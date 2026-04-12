@@ -10,9 +10,10 @@ use crate::workspace_graph;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::env;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio_postgres::Client;
 use uuid::Uuid;
 
@@ -25,13 +26,19 @@ const MAX_RECENT_QUERIES: usize = 6;
 const MAX_ACTIVE_FILES: usize = 8;
 const MAX_OPEN_QUESTIONS: usize = 6;
 const MAX_MATERIALIZED_NOTES: usize = 6;
+const MAX_REQUIRED_TASK_SET: usize = 12;
 const MAX_RECENT_DECISION_TRACES: usize = 3;
 const MAX_PENDING_RETURN_QUEUE: usize = 6;
 const MAX_EXECCTL_LEDGER_ENTRIES: i64 = 256;
+const MAX_PERSISTED_PROJECT_TASK_LEDGER_HISTORICAL_ENTRIES: usize = 5;
+const RESTORE_EXECUTION_CARD_THREAD_WINDOW_SECONDS: i64 = 30 * 60;
 const WORKING_STATE_RESTORE_REFRESH_MIN_INTERVAL_MS: u64 = 30_000;
 const EXECCTL_LEASE_TTL_MS: u64 = SESSION_GAP_MS;
+const EXECCTL_LEASE_HEARTBEAT_MIN_INTERVAL_MS: u64 = 5 * 60 * 1000;
 const PROJECT_TASK_TREE_VERSION: &str = "project-task-tree-v1";
 const PROJECT_TASK_LEDGER_VERSION: &str = "project-task-ledger-v2";
+const WORKSPACE_RESTORE_PACK_VERSION: &str = "workspace-restore-pack-v1";
+const WORKSPACE_RESTORE_PACK_ENVELOPE_VERSION: &str = "restore-pack-envelope-v2";
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION: &str =
     "client-budget-blocked-reply-v1";
 pub(crate) const CLIENT_REPLY_BUDGET_CONTRACT_VERSION: &str = "client-reply-budget-v1";
@@ -40,7 +47,7 @@ pub(crate) const CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND: &str = "wait_f
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND: &str =
     CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND;
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES: u64 = 1;
-pub(crate) const CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE: &str = "Этот чат жжёт внешний лимит клиента: сохрани handoff, открой новый чат и запусти continuity startup.";
+pub(crate) const CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE: &str = "Этот чат жжёт внешний лимит клиента: сначала сожми текущий чат; continuity startup используй только если fallback действительно нужен.";
 pub(crate) const CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE: &str = "Внешний лимит клиента почти исчерпан во всём клиенте. Не продолжай содержательный ответ, дождись восстановления окна лимита.";
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE: &str =
     CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE;
@@ -57,6 +64,214 @@ pub(crate) const HOST_CURRENT_THREAD_CONTROL_HOST_SURFACE_KIND: &str =
     "codex_webview_internal_command";
 pub(crate) const HOST_CURRENT_THREAD_CONTROL_COMMAND_ID: &str = "thread-overlay-open-current";
 pub(crate) const HOST_CURRENT_THREAD_COMPACT_WINDOW_KIND: &str = "hotkey_window_open_current";
+
+fn continuity_profile_enabled() -> bool {
+    env::var("AMAI_PROFILE_CONTINUITY")
+        .ok()
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+fn continuity_profile_log(stage: &str, elapsed_ms: u128, extra: &str) {
+    if continuity_profile_enabled() {
+        eprintln!("[amai-continuity-profile] {stage} elapsed_ms={elapsed_ms} {extra}");
+    }
+}
+
+async fn mirror_handoff_into_commitment_graph(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    event_id: &str,
+    snapshot_id: Uuid,
+    agent_scope: &str,
+    session_id: &str,
+    thread_id: Option<&str>,
+    headline: &str,
+    next_step: &str,
+    summary: &str,
+    local_path: &str,
+    pending_return_queue: &Value,
+    recorded_at_epoch_ms: i64,
+) -> Result<()> {
+    if postgres::find_task_node_by_task_key(
+        db,
+        project.project_id,
+        namespace.namespace_id,
+        event_id,
+    )
+    .await?
+    .is_some()
+    {
+        return Ok(());
+    }
+
+    let pending_return_count = pending_return_queue
+        .as_array()
+        .map(|items| items.len() as i32)
+        .unwrap_or(0);
+    let execution_state = if pending_return_count > 0 {
+        "blocked"
+    } else {
+        "active"
+    };
+    let memory_item_metadata = json!({
+        "source_kind": "continuity_handoff",
+        "source_event_id": event_id,
+        "agent_scope": agent_scope,
+        "session_id": session_id,
+        "thread_id": thread_id,
+        "local_path": local_path,
+    });
+    let source_event_ids = vec![event_id.to_string()];
+    let artifact_refs = vec![format!("file://{local_path}")];
+    let message_refs = thread_id
+        .map(|thread| vec![format!("thread:{thread}")])
+        .unwrap_or_default();
+    let evidence_span = json!({
+        "event_id": event_id,
+        "snapshot_id": snapshot_id,
+        "thread_id": thread_id,
+    });
+    let imported_from = json!({});
+    let memory_item = postgres::create_memory_item(
+        db,
+        &project.code,
+        &namespace.code,
+        &postgres::MemoryItemInsert {
+            source_project_code: None,
+            import_packet_id: None,
+            owner_agent_code: None,
+            item_kind: "task",
+            identity_key: Some(event_id),
+            title: headline,
+            summary: Some(summary),
+            body: Some(summary),
+            sensitivity_class: Some("internal"),
+            truth_state: Some("current"),
+            trust_state: Some("proposed"),
+            verification_state: Some("proposed"),
+            lifecycle_state: Some("hot"),
+            source_event_ids: &source_event_ids,
+            artifact_refs: &artifact_refs,
+            message_refs: &message_refs,
+            evidence_span: &evidence_span,
+            derivation_kind: Some("operator_write"),
+            observed_at_epoch_ms: Some(recorded_at_epoch_ms),
+            recorded_at_epoch_ms: Some(recorded_at_epoch_ms),
+            valid_from_epoch_ms: Some(recorded_at_epoch_ms),
+            valid_to_epoch_ms: None,
+            last_verified_at_epoch_ms: None,
+            object_version: Some(1),
+            causation_id: Some(event_id),
+            correlation_id: thread_id,
+            utility_score: Some(1.0),
+            freshness_score: Some(1.0),
+            retention_class: Some("durable"),
+            ttl_epoch_ms: None,
+            decay_policy: None,
+            consolidation_status: None,
+            imported_from: Some(&imported_from),
+            schema_version: Some("memory-envelope-v1"),
+            superseded_by_memory_item_id: None,
+            metadata: &memory_item_metadata,
+        },
+    )
+    .await?;
+    let task_node_status_payload = json!({
+        "source_kind": "continuity_handoff",
+        "source_event_id": event_id,
+        "source_snapshot_id": snapshot_id,
+        "pending_return_queue": pending_return_queue,
+    });
+    let task_node_source_event_ids = json!([event_id]);
+    let task_node_artifact_refs = json!([format!("file://{local_path}")]);
+    let task_node_evidence_span = json!({
+        "event_id": event_id,
+        "snapshot_id": snapshot_id,
+        "thread_id": thread_id,
+    });
+    let task_node_metadata = json!({
+        "agent_scope": agent_scope,
+        "session_id": session_id,
+        "thread_id": thread_id,
+        "local_path": local_path,
+        "materialized_from": "execctl_task_ledger_entry"
+    });
+    let task_node = postgres::create_task_node(
+        db,
+        &project.code,
+        &namespace.code,
+        &postgres::TaskNodeInsert {
+            parent_task_node_id: None,
+            memory_item_id: Some(memory_item.memory_item_id),
+            task_key: Some(event_id),
+            task_role: Some("historical"),
+            headline,
+            summary: Some(summary),
+            next_step: Some(next_step),
+            execution_state: Some(execution_state),
+            lifecycle_state: Some("hot"),
+            confidence: Some(1.0),
+            current_score: None,
+            reopened_count: Some(0),
+            child_count: Some(0),
+            closed_child_count: Some(0),
+            pending_return_count: Some(pending_return_count),
+            source_event_ids: Some(&task_node_source_event_ids),
+            artifact_refs: Some(&task_node_artifact_refs),
+            evidence_span: Some(&task_node_evidence_span),
+            derivation_kind: Some("extract"),
+            status_payload: &task_node_status_payload,
+            metadata: &task_node_metadata,
+            opened_at_epoch_ms: Some(recorded_at_epoch_ms),
+            closed_at_epoch_ms: None,
+            archived_at_epoch_ms: None,
+        },
+    )
+    .await?;
+    let task_event_payload = json!({
+        "source_kind": "continuity_handoff",
+        "summary": summary,
+        "next_step": next_step,
+        "pending_return_queue": pending_return_queue,
+    });
+    let task_event_artifact_refs = json!([format!("file://{local_path}")]);
+    let task_event_message_refs = thread_id
+        .map(|thread| json!([format!("thread:{thread}")]))
+        .unwrap_or_else(|| json!([]));
+    let task_event_evidence_span = json!({
+        "event_id": event_id,
+        "snapshot_id": snapshot_id,
+        "thread_id": thread_id,
+        "kind": "continuity_handoff",
+    });
+    let _ = postgres::create_task_event(
+        db,
+        &project.code,
+        &namespace.code,
+        &postgres::TaskEventInsert {
+            task_node_id: task_node.task_node_id,
+            source_snapshot_id: Some(snapshot_id),
+            source_event_id: Some(event_id),
+            event_kind: "created",
+            prior_execution_state: None,
+            next_execution_state: Some(execution_state),
+            prior_lifecycle_state: None,
+            next_lifecycle_state: Some("hot"),
+            source_kind: Some("continuity_handoff"),
+            artifact_refs: Some(&task_event_artifact_refs),
+            message_refs: Some(&task_event_message_refs),
+            evidence_span: Some(&task_event_evidence_span),
+            derivation_kind: Some("raw_capture"),
+            schema_version: Some("task-event-envelope-v1"),
+            event_payload: &task_event_payload,
+            recorded_at_epoch_ms: Some(recorded_at_epoch_ms),
+        },
+    )
+    .await?;
+    Ok(())
+}
 pub(crate) const HOST_CURRENT_THREAD_COMPACT_WINDOW_HOST_SURFACE_KIND: &str =
     "codex_webview_compact_window_route";
 pub(crate) const HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID: &str = "hotkey-window-open-current";
@@ -79,6 +294,8 @@ pub(crate) enum ClientBudgetBlockingReplyMode {
     Inactive,
     #[allow(dead_code)]
     RotateChatOnly,
+    // Kept for contract/test compatibility even though runtime reply blocking is removed.
+    #[allow(dead_code)]
     WaitForGlobalBudgetRecovery,
 }
 
@@ -1137,27 +1354,24 @@ pub(crate) fn build_global_client_limit_source_contract() -> Value {
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn client_budget_guard_requires_rotate_before_reply(guard: &Value) -> bool {
     guard["reply_execution_gate"]["must_rotate_before_reply"].as_bool() == Some(true)
 }
 
 pub(crate) fn client_budget_guard_blocks_reply(guard: &Value) -> bool {
-    let reply_execution_gate = &guard["reply_execution_gate"];
-    reply_execution_gate["blocking"].as_bool() == Some(true)
-        || reply_execution_gate["must_wait_for_budget_recovery_before_reply"].as_bool()
-            == Some(true)
-        || guard["requires_global_budget_recovery_before_reply"].as_bool() == Some(true)
-        || client_budget_guard_requires_rotate_before_reply(guard)
+    let _ = guard;
+    // User-visible reply blocking is removed from the client-budget contour.
+    false
 }
 
+#[cfg(test)]
 pub(crate) fn client_budget_guard_blocks_expensive_tool_turn(guard: &Value) -> bool {
-    if client_budget_guard_blocks_reply(guard) {
-        return true;
-    }
-    let reply_execution_gate = &guard["reply_execution_gate"];
-    reply_execution_gate["must_avoid_new_tool_turn_without_specific_delta_goal"].as_bool()
-        == Some(true)
-        && reply_execution_gate["max_tool_roundtrips_soft"].as_i64() == Some(0)
+    let _ = guard;
+    // Tool-turn blocking is removed from the client-budget contour. Pressure
+    // signals such as same_meter_pure_burn_turn_active or max_tool_roundtrips_soft=0
+    // remain advisory-only and must not hard-block tools.
+    false
 }
 
 pub async fn record_handoff_event(
@@ -1169,13 +1383,84 @@ pub async fn record_handoff_event(
     details: &str,
     resolve_current_goal: bool,
     resolved_headlines: &[String],
+    resolved_task_ids: &[String],
     local_path: &str,
 ) -> Result<()> {
+    record_handoff_event_with_refresh(
+        db,
+        project,
+        namespace,
+        headline,
+        next_step,
+        details,
+        resolve_current_goal,
+        resolved_headlines,
+        resolved_task_ids,
+        local_path,
+        None,
+        true,
+    )
+    .await
+}
+
+pub async fn record_handoff_event_with_previous_restore(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    headline: &str,
+    next_step: &str,
+    details: &str,
+    resolve_current_goal: bool,
+    resolved_headlines: &[String],
+    resolved_task_ids: &[String],
+    local_path: &str,
+    previous_restore: Option<&Value>,
+) -> Result<()> {
+    record_handoff_event_with_refresh(
+        db,
+        project,
+        namespace,
+        headline,
+        next_step,
+        details,
+        resolve_current_goal,
+        resolved_headlines,
+        resolved_task_ids,
+        local_path,
+        previous_restore,
+        true,
+    )
+    .await
+}
+
+async fn record_handoff_event_with_refresh(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    headline: &str,
+    next_step: &str,
+    details: &str,
+    resolve_current_goal: bool,
+    resolved_headlines: &[String],
+    resolved_task_ids: &[String],
+    local_path: &str,
+    previous_restore: Option<&Value>,
+    refresh_restore_snapshot_after_write: bool,
+) -> Result<()> {
+    let total_started = Instant::now();
     let recorded_at_epoch_ms = now_epoch_ms()?;
     let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
     let next_step = normalize_next_step_hint(next_step);
-    let previous_restore =
-        load_recent_restore_bundle_without_live_guard(db, project, namespace).await?;
+    let previous_restore_started = Instant::now();
+    let previous_restore = match previous_restore {
+        Some(restore) => Some(restore.clone()),
+        None => load_recent_restore_bundle_without_live_guard(db, project, namespace).await?,
+    };
+    continuity_profile_log(
+        "record_handoff.previous_restore",
+        previous_restore_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
     let client_budget_target_percent = previous_restore.as_ref().and_then(|value| {
         value["working_state_restore"]["client_budget_target_percent"]
             .as_u64()
@@ -1190,8 +1475,10 @@ pub async fn record_handoff_event(
         recorded_at_epoch_ms,
         resolve_current_goal,
         resolved_headlines,
+        resolved_task_ids,
     );
-    let thread_id = current_thread_id();
+    let thread_id = resolve_thread_id_for_project_repo_root(&project.repo_root, None);
+    let session_id_started = Instant::now();
     let session_id = resolve_session_id(
         db,
         &project.code,
@@ -1200,6 +1487,11 @@ pub async fn record_handoff_event(
         recorded_at_epoch_ms,
     )
     .await?;
+    continuity_profile_log(
+        "record_handoff.resolve_session_id",
+        session_id_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
     let event_id = Uuid::new_v4().to_string();
     let active_files = extract_paths_from_text(details);
     let recent_paths = active_files.clone();
@@ -1230,17 +1522,26 @@ pub async fn record_handoff_event(
             "rejected_hypotheses": Vec::<String>::new(),
             "open_questions": open_questions,
             "materialized_notes": materialized_notes,
+            "required_task_set": extract_required_task_set(details),
             "pending_return_queue": pending_return_queue,
             "client_budget_target_percent": client_budget_target_percent,
             "resolve_current_goal": resolve_current_goal,
             "resolved_pending_return_headlines": resolved_headlines,
+            "resolved_pending_return_task_ids": resolved_task_ids,
             "last_command": "continuity handoff".to_string(),
             "last_results_summary": format!("Зафиксирован handoff для {} :: {}", project.code, namespace.code),
             "local_path": local_path,
         }
     });
+    let insert_snapshot_started = Instant::now();
     let snapshot_id =
         postgres::insert_observability_snapshot(db, WORKING_STATE_EVENT_KIND, &payload).await?;
+    continuity_profile_log(
+        "record_handoff.insert_working_state_event",
+        insert_snapshot_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let ledger_started = Instant::now();
     postgres::insert_execctl_task_ledger_entry(
         db,
         &postgres::ExecCtlTaskLedgerEntryInsert {
@@ -1265,8 +1566,40 @@ pub async fn record_handoff_event(
         },
     )
     .await?;
+    continuity_profile_log(
+        "record_handoff.insert_ledger",
+        ledger_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    if let Err(error) = mirror_handoff_into_commitment_graph(
+        db,
+        project,
+        namespace,
+        event_id.as_str(),
+        snapshot_id,
+        &agent_scope,
+        session_id.as_str(),
+        thread_id.as_deref(),
+        headline,
+        &next_step,
+        summary.as_str(),
+        local_path,
+        &payload["working_state_event"]["pending_return_queue"],
+        recorded_at_epoch_ms as i64,
+    )
+    .await
+    {
+        tracing::warn!(
+            ?error,
+            project = %project.code,
+            namespace = %namespace.code,
+            source_event_id = %event_id,
+            "failed to mirror continuity handoff into commitment graph"
+        );
+    }
     let lease_expires_at_epoch_ms =
         recorded_at_epoch_ms.saturating_add(EXECCTL_LEASE_TTL_MS) as i64;
+    let lease_started = Instant::now();
     postgres::upsert_execctl_task_lease(
         db,
         &postgres::ExecCtlTaskLeaseInsert {
@@ -1288,7 +1621,37 @@ pub async fn record_handoff_event(
         },
     )
     .await?;
-    refresh_restore_snapshot(db, project, namespace).await?;
+    continuity_profile_log(
+        "record_handoff.upsert_lease",
+        lease_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    if refresh_restore_snapshot_after_write {
+        let refresh_started = Instant::now();
+        let _ = if let Some(previous_restore) = previous_restore.as_ref() {
+            force_refresh_restore_snapshot_from_previous_handoff(
+                db,
+                project,
+                namespace,
+                previous_restore,
+                &payload["working_state_event"],
+                snapshot_id,
+            )
+            .await?
+        } else {
+            force_refresh_restore_snapshot(db, project, namespace).await?
+        };
+        continuity_profile_log(
+            "record_handoff.refresh_restore_snapshot",
+            refresh_started.elapsed().as_millis(),
+            &format!("project={} namespace={}", project.code, namespace.code),
+        );
+    }
+    continuity_profile_log(
+        "record_handoff.total",
+        total_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
     Ok(())
 }
 
@@ -1309,14 +1672,24 @@ pub async fn record_client_budget_target_event_with_thread_hint(
     target_percent: u64,
     thread_id_hint: Option<&str>,
 ) -> Result<()> {
+    let total_started = Instant::now();
     let target_percent =
         normalize_client_budget_target_percent(target_percent).ok_or_else(|| {
             anyhow::anyhow!(
                 "client budget target must be one of 0, 10, 20, 30, 40, 50, 60, 70, 80, 90"
             )
         })?;
+    let previous_restore_started = Instant::now();
     let previous_restore =
         load_recent_restore_bundle_without_live_guard(db, project, namespace).await?;
+    continuity_profile_log(
+        "client_budget_target.previous_restore",
+        previous_restore_started.elapsed().as_millis(),
+        &format!(
+            "project={} namespace={} target={target_percent}",
+            project.code, namespace.code
+        ),
+    );
     let current_goal = previous_restore
         .as_ref()
         .and_then(|value| value["working_state_restore"]["current_goal"].as_str())
@@ -1330,11 +1703,8 @@ pub async fn record_client_budget_target_event_with_thread_hint(
         .unwrap_or_else(|| "Продолжить работу с новым target для клиентской экономии.".to_string());
     let recorded_at_epoch_ms = now_epoch_ms()?;
     let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
-    let thread_id = thread_id_hint
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(current_thread_id);
+    let thread_id = resolve_thread_id_for_project_repo_root(&project.repo_root, thread_id_hint);
+    let session_id_started = Instant::now();
     let session_id = resolve_session_id(
         db,
         &project.code,
@@ -1343,6 +1713,14 @@ pub async fn record_client_budget_target_event_with_thread_hint(
         recorded_at_epoch_ms,
     )
     .await?;
+    continuity_profile_log(
+        "client_budget_target.resolve_session_id",
+        session_id_started.elapsed().as_millis(),
+        &format!(
+            "project={} namespace={} target={target_percent}",
+            project.code, namespace.code
+        ),
+    );
     let event_id = Uuid::new_v4().to_string();
     let summary = format!("Client budget target set to {target_percent}%.");
     let payload = json!({
@@ -1378,8 +1756,34 @@ pub async fn record_client_budget_target_event_with_thread_hint(
             "local_path": "Amai client budget target".to_string(),
         }
     });
+    let insert_snapshot_started = Instant::now();
     let _ = postgres::insert_observability_snapshot(db, WORKING_STATE_EVENT_KIND, &payload).await?;
+    continuity_profile_log(
+        "client_budget_target.insert_working_state_event",
+        insert_snapshot_started.elapsed().as_millis(),
+        &format!(
+            "project={} namespace={} target={target_percent}",
+            project.code, namespace.code
+        ),
+    );
+    let refresh_started = Instant::now();
     refresh_restore_snapshot(db, project, namespace).await?;
+    continuity_profile_log(
+        "client_budget_target.refresh_restore_snapshot",
+        refresh_started.elapsed().as_millis(),
+        &format!(
+            "project={} namespace={} target={target_percent}",
+            project.code, namespace.code
+        ),
+    );
+    continuity_profile_log(
+        "client_budget_target.total",
+        total_started.elapsed().as_millis(),
+        &format!(
+            "project={} namespace={} target={target_percent}",
+            project.code, namespace.code
+        ),
+    );
     Ok(())
 }
 
@@ -1424,11 +1828,7 @@ pub async fn record_host_current_thread_control_feedback_with_thread_hint(
         .unwrap_or(HOST_CURRENT_THREAD_CONTROL_COMMAND_ID);
     let recorded_at_epoch_ms = now_epoch_ms()?;
     let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
-    let thread_id = thread_id_hint
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(current_thread_id);
+    let thread_id = resolve_thread_id_for_project_repo_root(&project.repo_root, thread_id_hint);
     let session_id = resolve_session_id(
         db,
         &project.code,
@@ -1551,7 +1951,23 @@ pub async fn record_context_pack_event(
     };
     let recorded_at_epoch_ms = now_epoch_ms()?;
     let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
-    let thread_id = current_thread_id();
+    let thread_id = if let Some(thread_id) = current_thread_id() {
+        Some(thread_id)
+    } else if project.repo_root.trim().is_empty() {
+        None
+    } else {
+        token_budget::preferred_dashboard_thread_binding_hint(db, Path::new(&project.repo_root))
+            .await?
+    };
+    let turn_id = thread_id
+        .as_deref()
+        .and_then(|thread_id| {
+            codex_threads::latest_rollout_client_meter_observation_for_thread(thread_id)
+                .ok()
+                .flatten()
+        })
+        .map(|observation| observation.turn_id)
+        .filter(|value| !value.trim().is_empty());
     let session_id = resolve_session_id(
         db,
         &project.code,
@@ -1560,9 +1976,12 @@ pub async fn record_context_pack_event(
         recorded_at_epoch_ms,
     )
     .await?;
+    let memory_cards = payload["retrieval"]["memory_cards"]
+        .as_array()
+        .map_or(0, Vec::len);
     let query_summary = format!(
-        "Найдено: документов {}, символов {}, lexical chunks {}, semantic chunks {}.",
-        exact_documents, symbol_hits, lexical_chunks, semantic_chunks
+        "Найдено: документов {}, символов {}, lexical chunks {}, semantic chunks {}, memory cards {}.",
+        exact_documents, symbol_hits, lexical_chunks, semantic_chunks, memory_cards
     );
     let traffic_class = token_budget::derive_traffic_class(token_source_kind);
     let payload = json!({
@@ -1575,6 +1994,7 @@ pub async fn record_context_pack_event(
             "session_id": session_id,
             "agent_scope": agent_scope,
             "thread_id": thread_id,
+            "turn_id": turn_id,
             "source_kind": "context_pack",
             "token_source_kind": token_source_kind,
             "traffic_class": traffic_class,
@@ -1602,8 +2022,8 @@ pub async fn record_context_pack_event(
             "context_pack_id": node["context_pack_id"].as_str().unwrap_or_default(),
             "retrieval_mode": node["effective_retrieval_mode"].as_str().unwrap_or_default(),
             "latency_ms": node["retrieval_runtime"]["total_ms"].clone(),
-            "decision_trace": node["decision_trace"].clone(),
-            "workspace_graph": node["workspace_graph"].clone(),
+            "decision_trace": node.get("decision_trace").cloned().unwrap_or(Value::Null),
+            "workspace_graph": node.get("workspace_graph").cloned().unwrap_or(Value::Null),
         }
     });
     postgres::insert_observability_snapshot(db, WORKING_STATE_EVENT_KIND, &payload).await?;
@@ -1615,26 +2035,22 @@ pub async fn record_context_pack_event(
             );
         }
     }
+    let persisted_project = postgres::get_project_by_code(db, &project.code).await?;
     let project_record = ProjectRecord {
-        project_id: postgres::get_project_by_code(db, &project.code)
-            .await?
-            .project_id,
+        project_id: persisted_project.project_id,
         code: project.code,
         display_name: project.display_name,
         repo_root: project.repo_root,
+        visibility_scope: persisted_project.visibility_scope,
         updated_at: String::new(),
     };
+    let persisted_namespace =
+        postgres::get_namespace_by_code(db, project_record.project_id, &namespace.code).await?;
     let namespace_record = NamespaceRecord {
-        namespace_id: postgres::get_namespace_by_code(
-            db,
-            project_record.project_id,
-            &namespace.code,
-        )
-        .await?
-        .namespace_id,
+        namespace_id: persisted_namespace.namespace_id,
         code: namespace.code,
         display_name: namespace.display_name,
-        retrieval_mode: String::new(),
+        retrieval_mode: persisted_namespace.retrieval_mode,
     };
     refresh_restore_snapshot(db, &project_record, &namespace_record).await?;
     Ok(())
@@ -1645,22 +2061,40 @@ async fn build_restore_bundle_without_live_guard(
     project: &ProjectRecord,
     namespace: &NamespaceRecord,
 ) -> Result<Option<Value>> {
+    let total_started = Instant::now();
     let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
-    let snapshots = postgres::list_observability_snapshots_by_kind_for_scope(
-        db,
-        WORKING_STATE_EVENT_KIND,
-        "working_state_event",
-        &project.code,
-        &namespace.code,
-        Some(MAX_RESTORE_EVENTS),
-    )
-    .await?;
-    let events = select_relevant_events(snapshots, &project.code, &namespace.code, &agent_scope);
+    let step_started = Instant::now();
+    let events = load_selected_working_state_events(db, project, namespace).await?;
+    continuity_profile_log(
+        "build_restore_bundle_without_live_guard.load_selected_events",
+        step_started.elapsed().as_millis(),
+        &format!(
+            "project={} namespace={} events={}",
+            project.code,
+            namespace.code,
+            events.len()
+        ),
+    );
     if events.is_empty() {
+        continuity_profile_log(
+            "build_restore_bundle_without_live_guard.total",
+            total_started.elapsed().as_millis(),
+            &format!(
+                "project={} namespace={} no_events=true",
+                project.code, namespace.code
+            ),
+        );
         return Ok(None);
     }
+    let step_started = Instant::now();
     let mut bundle =
         compose_restore_bundle(&project_json(project), &namespace_json(namespace), &events);
+    continuity_profile_log(
+        "build_restore_bundle_without_live_guard.compose_restore_bundle",
+        step_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let step_started = Instant::now();
     let durable_entries = postgres::list_execctl_task_ledger_entries(
         db,
         project.project_id,
@@ -1669,12 +2103,29 @@ async fn build_restore_bundle_without_live_guard(
         Some(MAX_EXECCTL_LEDGER_ENTRIES),
     )
     .await?;
+    continuity_profile_log(
+        "build_restore_bundle_without_live_guard.list_execctl_task_ledger_entries",
+        step_started.elapsed().as_millis(),
+        &format!(
+            "project={} namespace={} entries={}",
+            project.code,
+            namespace.code,
+            durable_entries.len()
+        ),
+    );
+    let step_started = Instant::now();
     overlay_durable_project_task_ledger(
         &mut bundle,
         &project_json(project),
         &namespace_json(namespace),
         &durable_entries,
     );
+    continuity_profile_log(
+        "build_restore_bundle_without_live_guard.overlay_durable_project_task_ledger",
+        step_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let step_started = Instant::now();
     let active_lease = postgres::get_execctl_task_lease(
         db,
         project.project_id,
@@ -1683,8 +2134,895 @@ async fn build_restore_bundle_without_live_guard(
         now_epoch_ms()? as i64,
     )
     .await?;
+    continuity_profile_log(
+        "build_restore_bundle_without_live_guard.get_execctl_task_lease",
+        step_started.elapsed().as_millis(),
+        &format!(
+            "project={} namespace={} has_lease={}",
+            project.code,
+            namespace.code,
+            active_lease.is_some()
+        ),
+    );
+    let step_started = Instant::now();
     overlay_execctl_active_lease(&mut bundle, active_lease.as_ref());
+    continuity_profile_log(
+        "build_restore_bundle_without_live_guard.overlay_execctl_active_lease",
+        step_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let step_started = Instant::now();
+    overlay_restore_execution_card(db, project, namespace, &mut bundle).await?;
+    continuity_profile_log(
+        "build_restore_bundle_without_live_guard.overlay_restore_execution_card",
+        step_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let step_started = Instant::now();
+    overlay_workspace_restore_pack(&mut bundle);
+    continuity_profile_log(
+        "build_restore_bundle_without_live_guard.overlay_workspace_restore_pack",
+        step_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    continuity_profile_log(
+        "build_restore_bundle_without_live_guard.total",
+        total_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
     Ok(Some(bundle))
+}
+
+#[derive(Debug, Clone)]
+struct RestoreExecutionCardBinding {
+    thread_id: Option<String>,
+    runtime: Option<String>,
+    model: Option<String>,
+    tool: Option<String>,
+    model_provider: Option<String>,
+    binding_source: String,
+}
+
+fn normalize_lower_token(token: &str) -> Option<String> {
+    let trimmed = token.trim().to_lowercase();
+    let normalized = trimmed
+        .chars()
+        .map(|ch| if ch.is_alphanumeric() { ch } else { ' ' })
+        .collect::<String>();
+    let compact = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.len() < 3 {
+        return None;
+    }
+    match compact.as_str() {
+        "the" | "and" | "for" | "with" | "that" | "this" | "from" | "into" | "или" | "для"
+        | "как" | "что" | "при" | "это" | "если" | "его" | "без" => None,
+        _ => Some(compact),
+    }
+}
+
+fn collect_restore_relevance_terms(node: &Value) -> BTreeSet<String> {
+    let mut terms = BTreeSet::new();
+    for text in [
+        node["current_goal"].as_str(),
+        node["next_step"].as_str(),
+        node["current_focus"].as_str(),
+        node["source_summary"].as_str(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for token in text.split_whitespace() {
+            if let Some(term) = normalize_lower_token(token) {
+                terms.insert(term);
+            }
+        }
+    }
+    for query in node["recent_queries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        for token in query.split_whitespace() {
+            if let Some(term) = normalize_lower_token(token) {
+                terms.insert(term);
+            }
+        }
+    }
+    terms
+}
+
+fn score_restore_execution_card_relevance(card: &Value, terms: &BTreeSet<String>) -> i32 {
+    if terms.is_empty() {
+        return 0;
+    }
+    let mut haystacks = Vec::new();
+    for text in [
+        card["skill_title"].as_str(),
+        card["skill_goal"].as_str(),
+        card["skill_expected_outcome"].as_str(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        haystacks.push(text.to_lowercase());
+    }
+    for key in [
+        "skill_trigger_conditions",
+        "skill_execution_steps",
+        "skill_preconditions",
+        "skill_stop_conditions",
+        "skill_forbidden_when",
+        "skill_context_constraints",
+    ] {
+        for value in card[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            haystacks.push(value.to_lowercase());
+        }
+    }
+
+    let mut score = 0;
+    for term in terms {
+        for haystack in &haystacks {
+            if haystack.contains(term) {
+                score += if haystack
+                    == &card["skill_title"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                {
+                    4
+                } else {
+                    2
+                };
+                break;
+            }
+        }
+    }
+    score
+}
+
+fn compact_restore_execution_card(
+    card: &Value,
+    relevance_score: i32,
+    binding: &RestoreExecutionCardBinding,
+) -> Value {
+    json!({
+        "skill_card_id": card["skill_card_id"].clone(),
+        "skill_id": card["skill_id"].clone(),
+        "skill_version": card["skill_version"].clone(),
+        "skill_title": card["skill_title"].clone(),
+        "skill_goal": card["skill_goal"].clone(),
+        "skill_trigger_conditions": card["skill_trigger_conditions"].clone(),
+        "skill_preconditions": card["skill_preconditions"].clone(),
+        "skill_execution_steps": card["skill_execution_steps"].clone(),
+        "skill_stop_conditions": card["skill_stop_conditions"].clone(),
+        "skill_forbidden_when": card["skill_forbidden_when"].clone(),
+        "skill_expected_outcome": card["skill_expected_outcome"].clone(),
+        "skill_trust_state": card["skill_trust_state"].clone(),
+        "skill_verification_state": card["skill_verification_state"].clone(),
+        "skill_candidate_class": card["skill_candidate_class"].clone(),
+        "skill_scope_type": card["skill_scope_type"].clone(),
+        "skill_owner_scope": card["skill_owner_scope"].clone(),
+        "skill_context_constraints": card["skill_context_constraints"].clone(),
+        "skill_runtime_constraints": card["skill_runtime_constraints"].clone(),
+        "skill_model_constraints": card["skill_model_constraints"].clone(),
+        "skill_tool_constraints": card["skill_tool_constraints"].clone(),
+        "skill_utility_score": card["skill_utility_score"].clone(),
+        "skill_success_count": card["skill_success_count"].clone(),
+        "skill_failure_count": card["skill_failure_count"].clone(),
+        "skill_reuse_count": card["skill_reuse_count"].clone(),
+        "skill_patch_parent_id": card["skill_patch_parent_id"].clone(),
+        "skill_merge_group_id": card["skill_merge_group_id"].clone(),
+        "restore_relevance_score": relevance_score,
+        "binding": {
+            "thread_id": binding.thread_id,
+            "runtime": binding.runtime,
+            "model": binding.model,
+            "tool": binding.tool,
+            "model_provider": binding.model_provider,
+            "binding_source": binding.binding_source,
+        }
+    })
+}
+
+fn summarize_restore_execution_card(card: &Value) -> Option<String> {
+    let title = card["skill_title"]
+        .as_str()
+        .filter(|value| !value.is_empty())?;
+    let trust = card["skill_trust_state"].as_str().unwrap_or("candidate");
+    let first_step = card["skill_execution_steps"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("без шага");
+    Some(format!("{title} [{trust}] -> {first_step}"))
+}
+
+fn workspace_restore_pack_active_commitments(restore: &Value) -> Value {
+    let mut items = Vec::new();
+    if let Some(nodes) = restore["project_task_tree"]["nodes"].as_array() {
+        for node in nodes.iter().filter(|item| {
+            if item["task_role"].as_str() != Some("active") {
+                return false;
+            }
+            let task_state = item["task_state"].as_str().unwrap_or_default();
+            let resume_state = item["resume_state"].as_str().unwrap_or_default();
+            !matches!(
+                task_state,
+                "blocked" | "waiting" | "waiting_external" | "in_review"
+            ) && !matches!(
+                resume_state,
+                "blocked" | "waiting" | "waiting_external" | "in_review"
+            )
+        }) {
+            items.push(json!({
+                "task_id": node["task_id"].clone(),
+                "headline": node["headline"].clone(),
+                "next_step": node["next_step"].clone(),
+                "task_state": node["task_state"].clone(),
+                "resume_state": node["resume_state"].clone(),
+                "source_kind": node["source_kind"].clone(),
+            }));
+        }
+    }
+    Value::Array(items)
+}
+
+fn workspace_restore_pack_blocked_waiting_items(restore: &Value) -> Value {
+    let mut items = Vec::new();
+    let mut seen_ids = BTreeSet::new();
+    for source in [
+        restore["project_task_tree"]["nodes"].as_array(),
+        restore["project_task_ledger"]["entries"].as_array(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for item in source {
+            let task_state = item["task_state"].as_str().unwrap_or_default();
+            let resume_state = item["resume_state"].as_str().unwrap_or_default();
+            let is_blocked_or_waiting = matches!(
+                task_state,
+                "blocked" | "waiting" | "waiting_external" | "in_review"
+            ) || matches!(
+                resume_state,
+                "blocked" | "waiting" | "waiting_external" | "in_review"
+            );
+            if !is_blocked_or_waiting {
+                continue;
+            }
+            let dedupe_key = item["task_id"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .unwrap_or(task_state);
+            if !seen_ids.insert(dedupe_key.to_string()) {
+                continue;
+            }
+            items.push(json!({
+                "task_id": item["task_id"].clone(),
+                "headline": item["headline"].clone(),
+                "next_step": item["next_step"].clone(),
+                "task_state": item["task_state"].clone(),
+                "resume_state": item["resume_state"].clone(),
+                "source_kind": item["source_kind"].clone(),
+            }));
+        }
+    }
+    Value::Array(items)
+}
+
+fn workspace_restore_pack_paused_branches(restore: &Value) -> Value {
+    let items = restore["pending_return_queue"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|item| {
+            json!({
+                "task_id": item["task_id"].clone(),
+                "headline": item["headline"].clone(),
+                "next_step": item["next_step"].clone(),
+                "queued_reason": item["queued_reason"].clone(),
+                "resume_state": item["resume_state"].clone(),
+                "queued_at_epoch_ms": item["queued_at_epoch_ms"].clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    Value::Array(items)
+}
+
+fn workspace_restore_pack_recently_closed(restore: &Value) -> Value {
+    let mut items = Vec::new();
+    let mut seen = BTreeSet::new();
+    if let Some(entries) = restore["project_task_ledger"]["entries"].as_array() {
+        for entry in entries.iter().filter(|item| {
+            matches!(
+                item["task_role"].as_str().unwrap_or_default(),
+                "historical_handoff"
+            ) || matches!(
+                item["task_state"].as_str().unwrap_or_default(),
+                "done" | "resolved" | "superseded" | "canceled"
+            )
+        }) {
+            let key = entry["task_id"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .or_else(|| entry["headline"].as_str())
+                .unwrap_or_default();
+            if key.is_empty() || !seen.insert(key.to_string()) {
+                continue;
+            }
+            items.push(json!({
+                "task_id": entry["task_id"].clone(),
+                "headline": entry["headline"].clone(),
+                "next_step": entry["next_step"].clone(),
+                "task_role": entry["task_role"].clone(),
+                "task_state": entry["task_state"].clone(),
+                "recorded_at_epoch_ms": entry["recorded_at_epoch_ms"].clone(),
+                "source_kind": entry["source_kind"].clone(),
+            }));
+            if items.len() >= 5 {
+                break;
+            }
+        }
+    }
+    Value::Array(items)
+}
+
+fn workspace_restore_pack_semantic_facts(restore: &Value) -> Value {
+    let mut items = Vec::new();
+    if let Some(summary) = restore["source_summary"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+    {
+        items.push(json!({
+            "fact_kind": "source_summary",
+            "summary": summary,
+        }));
+    }
+    if let Some(hypothesis) = restore["current_hypothesis"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+    {
+        items.push(json!({
+            "fact_kind": "current_hypothesis",
+            "summary": hypothesis,
+        }));
+    }
+    if let Some(notes) = restore["materialized_notes"].as_array() {
+        for note in notes.iter().filter_map(Value::as_str).take(6) {
+            let trimmed = note.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            items.push(json!({
+                "fact_kind": "materialized_note",
+                "summary": trimmed,
+            }));
+        }
+    }
+    Value::Array(items)
+}
+
+fn workspace_restore_pack_recent_episodic_traces(restore: &Value) -> Value {
+    let mut items = Vec::new();
+    if let Some(actions) = restore["recent_actions"].as_array() {
+        for action in actions.iter().take(5) {
+            items.push(json!({
+                "trace_kind": "recent_action",
+                "headline": action["headline"].clone(),
+                "summary": action["summary"].clone(),
+                "event_kind": action["event_kind"].clone(),
+                "execution_state": action["execution_state"].clone(),
+                "recorded_at_epoch_ms": action["recorded_at_epoch_ms"].clone(),
+                "authoritative": action["authoritative"].clone(),
+            }));
+        }
+    }
+    if let Some(traces) = restore["recent_decision_traces"].as_array() {
+        for trace in traces.iter().take(3) {
+            items.push(json!({
+                "trace_kind": "decision_trace",
+                "trace": trace.clone(),
+            }));
+        }
+    }
+    Value::Array(items)
+}
+
+fn workspace_restore_pack_active_constraints(restore: &Value) -> Value {
+    let mut items = Vec::new();
+    if restore["execctl_resume_contract"].is_object() {
+        items.push(json!({
+            "constraint_kind": "execctl_resume_contract",
+            "resume_state": restore["execctl_resume_contract"]["resume_state"].clone(),
+            "summary": restore["execctl_resume_contract_summary"].clone(),
+            "required_return_task": restore["required_return_task"].clone(),
+        }));
+    }
+    if restore["startup_next_action"].is_object() {
+        items.push(json!({
+            "constraint_kind": "startup_next_action",
+            "action_kind": restore["startup_next_action"]["action_kind"].clone(),
+            "blocking": restore["startup_next_action"]["blocking"].clone(),
+            "summary": restore["startup_next_action_summary"].clone(),
+        }));
+    }
+    if restore["client_budget_guard"].is_object() {
+        items.push(json!({
+            "constraint_kind": "client_budget_guard",
+            "status": restore["client_budget_guard"]["status"].clone(),
+            "status_label": restore["client_budget_guard"]["status_label"].clone(),
+            "reply_execution_gate": restore["client_budget_guard"]["reply_execution_gate"].clone(),
+        }));
+    }
+    if restore["skill_execution_card"].is_object() {
+        items.push(json!({
+            "constraint_kind": "procedural_binding",
+            "summary": restore["skill_execution_card_summary"].clone(),
+            "runtime_constraints": restore["skill_execution_card"]["skill_runtime_constraints"].clone(),
+            "model_constraints": restore["skill_execution_card"]["skill_model_constraints"].clone(),
+            "tool_constraints": restore["skill_execution_card"]["skill_tool_constraints"].clone(),
+            "context_constraints": restore["skill_execution_card"]["skill_context_constraints"].clone(),
+        }));
+    }
+    Value::Array(items)
+}
+
+fn workspace_restore_pack_permission_summary(restore: &Value) -> Value {
+    let visible_projects = restore["visible_projects"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    json!({
+        "project_code": restore["project"]["code"].clone(),
+        "namespace_code": restore["namespace"]["code"].clone(),
+        "project_visibility_scope": restore["project"]["visibility_scope"].clone(),
+        "namespace_retrieval_mode": restore["namespace"]["retrieval_mode"].clone(),
+        "agent_scope": restore["agent_scope"].clone(),
+        "thread_id": restore["thread_id"].clone(),
+        "visible_projects": visible_projects,
+        "visible_projects_count": restore["visible_projects"].as_array().map(|items| items.len()).unwrap_or(0),
+        "latest_decision_scope": restore["latest_decision_trace"]["scope"].clone(),
+        "authoritative_source_kind": restore["state_lineage"]["authoritative_source_kind"].clone(),
+    })
+}
+
+fn workspace_restore_pack_important_artifacts(restore: &Value) -> Value {
+    let mut seen = BTreeSet::new();
+    let mut items = Vec::new();
+    let mut push_path = |path: &str, artifact_kind: &str, source: &str| {
+        let trimmed = path.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+            return;
+        }
+        items.push(json!({
+            "artifact_kind": artifact_kind,
+            "path": trimmed,
+            "source": source,
+        }));
+    };
+    if let Some(path) = restore["state_lineage"]["authoritative_local_path"].as_str() {
+        push_path(path, "authoritative_local_path", "state_lineage");
+    }
+    if let Some(files) = restore["active_files"].as_array() {
+        for path in files
+            .iter()
+            .filter_map(Value::as_str)
+            .take(MAX_ACTIVE_FILES)
+        {
+            push_path(path, "active_file", "active_files");
+        }
+    }
+    if let Some(actions) = restore["recent_actions"].as_array() {
+        for path in actions
+            .iter()
+            .filter_map(|item| item["local_path"].as_str())
+            .take(MAX_RECENT_ACTIONS)
+        {
+            push_path(path, "recent_action_path", "recent_actions");
+        }
+    }
+    Value::Array(items)
+}
+
+fn workspace_restore_pack_unresolved_conflicts(restore: &Value) -> Value {
+    let mut items = Vec::new();
+    if let Some(questions) = restore["open_questions"].as_array() {
+        for question in questions
+            .iter()
+            .filter_map(Value::as_str)
+            .take(MAX_OPEN_QUESTIONS)
+        {
+            let trimmed = question.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            items.push(json!({
+                "conflict_kind": "open_question",
+                "summary": trimmed,
+            }));
+        }
+    }
+    if let Some(rejected) = restore["rejected_hypotheses"].as_array() {
+        for hypothesis in rejected.iter().filter_map(Value::as_str).take(4) {
+            let trimmed = hypothesis.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            items.push(json!({
+                "conflict_kind": "rejected_hypothesis",
+                "summary": trimmed,
+            }));
+        }
+    }
+    if let Some(summary) = restore["excluded_reasons_summary"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+    {
+        items.push(json!({
+            "conflict_kind": "excluded_reasons",
+            "summary": summary,
+        }));
+    }
+    Value::Array(items)
+}
+
+fn workspace_restore_pack_relevant_procedures(restore: &Value) -> Value {
+    if !restore["skill_execution_card"].is_object() {
+        return Value::Array(Vec::new());
+    }
+    Value::Array(vec![json!({
+        "procedure_kind": "compact_execution_card",
+        "raw_procedural_archive_included": false,
+        "summary": restore["skill_execution_card_summary"].clone(),
+        "card": restore["skill_execution_card"].clone(),
+        "binding": restore["skill_execution_card_binding"].clone(),
+    })])
+}
+
+fn summarize_workspace_restore_bucket(label: &str, value: &Value) -> Option<String> {
+    let count = value.as_array().map(|items| items.len()).unwrap_or(0);
+    (count > 0).then(|| format!("{label}({count})"))
+}
+
+fn build_workspace_restore_pack(restore: &Value) -> Value {
+    let active_commitments = workspace_restore_pack_active_commitments(restore);
+    let blocked_waiting_items = workspace_restore_pack_blocked_waiting_items(restore);
+    let paused_branches = workspace_restore_pack_paused_branches(restore);
+    let recently_closed = workspace_restore_pack_recently_closed(restore);
+    let relevant_semantic_facts = workspace_restore_pack_semantic_facts(restore);
+    let recent_episodic_traces = workspace_restore_pack_recent_episodic_traces(restore);
+    let active_constraints = workspace_restore_pack_active_constraints(restore);
+    let permission_summary = workspace_restore_pack_permission_summary(restore);
+    let important_artifacts = workspace_restore_pack_important_artifacts(restore);
+    let unresolved_conflicts = workspace_restore_pack_unresolved_conflicts(restore);
+    let relevant_procedures = workspace_restore_pack_relevant_procedures(restore);
+    let summary = [
+        summarize_workspace_restore_bucket("active", &active_commitments),
+        summarize_workspace_restore_bucket("blocked", &blocked_waiting_items),
+        summarize_workspace_restore_bucket("paused", &paused_branches),
+        summarize_workspace_restore_bucket("facts", &relevant_semantic_facts),
+        summarize_workspace_restore_bucket("constraints", &active_constraints),
+        summarize_workspace_restore_bucket("artifacts", &important_artifacts),
+        summarize_workspace_restore_bucket("procedures", &relevant_procedures),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("; ");
+    json!({
+        "pack_version": WORKSPACE_RESTORE_PACK_VERSION,
+        "pack_kind": "workspace_restore_pack",
+        "current_goal": restore["current_goal"].clone(),
+        "next_step": restore["next_step"].clone(),
+        "restore_confidence": restore["restore_confidence"].clone(),
+        "restore_freshness_state": restore["restore_freshness_state"].clone(),
+        "active_commitments": active_commitments,
+        "blocked_waiting_items": blocked_waiting_items,
+        "paused_branches": paused_branches,
+        "recently_closed": recently_closed,
+        "relevant_semantic_facts": relevant_semantic_facts,
+        "recent_episodic_traces": recent_episodic_traces,
+        "active_constraints": active_constraints,
+        "permission_summary": permission_summary,
+        "important_artifacts": important_artifacts,
+        "unresolved_conflicts": unresolved_conflicts,
+        "relevant_procedures": relevant_procedures,
+        "procedural_restore_policy": {
+            "raw_procedural_archive_forbidden": true,
+            "materialized_surface": if restore["skill_execution_card"].is_object() {
+                "compact_execution_card"
+            } else {
+                "none"
+            },
+        },
+        "summary": if summary.is_empty() { Value::Null } else { Value::String(summary) },
+    })
+}
+
+fn overlay_workspace_restore_pack(bundle: &mut Value) {
+    let Some(restore) = bundle.get("working_state_restore") else {
+        return;
+    };
+    let pack = build_workspace_restore_pack(restore);
+    let summary = pack["summary"].clone();
+    bundle["workspace_restore_pack"] = pack.clone();
+    if let Some(node) = bundle
+        .get_mut("working_state_restore")
+        .and_then(Value::as_object_mut)
+    {
+        node.insert("workspace_restore_pack".to_string(), pack);
+        node.insert("workspace_restore_pack_summary".to_string(), summary);
+    }
+}
+
+pub(crate) fn ensure_runtime_workspace_restore_pack(bundle: &mut Value) {
+    overlay_workspace_restore_pack(bundle);
+}
+
+fn compact_persisted_project_task_ledger(ledger: &Value) -> Value {
+    let Some(entries) = ledger["entries"].as_array() else {
+        return ledger.clone();
+    };
+    let mut kept = Vec::new();
+    let mut historical_kept = 0usize;
+    for entry in entries {
+        let task_role = entry["task_role"].as_str().unwrap_or_default();
+        let keep = match task_role {
+            "active" | "pending_return" => true,
+            "historical_handoff" => {
+                if historical_kept < MAX_PERSISTED_PROJECT_TASK_LEDGER_HISTORICAL_ENTRIES {
+                    historical_kept += 1;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => true,
+        };
+        if keep {
+            kept.push(entry.clone());
+        }
+    }
+    let mut compact = ledger.clone();
+    if let Some(object) = compact.as_object_mut() {
+        object.insert("entries".to_string(), Value::Array(kept));
+        object.insert(
+            "full_shape_preserved_in_working_state_restore".to_string(),
+            Value::Bool(false),
+        );
+    }
+    compact
+}
+
+fn persisted_restore_snapshot_payload(bundle: &Value) -> Value {
+    let mut payload = json!({
+        "working_state_restore": bundle["working_state_restore"].clone()
+    });
+    if let Some(restore) = payload
+        .get_mut("working_state_restore")
+        .and_then(Value::as_object_mut)
+    {
+        if restore["project_task_ledger"].is_object() {
+            restore.insert(
+                "project_task_ledger".to_string(),
+                compact_persisted_project_task_ledger(&restore["project_task_ledger"]),
+            );
+        }
+        restore.remove("workspace_restore_pack");
+        restore.remove("workspace_restore_pack_summary");
+        restore.remove("skill_execution_card");
+        restore.remove("skill_execution_card_summary");
+        restore.remove("skill_execution_card_binding");
+    }
+    payload
+}
+
+fn resolve_restore_execution_card_binding(
+    project: &ProjectRecord,
+    node: &Value,
+) -> RestoreExecutionCardBinding {
+    let explicit_runtime = env::var("AMAI_RESTORE_EXECUTION_CARD_RUNTIME")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let explicit_model = env::var("AMAI_RESTORE_EXECUTION_CARD_MODEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let explicit_tool = env::var("AMAI_RESTORE_EXECUTION_CARD_TOOL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let thread_id = node["thread_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| resolve_thread_id_for_project_repo_root(&project.repo_root, None));
+
+    let recent_thread =
+        codex_threads::recent_client_thread_records(RESTORE_EXECUTION_CARD_THREAD_WINDOW_SECONDS)
+            .ok()
+            .and_then(|items| {
+                items.into_iter().find(|item| {
+                    thread_id.as_deref() == Some(item.thread_id.as_str())
+                        || (!project.repo_root.trim().is_empty() && item.cwd == project.repo_root)
+                })
+            });
+
+    let model =
+        explicit_model.or_else(|| recent_thread.as_ref().and_then(|item| item.model.clone()));
+    let model_provider = recent_thread
+        .as_ref()
+        .and_then(|item| item.model_provider.clone());
+    let runtime = explicit_runtime.or_else(|| model.as_ref().map(|_| "codex".to_string()));
+    let tool = explicit_tool.or_else(|| runtime.as_ref().map(|_| "exec_command".to_string()));
+    let binding_source = if env::var("AMAI_RESTORE_EXECUTION_CARD_MODEL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .is_some()
+    {
+        "env_override".to_string()
+    } else if recent_thread.is_some() {
+        "recent_client_thread".to_string()
+    } else if runtime.is_some() || tool.is_some() {
+        "runtime_default_without_model".to_string()
+    } else {
+        "unbound".to_string()
+    };
+
+    RestoreExecutionCardBinding {
+        thread_id,
+        runtime,
+        model,
+        tool,
+        model_provider,
+        binding_source,
+    }
+}
+
+async fn overlay_restore_execution_card(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    bundle: &mut Value,
+) -> Result<()> {
+    let total_started = Instant::now();
+    let Some(node) = bundle
+        .get_mut("working_state_restore")
+        .and_then(Value::as_object_mut)
+    else {
+        return Ok(());
+    };
+    let node_snapshot = Value::Object(node.clone());
+    let step_started = Instant::now();
+    let binding = resolve_restore_execution_card_binding(project, &node_snapshot);
+    continuity_profile_log(
+        "overlay_restore_execution_card.resolve_binding",
+        step_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let Some(model) = binding.model.as_deref() else {
+        node.insert("skill_execution_card".to_string(), Value::Null);
+        node.insert("skill_execution_card_summary".to_string(), Value::Null);
+        node.insert(
+            "skill_execution_card_binding".to_string(),
+            json!({
+                "thread_id": binding.thread_id,
+                "runtime": binding.runtime,
+                "model": binding.model,
+                "tool": binding.tool,
+                "model_provider": binding.model_provider,
+                "binding_source": binding.binding_source,
+                "binding_ready": false,
+            }),
+        );
+        continuity_profile_log(
+            "overlay_restore_execution_card.total",
+            total_started.elapsed().as_millis(),
+            &format!(
+                "project={} namespace={} binding_ready=false",
+                project.code, namespace.code
+            ),
+        );
+        return Ok(());
+    };
+
+    let step_started = Instant::now();
+    let cards = postgres::build_skill_execution_cards(
+        db,
+        &project.code,
+        &namespace.code,
+        None,
+        binding.runtime.as_deref(),
+        Some(model),
+        binding.tool.as_deref(),
+        true,
+        false,
+        false,
+    )
+    .await?;
+    continuity_profile_log(
+        "overlay_restore_execution_card.build_skill_execution_cards",
+        step_started.elapsed().as_millis(),
+        &format!(
+            "project={} namespace={} cards={}",
+            project.code,
+            namespace.code,
+            cards.as_array().map(|items| items.len()).unwrap_or(0)
+        ),
+    );
+    let step_started = Instant::now();
+    let terms = collect_restore_relevance_terms(&node_snapshot);
+    let selected = cards
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|card| {
+            let score = score_restore_execution_card_relevance(card, &terms);
+            (score > 0).then_some((score, card))
+        })
+        .max_by(|(left_score, left_card), (right_score, right_card)| {
+            left_score.cmp(right_score).then_with(|| {
+                left_card["skill_utility_score"]
+                    .as_f64()
+                    .partial_cmp(&right_card["skill_utility_score"].as_f64())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        });
+    continuity_profile_log(
+        "overlay_restore_execution_card.select_card",
+        step_started.elapsed().as_millis(),
+        &format!(
+            "project={} namespace={} terms={}",
+            project.code,
+            namespace.code,
+            terms.len()
+        ),
+    );
+
+    if let Some((score, card)) = selected {
+        let compact = compact_restore_execution_card(card, score, &binding);
+        let summary = summarize_restore_execution_card(&compact);
+        node.insert("skill_execution_card".to_string(), compact);
+        node.insert(
+            "skill_execution_card_summary".to_string(),
+            summary.map(Value::String).unwrap_or(Value::Null),
+        );
+    } else {
+        node.insert("skill_execution_card".to_string(), Value::Null);
+        node.insert("skill_execution_card_summary".to_string(), Value::Null);
+    }
+    node.insert(
+        "skill_execution_card_binding".to_string(),
+        json!({
+            "thread_id": binding.thread_id,
+            "runtime": binding.runtime,
+            "model": binding.model,
+            "tool": binding.tool,
+            "model_provider": binding.model_provider,
+            "binding_source": binding.binding_source,
+            "binding_ready": true,
+        }),
+    );
+    continuity_profile_log(
+        "overlay_restore_execution_card.total",
+        total_started.elapsed().as_millis(),
+        &format!(
+            "project={} namespace={} binding_ready=true selected={}",
+            project.code,
+            namespace.code,
+            selected.is_some()
+        ),
+    );
+    Ok(())
 }
 
 pub async fn load_recent_restore_bundle_without_live_guard(
@@ -1692,23 +3030,28 @@ pub async fn load_recent_restore_bundle_without_live_guard(
     project: &ProjectRecord,
     namespace: &NamespaceRecord,
 ) -> Result<Option<Value>> {
-    let latest_snapshot = postgres::list_observability_snapshots_by_kind_for_scope(
+    let latest_snapshot = postgres::list_observability_snapshots_by_kind_for_scope_index_only(
         db,
         WORKING_STATE_RESTORE_KIND,
-        "working_state_restore",
         &project.code,
         &namespace.code,
         Some(1),
     )
     .await?;
     if let Some(snapshot) = latest_snapshot.first() {
-        let captured_at_epoch_ms = snapshot.payload["working_state_restore"]["captured_at_epoch_ms"]
-            .as_u64()
-            .unwrap_or(snapshot.created_at_epoch_ms.max(0) as u64);
+        let captured_at_epoch_ms =
+            snapshot_payload_captured_at_epoch_ms(snapshot, "working_state_restore");
         if now_epoch_ms()?.saturating_sub(captured_at_epoch_ms)
             <= WORKING_STATE_RESTORE_REFRESH_MIN_INTERVAL_MS
         {
-            return Ok(Some(snapshot.payload.clone()));
+            let events = load_selected_working_state_events(db, project, namespace).await?;
+            if !events.is_empty()
+                && restore_snapshot_matches_latest_relevant_events(&snapshot.payload, &events)
+            {
+                let mut bundle = snapshot.payload.clone();
+                ensure_runtime_workspace_restore_pack(&mut bundle);
+                return Ok(Some(bundle));
+            }
         }
     }
     build_restore_bundle_without_live_guard(db, project, namespace).await
@@ -1719,16 +3062,167 @@ pub async fn build_restore_bundle(
     project: &ProjectRecord,
     namespace: &NamespaceRecord,
 ) -> Result<Option<Value>> {
+    let total_started = Instant::now();
     let Some(mut bundle) = build_restore_bundle_without_live_guard(db, project, namespace).await?
     else {
+        continuity_profile_log(
+            "build_restore_bundle.total",
+            total_started.elapsed().as_millis(),
+            &format!(
+                "project={} namespace={} no_bundle=true",
+                project.code, namespace.code
+            ),
+        );
         return Ok(None);
     };
+    let step_started = Instant::now();
     let client_budget_guard =
         token_budget::collect_live_current_session_budget_guard(db, Some(&bundle))
             .await
             .unwrap_or_else(|error| fallback_client_budget_guard_from_error(&error.to_string()));
+    continuity_profile_log(
+        "build_restore_bundle.collect_live_current_session_budget_guard",
+        step_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let step_started = Instant::now();
     overlay_client_budget_guard(&mut bundle, &client_budget_guard);
+    continuity_profile_log(
+        "build_restore_bundle.overlay_client_budget_guard",
+        step_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let step_started = Instant::now();
+    overlay_workspace_restore_pack(&mut bundle);
+    continuity_profile_log(
+        "build_restore_bundle.overlay_workspace_restore_pack",
+        step_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    continuity_profile_log(
+        "build_restore_bundle.total",
+        total_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
     Ok(Some(bundle))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExecCtlStartupLeaseRefreshCandidate {
+    source_event_id: String,
+    source_kind: String,
+    headline: String,
+    next_step: String,
+    local_path: Option<String>,
+}
+
+fn execctl_startup_same_thread_lease_refresh_candidate(
+    restore_bundle: &Value,
+    current_thread_id: Option<&str>,
+) -> Option<ExecCtlStartupLeaseRefreshCandidate> {
+    let restore = restore_bundle.get("working_state_restore")?;
+    let current_thread_id = current_thread_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let _ = current_thread_id;
+
+    let active_task = restore["project_task_tree"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|node| node["task_role"].as_str() == Some("active"));
+    let source_event_id = active_task
+        .and_then(|node| node["authoritative_event_id"].as_str())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            restore["state_lineage"]["authoritative_event_id"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+        })?
+        .trim()
+        .to_string();
+    let source_kind = active_task
+        .and_then(|node| node["source_kind"].as_str())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            restore["state_lineage"]["authoritative_source_kind"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or("working_state_restore")
+        .trim()
+        .to_string();
+    let headline = active_task
+        .and_then(|node| node["headline"].as_str())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            restore["current_goal"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+        })?
+        .trim()
+        .to_string();
+    let next_step = active_task
+        .and_then(|node| node["next_step"].as_str())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            restore["next_step"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .map(normalize_next_step_hint)
+        .unwrap_or_else(|| "ещё нет данных".to_string());
+    let local_path = restore["state_lineage"]["authoritative_local_path"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_string())
+        .or_else(|| {
+            restore["project_task_ledger"]["entries"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|entry| entry["task_role"].as_str() == Some("active"))
+                .and_then(|entry| entry["local_path"].as_str())
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| value.trim().to_string())
+        });
+
+    Some(ExecCtlStartupLeaseRefreshCandidate {
+        source_event_id,
+        source_kind,
+        headline,
+        next_step,
+        local_path,
+    })
+}
+
+fn execctl_same_thread_lease_refresh_required(
+    active_lease: Option<&ExecCtlTaskLeaseRecord>,
+    current_thread_id: Option<&str>,
+    now_epoch_ms: u64,
+    min_refresh_interval_ms: u64,
+) -> bool {
+    let Some(current_thread_id) = current_thread_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let Some(active_lease) = active_lease else {
+        return true;
+    };
+    let owner_thread_id = active_lease
+        .owner_thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if owner_thread_id != Some(current_thread_id) {
+        return true;
+    }
+    let heartbeat_at_epoch_ms = active_lease.heartbeat_at_epoch_ms.max(0) as u64;
+    let expires_at_epoch_ms = active_lease.expires_at_epoch_ms.max(0) as u64;
+    now_epoch_ms.saturating_sub(heartbeat_at_epoch_ms) >= min_refresh_interval_ms
+        || expires_at_epoch_ms.saturating_sub(now_epoch_ms) <= min_refresh_interval_ms
 }
 
 pub fn print_restore_bundle_human(restore: &Value) {
@@ -1796,6 +3290,12 @@ pub fn print_restore_bundle_human(restore: &Value) {
     {
         println!("- Незавершённые линии к возврату: {value}");
     }
+    if let Some(value) = node["skill_execution_card_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Исполнимая procedural-карточка: {value}");
+    }
     if let Some(value) = node["included_reasons_summary"]
         .as_str()
         .filter(|value| !value.is_empty())
@@ -1819,34 +3319,1018 @@ async fn refresh_restore_snapshot(
     project: &ProjectRecord,
     namespace: &NamespaceRecord,
 ) -> Result<()> {
+    let total_started = Instant::now();
     let now_epoch_ms = now_epoch_ms()?;
-    let latest_snapshot = postgres::list_observability_snapshots_by_kind_for_scope(
+    let latest_snapshot_started = Instant::now();
+    let latest_snapshot = postgres::list_observability_snapshots_by_kind_for_scope_index_only(
         db,
         WORKING_STATE_RESTORE_KIND,
-        "working_state_restore",
         &project.code,
         &namespace.code,
         Some(1),
     )
     .await?;
+    continuity_profile_log(
+        "refresh_restore_snapshot.list_latest_snapshot",
+        latest_snapshot_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
     if let Some(snapshot) = latest_snapshot.first() {
-        let captured_at_epoch_ms = snapshot.payload["working_state_restore"]["captured_at_epoch_ms"]
-            .as_u64()
-            .unwrap_or(snapshot.created_at_epoch_ms.max(0) as u64);
+        let captured_at_epoch_ms =
+            snapshot_payload_captured_at_epoch_ms(snapshot, "working_state_restore");
         if now_epoch_ms.saturating_sub(captured_at_epoch_ms)
             <= WORKING_STATE_RESTORE_REFRESH_MIN_INTERVAL_MS
         {
-            return Ok(());
+            let selected_events_started = Instant::now();
+            let events = load_selected_working_state_events(db, project, namespace).await?;
+            continuity_profile_log(
+                "refresh_restore_snapshot.load_selected_events_fast_check",
+                selected_events_started.elapsed().as_millis(),
+                &format!(
+                    "project={} namespace={} events={}",
+                    project.code,
+                    namespace.code,
+                    events.len()
+                ),
+            );
+            if !events.is_empty()
+                && restore_snapshot_matches_latest_relevant_events(&snapshot.payload, &events)
+            {
+                continuity_profile_log(
+                    "refresh_restore_snapshot.total",
+                    total_started.elapsed().as_millis(),
+                    &format!(
+                        "project={} namespace={} reused_snapshot=true",
+                        project.code, namespace.code
+                    ),
+                );
+                return Ok(());
+            }
         }
     }
-    let Some(bundle) = build_restore_bundle_without_live_guard(db, project, namespace).await? else {
+    let build_bundle_started = Instant::now();
+    let Some(bundle) = build_restore_bundle_without_live_guard(db, project, namespace).await?
+    else {
+        continuity_profile_log(
+            "refresh_restore_snapshot.total",
+            total_started.elapsed().as_millis(),
+            &format!(
+                "project={} namespace={} no_bundle=true",
+                project.code, namespace.code
+            ),
+        );
         return Ok(());
     };
-    let payload = json!({
-        "working_state_restore": bundle["working_state_restore"].clone()
-    });
-    postgres::insert_observability_snapshot(db, WORKING_STATE_RESTORE_KIND, &payload).await?;
+    continuity_profile_log(
+        "refresh_restore_snapshot.build_bundle",
+        build_bundle_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let payload = persisted_restore_snapshot_payload(&bundle);
+    let insert_snapshot_started = Instant::now();
+    let snapshot_id =
+        postgres::insert_observability_snapshot(db, WORKING_STATE_RESTORE_KIND, &payload).await?;
+    continuity_profile_log(
+        "refresh_restore_snapshot.insert_snapshot",
+        insert_snapshot_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let materialize_started = Instant::now();
+    materialize_restore_pack(db, project, namespace, &bundle, snapshot_id).await?;
+    continuity_profile_log(
+        "refresh_restore_snapshot.materialize_restore_pack",
+        materialize_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    continuity_profile_log(
+        "refresh_restore_snapshot.total",
+        total_started.elapsed().as_millis(),
+        &format!(
+            "project={} namespace={} reused_snapshot=false",
+            project.code, namespace.code
+        ),
+    );
     Ok(())
+}
+
+async fn force_refresh_restore_snapshot(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+) -> Result<Option<Value>> {
+    let Some(bundle) = build_restore_bundle_without_live_guard(db, project, namespace).await?
+    else {
+        return Ok(None);
+    };
+    let payload = persisted_restore_snapshot_payload(&bundle);
+    let snapshot_id =
+        postgres::insert_observability_snapshot(db, WORKING_STATE_RESTORE_KIND, &payload).await?;
+    materialize_restore_pack(db, project, namespace, &bundle, snapshot_id).await?;
+    Ok(Some(bundle))
+}
+
+async fn force_refresh_restore_snapshot_from_previous_handoff(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    previous_restore: &Value,
+    authoritative_event: &Value,
+    source_snapshot_id: Uuid,
+) -> Result<Option<Value>> {
+    let project_value = project_json(project);
+    let namespace_value = namespace_json(namespace);
+    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
+    let durable_entries_started = Instant::now();
+    let durable_entries = postgres::list_execctl_task_ledger_entries(
+        db,
+        project.project_id,
+        namespace.namespace_id,
+        &agent_scope,
+        Some(MAX_EXECCTL_LEDGER_ENTRIES),
+    )
+    .await?;
+    continuity_profile_log(
+        "force_refresh_restore_snapshot_from_previous_handoff.load_durable_entries",
+        durable_entries_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let active_lease_started = Instant::now();
+    let active_lease = postgres::get_execctl_task_lease(
+        db,
+        project.project_id,
+        namespace.namespace_id,
+        &agent_scope,
+        now_epoch_ms()? as i64,
+    )
+    .await?;
+    continuity_profile_log(
+        "force_refresh_restore_snapshot_from_previous_handoff.load_active_lease",
+        active_lease_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let mut bundle = previous_restore.clone();
+    let Some(restore) = bundle
+        .get_mut("working_state_restore")
+        .and_then(Value::as_object_mut)
+    else {
+        return force_refresh_restore_snapshot(db, project, namespace).await;
+    };
+    let now_epoch_ms = now_epoch_ms().unwrap_or_default();
+    let recorded_at_epoch_ms = authoritative_event["recorded_at_epoch_ms"]
+        .as_u64()
+        .unwrap_or(now_epoch_ms);
+    let current_goal = authoritative_event["headline"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("ещё нет данных")
+        .to_string();
+    let next_step = authoritative_event["next_step_hint"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("ещё нет данных")
+        .to_string();
+    let pending_return_queue = authoritative_event["pending_return_queue"].clone();
+    let pending_return_summary = summarize_pending_return_queue(&pending_return_queue);
+    let required_task_set = extract_required_task_set_from_event(authoritative_event);
+    let required_task_set_summary = summarize_required_task_set(&required_task_set);
+
+    let mut active_files = Vec::new();
+    collect_active_files(&mut active_files, &authoritative_event["active_files"]);
+    collect_active_files(&mut active_files, &restore["active_files"]);
+    let mut visible_projects = Vec::new();
+    collect_unique_strings(
+        &mut visible_projects,
+        &authoritative_event["visible_projects"],
+    );
+    collect_unique_strings(&mut visible_projects, &restore["visible_projects"]);
+    let mut recent_queries = Vec::new();
+    if let Some(query) = authoritative_event["query"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        push_unique(&mut recent_queries, query.to_string());
+    }
+    collect_unique_strings(&mut recent_queries, &restore["recent_queries"]);
+    let mut open_questions = Vec::new();
+    collect_open_questions(&mut open_questions, &authoritative_event["open_questions"]);
+    collect_open_questions(&mut open_questions, &restore["open_questions"]);
+    let mut rejected_hypotheses = Vec::new();
+    collect_unique_strings(
+        &mut rejected_hypotheses,
+        &authoritative_event["rejected_hypotheses"],
+    );
+    collect_unique_strings(&mut rejected_hypotheses, &restore["rejected_hypotheses"]);
+    let mut materialized_notes = Vec::new();
+    collect_materialized_notes(
+        &mut materialized_notes,
+        &authoritative_event["materialized_notes"],
+    );
+    collect_materialized_notes(&mut materialized_notes, &restore["materialized_notes"]);
+    let current_hypothesis = authoritative_event["current_hypothesis"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            restore["current_hypothesis"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        });
+    let last_command = authoritative_event["last_command"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            restore["last_command"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        });
+    let last_results_summary = authoritative_event["last_results_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            restore["last_results_summary"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        });
+    let included_reasons_summary = decision_trace_summary(Some(authoritative_event), "included");
+    let excluded_reasons_summary =
+        decision_trace_summary(Some(authoritative_event), "not_included");
+    let current_focus = derive_restore_current_focus(
+        &active_files,
+        &recent_queries,
+        current_hypothesis.as_deref(),
+    );
+    let source_summary = derive_restore_source_summary(
+        authoritative_event,
+        &active_files,
+        included_reasons_summary.as_deref(),
+    );
+
+    let mut recent_actions = vec![json!({
+        "event_id": authoritative_event["event_id"],
+        "event_kind": authoritative_event["event_kind"],
+        "source_kind": authoritative_event["source_kind"],
+        "headline": authoritative_event["headline"],
+        "summary": authoritative_event["summary"],
+        "recorded_at_epoch_ms": authoritative_event["recorded_at_epoch_ms"],
+        "local_path": authoritative_event["local_path"],
+        "host_current_thread_control_feedback": if authoritative_event["host_current_thread_control_feedback"].is_object() {
+            authoritative_event["host_current_thread_control_feedback"].clone()
+        } else {
+            Value::Null
+        },
+        "execution_state": "succeeded",
+        "authoritative": true,
+    })];
+    if let Some(items) = restore["recent_actions"].as_array() {
+        for item in items {
+            if recent_actions.len() >= MAX_RECENT_ACTIONS {
+                break;
+            }
+            if item["event_id"] == authoritative_event["event_id"] {
+                continue;
+            }
+            let mut updated = item.clone();
+            updated["authoritative"] = Value::Bool(false);
+            if updated["event_kind"].as_str() == Some("continuity_handoff") {
+                updated["execution_state"] = Value::String("superseded".to_string());
+            }
+            recent_actions.push(updated);
+        }
+    }
+    let action_state_counts = collect_action_state_counts(&recent_actions);
+    let lineage_supporting_event_ids = recent_actions
+        .iter()
+        .filter_map(|item| item["event_id"].as_str().map(ToOwned::to_owned))
+        .collect::<Vec<_>>();
+    let authoritative_event_id = authoritative_event["event_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let lineage_nodes = recent_actions
+        .iter()
+        .filter_map(|item| {
+            let event_id = item["event_id"].as_str()?;
+            Some(json!({
+                "node_id": event_id,
+                "event_kind": item["event_kind"],
+                "source_kind": item["source_kind"],
+                "headline": item["headline"],
+                "execution_state": item["execution_state"],
+                "authoritative": item["authoritative"],
+                "recorded_at_epoch_ms": item["recorded_at_epoch_ms"],
+            }))
+        })
+        .collect::<Vec<_>>();
+    let lineage_edges = recent_actions
+        .iter()
+        .filter_map(|item| {
+            let event_id = item["event_id"].as_str()?;
+            if event_id == authoritative_event_id {
+                return None;
+            }
+            Some(json!({
+                "from_event_id": event_id,
+                "to_event_id": authoritative_event_id,
+                "relation": lineage_relation(item["execution_state"].as_str().unwrap_or("unknown")),
+            }))
+        })
+        .collect::<Vec<_>>();
+
+    let project_task_tree = build_project_task_tree(
+        &project_value,
+        &namespace_value,
+        authoritative_event,
+        &current_goal,
+        &next_step,
+        &pending_return_queue,
+    );
+    let project_task_tree_summary = summarize_project_task_tree(&project_task_tree);
+    let project_task_ledger = build_durable_project_task_ledger(
+        &project_value,
+        &namespace_value,
+        &durable_entries,
+        &authoritative_event_id,
+        &pending_return_queue,
+    );
+    let project_task_ledger_summary = summarize_project_task_ledger(&project_task_ledger);
+    let client_budget_guard = default_client_budget_guard();
+    let execctl_resume_contract = build_execctl_resume_contract(
+        &project_task_tree,
+        &pending_return_queue,
+        &required_task_set,
+    );
+    let execctl_resume_contract_summary =
+        summarize_execctl_resume_contract(&execctl_resume_contract);
+    let startup_next_action = build_startup_next_action(
+        &current_goal,
+        &next_step,
+        &execctl_resume_contract,
+        &client_budget_guard,
+        Some(project.code.as_str()),
+        Some(namespace.code.as_str()),
+        Some(project.repo_root.as_str()),
+    );
+    let startup_next_action_summary = summarize_startup_next_action(&startup_next_action);
+
+    restore.insert("project".to_string(), project_value.clone());
+    restore.insert("namespace".to_string(), namespace_value.clone());
+    restore.insert("captured_at_epoch_ms".to_string(), json!(now_epoch_ms));
+    restore.insert(
+        "agent_scope".to_string(),
+        authoritative_event["agent_scope"].clone(),
+    );
+    restore.insert(
+        "thread_id".to_string(),
+        authoritative_event["thread_id"].clone(),
+    );
+    restore.insert(
+        "session_id".to_string(),
+        authoritative_event["session_id"].clone(),
+    );
+    restore.insert(
+        "session_age_ms".to_string(),
+        json!(now_epoch_ms.saturating_sub(recorded_at_epoch_ms)),
+    );
+    restore.insert(
+        "events_count".to_string(),
+        Value::from(
+            restore["events_count"]
+                .as_u64()
+                .unwrap_or_default()
+                .saturating_add(1),
+        ),
+    );
+    restore.insert("current_goal".to_string(), json!(current_goal));
+    restore.insert("next_step".to_string(), json!(next_step));
+    restore.insert("next_step_state".to_string(), json!("planned"));
+    restore.insert(
+        "current_hypothesis".to_string(),
+        current_hypothesis.map(Value::String).unwrap_or(Value::Null),
+    );
+    restore.insert(
+        "current_focus".to_string(),
+        current_focus.map(Value::String).unwrap_or(Value::Null),
+    );
+    restore.insert("open_questions".to_string(), json!(open_questions));
+    restore.insert(
+        "rejected_hypotheses".to_string(),
+        json!(rejected_hypotheses),
+    );
+    restore.insert("materialized_notes".to_string(), json!(materialized_notes));
+    restore.insert("required_task_set".to_string(), json!(required_task_set));
+    restore.insert(
+        "required_task_set_summary".to_string(),
+        required_task_set_summary
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    restore.insert("active_files".to_string(), json!(active_files));
+    restore.insert("visible_projects".to_string(), json!(visible_projects));
+    restore.insert("recent_queries".to_string(), json!(recent_queries));
+    restore.insert("recent_actions".to_string(), json!(recent_actions));
+    restore.insert(
+        "pending_return_queue".to_string(),
+        pending_return_queue.clone(),
+    );
+    restore.insert(
+        "pending_return_summary".to_string(),
+        pending_return_summary
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    restore.insert(
+        "execctl_resume_state".to_string(),
+        if pending_return_queue
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+        {
+            json!("pending_return_queue_present")
+        } else {
+            json!("clear")
+        },
+    );
+    restore.insert(
+        "execctl_resume_contract".to_string(),
+        execctl_resume_contract.clone(),
+    );
+    restore.insert(
+        "execctl_resume_contract_summary".to_string(),
+        execctl_resume_contract_summary
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    restore.insert(
+        "required_return_task".to_string(),
+        execctl_resume_contract["required_return_task"].clone(),
+    );
+    restore.insert(
+        "client_budget_guard".to_string(),
+        client_budget_guard.clone(),
+    );
+    restore.insert("startup_next_action".to_string(), startup_next_action);
+    restore.insert(
+        "startup_next_action_summary".to_string(),
+        startup_next_action_summary
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    restore.insert("project_task_tree".to_string(), project_task_tree);
+    restore.insert(
+        "project_task_tree_summary".to_string(),
+        project_task_tree_summary
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    restore.insert("project_task_ledger".to_string(), project_task_ledger);
+    restore.insert(
+        "project_task_ledger_summary".to_string(),
+        project_task_ledger_summary
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    restore.insert(
+        "last_command".to_string(),
+        last_command.map(Value::String).unwrap_or(Value::Null),
+    );
+    restore.insert(
+        "last_results_summary".to_string(),
+        last_results_summary
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    restore.insert(
+        "source_summary".to_string(),
+        source_summary.map(Value::String).unwrap_or(Value::Null),
+    );
+    restore.insert("latest_decision_trace".to_string(), Value::Null);
+    restore.insert(
+        "included_reasons_summary".to_string(),
+        included_reasons_summary
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    restore.insert(
+        "excluded_reasons_summary".to_string(),
+        excluded_reasons_summary
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    restore.insert("action_state_counts".to_string(), action_state_counts);
+    restore.insert(
+        "restore_confidence".to_string(),
+        restore
+            .get("restore_confidence")
+            .cloned()
+            .unwrap_or_else(|| json!("high")),
+    );
+    restore.insert("restore_freshness_state".to_string(), json!("fresh"));
+    restore.insert(
+        "state_lineage".to_string(),
+        json!({
+            "lineage_model_version": restore["execution_catalog"]["lineage_model_version"].clone(),
+            "authoritative_event_id": authoritative_event["event_id"],
+            "authoritative_event_kind": authoritative_event["event_kind"],
+            "authoritative_source_kind": authoritative_event["source_kind"],
+            "authoritative_local_path": authoritative_event["local_path"],
+            "source_snapshot_id": source_snapshot_id.to_string(),
+            "supporting_event_ids": lineage_supporting_event_ids,
+            "truth_ranking": restore["execution_catalog"]["truth_ranking"].clone(),
+            "nodes": lineage_nodes,
+            "edges": lineage_edges,
+        }),
+    );
+    restore.insert("is_preliminary".to_string(), json!(false));
+
+    let overlay_lease_started = Instant::now();
+    overlay_execctl_active_lease(&mut bundle, active_lease.as_ref());
+    continuity_profile_log(
+        "force_refresh_restore_snapshot_from_previous_handoff.overlay_active_lease",
+        overlay_lease_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let overlay_execution_card_started = Instant::now();
+    overlay_restore_execution_card(db, project, namespace, &mut bundle).await?;
+    continuity_profile_log(
+        "force_refresh_restore_snapshot_from_previous_handoff.overlay_execution_card",
+        overlay_execution_card_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let overlay_restore_pack_started = Instant::now();
+    overlay_workspace_restore_pack(&mut bundle);
+    continuity_profile_log(
+        "force_refresh_restore_snapshot_from_previous_handoff.overlay_workspace_restore_pack",
+        overlay_restore_pack_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+
+    let payload = persisted_restore_snapshot_payload(&bundle);
+    let insert_snapshot_started = Instant::now();
+    let snapshot_id =
+        postgres::insert_observability_snapshot(db, WORKING_STATE_RESTORE_KIND, &payload).await?;
+    continuity_profile_log(
+        "force_refresh_restore_snapshot_from_previous_handoff.insert_snapshot",
+        insert_snapshot_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let materialize_started = Instant::now();
+    materialize_restore_pack(db, project, namespace, &bundle, snapshot_id).await?;
+    continuity_profile_log(
+        "force_refresh_restore_snapshot_from_previous_handoff.materialize_restore_pack",
+        materialize_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    Ok(Some(bundle))
+}
+
+pub(crate) async fn refresh_same_thread_execctl_active_lease_for_startup(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    restore: Option<&Value>,
+) -> Result<Option<Value>> {
+    let Some(restore) = restore else {
+        return Ok(None);
+    };
+    let current_thread_id = resolve_thread_id_for_project_repo_root(&project.repo_root, None);
+    let Some(candidate) =
+        execctl_startup_same_thread_lease_refresh_candidate(restore, current_thread_id.as_deref())
+    else {
+        return Ok(Some(restore.clone()));
+    };
+    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
+    let live_active_lease = postgres::get_execctl_task_lease(
+        db,
+        project.project_id,
+        namespace.namespace_id,
+        &agent_scope,
+        now_epoch_ms()? as i64,
+    )
+    .await?;
+    let now_epoch_ms = now_epoch_ms()?;
+    if !execctl_same_thread_lease_refresh_required(
+        live_active_lease.as_ref(),
+        current_thread_id.as_deref(),
+        now_epoch_ms,
+        0,
+    ) {
+        return Ok(Some(restore.clone()));
+    }
+    let recorded_at_epoch_ms = now_epoch_ms;
+    let session_id = resolve_session_id(
+        db,
+        &project.code,
+        &namespace.code,
+        &agent_scope,
+        recorded_at_epoch_ms,
+    )
+    .await?;
+    let lease_expires_at_epoch_ms =
+        recorded_at_epoch_ms.saturating_add(EXECCTL_LEASE_TTL_MS) as i64;
+    postgres::upsert_execctl_task_lease(
+        db,
+        &postgres::ExecCtlTaskLeaseInsert {
+            project_id: project.project_id,
+            namespace_id: namespace.namespace_id,
+            agent_scope: &agent_scope,
+            owner_session_id: Some(session_id.as_str()),
+            owner_thread_id: current_thread_id.as_deref(),
+            source_snapshot_id: None,
+            source_event_id: candidate.source_event_id.as_str(),
+            source_kind: candidate.source_kind.as_str(),
+            lease_state: "active",
+            headline: candidate.headline.as_str(),
+            next_step: candidate.next_step.as_str(),
+            local_path: candidate.local_path.as_deref(),
+            acquired_at_epoch_ms: recorded_at_epoch_ms as i64,
+            heartbeat_at_epoch_ms: recorded_at_epoch_ms as i64,
+            expires_at_epoch_ms: lease_expires_at_epoch_ms,
+        },
+    )
+    .await?;
+    let refreshed_lease = postgres::get_execctl_task_lease(
+        db,
+        project.project_id,
+        namespace.namespace_id,
+        &agent_scope,
+        now_epoch_ms as i64,
+    )
+    .await?;
+    let mut refreshed_bundle = restore.clone();
+    overlay_execctl_active_lease(&mut refreshed_bundle, refreshed_lease.as_ref());
+    overlay_workspace_restore_pack(&mut refreshed_bundle);
+    let client_budget_guard =
+        token_budget::collect_live_current_session_budget_guard(db, Some(&refreshed_bundle))
+            .await
+            .unwrap_or_else(|error| fallback_client_budget_guard_from_error(&error.to_string()));
+    overlay_client_budget_guard(&mut refreshed_bundle, &client_budget_guard);
+    overlay_workspace_restore_pack(&mut refreshed_bundle);
+    Ok(Some(refreshed_bundle))
+}
+
+pub(crate) async fn maintain_same_thread_execctl_active_lease_for_guard(
+    db: &Client,
+    restore: Option<&Value>,
+    explicit_thread_id_hint: Option<&str>,
+) -> Result<()> {
+    let Some(restore) = restore else {
+        return Ok(());
+    };
+    let project_code = restore["working_state_restore"]["project"]["code"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let namespace_code = restore["working_state_restore"]["namespace"]["code"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(project_code) = project_code else {
+        return Ok(());
+    };
+    let Some(namespace_code) = namespace_code else {
+        return Ok(());
+    };
+    let project = postgres::get_project_by_code(db, project_code).await?;
+    let Some(namespace) =
+        postgres::find_namespace_by_code(db, project.project_id, namespace_code).await?
+    else {
+        return Ok(());
+    };
+    let current_thread_id =
+        resolve_thread_id_for_project_repo_root(&project.repo_root, explicit_thread_id_hint);
+    let Some(candidate) =
+        execctl_startup_same_thread_lease_refresh_candidate(restore, current_thread_id.as_deref())
+    else {
+        return Ok(());
+    };
+    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
+    let now_epoch_ms = now_epoch_ms()?;
+    let live_active_lease = postgres::get_execctl_task_lease(
+        db,
+        project.project_id,
+        namespace.namespace_id,
+        &agent_scope,
+        now_epoch_ms as i64,
+    )
+    .await?;
+    if !execctl_same_thread_lease_refresh_required(
+        live_active_lease.as_ref(),
+        current_thread_id.as_deref(),
+        now_epoch_ms,
+        EXECCTL_LEASE_HEARTBEAT_MIN_INTERVAL_MS,
+    ) {
+        return Ok(());
+    }
+    let session_id = resolve_session_id(
+        db,
+        &project.code,
+        &namespace.code,
+        &agent_scope,
+        now_epoch_ms,
+    )
+    .await?;
+    let lease_expires_at_epoch_ms = now_epoch_ms.saturating_add(EXECCTL_LEASE_TTL_MS) as i64;
+    postgres::upsert_execctl_task_lease(
+        db,
+        &postgres::ExecCtlTaskLeaseInsert {
+            project_id: project.project_id,
+            namespace_id: namespace.namespace_id,
+            agent_scope: &agent_scope,
+            owner_session_id: Some(session_id.as_str()),
+            owner_thread_id: current_thread_id.as_deref(),
+            source_snapshot_id: None,
+            source_event_id: candidate.source_event_id.as_str(),
+            source_kind: candidate.source_kind.as_str(),
+            lease_state: "active",
+            headline: candidate.headline.as_str(),
+            next_step: candidate.next_step.as_str(),
+            local_path: candidate.local_path.as_deref(),
+            acquired_at_epoch_ms: now_epoch_ms as i64,
+            heartbeat_at_epoch_ms: now_epoch_ms as i64,
+            expires_at_epoch_ms: lease_expires_at_epoch_ms,
+        },
+    )
+    .await?;
+    let _ = force_refresh_restore_snapshot(db, &project, &namespace).await?;
+    Ok(())
+}
+
+async fn load_selected_working_state_events(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+) -> Result<Vec<ObservabilitySnapshotRecord>> {
+    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
+    let snapshots = postgres::list_observability_snapshots_by_kind_for_scope_index_only(
+        db,
+        WORKING_STATE_EVENT_KIND,
+        &project.code,
+        &namespace.code,
+        Some(MAX_RESTORE_EVENTS),
+    )
+    .await?;
+    Ok(select_relevant_events(
+        snapshots,
+        &project.code,
+        &namespace.code,
+        &agent_scope,
+    ))
+}
+
+fn snapshot_payload_captured_at_epoch_ms(
+    snapshot: &ObservabilitySnapshotRecord,
+    payload_root: &str,
+) -> u64 {
+    snapshot.payload[payload_root]["captured_at_epoch_ms"]
+        .as_u64()
+        .or_else(|| snapshot.payload[payload_root]["recorded_at_epoch_ms"].as_u64())
+        .unwrap_or(snapshot.created_at_epoch_ms.max(0) as u64)
+}
+
+fn inferred_restore_thread_id(events: &[ObservabilitySnapshotRecord]) -> Option<String> {
+    let mut inferred = None::<String>;
+    for snapshot in events.iter().take(MAX_RECENT_ACTIONS) {
+        let thread_id = snapshot.payload["working_state_event"]["thread_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let Some(thread_id) = thread_id else {
+            continue;
+        };
+        if let Some(existing) = inferred.as_deref() {
+            if existing != thread_id {
+                return None;
+            }
+        } else {
+            inferred = Some(thread_id.to_string());
+        }
+    }
+    inferred
+}
+
+fn restore_pack_source_event_ids(restore: &Value) -> Value {
+    let mut ids = BTreeSet::new();
+    if let Some(value) = restore["state_lineage"]["authoritative_event_id"].as_str() {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            ids.insert(trimmed.to_string());
+        }
+    }
+    if let Some(actions) = restore["recent_actions"].as_array() {
+        for action in actions {
+            if let Some(value) = action["event_id"].as_str() {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    ids.insert(trimmed.to_string());
+                }
+            }
+        }
+    }
+    Value::Array(ids.into_iter().map(Value::String).collect())
+}
+
+fn restore_pack_artifact_refs(restore: &Value) -> Value {
+    let mut refs = BTreeSet::new();
+    if let Some(value) = restore["state_lineage"]["authoritative_local_path"].as_str() {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            refs.insert(format!("file://{trimmed}"));
+        }
+    }
+    if let Some(actions) = restore["recent_actions"].as_array() {
+        for action in actions {
+            if let Some(value) = action["local_path"].as_str() {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    refs.insert(format!("file://{trimmed}"));
+                }
+            }
+        }
+    }
+    if let Some(files) = restore["active_files"].as_array() {
+        for file in files {
+            if let Some(value) = file.as_str() {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() && trimmed.starts_with('/') {
+                    refs.insert(format!("file://{trimmed}"));
+                }
+            }
+        }
+    }
+    Value::Array(refs.into_iter().map(Value::String).collect())
+}
+
+fn restore_pack_message_refs(restore: &Value) -> Value {
+    let mut refs = BTreeSet::new();
+    if let Some(value) = restore["thread_id"].as_str() {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            refs.insert(format!("thread:{trimmed}"));
+        }
+    }
+    Value::Array(refs.into_iter().map(Value::String).collect())
+}
+
+async fn materialize_restore_pack(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    bundle: &Value,
+    source_snapshot_id: Uuid,
+) -> Result<()> {
+    let restore = &bundle["working_state_restore"];
+    let workspace_restore_pack = bundle
+        .get("workspace_restore_pack")
+        .cloned()
+        .unwrap_or_else(|| build_workspace_restore_pack(restore));
+    let source_event_ids = restore_pack_source_event_ids(restore);
+    let artifact_refs = restore_pack_artifact_refs(restore);
+    let message_refs = restore_pack_message_refs(restore);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": restore["state_lineage"]["authoritative_event_id"].clone(),
+        "authoritative_event_kind": restore["state_lineage"]["authoritative_event_kind"].clone(),
+        "restore_confidence": restore["restore_confidence"].clone(),
+        "restore_freshness_state": restore["restore_freshness_state"].clone(),
+        "recent_actions_count": restore["recent_actions"].as_array().map(|items| items.len()).unwrap_or(0),
+        "pending_return_count": restore["pending_return_queue"].as_array().map(|items| items.len()).unwrap_or(0),
+        "source_snapshot_id": source_snapshot_id,
+    });
+    let headline = workspace_restore_pack["current_goal"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty());
+    let summary = workspace_restore_pack["summary"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty());
+    let agent_scope = restore["agent_scope"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty());
+    let session_id = restore["session_id"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty());
+    let thread_id = restore["thread_id"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty());
+    let captured_at_epoch_ms = restore["captured_at_epoch_ms"].as_i64();
+    let payload = workspace_restore_pack.clone();
+    let _ = postgres::create_restore_pack(
+        db,
+        &project.code,
+        &namespace.code,
+        &postgres::RestorePackInsert {
+            agent_scope,
+            session_id,
+            thread_id,
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: Some(postgres::RestorePackSourceSnapshotHint {
+                snapshot_kind: WORKING_STATE_RESTORE_KIND,
+                scope_project_code: Some(project.code.as_str()),
+                scope_namespace_code: Some(namespace.code.as_str()),
+                verified_exists: true,
+            }),
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some(WORKSPACE_RESTORE_PACK_ENVELOPE_VERSION),
+            headline,
+            summary,
+            payload: &payload,
+            captured_at_epoch_ms,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+fn restore_snapshot_matches_latest_relevant_events(
+    snapshot_payload: &Value,
+    events: &[ObservabilitySnapshotRecord],
+) -> bool {
+    if events.is_empty() {
+        return false;
+    }
+    let restore = &snapshot_payload["working_state_restore"];
+    let latest_event = &events[0].payload["working_state_event"];
+    let latest_event_id = latest_event["event_id"].as_str().unwrap_or_default();
+    let restore_latest_event_id = restore["recent_actions"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| item["event_id"].as_str())
+        .unwrap_or_default();
+    if !latest_event_id.is_empty() && latest_event_id != restore_latest_event_id {
+        return false;
+    }
+    let authoritative_event = events
+        .iter()
+        .map(|snapshot| &snapshot.payload["working_state_event"])
+        .find(|event| {
+            event["event_kind"].as_str() == Some("continuity_handoff")
+                && !is_meta_continuity_event(event)
+        })
+        .unwrap_or(latest_event);
+    let authoritative_event_id = authoritative_event["event_id"].as_str().unwrap_or_default();
+    let restore_authoritative_event_id = restore["state_lineage"]["authoritative_event_id"]
+        .as_str()
+        .unwrap_or_default();
+    if !authoritative_event_id.is_empty()
+        && authoritative_event_id != restore_authoritative_event_id
+    {
+        return false;
+    }
+    let latest_agent_scope = latest_event["agent_scope"].as_str().unwrap_or("shared");
+    let restore_agent_scope = restore["agent_scope"].as_str().unwrap_or("shared");
+    if !latest_agent_scope.is_empty() && latest_agent_scope != restore_agent_scope {
+        return false;
+    }
+    let latest_session_id = latest_event["session_id"].as_str().unwrap_or_default();
+    let restore_session_id = restore["session_id"].as_str().unwrap_or_default();
+    if !latest_session_id.is_empty() && latest_session_id != restore_session_id {
+        return false;
+    }
+
+    let mut active_files = Vec::new();
+    let mut recent_queries = Vec::new();
+    collect_active_files(&mut active_files, &latest_event["active_files"]);
+    if let Some(query) = latest_event["query"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        recent_queries.push(query.to_string());
+    }
+    let expected_focus = derive_restore_current_focus(
+        &active_files,
+        &recent_queries,
+        restore["current_hypothesis"].as_str(),
+    );
+    if let Some(expected_focus) = expected_focus {
+        let restore_focus = restore["current_focus"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if restore_focus != Some(expected_focus.as_str()) {
+            return false;
+        }
+    }
+    let expected_source_summary =
+        derive_restore_source_summary(authoritative_event, &active_files, None);
+    if let Some(expected_source_summary) = expected_source_summary {
+        let restore_source_summary = restore["source_summary"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if restore_source_summary != Some(expected_source_summary.as_str()) {
+            return false;
+        }
+    }
+    true
 }
 
 fn compose_restore_bundle(
@@ -1873,6 +4357,12 @@ fn compose_restore_bundle(
         .unwrap_or_default()
         .to_string();
     let session_id = latest["session_id"].as_str().unwrap_or_default();
+    let thread_id = latest["thread_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| inferred_restore_thread_id(events));
     let latest_recorded_at = latest["recorded_at_epoch_ms"]
         .as_u64()
         .unwrap_or(events[0].created_at_epoch_ms.max(0) as u64);
@@ -1976,6 +4466,8 @@ fn compose_restore_bundle(
             workspace_graph_inputs.push(event["workspace_graph"].clone());
         }
     }
+    let required_task_set = extract_required_task_set_from_event(authoritative_event);
+    let required_task_set_summary = summarize_required_task_set(&required_task_set);
 
     let restore_confidence = if events.len() >= 4 && latest_recorded_at > 0 {
         if now_epoch_ms - latest_recorded_at <= 15 * 60 * 1000 {
@@ -2065,6 +4557,16 @@ fn compose_restore_bundle(
     let included_reasons_summary = decision_trace_summary(Some(&latest_decision_trace), "included");
     let excluded_reasons_summary =
         decision_trace_summary(Some(&latest_decision_trace), "not_included");
+    let current_focus = derive_restore_current_focus(
+        &active_files,
+        &recent_queries,
+        current_hypothesis.as_deref(),
+    );
+    let source_summary = derive_restore_source_summary(
+        authoritative_event,
+        &active_files,
+        included_reasons_summary.as_deref(),
+    );
     let project_task_tree = build_project_task_tree(
         project,
         namespace,
@@ -2082,8 +4584,11 @@ fn compose_restore_bundle(
         &pending_return_queue,
     );
     let project_task_ledger_summary = summarize_project_task_ledger(&project_task_ledger);
-    let execctl_resume_contract =
-        build_execctl_resume_contract(&project_task_tree, &pending_return_queue);
+    let execctl_resume_contract = build_execctl_resume_contract(
+        &project_task_tree,
+        &pending_return_queue,
+        &required_task_set,
+    );
     let execctl_resume_contract_summary =
         summarize_execctl_resume_contract(&execctl_resume_contract);
     let client_budget_guard = default_client_budget_guard();
@@ -2104,7 +4609,7 @@ fn compose_restore_bundle(
             "namespace": namespace,
             "captured_at_epoch_ms": now_epoch_ms,
             "agent_scope": latest["agent_scope"].as_str().unwrap_or("shared"),
-            "thread_id": latest["thread_id"].as_str().unwrap_or_default(),
+            "thread_id": thread_id,
             "session_id": session_id,
             "session_age_ms": now_epoch_ms.saturating_sub(latest_recorded_at),
             "events_count": events.len(),
@@ -2112,9 +4617,12 @@ fn compose_restore_bundle(
             "next_step": next_step,
             "next_step_state": "planned",
             "current_hypothesis": current_hypothesis,
+            "current_focus": current_focus,
             "open_questions": open_questions,
             "rejected_hypotheses": rejected_hypotheses,
             "materialized_notes": materialized_notes,
+            "required_task_set": required_task_set,
+            "required_task_set_summary": required_task_set_summary,
             "active_files": active_files,
             "visible_projects": visible_projects,
             "recent_queries": recent_queries,
@@ -2125,6 +4633,7 @@ fn compose_restore_bundle(
             "execctl_resume_state": execctl_resume_state,
             "execctl_resume_contract": execctl_resume_contract,
             "execctl_resume_contract_summary": execctl_resume_contract_summary,
+            "required_return_task": execctl_resume_contract["required_return_task"].clone(),
             "client_budget_guard": client_budget_guard,
             "startup_next_action": startup_next_action,
             "startup_next_action_summary": startup_next_action_summary,
@@ -2134,6 +4643,7 @@ fn compose_restore_bundle(
             "project_task_ledger_summary": project_task_ledger_summary,
             "last_command": last_command,
             "last_results_summary": last_results_summary,
+            "source_summary": source_summary,
             "latest_decision_trace": latest_decision_trace,
             "included_reasons_summary": included_reasons_summary,
             "excluded_reasons_summary": excluded_reasons_summary,
@@ -2157,6 +4667,68 @@ fn compose_restore_bundle(
             "is_preliminary": events.len() < 3,
         }
     })
+}
+
+fn derive_restore_current_focus(
+    active_files: &[String],
+    recent_queries: &[String],
+    current_hypothesis: Option<&str>,
+) -> Option<String> {
+    let primary_file = active_files
+        .iter()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty() && *value != "ещё нет данных");
+    let recent_query = recent_queries
+        .iter()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty() && *value != "ещё нет данных");
+
+    match (primary_file, recent_query) {
+        (Some(path), Some(query)) => Some(format!(
+            "Сейчас основной фокус: {path} по запросу «{query}»."
+        )),
+        (Some(path), None) => Some(format!("Сейчас основной фокус: {path}.")),
+        (None, Some(query)) => Some(format!("Сейчас основной фокус: запрос «{query}».")),
+        (None, None) => current_hypothesis
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "ещё нет данных")
+            .map(ToOwned::to_owned),
+    }
+}
+
+fn derive_restore_source_summary(
+    authoritative_event: &Value,
+    active_files: &[String],
+    included_reasons_summary: Option<&str>,
+) -> Option<String> {
+    let source_kind = authoritative_event["source_kind"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "ещё нет данных")?;
+    let local_path = authoritative_event["local_path"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "ещё нет данных");
+    let primary_file = active_files
+        .iter()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty() && *value != "ещё нет данных");
+    let retrieval_summary = included_reasons_summary
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let mut parts = Vec::new();
+    match local_path {
+        Some(path) => parts.push(format!("Источник истины: {source_kind} ({path}).")),
+        None => parts.push(format!("Источник истины: {source_kind}.")),
+    }
+    if let Some(path) = primary_file {
+        parts.push(format!("Главный подтверждающий артефакт: {path}."));
+    }
+    if let Some(summary) = retrieval_summary {
+        parts.push(format!("Почему это вошло: {summary}"));
+    }
+    Some(parts.join(" "))
 }
 
 pub fn degradation_proof_scenarios(captured_at_epoch_ms: u64) -> Result<Vec<Value>> {
@@ -2697,10 +5269,9 @@ async fn resolve_session_id(
     agent_scope: &str,
     recorded_at_epoch_ms: u64,
 ) -> Result<String> {
-    let snapshots = postgres::list_observability_snapshots_by_kind_for_scope(
+    let snapshots = postgres::list_observability_snapshots_by_kind_for_scope_index_only(
         db,
         WORKING_STATE_EVENT_KIND,
-        "working_state_event",
         project_code,
         namespace_code,
         Some(60),
@@ -2726,7 +5297,7 @@ async fn resolve_session_id(
     ))
 }
 
-fn current_agent_scope_for(project_code: &str, namespace_code: &str) -> String {
+pub(crate) fn current_agent_scope_for(project_code: &str, namespace_code: &str) -> String {
     for key in [
         "AMAI_AGENT_SCOPE",
         "CODEX_AGENT_SCOPE",
@@ -2786,11 +5357,54 @@ fn current_thread_id() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn resolved_thread_id_with_candidates(
+    explicit_thread_id_hint: Option<&str>,
+    env_thread_id: Option<&str>,
+    repo_preferred_thread_id: Option<&str>,
+) -> Option<String> {
+    explicit_thread_id_hint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            env_thread_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            repo_preferred_thread_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+}
+
+fn resolve_thread_id_for_project_repo_root(
+    repo_root: &str,
+    explicit_thread_id_hint: Option<&str>,
+) -> Option<String> {
+    let env_thread_id = current_thread_id();
+    let repo_preferred_thread_id = if repo_root.trim().is_empty() {
+        None
+    } else {
+        codex_threads::preferred_thread_id_for_repo(repo_root)
+            .ok()
+            .flatten()
+    };
+    resolved_thread_id_with_candidates(
+        explicit_thread_id_hint,
+        env_thread_id.as_deref(),
+        repo_preferred_thread_id.as_deref(),
+    )
+}
+
 fn project_json(project: &ProjectRecord) -> Value {
     json!({
         "code": project.code,
         "display_name": project.display_name,
         "repo_root": project.repo_root,
+        "visibility_scope": project.visibility_scope,
     })
 }
 
@@ -2798,6 +5412,7 @@ fn namespace_json(namespace: &NamespaceRecord) -> Value {
     json!({
         "code": namespace.code,
         "display_name": namespace.display_name,
+        "retrieval_mode": namespace.retrieval_mode,
     })
 }
 
@@ -2909,12 +5524,13 @@ fn derive_pending_return_queue(
     queued_at_epoch_ms: u64,
     resolve_current_goal: bool,
     resolved_headlines: &[String],
+    resolved_task_ids: &[String],
 ) -> Vec<Value> {
     let mut queue = restore_node
         .and_then(|node| node["pending_return_queue"].as_array())
         .cloned()
         .unwrap_or_default();
-    prune_resolved_pending_return_items(&mut queue, resolved_headlines);
+    prune_resolved_pending_return_items(&mut queue, resolved_headlines, resolved_task_ids);
     let Some(node) = restore_node else {
         return queue;
     };
@@ -2926,16 +5542,26 @@ fn derive_pending_return_queue(
         .as_str()
         .map(normalize_next_step_hint)
         .unwrap_or_default();
+    let previous_authoritative_event_id = node["state_lineage"]["authoritative_event_id"]
+        .as_str()
+        .unwrap_or_default();
+    let previous_task_id = task_id_for_authoritative_event(previous_authoritative_event_id);
     let normalized_new_next_step = normalize_next_step_hint(new_next_step);
     if !is_meaningful_pending_return_headline(previous_goal)
         || previous_goal == new_headline
         || resolve_current_goal
         || resolved_pending_return_headline_matches(previous_goal, resolved_headlines)
+        || resolved_pending_return_task_id_matches(
+            previous_task_id.as_deref(),
+            previous_authoritative_event_id,
+            resolved_task_ids,
+        )
         || (!previous_next_step.is_empty() && previous_next_step == normalized_new_next_step)
     {
         return queue;
     }
     let candidate = json!({
+        "task_id": previous_task_id,
         "headline": previous_goal,
         "next_step": previous_next_step,
         "queued_at_epoch_ms": queued_at_epoch_ms,
@@ -2960,14 +5586,66 @@ fn resolved_pending_return_headline_matches(value: &str, resolved_headlines: &[S
             .any(|item| item == trimmed)
 }
 
-fn prune_resolved_pending_return_items(queue: &mut Vec<Value>, resolved_headlines: &[String]) {
-    if resolved_headlines.is_empty() {
+fn normalize_resolved_task_id(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(stripped) = trimmed.strip_prefix("task::") {
+        let stripped = stripped.trim();
+        if stripped.is_empty() {
+            None
+        } else {
+            Some(format!("task::{stripped}"))
+        }
+    } else {
+        Some(format!("task::{trimmed}"))
+    }
+}
+
+fn task_id_for_authoritative_event(event_id: &str) -> Option<String> {
+    let trimmed = event_id.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(format!("task::{trimmed}"))
+    }
+}
+
+fn resolved_pending_return_task_id_matches(
+    task_id: Option<&str>,
+    authoritative_event_id: &str,
+    resolved_task_ids: &[String],
+) -> bool {
+    let Some(candidate_task_id) = task_id
+        .and_then(normalize_resolved_task_id)
+        .or_else(|| task_id_for_authoritative_event(authoritative_event_id))
+    else {
+        return false;
+    };
+    resolved_task_ids.iter().any(|item| {
+        normalize_resolved_task_id(item)
+            .as_deref()
+            .is_some_and(|value| value == candidate_task_id)
+    })
+}
+
+fn prune_resolved_pending_return_items(
+    queue: &mut Vec<Value>,
+    resolved_headlines: &[String],
+    resolved_task_ids: &[String],
+) {
+    if resolved_headlines.is_empty() && resolved_task_ids.is_empty() {
         return;
     }
     queue.retain(|item| {
         !resolved_pending_return_headline_matches(
             item["headline"].as_str().unwrap_or_default(),
             resolved_headlines,
+        ) && !resolved_pending_return_task_id_matches(
+            item["task_id"].as_str(),
+            item["authoritative_event_id"].as_str().unwrap_or_default(),
+            resolved_task_ids,
         )
     });
 }
@@ -2993,6 +5671,13 @@ fn extract_pending_return_queue(
     for item in &mut queue {
         if item["queued_at_epoch_ms"].is_null() {
             item["queued_at_epoch_ms"] = json!(fallback_epoch_ms);
+        }
+        if item["task_id"].is_null() {
+            if let Some(task_id) = task_id_for_authoritative_event(
+                item["authoritative_event_id"].as_str().unwrap_or_default(),
+            ) {
+                item["task_id"] = json!(task_id);
+            }
         }
         if item["resume_state"].is_null() {
             item["resume_state"] = json!("pending_return");
@@ -3439,6 +6124,14 @@ fn overlay_execctl_active_lease(bundle: &mut Value, active_lease: Option<&ExecCt
         "storage_lane": "ami.execctl_task_leases",
     });
     restore.insert("execctl_active_lease".to_string(), lease_value.clone());
+    if let Some(owner_thread_id) = lease
+        .owner_thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        restore.insert("thread_id".to_string(), json!(owner_thread_id));
+    }
     if let Some(summary) = summarize_execctl_active_lease(&lease_value) {
         restore.insert("execctl_active_lease_summary".to_string(), json!(summary));
     }
@@ -3602,7 +6295,11 @@ fn build_durable_project_task_ledger(
     })
 }
 
-fn build_execctl_resume_contract(project_task_tree: &Value, pending_return_queue: &Value) -> Value {
+fn build_execctl_resume_contract(
+    project_task_tree: &Value,
+    pending_return_queue: &Value,
+    required_task_set: &[String],
+) -> Value {
     let nodes = project_task_tree["nodes"]
         .as_array()
         .cloned()
@@ -3638,6 +6335,7 @@ fn build_execctl_resume_contract(project_task_tree: &Value, pending_return_queue
         .iter()
         .filter(|item| item["task_role"].as_str() == Some("pending_return"))
         .count();
+    let required_task_set_count = required_task_set.len();
     let resume_state = if required_return_task.is_null() {
         "clear"
     } else {
@@ -3650,6 +6348,8 @@ fn build_execctl_resume_contract(project_task_tree: &Value, pending_return_queue
         "pending_return_count": pending_return_count,
         "active_task": active_task,
         "required_return_task": required_return_task,
+        "required_task_set_count": required_task_set_count,
+        "required_task_set": required_task_set,
     })
 }
 
@@ -3663,10 +6363,15 @@ fn summarize_execctl_resume_contract(value: &Value) -> Option<String> {
         .filter(|item| !item.is_empty())
         .unwrap_or("ещё нет данных");
     let count = value["pending_return_count"].as_u64().unwrap_or(0);
-    Some(format!(
+    let required_task_set_count = value["required_task_set_count"].as_u64().unwrap_or(0);
+    let mut summary = format!(
         "return_required({count}): {}",
         collapse_human_text(headline, 72)
-    ))
+    );
+    if required_task_set_count > 0 {
+        summary.push_str(&format!(" + required_task_set({required_task_set_count})"));
+    }
+    Some(summary)
 }
 
 pub(crate) fn build_rotate_chat_action_bundle(
@@ -3705,7 +6410,7 @@ pub(crate) fn build_rotate_chat_action_bundle_for_stage(
         recommended_headline,
         recommended_next_step,
         host_context_compaction_stage,
-        host_context_compaction_stage.preserve_active(),
+        true,
     )
 }
 
@@ -4123,60 +6828,15 @@ fn build_startup_next_action(
     let required_next_step = required_return_task["next_step"]
         .as_str()
         .filter(|value| !value.is_empty());
-    let reply_execution_gate = &client_budget_guard["reply_execution_gate"];
-    let should_rotate_chat = client_budget_guard_requires_rotate_before_reply(client_budget_guard);
-    let wait_for_global_budget_recovery = reply_execution_gate["action_kind"].as_str()
-        == Some("wait_for_global_client_budget_recovery")
-        && reply_execution_gate["blocking"].as_bool() == Some(true);
-    let client_budget_status = client_budget_guard["status_label"]
-        .as_str()
-        .filter(|value| !value.is_empty())
-        .unwrap_or("новый чат рекомендован");
-    if wait_for_global_budget_recovery {
-        let preserves_return_obligation = resume_state != "clear";
-        json!({
-            "action_version": "startup-next-action-v1",
-            "action_kind": "wait_for_global_client_budget_recovery",
-            "blocking": true,
-            "reason": "client_budget_guard_global_exhaustion",
-            "resume_state": resume_state,
-            "no_silent_drop": no_silent_drop,
-            "headline": format!("Клиентский лимит: {client_budget_status}"),
-            "next_step": "не продолжай содержательный reply, дождись восстановления внешнего клиентского лимита и только потом снова проверь continuity startup",
-            "client_budget_status_label": client_budget_status,
-            "preserves_return_obligation": preserves_return_obligation,
-            "action_bundle": build_wait_for_global_client_budget_action_bundle(
-                project_code,
-                namespace_code,
-                repo_root,
-                preserves_return_obligation,
-                Some(active_headline),
-                Some(active_next_step),
-            ),
-        })
-    } else if should_rotate_chat {
-        let preserves_return_obligation = resume_state != "clear";
-        json!({
-            "action_version": "startup-next-action-v1",
-            "action_kind": "rotate_chat_for_client_budget",
-            "blocking": true,
-            "reason": "client_budget_guard_pressure",
-            "resume_state": resume_state,
-            "no_silent_drop": no_silent_drop,
-            "headline": format!("Клиентский лимит: {client_budget_status}"),
-            "next_step": "сохрани handoff и продолжай только в свежем чате через continuity startup",
-            "client_budget_status_label": client_budget_status,
-            "preserves_return_obligation": preserves_return_obligation,
-            "action_bundle": build_rotate_chat_action_bundle(
-                project_code,
-                namespace_code,
-                repo_root,
-                preserves_return_obligation,
-                Some(active_headline),
-                Some(active_next_step),
-            ),
-        })
-    } else if resume_state != "clear" && required_headline.is_some() {
+    let required_task_set = extract_required_task_set_from_value(&contract["required_task_set"]);
+    let required_task_set_summary = summarize_required_task_set(&required_task_set);
+    let required_task_set_next_step = required_task_set.first().map(String::as_str);
+    let has_required_task_set = !required_task_set.is_empty();
+    let _ = client_budget_guard;
+    let _ = project_code;
+    let _ = namespace_code;
+    let _ = repo_root;
+    if resume_state != "clear" && required_headline.is_some() {
         json!({
             "action_version": "startup-next-action-v1",
             "action_kind": "resume_required_return_task",
@@ -4186,6 +6846,21 @@ fn build_startup_next_action(
             "no_silent_drop": no_silent_drop,
             "headline": required_headline,
             "next_step": required_next_step,
+            "required_task_set": required_task_set,
+            "required_task_set_summary": required_task_set_summary,
+        })
+    } else if has_required_task_set {
+        json!({
+            "action_version": "startup-next-action-v1",
+            "action_kind": "honor_required_task_set",
+            "blocking": true,
+            "reason": "required_task_set_present",
+            "resume_state": resume_state,
+            "no_silent_drop": no_silent_drop,
+            "headline": active_headline,
+            "next_step": required_task_set_next_step.unwrap_or(active_next_step),
+            "required_task_set": required_task_set,
+            "required_task_set_summary": required_task_set_summary,
         })
     } else {
         json!({
@@ -4209,10 +6884,16 @@ fn summarize_startup_next_action(value: &Value) -> Option<String> {
         .as_str()
         .filter(|item| !item.is_empty())
         .unwrap_or("ещё нет данных");
-    Some(format!(
-        "{action_kind}: {}",
-        collapse_human_text(headline, 72)
-    ))
+    let mut summary = format!("{action_kind}: {}", collapse_human_text(headline, 72));
+    if action_kind == "honor_required_task_set" {
+        if let Some(task_summary) = value["required_task_set_summary"]
+            .as_str()
+            .filter(|item| !item.is_empty())
+        {
+            summary.push_str(&format!(" ({})", collapse_human_text(task_summary, 72)));
+        }
+    }
+    Some(summary)
 }
 
 fn normalize_next_step_hint(value: &str) -> String {
@@ -4339,6 +7020,118 @@ fn extract_materialized_notes(text: &str) -> Vec<String> {
         }
     }
     notes
+}
+
+fn extract_required_task_set(text: &str) -> Vec<String> {
+    let mut tasks = Vec::new();
+    let mut in_section = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if in_section {
+                break;
+            }
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        let is_header = trimmed.ends_with(':')
+            && [
+                "задач",
+                "обязател",
+                "нужно",
+                "требует",
+                "todo",
+                "tasks",
+                "must",
+                "pending",
+                "не выполнен",
+                "не закрыт",
+            ]
+            .iter()
+            .any(|needle| lower.contains(needle));
+        if is_header {
+            in_section = true;
+            continue;
+        }
+        if trimmed.starts_with("- [x]")
+            || trimmed.starts_with("* [x]")
+            || trimmed.starts_with("• [x]")
+        {
+            continue;
+        }
+        if trimmed.starts_with("- [ ]")
+            || trimmed.starts_with("* [ ]")
+            || trimmed.starts_with("• [ ]")
+        {
+            push_unique(&mut tasks, clean_task_line(trimmed));
+            continue;
+        }
+        if in_section
+            && (trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("• "))
+        {
+            push_unique(&mut tasks, clean_task_line(trimmed));
+        }
+    }
+    tasks.truncate(MAX_REQUIRED_TASK_SET);
+    tasks
+}
+
+fn extract_required_task_set_from_event(event: &Value) -> Vec<String> {
+    let mut tasks = Vec::new();
+    if let Some(items) = event["required_task_set"].as_array() {
+        for item in items {
+            if let Some(value) = item
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                push_unique(&mut tasks, value.to_string());
+            }
+        }
+    }
+    tasks.truncate(MAX_REQUIRED_TASK_SET);
+    tasks
+}
+
+fn extract_required_task_set_from_value(value: &Value) -> Vec<String> {
+    let mut tasks = Vec::new();
+    if let Some(items) = value.as_array() {
+        for item in items {
+            if let Some(value) = item
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                push_unique(&mut tasks, value.to_string());
+            }
+        }
+    }
+    tasks.truncate(MAX_REQUIRED_TASK_SET);
+    tasks
+}
+
+fn summarize_required_task_set(tasks: &[String]) -> Option<String> {
+    if tasks.is_empty() {
+        return None;
+    }
+    let first = collapse_human_text(&tasks[0], 64);
+    if tasks.len() == 1 {
+        Some(first)
+    } else {
+        Some(format!("{} задач(и): {first}", tasks.len()))
+    }
+}
+
+fn clean_task_line(line: &str) -> String {
+    let trimmed = line
+        .trim_start_matches("- [ ]")
+        .trim_start_matches("* [ ]")
+        .trim_start_matches("• [ ]")
+        .trim_start_matches("- ")
+        .trim_start_matches("* ")
+        .trim_start_matches("• ")
+        .trim();
+    trimmed.trim_end_matches(['.', ';', ':']).trim().to_string()
 }
 
 fn looks_like_question(value: &str) -> bool {
@@ -4530,8 +7323,11 @@ fn now_epoch_ms() -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AppConfig;
+    use crate::postgres;
     use proptest::prelude::*;
     use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use uuid::Uuid;
 
     struct FakeSnapshotSpec<'a> {
@@ -4893,6 +7689,20 @@ mod tests {
     }
 
     #[test]
+    fn extract_required_task_set_prefers_checkbox_tasks() {
+        let tasks = extract_required_task_set(
+            "Задачи:\n- [ ] Починить забывание задач\n- [x] Не трогать готовые контуры\n- [ ] Добавить обязательный список\n",
+        );
+        assert_eq!(
+            tasks,
+            vec![
+                "Починить забывание задач".to_string(),
+                "Добавить обязательный список".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn compose_restore_bundle_filters_noisy_multiline_open_questions() {
         let noisy = fake_snapshot_with_kind(FakeSnapshotSpec {
             project_code: "art",
@@ -5132,6 +7942,156 @@ mod tests {
     }
 
     #[test]
+    fn restore_snapshot_matches_latest_relevant_events_accepts_current_snapshot() {
+        let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
+        let latest_handoff = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-a",
+            event_kind: "continuity_handoff",
+            headline: "Project relocation contour",
+            next_step_hint: "Dovetail runtime auto-start guarantees.",
+            summary: "Relocation contour materialized.",
+            offset: base,
+        });
+        let older_handoff = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-a",
+            event_kind: "continuity_handoff",
+            headline: "Same-meter spend control",
+            next_step_hint: "Materialize live assistant generation source.",
+            summary: "Older handoff.",
+            offset: base - 1,
+        });
+        let events = vec![latest_handoff, older_handoff];
+        let bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &events,
+        );
+
+        assert!(restore_snapshot_matches_latest_relevant_events(
+            &bundle, &events
+        ));
+    }
+
+    #[test]
+    fn restore_snapshot_matches_latest_relevant_events_rejects_latest_event_drift() {
+        let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
+        let older_handoff = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-a",
+            event_kind: "continuity_handoff",
+            headline: "Same-meter spend control",
+            next_step_hint: "Materialize live assistant generation source.",
+            summary: "Older handoff.",
+            offset: base - 1,
+        });
+        let stale_bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            std::slice::from_ref(&older_handoff),
+        );
+        let latest_handoff = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-a",
+            event_kind: "continuity_handoff",
+            headline: "Project relocation contour",
+            next_step_hint: "Dovetail runtime auto-start guarantees.",
+            summary: "Relocation contour materialized.",
+            offset: base,
+        });
+        let events = vec![latest_handoff, older_handoff];
+
+        assert!(!restore_snapshot_matches_latest_relevant_events(
+            &stale_bundle,
+            &events
+        ));
+    }
+
+    #[test]
+    fn restore_snapshot_matches_latest_relevant_events_rejects_authoritative_drift() {
+        let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
+        let retrieval = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-a",
+            event_kind: "retrieval_context_pack",
+            headline: "Inspect startup state",
+            next_step_hint: "Check restore bundle.",
+            summary: "Retrieved current state.",
+            offset: base,
+        });
+        let older_handoff = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-a",
+            event_kind: "continuity_handoff",
+            headline: "Same-meter spend control",
+            next_step_hint: "Materialize live assistant generation source.",
+            summary: "Older handoff.",
+            offset: base - 1,
+        });
+        let stale_bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &[retrieval.clone(), older_handoff.clone()],
+        );
+        let newer_handoff = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-a",
+            event_kind: "continuity_handoff",
+            headline: "Project relocation contour",
+            next_step_hint: "Dovetail runtime auto-start guarantees.",
+            summary: "Relocation contour materialized.",
+            offset: base - 0,
+        });
+        let events = vec![retrieval, newer_handoff, older_handoff];
+
+        assert!(!restore_snapshot_matches_latest_relevant_events(
+            &stale_bundle,
+            &events
+        ));
+    }
+
+    #[test]
+    fn restore_snapshot_matches_latest_relevant_events_rejects_empty_event_set() {
+        let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
+        let latest_handoff = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-a",
+            event_kind: "continuity_handoff",
+            headline: "Project relocation contour",
+            next_step_hint: "Dovetail runtime auto-start guarantees.",
+            summary: "Relocation contour materialized.",
+            offset: base,
+        });
+        let bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &[latest_handoff],
+        );
+
+        assert!(!restore_snapshot_matches_latest_relevant_events(
+            &bundle,
+            &[]
+        ));
+    }
+
+    #[test]
     fn derive_pending_return_queue_captures_interrupted_previous_line() {
         let restore = json!({
             "working_state_restore": {
@@ -5159,6 +8119,7 @@ mod tests {
             42,
             false,
             &[],
+            &[],
         );
         assert_eq!(queue.len(), 2);
         assert_eq!(queue[0]["headline"], json!("Same-meter spend control"));
@@ -5173,6 +8134,58 @@ mod tests {
         assert_eq!(queue[0]["resume_state"], json!("pending_return"));
         assert_eq!(queue[0]["authoritative_event_id"], json!("event-123"));
         assert_eq!(queue[1]["headline"], json!("Older suspended line"));
+    }
+
+    #[test]
+    fn restore_snapshot_matches_latest_relevant_events_rejects_focus_or_source_drift() {
+        let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
+        let retrieval = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "retrieval-1",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "event_kind": "retrieval_context_pack",
+                    "source_kind": "context_pack",
+                    "headline": "Рабочий запрос: Continuity snapshot",
+                    "summary": "Continuity snapshot Найдено: документов 1, символов 0, lexical chunks 0, semantic chunks 0.",
+                    "recorded_at_epoch_ms": base,
+                    "active_files": [".amai-continuity/bootstrap/continuity-snapshot.md"],
+                    "visible_projects": ["art"],
+                    "query": "Continuity snapshot",
+                    "current_hypothesis": "Вероятный рабочий контекст сейчас лежит в: .amai-continuity/bootstrap/continuity-snapshot.md",
+                    "last_results_summary": "Найдено: документов 1, символов 0, lexical chunks 0, semantic chunks 0."
+                }
+            }),
+            created_at_epoch_ms: base,
+        };
+        let handoff = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-a",
+            event_kind: "continuity_handoff",
+            headline: "Amai continuity migration proof",
+            next_step_hint: "Убедиться, что startup summary и retrieval уже живут без project .codex",
+            summary: "Relocation contour materialized.",
+            offset: base + 1,
+        });
+        let events = vec![handoff.clone(), retrieval.clone()];
+        let mut bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &events,
+        );
+        bundle["working_state_restore"]["current_focus"] = Value::Null;
+        bundle["working_state_restore"]["source_summary"] = Value::Null;
+
+        assert!(!restore_snapshot_matches_latest_relevant_events(
+            &bundle, &events
+        ));
     }
 
     #[test]
@@ -5195,6 +8208,7 @@ mod tests {
             "Document automatic startup behavior.",
             42,
             false,
+            &[],
             &[],
         );
         assert!(queue.is_empty());
@@ -5220,6 +8234,7 @@ mod tests {
             "Document automatic startup behavior.",
             42,
             false,
+            &[],
             &[],
         );
         assert!(queue.is_empty());
@@ -5252,6 +8267,7 @@ mod tests {
             "Resume the next pending-return contour now that Art startup/migration proofs and client-budget gate semantics are green at commit 30feca3.",
             42,
             true,
+            &[],
             &[],
         );
         assert_eq!(queue.len(), 1);
@@ -5296,9 +8312,154 @@ mod tests {
             42,
             false,
             &resolved,
+            &[],
         );
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0]["headline"], json!("Current active line"));
+    }
+
+    #[test]
+    fn derive_pending_return_queue_prunes_explicitly_resolved_task_ids() {
+        let restore = json!({
+            "working_state_restore": {
+                "current_goal": "Current active line",
+                "next_step": "Continue active work.",
+                "pending_return_queue": [
+                    {
+                        "task_id": "task::event-111",
+                        "headline": "Amai continuity migration proof",
+                        "next_step": "Убедиться, что startup summary и retrieval уже живут без project .codex",
+                        "queued_at_epoch_ms": 5,
+                        "resume_state": "pending_return",
+                        "authoritative_event_id": "event-111"
+                    }
+                ],
+                "state_lineage": {
+                    "authoritative_event_id": "event-123",
+                    "authoritative_event_kind": "continuity_handoff",
+                    "authoritative_local_path": "/home/art/agent-memory-index"
+                }
+            }
+        });
+        let resolved_task_ids = vec!["task::event-111".to_string()];
+        let queue = derive_pending_return_queue(
+            Some(&restore["working_state_restore"]),
+            "ExecCtl stale pending-return closure semantics materialized",
+            "Recheck Art startup queue after explicit resolve path.",
+            42,
+            false,
+            &[],
+            &resolved_task_ids,
+        );
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0]["task_id"], json!("task::event-123"));
+        assert_eq!(queue[0]["headline"], json!("Current active line"));
+    }
+
+    #[test]
+    fn derive_pending_return_queue_prunes_only_matching_duplicate_headline_task_id() {
+        let restore = json!({
+            "working_state_restore": {
+                "current_goal": "Current active line",
+                "next_step": "Continue active work.",
+                "pending_return_queue": [
+                    {
+                        "task_id": "task::event-111",
+                        "headline": "Shared headline",
+                        "next_step": "First incarnation.",
+                        "queued_at_epoch_ms": 7,
+                        "resume_state": "pending_return",
+                        "authoritative_event_id": "event-111"
+                    },
+                    {
+                        "task_id": "task::event-222",
+                        "headline": "Shared headline",
+                        "next_step": "Second incarnation.",
+                        "queued_at_epoch_ms": 6,
+                        "resume_state": "pending_return",
+                        "authoritative_event_id": "event-222"
+                    },
+                    {
+                        "task_id": "task::event-333",
+                        "headline": "Different suspended line",
+                        "next_step": "Keep this too.",
+                        "queued_at_epoch_ms": 5,
+                        "resume_state": "pending_return",
+                        "authoritative_event_id": "event-333"
+                    }
+                ],
+                "state_lineage": {
+                    "authoritative_event_id": "event-999",
+                    "authoritative_event_kind": "continuity_handoff",
+                    "authoritative_local_path": "/home/art/agent-memory-index"
+                }
+            }
+        });
+        let resolved_task_ids = vec!["event-222".to_string()];
+        let queue = derive_pending_return_queue(
+            Some(&restore["working_state_restore"]),
+            "New active line",
+            "Verify identity-based cleanup.",
+            42,
+            false,
+            &[],
+            &resolved_task_ids,
+        );
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue[0]["task_id"], json!("task::event-999"));
+        let shared = queue
+            .iter()
+            .filter(|item| item["headline"] == json!("Shared headline"))
+            .collect::<Vec<_>>();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0]["task_id"], json!("task::event-111"));
+        assert!(
+            queue
+                .iter()
+                .all(|item| item["task_id"] != json!("task::event-222"))
+        );
+    }
+
+    #[test]
+    fn derive_pending_return_queue_skips_requeue_when_current_goal_resolved_by_task_id() {
+        let restore = json!({
+            "working_state_restore": {
+                "current_goal": "Identity-based resolved current line",
+                "next_step": "Close this line before switching.",
+                "pending_return_queue": [
+                    {
+                        "task_id": "task::event-111",
+                        "headline": "Older suspended line",
+                        "next_step": "Return there later.",
+                        "queued_at_epoch_ms": 5,
+                        "resume_state": "pending_return",
+                        "authoritative_event_id": "event-111"
+                    }
+                ],
+                "state_lineage": {
+                    "authoritative_event_id": "event-123",
+                    "authoritative_event_kind": "continuity_handoff",
+                    "authoritative_local_path": "/home/art/agent-memory-index"
+                }
+            }
+        });
+        let resolved_task_ids = vec!["task::event-123".to_string()];
+        let queue = derive_pending_return_queue(
+            Some(&restore["working_state_restore"]),
+            "New active line",
+            "Do not requeue the resolved current line.",
+            42,
+            false,
+            &[],
+            &resolved_task_ids,
+        );
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0]["task_id"], json!("task::event-111"));
+        assert!(
+            queue
+                .iter()
+                .all(|item| item["headline"] != json!("Identity-based resolved current line"))
+        );
     }
 
     #[test]
@@ -5416,6 +8577,54 @@ mod tests {
     }
 
     #[test]
+    fn compose_restore_bundle_surfaces_required_task_set_as_startup_action() {
+        let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
+        let latest_handoff = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "handoff-2",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "event_kind": "continuity_handoff",
+                    "headline": "UI cleanup required",
+                    "next_step_hint": "Close all pending UI gaps.",
+                    "summary": "User asked for multi-task UI fixes.",
+                    "recorded_at_epoch_ms": base,
+                    "required_task_set": [
+                        "Fix card A",
+                        "Fix card B"
+                    ],
+                    "pending_return_queue": []
+                }
+            }),
+            created_at_epoch_ms: base,
+        };
+        let bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &[latest_handoff],
+        );
+        let restore = &bundle["working_state_restore"];
+        assert_eq!(
+            restore["required_task_set"],
+            json!(["Fix card A", "Fix card B"])
+        );
+        assert_eq!(
+            restore["startup_next_action"]["action_kind"],
+            json!("honor_required_task_set")
+        );
+        assert!(
+            restore["startup_next_action"]["blocking"]
+                .as_bool()
+                .unwrap_or(false)
+        );
+    }
+
+    #[test]
     fn compose_restore_bundle_drops_placeholder_pending_return_queue() {
         let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
         let latest_handoff = ObservabilitySnapshotRecord {
@@ -5463,6 +8672,85 @@ mod tests {
         assert_eq!(
             restore["startup_next_action"]["action_kind"],
             json!("continue_active_workline")
+        );
+    }
+
+    #[test]
+    fn compose_restore_bundle_derives_current_focus_and_source_summary() {
+        let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
+        let retrieval_event = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "retrieval-1",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "event_kind": "retrieval_context_pack",
+                    "source_kind": "context_pack",
+                    "headline": "Рабочий запрос: Continuity snapshot",
+                    "summary": "Continuity snapshot Найдено: документов 1, символов 0, lexical chunks 0, semantic chunks 0.",
+                    "recorded_at_epoch_ms": base - 100,
+                    "active_files": [".amai-continuity/bootstrap/continuity-snapshot.md"],
+                    "visible_projects": ["art"],
+                    "query": "Continuity snapshot",
+                    "current_hypothesis": "Вероятный рабочий контекст сейчас лежит в: .amai-continuity/bootstrap/continuity-snapshot.md",
+                    "last_results_summary": "Найдено: документов 1, символов 0, lexical chunks 0, semantic chunks 0.",
+                    "decision_trace": {
+                        "included": [
+                            {
+                                "label": "точные совпадения",
+                                "summary": "Нашлись точные document/path совпадения внутри видимого контура."
+                            }
+                        ]
+                    }
+                }
+            }),
+            created_at_epoch_ms: base - 100,
+        };
+        let latest_handoff = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "handoff-1",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "event_kind": "continuity_handoff",
+                    "source_kind": "continuity_handoff",
+                    "headline": "Amai continuity migration proof",
+                    "next_step_hint": "Убедиться, что startup summary и retrieval уже живут без project .codex",
+                    "summary": "Relocation contour materialized.",
+                    "recorded_at_epoch_ms": base,
+                    "local_path": "/tmp/live-handoff.md",
+                    "pending_return_queue": []
+                }
+            }),
+            created_at_epoch_ms: base,
+        };
+        let bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &[latest_handoff, retrieval_event],
+        );
+        let restore = &bundle["working_state_restore"];
+        assert_eq!(
+            restore["current_focus"],
+            json!(
+                "Сейчас основной фокус: .amai-continuity/bootstrap/continuity-snapshot.md по запросу «Continuity snapshot»."
+            )
+        );
+        assert!(restore["source_summary"].as_str().is_some_and(|value| {
+            value.contains("Источник истины: continuity_handoff (/tmp/live-handoff.md).")
+        }));
+        assert!(
+            restore["source_summary"]
+                .as_str()
+                .is_some_and(|value| value.contains("Главный подтверждающий артефакт: .amai-continuity/bootstrap/continuity-snapshot.md."))
         );
     }
 
@@ -5624,11 +8912,413 @@ mod tests {
             restore["execctl_active_lease"]["storage_lane"],
             json!("ami.execctl_task_leases")
         );
+        assert_eq!(restore["thread_id"], json!("thread-a"));
         assert!(
             restore["execctl_active_lease_summary"]
                 .as_str()
                 .is_some_and(|value| value.contains("same_session_owner"))
         );
+    }
+
+    #[test]
+    fn startup_same_thread_lease_refresh_candidate_prefers_active_task_identity() {
+        let restore = json!({
+            "working_state_restore": {
+                "thread_id": "thread-a",
+                "current_goal": "Less precise fallback goal",
+                "next_step": "less precise fallback next step",
+                "state_lineage": {
+                    "authoritative_event_id": "handoff-1",
+                    "authoritative_source_kind": "continuity_handoff",
+                    "authoritative_local_path": "/tmp/HANDOFF.md"
+                },
+                "project_task_tree": {
+                    "nodes": [
+                        {
+                            "task_role": "active",
+                            "authoritative_event_id": "handoff-1",
+                            "source_kind": "continuity_handoff",
+                            "headline": "ExecCtl foundation hardening",
+                            "next_step": "Stress interrupted handoff transitions."
+                        }
+                    ]
+                },
+                "project_task_ledger": {
+                    "entries": []
+                }
+            }
+        });
+
+        let candidate =
+            execctl_startup_same_thread_lease_refresh_candidate(&restore, Some("thread-a"))
+                .expect("candidate");
+        assert_eq!(candidate.source_event_id, "handoff-1");
+        assert_eq!(candidate.source_kind, "continuity_handoff");
+        assert_eq!(candidate.headline, "ExecCtl foundation hardening");
+        assert_eq!(
+            candidate.next_step,
+            "Stress interrupted handoff transitions."
+        );
+        assert_eq!(candidate.local_path.as_deref(), Some("/tmp/HANDOFF.md"));
+    }
+
+    #[test]
+    fn startup_same_thread_lease_refresh_candidate_accepts_rebind_to_new_thread() {
+        let restore = json!({
+            "working_state_restore": {
+                "thread_id": "thread-b",
+                "current_goal": "ExecCtl foundation hardening",
+                "next_step": "Stress interrupted handoff transitions.",
+                "state_lineage": {
+                    "authoritative_event_id": "handoff-1",
+                    "authoritative_source_kind": "continuity_handoff"
+                },
+                "project_task_tree": {
+                    "nodes": [
+                        {
+                            "task_role": "active",
+                            "authoritative_event_id": "handoff-1",
+                            "headline": "ExecCtl foundation hardening",
+                            "next_step": "Stress interrupted handoff transitions."
+                        }
+                    ]
+                },
+                "project_task_ledger": {
+                    "entries": []
+                }
+            }
+        });
+
+        let candidate =
+            execctl_startup_same_thread_lease_refresh_candidate(&restore, Some("thread-a"))
+                .expect("candidate");
+        assert_eq!(candidate.source_event_id, "handoff-1");
+        assert_eq!(candidate.headline, "ExecCtl foundation hardening");
+        assert_eq!(
+            candidate.next_step,
+            "Stress interrupted handoff transitions."
+        );
+    }
+
+    #[test]
+    fn startup_same_thread_lease_refresh_candidate_falls_back_to_state_lineage() {
+        let restore = json!({
+            "working_state_restore": {
+                "thread_id": "thread-a",
+                "current_goal": "ExecCtl foundation hardening",
+                "next_step": "Stress interrupted handoff transitions.",
+                "state_lineage": {
+                    "authoritative_event_id": "handoff-2",
+                    "authoritative_source_kind": "continuity_handoff",
+                    "authoritative_local_path": "/tmp/FALLBACK.md"
+                },
+                "project_task_tree": {
+                    "nodes": [
+                        {
+                            "task_role": "active",
+                            "headline": "ExecCtl foundation hardening",
+                            "next_step": "Stress interrupted handoff transitions."
+                        }
+                    ]
+                },
+                "project_task_ledger": {
+                    "entries": [
+                        {
+                            "task_role": "active",
+                            "local_path": "/tmp/LEDGER.md"
+                        }
+                    ]
+                }
+            }
+        });
+
+        let candidate =
+            execctl_startup_same_thread_lease_refresh_candidate(&restore, Some("thread-a"))
+                .expect("candidate");
+        assert_eq!(candidate.source_event_id, "handoff-2");
+        assert_eq!(candidate.source_kind, "continuity_handoff");
+        assert_eq!(candidate.local_path.as_deref(), Some("/tmp/FALLBACK.md"));
+    }
+
+    #[test]
+    fn compose_restore_bundle_infers_recent_thread_id_when_latest_events_are_blank() {
+        let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
+        let latest_blank = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "handoff-blank",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "thread_id": "",
+                    "event_kind": "continuity_handoff",
+                    "source_kind": "continuity_handoff",
+                    "headline": "Latest handoff without thread binding",
+                    "next_step_hint": "Keep the same line alive.",
+                    "summary": "Blank thread id.",
+                    "recorded_at_epoch_ms": base + 2
+                }
+            }),
+            created_at_epoch_ms: base + 2,
+        };
+        let previous_blank = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "handoff-blank-2",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "thread_id": "",
+                    "event_kind": "continuity_handoff",
+                    "source_kind": "continuity_handoff",
+                    "headline": "Still blank",
+                    "next_step_hint": "Still the same line.",
+                    "summary": "Blank thread id again.",
+                    "recorded_at_epoch_ms": base + 1
+                }
+            }),
+            created_at_epoch_ms: base + 1,
+        };
+        let earlier_bound = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "ctx-thread",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "thread_id": "thread-a",
+                    "event_kind": "retrieval_context_pack",
+                    "source_kind": "context_pack",
+                    "headline": "Thread-bound context pack",
+                    "next_step_hint": "Keep the same line alive.",
+                    "summary": "Thread-bound event.",
+                    "recorded_at_epoch_ms": base
+                }
+            }),
+            created_at_epoch_ms: base,
+        };
+
+        let bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &[latest_blank, previous_blank, earlier_bound],
+        );
+
+        assert_eq!(
+            bundle["working_state_restore"]["thread_id"],
+            json!("thread-a")
+        );
+    }
+
+    #[test]
+    fn compose_restore_bundle_keeps_thread_id_empty_when_recent_history_is_ambiguous() {
+        let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
+        let latest_blank = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "handoff-blank",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "thread_id": "",
+                    "event_kind": "continuity_handoff",
+                    "source_kind": "continuity_handoff",
+                    "headline": "Latest handoff without thread binding",
+                    "next_step_hint": "Keep the same line alive.",
+                    "summary": "Blank thread id.",
+                    "recorded_at_epoch_ms": base + 2
+                }
+            }),
+            created_at_epoch_ms: base + 2,
+        };
+        let bound_a = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "ctx-thread-a",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "thread_id": "thread-a",
+                    "event_kind": "retrieval_context_pack",
+                    "source_kind": "context_pack",
+                    "headline": "Thread A",
+                    "next_step_hint": "Keep the same line alive.",
+                    "summary": "Thread-bound event A.",
+                    "recorded_at_epoch_ms": base + 1
+                }
+            }),
+            created_at_epoch_ms: base + 1,
+        };
+        let bound_b = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "ctx-thread-b",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "thread_id": "thread-b",
+                    "event_kind": "retrieval_context_pack",
+                    "source_kind": "context_pack",
+                    "headline": "Thread B",
+                    "next_step_hint": "Keep the same line alive.",
+                    "summary": "Thread-bound event B.",
+                    "recorded_at_epoch_ms": base
+                }
+            }),
+            created_at_epoch_ms: base,
+        };
+
+        let bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &[latest_blank, bound_a, bound_b],
+        );
+
+        assert_eq!(bundle["working_state_restore"]["thread_id"], Value::Null);
+    }
+
+    #[test]
+    fn execctl_same_thread_lease_refresh_required_for_missing_lease() {
+        assert!(execctl_same_thread_lease_refresh_required(
+            None,
+            Some("thread-a"),
+            10_000,
+            5_000
+        ));
+    }
+
+    #[test]
+    fn execctl_same_thread_lease_refresh_required_rebinds_foreign_owner() {
+        let lease = ExecCtlTaskLeaseRecord {
+            lease_id: Uuid::new_v4(),
+            source_snapshot_id: None,
+            source_event_id: "handoff-1".to_string(),
+            source_kind: "continuity_handoff".to_string(),
+            agent_scope: "art::continuity::default".to_string(),
+            owner_session_id: Some("session-a".to_string()),
+            owner_thread_id: Some("thread-b".to_string()),
+            lease_state: "active".to_string(),
+            headline: "Live".to_string(),
+            next_step: "Keep going.".to_string(),
+            local_path: None,
+            acquired_at_epoch_ms: 1_000,
+            heartbeat_at_epoch_ms: 9_500,
+            expires_at_epoch_ms: 20_000,
+            created_at_epoch_ms: 1_000,
+            updated_at_epoch_ms: 9_500,
+        };
+
+        assert!(execctl_same_thread_lease_refresh_required(
+            Some(&lease),
+            Some("thread-a"),
+            10_000,
+            5_000
+        ));
+    }
+
+    #[test]
+    fn execctl_same_thread_lease_refresh_required_waits_while_heartbeat_is_fresh() {
+        let lease = ExecCtlTaskLeaseRecord {
+            lease_id: Uuid::new_v4(),
+            source_snapshot_id: None,
+            source_event_id: "handoff-1".to_string(),
+            source_kind: "continuity_handoff".to_string(),
+            agent_scope: "art::continuity::default".to_string(),
+            owner_session_id: Some("session-a".to_string()),
+            owner_thread_id: Some("thread-a".to_string()),
+            lease_state: "active".to_string(),
+            headline: "Live".to_string(),
+            next_step: "Keep going.".to_string(),
+            local_path: None,
+            acquired_at_epoch_ms: 1_000,
+            heartbeat_at_epoch_ms: 9_500,
+            expires_at_epoch_ms: 20_000,
+            created_at_epoch_ms: 1_000,
+            updated_at_epoch_ms: 9_500,
+        };
+
+        assert!(!execctl_same_thread_lease_refresh_required(
+            Some(&lease),
+            Some("thread-a"),
+            10_000,
+            5_000
+        ));
+    }
+
+    #[test]
+    fn execctl_same_thread_lease_refresh_required_triggers_on_stale_heartbeat() {
+        let lease = ExecCtlTaskLeaseRecord {
+            lease_id: Uuid::new_v4(),
+            source_snapshot_id: None,
+            source_event_id: "handoff-1".to_string(),
+            source_kind: "continuity_handoff".to_string(),
+            agent_scope: "art::continuity::default".to_string(),
+            owner_session_id: Some("session-a".to_string()),
+            owner_thread_id: Some("thread-a".to_string()),
+            lease_state: "active".to_string(),
+            headline: "Live".to_string(),
+            next_step: "Keep going.".to_string(),
+            local_path: None,
+            acquired_at_epoch_ms: 1_000,
+            heartbeat_at_epoch_ms: 4_000,
+            expires_at_epoch_ms: 20_000,
+            created_at_epoch_ms: 1_000,
+            updated_at_epoch_ms: 4_000,
+        };
+
+        assert!(execctl_same_thread_lease_refresh_required(
+            Some(&lease),
+            Some("thread-a"),
+            10_000,
+            5_000
+        ));
+    }
+
+    #[test]
+    fn execctl_same_thread_lease_refresh_required_triggers_when_expiry_is_near() {
+        let lease = ExecCtlTaskLeaseRecord {
+            lease_id: Uuid::new_v4(),
+            source_snapshot_id: None,
+            source_event_id: "handoff-1".to_string(),
+            source_kind: "continuity_handoff".to_string(),
+            agent_scope: "art::continuity::default".to_string(),
+            owner_session_id: Some("session-a".to_string()),
+            owner_thread_id: Some("thread-a".to_string()),
+            lease_state: "active".to_string(),
+            headline: "Live".to_string(),
+            next_step: "Keep going.".to_string(),
+            local_path: None,
+            acquired_at_epoch_ms: 1_000,
+            heartbeat_at_epoch_ms: 9_500,
+            expires_at_epoch_ms: 12_000,
+            created_at_epoch_ms: 1_000,
+            updated_at_epoch_ms: 9_500,
+        };
+
+        assert!(execctl_same_thread_lease_refresh_required(
+            Some(&lease),
+            Some("thread-a"),
+            10_000,
+            5_000
+        ));
     }
 
     #[test]
@@ -5880,13 +9570,13 @@ mod tests {
         assert_eq!(bundle["operator_flow"]["copy_paste_ready"], json!(true));
         assert_eq!(
             bundle["operator_flow"]["primary_command_kind"],
-            json!("rotate_helper_command")
+            json!("same_thread_host_control_launch_command")
         );
         assert!(
             bundle["operator_flow"]["primary_command"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("rotate-chat")
+                .contains("ctl-launch")
         );
         assert!(
             bundle["operator_flow"]["rotate_helper_command"]
@@ -6228,7 +9918,7 @@ mod tests {
     }
 
     #[test]
-    fn client_budget_guard_blocks_expensive_tool_turn_on_same_meter_pure_burn() {
+    fn client_budget_guard_keeps_same_meter_pure_burn_tool_pressure_advisory() {
         let guard = json!({
             "reply_execution_gate": {
                 "action_kind": "compact_current_thread_for_client_budget",
@@ -6240,13 +9930,14 @@ mod tests {
                 "max_tool_roundtrips_soft": 0
             }
         });
-        assert!(super::client_budget_guard_blocks_expensive_tool_turn(&guard));
+        assert!(!super::client_budget_guard_blocks_expensive_tool_turn(
+            &guard
+        ));
         assert!(!super::client_budget_guard_blocks_reply(&guard));
     }
 
     #[test]
-    fn client_budget_guard_blocks_expensive_tool_turn_on_zero_roundtrip_stop_loss_without_pure_burn(
-    ) {
+    fn client_budget_guard_keeps_zero_roundtrip_tool_pressure_advisory_without_pure_burn() {
         let guard = json!({
             "reply_execution_gate": {
                 "action_kind": "compact_current_thread_for_client_budget",
@@ -6258,11 +9949,13 @@ mod tests {
                 "max_tool_roundtrips_soft": 0
             }
         });
-        assert!(super::client_budget_guard_blocks_expensive_tool_turn(&guard));
+        assert!(!super::client_budget_guard_blocks_expensive_tool_turn(
+            &guard
+        ));
     }
 
     #[test]
-    fn client_budget_guard_blocks_expensive_tool_turn_ignores_non_zero_roundtrip_advisory() {
+    fn client_budget_guard_keeps_non_zero_roundtrip_tool_pressure_advisory() {
         let guard = json!({
             "reply_execution_gate": {
                 "action_kind": "compact_current_thread_for_client_budget",
@@ -6274,11 +9967,13 @@ mod tests {
                 "max_tool_roundtrips_soft": 1
             }
         });
-        assert!(!super::client_budget_guard_blocks_expensive_tool_turn(&guard));
+        assert!(!super::client_budget_guard_blocks_expensive_tool_turn(
+            &guard
+        ));
     }
 
     #[test]
-    fn build_startup_next_action_waits_for_global_budget_recovery() {
+    fn build_startup_next_action_keeps_global_budget_wait_as_advisory() {
         let contract = json!({
             "resume_state": "return_required",
             "no_silent_drop": true,
@@ -6309,15 +10004,8 @@ mod tests {
             Some("continuity"),
             Some("/tmp/amai"),
         );
-        assert_eq!(
-            action["action_kind"],
-            json!("wait_for_global_client_budget_recovery")
-        );
-        assert_eq!(action["blocking"], json!(true));
-        assert_eq!(
-            action["action_bundle"]["bundle_version"],
-            json!("wait-client-budget-action-bundle-v1")
-        );
+        assert_eq!(action["action_kind"], json!("continue_active_workline"));
+        assert_eq!(action["blocking"], json!(false));
     }
 
     #[test]
@@ -6345,7 +10033,7 @@ mod tests {
             }
         ]);
         let contract =
-            super::build_execctl_resume_contract(&project_task_tree, &pending_return_queue);
+            super::build_execctl_resume_contract(&project_task_tree, &pending_return_queue, &[]);
         assert_eq!(contract["resume_state"], json!("clear"));
         assert_eq!(contract["required_return_task"], Value::Null);
     }
@@ -6573,5 +10261,839 @@ mod tests {
             }),
             created_at_epoch_ms: spec.offset,
         }
+    }
+
+    #[test]
+    fn resolved_thread_id_with_candidates_prefers_explicit_hint() {
+        assert_eq!(
+            resolved_thread_id_with_candidates(
+                Some("thread-explicit"),
+                Some("thread-env"),
+                Some("thread-repo"),
+            )
+            .as_deref(),
+            Some("thread-explicit")
+        );
+    }
+
+    #[test]
+    fn resolved_thread_id_with_candidates_falls_back_to_env_before_repo() {
+        assert_eq!(
+            resolved_thread_id_with_candidates(None, Some("thread-env"), Some("thread-repo"))
+                .as_deref(),
+            Some("thread-env")
+        );
+    }
+
+    #[test]
+    fn resolved_thread_id_with_candidates_uses_repo_hint_when_other_sources_missing() {
+        assert_eq!(
+            resolved_thread_id_with_candidates(None, None, Some("thread-repo")).as_deref(),
+            Some("thread-repo")
+        );
+    }
+
+    #[tokio::test]
+    async fn record_handoff_event_materializes_workspace_restore_pack() {
+        if let Ok(env_text) =
+            std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+        {
+            for line in env_text.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                let Some((key, value)) = trimmed.split_once('=') else {
+                    continue;
+                };
+                if std::env::var_os(key).is_none() {
+                    unsafe {
+                        std::env::set_var(key.trim(), value.trim_matches('\"'));
+                    }
+                }
+            }
+        }
+
+        let cfg = AppConfig::from_env().expect("config");
+        let client = postgres::connect_admin(&cfg).await.expect("postgres");
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("unix epoch")
+            .as_nanos();
+        let workspace_code = format!("restore_pack_ws_{suffix}");
+        let project_code = format!("restore_pack_proj_{suffix}");
+        let repo_root = format!("/tmp/{project_code}");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "restore pack test handoff").expect("handoff file");
+
+        postgres::ensure_workspace(&client, &workspace_code, "Restore Pack Workspace", "active")
+            .await
+            .expect("workspace");
+        let project = postgres::upsert_project(
+            &client,
+            &project_code,
+            "Restore Pack Project",
+            &repo_root,
+            Some("main"),
+            &workspace_code,
+            "project_shared",
+            "local_strict",
+        )
+        .await
+        .expect("project");
+        let namespace = postgres::get_namespace_by_code(&client, project.project_id, "default")
+            .await
+            .expect("default namespace");
+
+        record_handoff_event(
+            &client,
+            &project,
+            &namespace,
+            "Restore pack runtime proof",
+            "Verify workspace restore pack materialization.",
+            "Reviewed /tmp/runtime-proof.md and confirmed restore pack should be durable.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+        )
+        .await
+        .expect("record handoff");
+
+        let row = client
+            .query_one(
+                r#"
+                SELECT
+                    pack_kind,
+                    source_kind,
+                    payload,
+                    source_event_ids,
+                    artifact_refs,
+                    message_refs,
+                    evidence_span
+                FROM ami.restore_packs
+                WHERE project_id = $1
+                  AND namespace_id = $2
+                ORDER BY created_at DESC, restore_pack_id DESC
+                LIMIT 1
+                "#,
+                &[&project.project_id, &namespace.namespace_id],
+            )
+            .await
+            .expect("restore pack row");
+        assert_eq!(row.get::<_, String>(0), "workspace_restore_pack");
+        assert_eq!(
+            row.get::<_, Option<String>>(1).as_deref(),
+            Some("working_state_restore_runtime")
+        );
+        let payload: Value = row.get(2);
+        assert_eq!(
+            payload["pack_version"],
+            json!(WORKSPACE_RESTORE_PACK_VERSION)
+        );
+        assert_eq!(payload["current_goal"], json!("Restore pack runtime proof"));
+        assert!(payload["active_commitments"].is_array());
+        assert!(payload["active_constraints"].is_array());
+        assert!(payload["important_artifacts"].is_array());
+        assert_eq!(
+            payload["procedural_restore_policy"]["raw_procedural_archive_forbidden"],
+            json!(true)
+        );
+        let source_event_ids: Value = row.get(3);
+        let artifact_refs: Value = row.get(4);
+        let message_refs: Value = row.get(5);
+        let evidence_span: Value = row.get(6);
+        assert!(
+            source_event_ids
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        );
+        assert!(artifact_refs.as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.as_str() == Some(format!("file://{handoff_path}").as_str()))
+        }));
+        assert!(
+            message_refs
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        );
+        assert_eq!(evidence_span["kind"], json!("working_state_restore"));
+    }
+
+    #[tokio::test]
+    async fn record_handoff_event_surfaces_compact_restore_execution_card() {
+        if let Ok(env_text) =
+            std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+        {
+            for line in env_text.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                let Some((key, value)) = trimmed.split_once('=') else {
+                    continue;
+                };
+                if std::env::var_os(key).is_none() {
+                    unsafe {
+                        std::env::set_var(key.trim(), value.trim_matches('\"'));
+                    }
+                }
+            }
+        }
+
+        unsafe {
+            std::env::set_var("AMAI_RESTORE_EXECUTION_CARD_RUNTIME", "codex");
+            std::env::set_var("AMAI_RESTORE_EXECUTION_CARD_MODEL", "gpt-5");
+            std::env::set_var("AMAI_RESTORE_EXECUTION_CARD_TOOL", "exec_command");
+        }
+
+        let cfg = AppConfig::from_env().expect("config");
+        let client = postgres::connect_admin(&cfg).await.expect("postgres");
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("unix epoch")
+            .as_nanos();
+        let workspace_code = format!("restore_card_ws_{suffix}");
+        let project_code = format!("restore_card_proj_{suffix}");
+        let repo_root = format!("/tmp/{project_code}");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "restore execution card test handoff").expect("handoff file");
+
+        postgres::ensure_workspace(&client, &workspace_code, "Restore Card Workspace", "active")
+            .await
+            .expect("workspace");
+        let project = postgres::upsert_project(
+            &client,
+            &project_code,
+            "Restore Card Project",
+            &repo_root,
+            Some("main"),
+            &workspace_code,
+            "project_shared",
+            "local_strict",
+        )
+        .await
+        .expect("project");
+        let namespace = postgres::get_namespace_by_code(&client, project.project_id, "default")
+            .await
+            .expect("default namespace");
+
+        let skill = postgres::create_skill_card_candidate(
+            &client,
+            &project.code,
+            &namespace.code,
+            &format!("restore_execution_skill_{suffix}"),
+            1,
+            "Restore Continuity Card",
+            "Restore continuity for current step",
+            &["restore continuity".to_string()],
+            &["continuity fresh".to_string()],
+            &[
+                "inspect startup gate".to_string(),
+                "confirm required return task".to_string(),
+            ],
+            &["required return cleared".to_string()],
+            &["continuity stale".to_string()],
+            Some("safe resume"),
+            "project_private",
+            "project",
+            &["codex".to_string()],
+            &["gpt-5".to_string()],
+            &["exec_command".to_string()],
+            &["continuity".to_string(), "restore".to_string()],
+            &[format!("event:restore-card:{suffix}")],
+            &[format!("artifact://restore-card/{suffix}")],
+            &json!({
+                "skill_change_summary": {
+                    "changed_by": "test",
+                    "change_reason": "seed restore execution card"
+                }
+            }),
+            None,
+            Some("extract"),
+        )
+        .await
+        .expect("skill");
+
+        let message_refs = json!([format!("thread:restore-card:{suffix}")]);
+        postgres::create_skill_evidence_bundle(
+            &client,
+            skill.skill_card_id,
+            "trace",
+            Some("restore card evidence"),
+            &[format!("event:restore-card:evidence:{suffix}")],
+            &[format!("artifact://restore-card/evidence/{suffix}")],
+            Some("manual_proof"),
+            Some(&message_refs),
+            Some(&json!({"kind":"bundle","context":"continuity"})),
+            Some("extract"),
+            Some("skill-evidence-bundle-envelope-v1"),
+        )
+        .await
+        .expect("evidence");
+        postgres::record_skill_trigger_match(
+            &client,
+            skill.skill_card_id,
+            "project_task",
+            "restore continuity",
+            true,
+            Some("trigger matched"),
+            Some("manual_trigger"),
+            Some(&json!([format!("event:restore-card:trigger:{suffix}")])),
+            Some(&json!([format!(
+                "artifact://restore-card/trigger/{suffix}"
+            )])),
+            Some(&message_refs),
+            Some(&json!({"kind":"trigger","context":"continuity"})),
+            Some("extract"),
+            Some("skill-trigger-match-envelope-v1"),
+        )
+        .await
+        .expect("trigger");
+        postgres::record_skill_trial_run(
+            &client,
+            skill.skill_card_id,
+            "shadow",
+            Some("restore card shadow"),
+            Some("codex"),
+            Some("gpt-5"),
+            Some("exec_command"),
+            true,
+            false,
+            "success",
+            Some("shadow success"),
+            Some("manual_shadow"),
+            Some(&json!([format!("event:restore-card:shadow:{suffix}")])),
+            Some(&json!([format!("artifact://restore-card/shadow/{suffix}")])),
+            Some(&message_refs),
+            Some(&json!({"kind":"shadow","context":"continuity"})),
+            Some("extract"),
+            Some("skill-trial-run-envelope-v1"),
+        )
+        .await
+        .expect("shadow run");
+        postgres::record_skill_eval(
+            &client,
+            skill.skill_card_id,
+            "promote_shadow",
+            "manual_eval",
+            true,
+            true,
+            true,
+            0.0,
+            Some("promote to shadow"),
+            Some("manual_eval"),
+            Some(&json!([format!("event:restore-card:eval-shadow:{suffix}")])),
+            Some(&json!([format!(
+                "artifact://restore-card/eval-shadow/{suffix}"
+            )])),
+            Some(&message_refs),
+            Some(&json!({"kind":"eval","phase":"shadow"})),
+            Some("extract"),
+            Some("skill-eval-envelope-v1"),
+        )
+        .await
+        .expect("promote shadow");
+        postgres::record_skill_trial_run(
+            &client,
+            skill.skill_card_id,
+            "trial",
+            Some("restore card trial"),
+            Some("codex"),
+            Some("gpt-5"),
+            Some("exec_command"),
+            true,
+            true,
+            "success",
+            Some("trial success"),
+            Some("manual_trial"),
+            Some(&json!([format!("event:restore-card:trial:{suffix}")])),
+            Some(&json!([format!("artifact://restore-card/trial/{suffix}")])),
+            Some(&message_refs),
+            Some(&json!({"kind":"trial","context":"continuity"})),
+            Some("extract"),
+            Some("skill-trial-run-envelope-v1"),
+        )
+        .await
+        .expect("trial run");
+        postgres::record_skill_eval(
+            &client,
+            skill.skill_card_id,
+            "promote_trial",
+            "manual_eval",
+            true,
+            true,
+            true,
+            0.8,
+            Some("promote to trial"),
+            Some("manual_eval"),
+            Some(&json!([format!("event:restore-card:eval:{suffix}")])),
+            Some(&json!([format!("artifact://restore-card/eval/{suffix}")])),
+            Some(&message_refs),
+            Some(&json!({"kind":"eval","phase":"trial"})),
+            Some("extract"),
+            Some("skill-eval-envelope-v1"),
+        )
+        .await
+        .expect("promote trial");
+
+        record_handoff_event(
+            &client,
+            &project,
+            &namespace,
+            "Restore continuity for current step",
+            "Restore continuity safely via compact execution card.",
+            "Reviewed restore path and need compact execution card.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+        )
+        .await
+        .expect("record handoff");
+
+        let row = client
+            .query_one(
+                r#"
+                SELECT payload
+                FROM ami.restore_packs
+                WHERE project_id = $1
+                  AND namespace_id = $2
+                ORDER BY created_at DESC, restore_pack_id DESC
+                LIMIT 1
+                "#,
+                &[&project.project_id, &namespace.namespace_id],
+            )
+            .await
+            .expect("restore pack row");
+        let payload: Value = row.get(0);
+        assert_eq!(
+            payload["skill_execution_card"]["skill_title"],
+            json!("Restore Continuity Card")
+        );
+        assert_eq!(
+            payload["skill_execution_card"]["skill_execution_steps"][0],
+            json!("inspect startup gate")
+        );
+        assert_eq!(
+            payload["skill_execution_card"]["binding"]["model"],
+            json!("gpt-5")
+        );
+        assert_eq!(
+            payload["skill_execution_card"]["binding"]["runtime"],
+            json!("codex")
+        );
+        assert_eq!(
+            payload["skill_execution_card"]["binding"]["tool"],
+            json!("exec_command")
+        );
+        assert_eq!(
+            payload["skill_execution_card"]["skill_trust_state"],
+            json!("trial")
+        );
+        assert!(
+            payload["skill_execution_card_summary"]
+                .as_str()
+                .is_some_and(|value| value.contains("Restore Continuity Card"))
+        );
+    }
+
+    #[test]
+    fn build_workspace_restore_pack_surfaces_full_acceptance_buckets() {
+        let restore = json!({
+            "project": {
+                "code": "amai",
+                "visibility_scope": "project_shared"
+            },
+            "namespace": {
+                "code": "continuity",
+                "retrieval_mode": "local_strict"
+            },
+            "agent_scope": "amai::continuity::default",
+            "thread_id": "thread-acceptance",
+            "visible_projects": ["amai"],
+            "latest_decision_trace": {
+                "scope": {
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "effective_retrieval_mode": "local_strict",
+                    "visible_projects_total": 1
+                }
+            },
+            "state_lineage": {
+                "authoritative_source_kind": "continuity_handoff",
+                "authoritative_local_path": "/tmp/acceptance/HANDOFF.md"
+            },
+            "project_task_tree": {
+                "nodes": [
+                    {
+                        "task_id": "task::active",
+                        "task_role": "active",
+                        "task_state": "active",
+                        "resume_state": "active",
+                        "headline": "Workspace restore acceptance line",
+                        "next_step": "Verify the full restore pack."
+                    },
+                    {
+                        "task_id": "task::waiting",
+                        "task_role": "active",
+                        "task_state": "waiting_external",
+                        "resume_state": "waiting_external",
+                        "headline": "Waiting on evaluator approval",
+                        "next_step": "Resume after approval arrives."
+                    },
+                    {
+                        "task_id": "task::review",
+                        "task_role": "active",
+                        "task_state": "in_review",
+                        "resume_state": "in_review",
+                        "headline": "Review restore wording",
+                        "next_step": "Approve prompt summary wording."
+                    }
+                ]
+            },
+            "project_task_ledger": {
+                "entries": [
+                    {
+                        "task_id": "task::active",
+                        "task_role": "active",
+                        "task_state": "active",
+                        "resume_state": "active",
+                        "headline": "Workspace restore acceptance line",
+                        "next_step": "Verify the full restore pack.",
+                        "recorded_at_epoch_ms": 100
+                    },
+                    {
+                        "task_id": "task::waiting",
+                        "task_role": "active",
+                        "task_state": "waiting_external",
+                        "resume_state": "waiting_external",
+                        "headline": "Waiting on evaluator approval",
+                        "next_step": "Resume after approval arrives.",
+                        "recorded_at_epoch_ms": 90
+                    },
+                    {
+                        "task_id": "task::closed",
+                        "task_role": "historical_handoff",
+                        "task_state": "resolved",
+                        "resume_state": "historical_only",
+                        "headline": "Closed restore rehearsal",
+                        "next_step": "None",
+                        "recorded_at_epoch_ms": 80,
+                        "source_kind": "continuity_handoff"
+                    }
+                ]
+            },
+            "pending_return_queue": [
+                {
+                    "task_id": "task::paused",
+                    "headline": "Paused compare branch",
+                    "next_step": "Return after acceptance proof.",
+                    "queued_reason": "interrupted_by_new_handoff",
+                    "resume_state": "pending_return",
+                    "queued_at_epoch_ms": 95
+                }
+            ],
+            "source_summary": "Workspace restore pack now combines task truth and restore truth.",
+            "current_hypothesis": "One pack should surface the current working picture.",
+            "materialized_notes": [
+                "Acceptance note one",
+                "Acceptance note two"
+            ],
+            "recent_actions": [
+                {
+                    "headline": "Recorded live handoff",
+                    "summary": "Captured latest execution line.",
+                    "event_kind": "continuity_handoff",
+                    "execution_state": "succeeded",
+                    "recorded_at_epoch_ms": 110,
+                    "authoritative": true,
+                    "local_path": "/tmp/acceptance/action-1.md"
+                },
+                {
+                    "headline": "Ran restore check",
+                    "summary": "Verified startup and restore surfaces.",
+                    "event_kind": "restore_check",
+                    "execution_state": "succeeded",
+                    "recorded_at_epoch_ms": 111,
+                    "authoritative": false
+                }
+            ],
+            "recent_decision_traces": [
+                {
+                    "decision": "keep_compact_execution_card",
+                    "recorded_at_epoch_ms": 112
+                }
+            ],
+            "execctl_resume_contract": {
+                "resume_state": "return_required"
+            },
+            "execctl_resume_contract_summary": "return_required(1): Paused compare branch",
+            "required_return_task": {
+                "headline": "Paused compare branch",
+                "next_step": "Return after acceptance proof."
+            },
+            "startup_next_action": {
+                "action_kind": "resume_required_return_task",
+                "blocking": true
+            },
+            "startup_next_action_summary": "resume_required_return_task: Paused compare branch",
+            "client_budget_guard": {
+                "status": "critical",
+                "status_label": "compact_now",
+                "reply_execution_gate": {
+                    "action_kind": "compact_current_thread_for_client_budget"
+                }
+            },
+            "skill_execution_card_summary": "Restore Continuity Card [trial] -> inspect startup gate",
+            "skill_execution_card": {
+                "skill_title": "Restore Continuity Card",
+                "skill_trust_state": "trial",
+                "skill_execution_steps": [
+                    "inspect startup gate",
+                    "confirm startup next action"
+                ],
+                "skill_runtime_constraints": ["codex"],
+                "skill_model_constraints": ["gpt-5"],
+                "skill_tool_constraints": ["exec_command"],
+                "skill_context_constraints": ["continuity", "restore"]
+            },
+            "skill_execution_card_binding": {
+                "runtime": "codex",
+                "model": "gpt-5",
+                "tool": "exec_command"
+            },
+            "active_files": [
+                "/tmp/acceptance/current.rs"
+            ],
+            "open_questions": [
+                "Should startup pack show more than one paused branch?"
+            ],
+            "rejected_hypotheses": [
+                "Do not emit raw procedural archive."
+            ],
+            "excluded_reasons_summary": "memory_cards — no extra factual summary was relevant."
+        });
+
+        let pack = super::build_workspace_restore_pack(&restore);
+
+        assert_eq!(
+            pack["active_commitments"][0]["headline"],
+            json!("Workspace restore acceptance line")
+        );
+        assert_eq!(
+            pack["blocked_waiting_items"].as_array().map(|v| v.len()),
+            Some(2)
+        );
+        assert_eq!(
+            pack["blocked_waiting_items"][0]["headline"],
+            json!("Waiting on evaluator approval")
+        );
+        assert_eq!(
+            pack["paused_branches"][0]["headline"],
+            json!("Paused compare branch")
+        );
+        assert_eq!(
+            pack["recently_closed"][0]["headline"],
+            json!("Closed restore rehearsal")
+        );
+        assert_eq!(
+            pack["relevant_semantic_facts"].as_array().map(|v| v.len()),
+            Some(4)
+        );
+        assert_eq!(
+            pack["recent_episodic_traces"].as_array().map(|v| v.len()),
+            Some(3)
+        );
+        assert_eq!(
+            pack["active_constraints"].as_array().map(|v| v.len()),
+            Some(4)
+        );
+        assert_eq!(
+            pack["active_constraints"][3]["constraint_kind"],
+            json!("procedural_binding")
+        );
+        assert_eq!(
+            pack["permission_summary"]["namespace_retrieval_mode"],
+            json!("local_strict")
+        );
+        assert_eq!(
+            pack["important_artifacts"].as_array().map(|v| v.len()),
+            Some(3)
+        );
+        assert_eq!(
+            pack["unresolved_conflicts"].as_array().map(|v| v.len()),
+            Some(3)
+        );
+        assert_eq!(
+            pack["relevant_procedures"][0]["procedure_kind"],
+            json!("compact_execution_card")
+        );
+        assert_eq!(
+            pack["relevant_procedures"][0]["raw_procedural_archive_included"],
+            json!(false)
+        );
+        assert_eq!(
+            pack["relevant_procedures"][0]["binding"]["tool"],
+            json!("exec_command")
+        );
+        assert_eq!(
+            pack["procedural_restore_policy"]["materialized_surface"],
+            json!("compact_execution_card")
+        );
+        assert_eq!(
+            pack["procedural_restore_policy"]["raw_procedural_archive_forbidden"],
+            json!(true)
+        );
+        assert_eq!(
+            pack["summary"],
+            json!(
+                "active(1); blocked(2); paused(1); facts(4); constraints(4); artifacts(3); procedures(1)"
+            )
+        );
+    }
+
+    #[test]
+    fn build_workspace_restore_pack_handles_malformed_surface_fail_closed() {
+        let restore = json!({
+            "project": "broken-project",
+            "namespace": 7,
+            "visible_projects": "amai",
+            "latest_decision_trace": {"scope": "broken"},
+            "state_lineage": {"authoritative_source_kind": 9},
+            "project_task_tree": {"nodes": "broken"},
+            "project_task_ledger": {"entries": "broken"},
+            "pending_return_queue": "broken",
+            "recent_actions": "broken",
+            "recent_decision_traces": "broken",
+            "execctl_resume_contract": "broken",
+            "startup_next_action": "broken",
+            "client_budget_guard": "broken",
+            "skill_execution_card": "broken",
+            "skill_execution_card_summary": "raw note must not be treated as a card",
+            "active_files": "broken",
+            "open_questions": "broken",
+            "rejected_hypotheses": "broken",
+            "excluded_reasons_summary": "",
+            "materialized_notes": "broken"
+        });
+
+        let pack = super::build_workspace_restore_pack(&restore);
+
+        assert_eq!(pack["active_commitments"], json!([]));
+        assert_eq!(pack["blocked_waiting_items"], json!([]));
+        assert_eq!(pack["paused_branches"], json!([]));
+        assert_eq!(pack["recent_episodic_traces"], json!([]));
+        assert_eq!(pack["active_constraints"], json!([]));
+        assert_eq!(pack["relevant_procedures"], json!([]));
+        assert_eq!(
+            pack["procedural_restore_policy"]["materialized_surface"],
+            json!("none")
+        );
+        assert_eq!(
+            pack["procedural_restore_policy"]["raw_procedural_archive_forbidden"],
+            json!(true)
+        );
+        assert_eq!(
+            pack["permission_summary"]["visible_projects_count"],
+            json!(0)
+        );
+        assert!(pack["summary"].is_null());
+    }
+
+    #[test]
+    fn build_workspace_restore_pack_does_not_surface_raw_procedural_note_without_card() {
+        let restore = json!({
+            "project": {"code": "amai", "visibility_scope": "project_shared"},
+            "namespace": {"code": "continuity", "retrieval_mode": "local_strict"},
+            "visible_projects": ["amai"],
+            "latest_decision_trace": {"scope": {"project_code": "amai"}},
+            "state_lineage": {"authoritative_source_kind": "continuity_handoff"},
+            "skill_execution_card_summary": "Long procedural note masquerading as summary",
+            "skill_execution_card": Value::Null
+        });
+
+        let pack = super::build_workspace_restore_pack(&restore);
+
+        assert_eq!(pack["relevant_procedures"], json!([]));
+        assert_eq!(
+            pack["procedural_restore_policy"]["materialized_surface"],
+            json!("none")
+        );
+    }
+
+    #[test]
+    fn persisted_restore_snapshot_payload_compacts_project_task_ledger_and_strips_runtime_derived_fields()
+     {
+        let mut entries = vec![
+            json!({
+                "task_role": "active",
+                "headline": "Current active line"
+            }),
+            json!({
+                "task_role": "pending_return",
+                "headline": "Pending line"
+            }),
+        ];
+        for idx in 0..7 {
+            entries.push(json!({
+                "task_role": "historical_handoff",
+                "headline": format!("Historical line {idx}")
+            }));
+        }
+        let bundle = json!({
+            "working_state_restore": {
+                "project_task_ledger": {
+                    "ledger_version": "project-task-ledger-v2",
+                    "open_tasks_count": 2,
+                    "historical_handoffs_count": 7,
+                    "entries": entries
+                },
+                "workspace_restore_pack": {
+                    "pack_version": WORKSPACE_RESTORE_PACK_VERSION
+                },
+                "workspace_restore_pack_summary": "runtime-only pack",
+                "skill_execution_card": {
+                    "card_version": "restore-execution-card-v1"
+                },
+                "skill_execution_card_summary": "runtime-only card",
+                "skill_execution_card_binding": {
+                    "tool": "exec_command"
+                }
+            }
+        });
+
+        let payload = super::persisted_restore_snapshot_payload(&bundle);
+        let restore = &payload["working_state_restore"];
+        let entries = restore["project_task_ledger"]["entries"]
+            .as_array()
+            .expect("compacted ledger entries");
+
+        assert_eq!(
+            restore["project_task_ledger"]["historical_handoffs_count"],
+            json!(7)
+        );
+        assert_eq!(
+            restore["project_task_ledger"]["full_shape_preserved_in_working_state_restore"],
+            json!(false)
+        );
+        assert_eq!(entries.len(), 7);
+        assert_eq!(entries[0]["task_role"], json!("active"));
+        assert_eq!(entries[1]["task_role"], json!("pending_return"));
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry["task_role"] == json!("historical_handoff"))
+                .count(),
+            MAX_PERSISTED_PROJECT_TASK_LEDGER_HISTORICAL_ENTRIES
+        );
+        assert!(restore.get("workspace_restore_pack").is_none());
+        assert!(restore.get("workspace_restore_pack_summary").is_none());
+        assert!(restore.get("skill_execution_card").is_none());
+        assert!(restore.get("skill_execution_card_summary").is_none());
+        assert!(restore.get("skill_execution_card_binding").is_none());
     }
 }

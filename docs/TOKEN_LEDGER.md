@@ -913,7 +913,7 @@ materialized end-to-end.
 
 Текущий truthful status без подключённого источника:
 - `adjustment_registry_version = adjustment-registry-v2`
-- `resolved_path = /home/art/agent-memory-index/state/token_adjustment_registry.json`
+- `resolved_path = <repo-root>/state/token_adjustment_registry.json`
 - `status = default_path_missing`
 - `entries_count = 0`
 - `registry_hash = null`

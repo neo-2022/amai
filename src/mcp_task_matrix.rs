@@ -365,10 +365,17 @@ async fn run_tool_catalog_task(session: &mut mcp::McpProofSession) -> Result<Val
         .filter_map(|tool| tool["name"].as_str().map(ToOwned::to_owned))
         .collect::<BTreeSet<_>>();
     let expected = BTreeSet::from([
+        "amai_benchmark_coverage".to_string(),
+        "amai_continuity_handoff".to_string(),
+        "amai_continuity_startup".to_string(),
         "amai_context_pack".to_string(),
         "amai_list_namespaces".to_string(),
         "amai_list_projects".to_string(),
+        "amai_memory_matrix".to_string(),
         "amai_observe_snapshot".to_string(),
+        "amai_observe_whole_cycle".to_string(),
+        "amai_observe_whole_cycle_turn".to_string(),
+        "amai_stack_preflight".to_string(),
         "amai_token_benchmark".to_string(),
         "amai_token_report".to_string(),
         "amai_warm_cache".to_string(),
@@ -1036,7 +1043,7 @@ mod tests {
             budget_profile: None,
             agent_scope: None,
             seed_agent_scope: None,
-            expected_error_contains: Some("unknown MCP tool".to_string()),
+            expected_error_contains: Some("amai_unknown_tool".to_string()),
             bootstrap_lines: Vec::new(),
             seed_headline: None,
             seed_next_step: None,

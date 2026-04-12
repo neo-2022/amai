@@ -100,7 +100,8 @@ jq -n \
   | (($gate.action_bundle // {}) | .operator_flow // {}) as $operator_flow
   | (($gate.action_bundle // {}) | .host_current_thread_control // {}) as $host_control
   | ($root_cause.host_current_thread_control_effect // {}) as $host_effect
-  | (prefix_drift_abs($toolbar_kpi; $root_cause.client_budget_reply_gate.reply_execution_gate.reply_prefix)) as $prefix_drift_abs
+  | (($root_cause.client_budget_reply_gate.global_reply_prefix // $root_cause.client_budget_reply_gate.reply_execution_gate.global_reply_prefix // $root_cause.client_budget_reply_gate.reply_execution_gate.reply_prefix)) as $global_reply_prefix
+  | (prefix_drift_abs($toolbar_kpi; $global_reply_prefix)) as $prefix_drift_abs
   | ($reply_gate.max_guard_age_seconds | if type == "number" then (. * 1000) else 10000 end) as $max_guard_age_ms
   | (age_ms($reply_gate.observed_at_epoch_ms)) as $root_cause_age_ms
   | $max_guard_age_ms as $gate_max_age_ms
@@ -118,7 +119,8 @@ jq -n \
     economic_markers: {
       toolbar_5h_prefix: $toolbar_kpi,
       internal_reply_prefix: ($gate.reply_prefix // ""),
-      prefix_family_match: (prefix_family($toolbar_kpi) == prefix_family($gate.reply_prefix // "")),
+      internal_global_reply_prefix: ($global_reply_prefix // ""),
+      prefix_family_match: (prefix_family($toolbar_kpi) == prefix_family($global_reply_prefix // "")),
       prefix_drift_abs_percent: $prefix_drift_abs,
       prefix_drift_within_tolerance:
         ($prefix_drift_abs == null or $prefix_drift_abs <= $prefix_drift_tolerance_percent),
@@ -140,6 +142,8 @@ jq -n \
         must_wait_for_same_thread_effect_measurement_before_reply: ($gate.must_wait_for_same_thread_effect_measurement_before_reply // false),
         reply_budget_mode: ($gate.reply_budget_mode // ""),
         reply_prefix: ($gate.reply_prefix // ""),
+        global_reply_prefix: ($gate.global_reply_prefix // $global_reply_prefix // ""),
+        reply_prefix_source: ($gate.reply_prefix_source // ""),
         host_context_compaction_inactive_target_pressure_active: ($gate.host_context_compaction_inactive_target_pressure_active // false),
         same_meter_pure_burn_turn_active: ($gate.same_meter_pure_burn_turn_active // false),
         must_prefer_short_paragraphs: ($gate.must_prefer_short_paragraphs // false),
@@ -173,6 +177,7 @@ jq -n \
       },
       current_live_meter: ($root_cause.current_live_meter // {}),
       current_live_turn: ($root_cause.current_live_turn // {"status": ""}),
+      same_meter_economics: ($root_cause.same_meter_economics // {}),
       host_context_compaction: ($root_cause.host_context_compaction // {"stage": ""}),
       host_current_thread_control_effect: {
         command_id: ($host_effect.command_id // ""),
@@ -238,10 +243,17 @@ jq -n \
     marker_integrity: {
       startup_gate_ready:
         ($ss.gate_semantics_consistent == true
-         and $ss.startup_execution_gate.must_follow_startup_next_action == true
-         and $ss.startup_execution_gate.unrelated_work_allowed == false
          and $ss.startup_execution_gate.must_read_prompt_text_before_reply == true
-         and $ss.startup_execution_gate.no_silent_drop == true),
+         and $ss.startup_execution_gate.no_silent_drop == true
+         and (
+           (($ss.startup_execution_gate.action_kind // "") == "continue_active_workline"
+            and ($ss.startup_execution_gate.blocking // false) == false
+            and ($ss.startup_execution_gate.must_follow_startup_next_action // false) == false
+            and ($ss.startup_execution_gate.unrelated_work_allowed // false) == true)
+           or
+           (($ss.startup_execution_gate.must_follow_startup_next_action // false) == true
+            and ($ss.startup_execution_gate.unrelated_work_allowed // true) == false)
+         )),
       exact_prefix_drift_within_tolerance:
         ($prefix_drift_abs == null or $prefix_drift_abs <= $prefix_drift_tolerance_percent),
       reply_gate_present:

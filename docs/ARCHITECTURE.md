@@ -3,6 +3,23 @@ modified_at: 2026-03-26 00:16 MSK
 
 # Architecture
 
+## Важная оговорка про роль этого документа
+
+Этот документ описывает прежде всего:
+- текущий materialized architectural baseline;
+- долговременные архитектурные законы проекта;
+- текущие source-of-truth и retrieval laws.
+
+Он не является полным target-state roadmap всей будущей памяти.
+
+Если нужно понять:
+- где проект находится сейчас;
+- что уже реализовано;
+- какой этап следующий;
+- как current-state соотносится с future memory fabric;
+
+сначала откройте [AGENT_START_HERE.md](AGENT_START_HERE.md), а затем [AMAI_GLOBAL_MEMORY_ROADMAP.md](AMAI_GLOBAL_MEMORY_ROADMAP.md).
+
 ## Цель
 
 `Amai` должен расти не только по возможностям, но и по дисциплине.
@@ -224,6 +241,8 @@ Code structure plane:
 Для этого baseline сейчас materialize-ит:
 - `pending_return_queue`
 - `pending_return_summary`
+- `required_task_set`
+- `required_task_set_summary`
 - `execctl_resume_state`
 - `execctl_resume_contract`
 - `execctl_resume_contract_summary`
@@ -248,6 +267,9 @@ Truthful статус теперь такой:
 тихой потери project-bound task inventory после compaction, relocation или client switch.
 Новый слой `execctl_resume_contract` нужен именно затем, чтобы pending worklines поднимались не
 как свободный human hint, а как machine-readable `required_return_task`.
+Если один пользовательский запрос несёт несколько явных подпунктов, они теперь должны жить не
+в `details`-тексте, а в отдельном machine-readable `required_task_set`, чтобы startup/runtime не
+мог silently narrow обязательный объём работы после первого частичного успеха.
 Отдельный active-lease слой нужен затем, чтобы startup видел не только дерево задач и обязательство
 к возврату, но и живого владельца текущей линии.
 
@@ -353,7 +375,7 @@ Truthful статус теперь такой:
 - `scripts/proof_hardening.sh`
   - repeat bootstrap, relation-aware retrieval и restart recovery;
 - `scripts/proof_performance.sh`
-  - end-to-end latency proof для `context pack` с hot guard `<10ms p95`;
+  - end-to-end latency proof для `context pack` с hot guard `<10ms p95`, полным benchmark режимом `warmup >= 3`, `iterations >= 20` и обязательным dashboard-check, если contour публикуется на dashboard;
 - `scripts/proof_accuracy.sh`
   - relation-aware precision и zero-leakage isolation proof;
 - `scripts/proof_load.sh`
@@ -397,7 +419,7 @@ Truthful статус теперь такой:
 - `cargo run -- observe serve --bind 0.0.0.0:9464`
 
 Machine-readable профиль:
-- [observability.toml](/home/art/agent-memory-index/config/observability.toml)
+- [observability.toml](../config/observability.toml)
 
 Слои observability:
 - `PostgreSQL`

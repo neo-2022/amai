@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ./scripts/bootstrap_stack.sh
+./scripts/benchmark_contamination_preflight.sh
 
 cargo run --release --quiet -- project register \
   --code project_alpha \

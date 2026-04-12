@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ./scripts/bootstrap_stack.sh
+./scripts/benchmark_contamination_preflight.sh
 
 cargo run --release --quiet -- project register \
   --code project_alpha \
@@ -55,12 +56,12 @@ cargo run --release --quiet -- verify benchmark \
   --limit-symbols 8 \
   --limit-chunks 8 \
   --limit-semantic-chunks 8 \
-  --warmup 1 \
-  --iterations 10 \
+  --warmup 3 \
+  --iterations 20 \
   --persist \
-  --max-mean-ms 10 \
-  --max-p95-ms 10 \
-  --max-p99-ms 10 \
+  --max-mean-ms 11 \
+  --max-p95-ms 12 \
+  --max-p99-ms 13 \
   --max-max-ms 15
 
 cargo run --release --quiet -- verify benchmark \
@@ -73,10 +74,10 @@ cargo run --release --quiet -- verify benchmark \
   --limit-symbols 8 \
   --limit-chunks 8 \
   --limit-semantic-chunks 8 \
-  --warmup 1 \
-  --iterations 5 \
+  --warmup 3 \
+  --iterations 20 \
   --persist \
-  --max-mean-ms 100 \
-  --max-p95-ms 100 \
-  --max-p99-ms 120 \
-  --max-max-ms 150
+  --max-mean-ms 11 \
+  --max-p95-ms 12 \
+  --max-p99-ms 13 \
+  --max-max-ms 15

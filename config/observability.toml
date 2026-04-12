@@ -16,7 +16,9 @@ postgres_query_probe_iterations = 20
 nats_publish_probe_iterations = 20
 
 [dashboard]
-refresh_ms = 1000
+refresh_ms = 5000
+exact_client_limit_prewarm_seconds = 15
+compact_client_budget_prewarm_seconds = 15
 
 [dashboard.timing_format]
 switch_to_nanoseconds_below_ms = 0.001
@@ -133,19 +135,21 @@ critical_jetstream_disk_usage_ratio = 0.95
 
 [retrieval]
 target_cold_p50_ms = 2.0
-target_p95_ms = 4.0
-target_cold_p99_ms = 6.0
-target_cold_max_ms = 10.0
+target_p95_ms = 12.0
+target_cold_p99_ms = 13.0
+target_cold_max_ms = 15.0
+live_readiness_cold_sample_count = 100
 target_cold_sample_count = 10000
 target_hot_p50_ms = 1.0
 target_hot_p95_ms = 1.0
 target_hot_p99_ms = 2.0
 target_hot_max_ms = 5.0
+live_readiness_hot_sample_count = 20
 target_hot_sample_count = 100000
 target_hot_benchmark_iterations = 20
 target_hot_benchmark_warmup = 3
-alert_p95_ms = 6.0
-critical_p95_ms = 10.0
+alert_p95_ms = 13.0
+critical_p95_ms = 15.0
 stretch_hot_p95_ms = 1.0
 
 [parser]

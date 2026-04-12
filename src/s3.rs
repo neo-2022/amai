@@ -5,8 +5,31 @@ use aws_credential_types::Credentials;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Builder, Region};
 use aws_sdk_s3::primitives::ByteStream;
+use std::sync::{Mutex, OnceLock};
+
+#[derive(Clone)]
+struct CachedS3Client {
+    cache_key: String,
+    client: Client,
+}
+
+static S3_CLIENT_CACHE: OnceLock<Mutex<Option<CachedS3Client>>> = OnceLock::new();
 
 pub async fn connect(cfg: &AppConfig) -> Result<Client> {
+    let cache_key = format!(
+        "{}|{}|{}|{}",
+        cfg.s3_endpoint, cfg.s3_region, cfg.s3_access_key, cfg.s3_secret_key
+    );
+    let cache = S3_CLIENT_CACHE.get_or_init(|| Mutex::new(None));
+    if let Some(cached) = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("s3 client cache lock poisoned"))?
+        .as_ref()
+        .filter(|cached| cached.cache_key == cache_key)
+    {
+        return Ok(cached.client.clone());
+    }
+
     let shared = aws_config::defaults(BehaviorVersion::latest())
         .region(Region::new(cfg.s3_region.clone()))
         .endpoint_url(cfg.s3_endpoint.clone())
@@ -20,7 +43,15 @@ pub async fn connect(cfg: &AppConfig) -> Result<Client> {
         .load()
         .await;
     let config = Builder::from(&shared).force_path_style(true).build();
-    Ok(Client::from_conf(config))
+    let client = Client::from_conf(config);
+    let mut guard = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("s3 client cache lock poisoned"))?;
+    *guard = Some(CachedS3Client {
+        cache_key,
+        client: client.clone(),
+    });
+    Ok(client)
 }
 
 pub async fn ensure_buckets(client: &Client, cfg: &AppConfig) -> Result<()> {

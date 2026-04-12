@@ -1,0 +1,5171 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Amai Human Dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="/brand/amai_mark.svg?v=__ASSET_VERSION__">
+  <link rel="icon" href="/favicon.ico?v=__ASSET_VERSION__" sizes="any">
+  <link rel="shortcut icon" href="/favicon.ico?v=__ASSET_VERSION__">
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: linear-gradient(180deg, #f5f1e7 0%, #f3f6ef 45%, #eef4f6 100%);
+      --paper: rgba(255, 252, 247, 0.92);
+      --ink: #1e2a2f;
+      --muted: #55666d;
+      --accent: #0d6b6f;
+      --accent-soft: rgba(13, 107, 111, 0.11);
+      --pass: #1d7c5b;
+      --pass-soft: rgba(29, 124, 91, 0.12);
+      --alert: #b96d10;
+      --alert-soft: rgba(185, 109, 16, 0.12);
+      --critical: #b6382b;
+      --critical-soft: rgba(182, 56, 43, 0.12);
+      --waiting: #3f6f93;
+      --waiting-soft: rgba(63, 111, 147, 0.12);
+      --unknown: #61717a;
+      --unknown-soft: rgba(97, 113, 122, 0.12);
+      --panel-outer-shadow:
+        0 0 2px rgba(17, 28, 33, 0.30),
+        0 0 12px rgba(17, 28, 33, 0.16),
+        0 0 28px rgba(17, 28, 33, 0.10),
+        0 22px 44px -30px rgba(17, 28, 33, 0.18);
+      --border: rgba(30, 42, 47, 0.10);
+      --surface: rgba(255, 255, 255, 0.72);
+      --surface-raised: rgba(255, 255, 255, 0.78);
+      --surface-solid: rgba(255, 255, 255, 0.82);
+      --surface-border: rgba(30, 42, 47, 0.08);
+      --table-scroll-track: rgba(23, 34, 39, 0.86);
+      --table-scroll-thumb: rgba(24, 108, 98, 0.82);
+      --table-scroll-thumb-strong: rgba(39, 146, 132, 0.92);
+      --hero-glow: rgba(13, 107, 111, 0.11);
+      --error-border: rgba(182, 56, 43, 0.18);
+      --card-outer-shadow:
+        0 0 1px rgba(18, 28, 33, 0.24),
+        0 0 8px rgba(18, 28, 33, 0.12),
+        0 0 18px rgba(18, 28, 33, 0.08),
+        0 16px 28px -24px rgba(18, 28, 33, 0.16);
+      --card-inner-shadow:
+        inset 0 0 0 1px rgba(8, 70, 61, 0.52),
+        inset 0 1px 0 rgba(255, 255, 255, 0.028),
+        inset 0 12px 16px -14px rgba(8, 63, 55, 0.20),
+        inset 0 -12px 16px -14px rgba(7, 52, 46, 0.16),
+        inset 12px 0 16px -14px rgba(8, 58, 51, 0.16),
+        inset -12px 0 16px -14px rgba(8, 58, 51, 0.16);
+    }
+
+    * { box-sizing: border-box; }
+    html {
+      scrollbar-gutter: stable both-edges;
+      scrollbar-width: thin;
+      scrollbar-color: transparent transparent;
+    }
+
+    html::-webkit-scrollbar {
+      width: 12px;
+      height: 12px;
+    }
+
+    html::-webkit-scrollbar-track {
+      background: transparent;
+      border-radius: 999px;
+    }
+
+    html::-webkit-scrollbar-thumb {
+      background: transparent;
+      border-radius: 999px;
+      border: 2px solid transparent;
+      transition: background 0.14s ease, border-width 0.14s ease, box-shadow 0.14s ease;
+    }
+
+    html:hover,
+    html:focus-within {
+      scrollbar-color: var(--table-scroll-thumb) var(--table-scroll-track);
+    }
+
+    html:hover::-webkit-scrollbar-track,
+    html:focus-within::-webkit-scrollbar-track {
+      background: var(--table-scroll-track);
+    }
+
+    html:hover::-webkit-scrollbar-thumb,
+    html:focus-within::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, var(--table-scroll-thumb), var(--table-scroll-thumb-strong));
+      border: 2px solid var(--table-scroll-track);
+    }
+
+    html:hover::-webkit-scrollbar-thumb:hover,
+    html:focus-within::-webkit-scrollbar-thumb:hover {
+      border-width: 0;
+      box-shadow: 0 0 0 1px rgba(78, 189, 171, 0.28);
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "IBM Plex Sans", "Segoe UI", "Helvetica Neue", sans-serif;
+    }
+
+    a { color: var(--accent); }
+
+    .shell {
+      max-width: 1900px;
+      margin: 0 auto;
+      padding: 12px 20px 40px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 2.34fr) minmax(320px, 0.28fr);
+      gap: 8px;
+      align-items: start;
+      margin-bottom: 8px;
+    }
+
+    .panel {
+      background: var(--paper);
+      border: none;
+      border-radius: 12px;
+      box-shadow: var(--panel-outer-shadow);
+      position: relative;
+      backdrop-filter: blur(14px);
+    }
+
+    .hero-main {
+      padding: 10px 14px 12px;
+      position: relative;
+      overflow: visible;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
+      gap: 8px;
+      min-height: 0;
+    }
+
+    .hero-top {
+      display: grid;
+      grid-template-columns: minmax(0, 1.54fr) minmax(360px, 430px);
+      gap: 8px;
+      align-items: start;
+    }
+
+    .brand-line {
+      display: flex;
+      align-items: flex-start;
+      width: 100%;
+      margin: -4px 0 0 -4px;
+    }
+
+    .brand-lockup {
+      width: min(100%, 860px);
+      height: auto;
+      display: block;
+      filter: drop-shadow(0 14px 28px rgba(11, 16, 32, 0.10));
+    }
+
+    .hero-cards {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 2px;
+      align-items: start;
+    }
+
+    .hero-metric-card {
+      padding: 14px 14px;
+      border-radius: 10px;
+    }
+
+    .hero-metric-card .card-top {
+      margin-bottom: 4px;
+      align-items: center;
+    }
+
+    .hero-metric-card .card-title {
+      font-size: 14px;
+    }
+
+    .hero-metric-card .card-value {
+      margin: 6px 0 4px;
+    }
+
+    .hero-metric-card .card-note {
+      font-size: 12px;
+      line-height: 1.34;
+    }
+
+    .hero-metric-card .metric-rows {
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .hero-metric-card .metric-row {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 4px;
+      padding-top: 10px;
+    }
+
+    .hero-metric-card .metric-label {
+      display: block;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .hero-metric-card .metric-row-value {
+      font-size: 13px;
+      line-height: 1.45;
+      text-align: left;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    .hero-metric-card .active-agent-budget-blocks {
+      margin-top: 10px;
+    }
+
+    .hero-side {
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 0;
+      align-self: start;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 7px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.1;
+      width: fit-content;
+      max-width: min(100%, 176px);
+      white-space: normal;
+      word-break: break-word;
+      flex-shrink: 0;
+      min-height: 32px;
+      text-align: center;
+      align-self: flex-start;
+    }
+
+    .status-pill.pass { background: var(--pass-soft); color: var(--pass); }
+    .status-pill.alert { background: var(--alert-soft); color: var(--alert); }
+    .status-pill.critical { background: var(--critical-soft); color: var(--critical); }
+    .status-pill.waiting { background: var(--waiting-soft); color: var(--waiting); }
+    .status-pill.unknown { background: var(--unknown-soft); color: var(--unknown); }
+
+    .side-block {
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: var(--surface);
+      border: none;
+      box-shadow: none;
+      position: relative;
+      overflow: visible;
+      isolation: isolate;
+    }
+
+    .hero-summary-block #summary-status {
+      margin-bottom: 8px;
+    }
+
+    .summary-head-row {
+      display: grid;
+      grid-template-columns: auto auto 1fr auto;
+      align-items: center;
+      column-gap: 16px;
+    }
+
+    .summary-version-label,
+    .summary-version-inline {
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 800;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .summary-version-label {
+      color: var(--muted);
+    }
+
+    .summary-version-inline {
+      justify-self: end;
+      text-align: right;
+      padding-left: 20px;
+    }
+
+    .side-block h2,
+    .section h2 {
+      margin: 0 0 8px;
+      font-size: 18px;
+      letter-spacing: -0.02em;
+    }
+
+    .kv {
+      margin: 0;
+      display: grid;
+      gap: 8px;
+    }
+
+    .kv div {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .kv strong {
+      color: var(--ink);
+      font-weight: 700;
+      text-align: right;
+    }
+
+    .section {
+      padding: 14px;
+      margin-bottom: 8px;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 8px;
+      align-items: start;
+    }
+
+    .benchmark-cards-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      align-items: start;
+    }
+
+    .benchmark-cards-grid > .compare-card {
+      height: auto;
+    }
+
+    .benchmark-cards-grid > .compare-card:not(.benchmark-span-full) .compare-table-wrap {
+      margin-top: auto;
+    }
+
+    .machine-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-auto-flow: dense;
+      grid-auto-rows: 6px;
+      align-items: start;
+    }
+
+    .machine-grid .machine-compact {
+      padding: 12px 14px;
+    }
+
+    .machine-grid .machine-compact .card-value {
+      margin: 6px 0 4px;
+    }
+
+    .machine-grid .machine-compact .card-note {
+      font-size: 13px;
+    }
+
+    .machine-grid .machine-compact .metric-row {
+      padding-top: 6px;
+    }
+
+    .metric-card,
+    .service-card,
+    .glossary-card,
+    .link-card {
+      padding: 14px;
+      border-radius: 10px;
+      border: none;
+      background: var(--surface-raised);
+      box-shadow: none;
+      position: relative;
+      overflow: visible;
+      isolation: isolate;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
+      gap: 0;
+    }
+
+    .metric-card.pass,
+    .service-card.pass { background: linear-gradient(180deg, rgba(29, 124, 91, 0.04), var(--surface-solid)); }
+    .metric-card.alert,
+    .service-card.alert { background: linear-gradient(180deg, rgba(185, 109, 16, 0.04), var(--surface-solid)); }
+    .metric-card.critical,
+    .service-card.critical { background: linear-gradient(180deg, rgba(182, 56, 43, 0.04), var(--surface-solid)); }
+    .metric-card.waiting,
+    .service-card.waiting { background: linear-gradient(180deg, rgba(63, 111, 147, 0.04), var(--surface-solid)); }
+    .metric-card.unknown,
+    .service-card.unknown { background: linear-gradient(180deg, rgba(97, 113, 122, 0.04), var(--surface-solid)); }
+
+    .card-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: start;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .card-title {
+      margin: 0;
+      font-size: 15px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .card-value {
+      margin: 6px 0 6px;
+    }
+
+    .card-note {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .card-source {
+      margin-top: 6px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .metric-rows {
+      margin: 10px 0 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 6px;
+    }
+
+    .metric-row {
+      display: grid;
+      grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+      gap: 8px;
+      align-items: start;
+      padding-top: 6px;
+      border-top: 1px solid var(--surface-border);
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+
+    .metric-row-value {
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.35;
+      font-weight: 700;
+      text-align: right;
+      min-width: 0;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .metric-row-value.interactive-client-budget-value {
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 0;
+      text-align: right;
+    }
+
+    .stack-metric-card .metric-row {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 4px;
+    }
+
+    .stack-metric-card .metric-label {
+      display: block;
+    }
+
+    .stack-metric-card .metric-row-value,
+    .stack-metric-card .metric-row-value.interactive-client-budget-value {
+      display: block;
+      text-align: left;
+      justify-content: flex-start;
+    }
+
+    .active-agent-budget-blocks {
+      display: grid;
+      gap: 12px;
+      margin-top: 8px;
+    }
+
+    .active-agent-budget-block {
+      display: grid;
+      gap: 10px;
+      padding-top: 12px;
+      border-top: 1px solid var(--surface-border);
+    }
+
+    .active-agent-budget-block:first-child {
+      padding-top: 0;
+      border-top: none;
+    }
+
+    .active-agent-budget-field {
+      display: grid;
+      gap: 4px;
+    }
+
+    .active-agent-budget-field-label {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .active-agent-budget-field-value {
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.45;
+      font-weight: 700;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    .active-agent-budget-compact {
+      display: grid;
+      gap: 6px;
+    }
+
+    .active-agent-budget-compact-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .active-agent-budget-agent-name {
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.35;
+    }
+
+    .active-agent-budget-agent-edit {
+      display: inline-flex;
+      align-items: center;
+      min-width: 0;
+      max-width: 100%;
+      cursor: text;
+    }
+
+    .active-agent-budget-agent-edit.is-saving {
+      opacity: 0.72;
+    }
+
+    .active-agent-budget-agent-edit-label {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .active-agent-budget-agent-input {
+      width: min(100%, 280px);
+      min-width: 140px;
+      padding: 5px 8px;
+      border-radius: 8px;
+      border: 1px solid rgba(121, 210, 197, 0.32);
+      background: rgba(12, 26, 30, 0.78);
+      color: var(--ink);
+      font: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.35;
+      outline: none;
+      box-shadow: 0 0 0 1px rgba(121, 210, 197, 0.14);
+    }
+
+    .active-agent-budget-agent-input:focus {
+      border-color: rgba(121, 210, 197, 0.56);
+      box-shadow: 0 0 0 2px rgba(121, 210, 197, 0.18);
+    }
+
+    .active-agent-budget-kpi-inline {
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.45;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .active-agent-budget-pressure-inline {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .client-budget-target-trigger {
+      appearance: none;
+      border: none;
+      background: none;
+      margin: 0;
+      padding: 0;
+      color: var(--accent);
+      font: inherit;
+      font-weight: 800;
+      line-height: inherit;
+      cursor: pointer;
+      text-decoration: underline dotted rgba(13, 107, 111, 0.45);
+      text-underline-offset: 3px;
+    }
+
+    .client-budget-target-trigger:hover,
+    .client-budget-target-trigger:focus-visible {
+      color: var(--accent-strong);
+      outline: none;
+    }
+
+    .tooltip-target-picker {
+      display: grid;
+      gap: 10px;
+    }
+
+    .tooltip-target-picker-note {
+      color: rgba(247, 250, 252, 0.84);
+    }
+
+    .tooltip-target-picker-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .tooltip-target-picker-option {
+      appearance: none;
+      border: 1px solid rgba(154, 231, 220, 0.26);
+      border-radius: 999px;
+      background: rgba(121, 210, 197, 0.08);
+      color: #dff8f4;
+      padding: 5px 10px;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.1;
+      cursor: pointer;
+      transition: background 0.14s ease, border-color 0.14s ease, transform 0.14s ease;
+    }
+
+    .tooltip-target-picker-option:hover,
+    .tooltip-target-picker-option:focus-visible {
+      background: rgba(121, 210, 197, 0.18);
+      border-color: rgba(154, 231, 220, 0.42);
+      outline: none;
+      transform: translateY(-1px);
+    }
+
+    .tooltip-target-picker-option.active {
+      background: rgba(121, 210, 197, 0.28);
+      border-color: rgba(154, 231, 220, 0.68);
+      color: #ffffff;
+    }
+
+    .tooltip-target-picker-option:disabled {
+      opacity: 0.6;
+      cursor: progress;
+      transform: none;
+    }
+
+    .tooltip-target-picker-command {
+      color: #9ae7dc;
+      font-weight: 700;
+    }
+
+    .dashboard-toast {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      z-index: 10020;
+      max-width: min(420px, calc(100vw - 32px));
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: rgba(8, 13, 17, 0.96);
+      color: #f7fafc;
+      font-size: 13px;
+      line-height: 1.45;
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.28);
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition: opacity 0.16s ease, transform 0.16s ease;
+    }
+
+    .dashboard-toast.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .dashboard-toast.error {
+      background: rgba(103, 20, 16, 0.96);
+    }
+
+    .has-tooltip {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      cursor: help;
+      text-decoration: underline dotted rgba(13, 107, 111, 0.45);
+      text-underline-offset: 3px;
+      z-index: 2;
+    }
+
+    .has-tooltip:hover,
+    .has-tooltip:focus-visible {
+      z-index: 30;
+    }
+
+    .tooltip-inline-trigger {
+      display: inline-flex;
+      align-items: center;
+      min-width: 0;
+      max-width: 100%;
+    }
+
+    .tooltip-layer {
+      position: fixed;
+      top: 0;
+      left: 0;
+      min-width: 220px;
+      max-width: min(360px, calc(100vw - 24px));
+      padding: 12px 14px;
+      padding-right: 42px;
+      border-radius: 12px;
+      background: rgba(8, 13, 17, 0.96);
+      color: #f7fafc;
+      font-size: 12px;
+      line-height: 1.45;
+      text-transform: none;
+      letter-spacing: normal;
+      white-space: normal;
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.28);
+      pointer-events: none;
+      user-select: text;
+      -webkit-user-select: text;
+      opacity: 0;
+      transform: translateY(4px);
+      transition: opacity 0.14s ease, transform 0.14s ease;
+      z-index: 10000;
+    }
+
+    .tooltip-layer.visible {
+      opacity: 1;
+      transform: translateY(0);
+      pointer-events: auto;
+    }
+
+    .tooltip-layer-content {
+      display: block;
+    }
+
+    .tooltip-copy-btn {
+      appearance: none;
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      border: none;
+      border-radius: 999px;
+      width: 24px;
+      height: 24px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(121, 210, 197, 0.10);
+      color: #9ae7dc;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1;
+      cursor: pointer;
+      opacity: 0;
+      transform: translateY(-2px);
+      pointer-events: none;
+      transition: opacity 0.14s ease, background 0.14s ease, transform 0.14s ease;
+    }
+
+    .tooltip-copy-btn.visible {
+      opacity: 1;
+      transform: translateY(0);
+      pointer-events: auto;
+    }
+
+    .tooltip-copy-btn:hover,
+    .tooltip-copy-btn:focus-visible {
+      background: rgba(121, 210, 197, 0.20);
+      outline: none;
+    }
+
+    .tooltip-layer .link-inline {
+      display: inline-flex;
+      flex-wrap: wrap;
+    }
+
+    .tooltip-layer .link-inline a,
+    .tooltip-layer .inline-path,
+    .tooltip-layer .inline-copyable {
+      color: #9ae7dc;
+    }
+
+    .compare-card {
+      padding: 14px;
+      border-radius: 10px;
+      border: none;
+      background: var(--surface-raised);
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
+      gap: 0;
+      box-shadow: none;
+      position: relative;
+      overflow: visible;
+      isolation: isolate;
+    }
+
+    .compare-card.pass { background: linear-gradient(180deg, rgba(29, 124, 91, 0.04), var(--surface-solid)); }
+    .compare-card.alert { background: linear-gradient(180deg, rgba(185, 109, 16, 0.04), var(--surface-solid)); }
+    .compare-card.critical { background: linear-gradient(180deg, rgba(182, 56, 43, 0.04), var(--surface-solid)); }
+    .compare-card.waiting { background: linear-gradient(180deg, rgba(63, 111, 147, 0.04), var(--surface-solid)); }
+    .compare-card.unknown { background: linear-gradient(180deg, rgba(97, 113, 122, 0.04), var(--surface-solid)); }
+
+    .benchmark-span-full {
+      grid-column: 1 / -1;
+    }
+
+    .compare-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: start;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .compare-headline {
+      margin: 0 0 8px;
+    }
+
+    .compare-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 4px;
+    }
+
+    .compare-metric {
+      border: none;
+      border-radius: 10px;
+      background: var(--surface);
+      padding: 12px;
+      display: grid;
+      gap: 6px;
+      box-shadow: none;
+      position: relative;
+      overflow: visible;
+      isolation: isolate;
+    }
+
+    .side-block:hover,
+    .side-block:focus-within,
+    .metric-card:hover,
+    .metric-card:focus-within,
+    .service-card:hover,
+    .service-card:focus-within,
+    .glossary-card:hover,
+    .glossary-card:focus-within,
+    .link-card:hover,
+    .link-card:focus-within,
+    .compare-card:hover,
+    .compare-card:focus-within,
+    .compare-metric:hover,
+    .compare-metric:focus-within {
+      z-index: 12;
+    }
+
+    .side-block::before,
+    .metric-card::before,
+    .service-card::before,
+    .glossary-card::before,
+    .link-card::before,
+    .compare-card::before,
+    .compare-metric::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      box-shadow: var(--card-inner-shadow);
+    }
+
+    .compare-metric-label {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .compare-metric-value {
+      margin: 0;
+    }
+
+    .compare-metric-note {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .card-shell {
+      perspective: 1600px;
+      transform-style: preserve-3d;
+      isolation: isolate;
+    }
+
+    .card-flip-stage {
+      display: block;
+      min-height: 0;
+      transform-style: preserve-3d;
+      transition: transform 0.2s ease;
+    }
+
+    .card-face {
+      min-width: 0;
+      backface-visibility: hidden;
+      -webkit-backface-visibility: hidden;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    .card-face-back {
+      transform: rotateY(180deg);
+    }
+
+    .card-shell:not(.card-back-visible) .card-face-back,
+    .card-shell.card-back-visible .card-face-front {
+      display: none;
+    }
+
+    .card-shell.card-back-visible .card-flip-stage {
+      transform: rotateY(180deg);
+    }
+
+    body.card-fullscreen-open {
+      overflow: hidden;
+    }
+
+    .card-shell.card-fullscreen {
+      position: fixed;
+      inset: 14px;
+      z-index: 1100;
+      max-width: none;
+      width: auto;
+      height: auto;
+      margin: 0 !important;
+      overflow: auto;
+      backdrop-filter: blur(18px);
+      box-shadow:
+        0 0 1px rgba(18, 28, 33, 0.28),
+        0 0 16px rgba(18, 28, 33, 0.14),
+        0 0 40px rgba(18, 28, 33, 0.10),
+        0 28px 60px -26px rgba(18, 28, 33, 0.22);
+    }
+
+    .card-back-note {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .card-back-source {
+      margin: 10px 0 0;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.45;
+    }
+
+    .card-back-section-title {
+      margin: 12px 0 8px;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.01em;
+    }
+
+    .procedural-back-layout {
+      display: grid;
+      gap: 12px;
+    }
+
+    .procedural-back-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .procedural-back-legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 11px;
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    .procedural-back-legend-swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      flex: 0 0 auto;
+      box-shadow: inset 0 0 0 1px rgba(30, 42, 47, 0.08);
+    }
+
+    .procedural-back-legend-swatch.with-amai {
+      background: linear-gradient(180deg, rgba(29, 124, 91, 0.88), rgba(29, 124, 91, 0.62));
+    }
+
+    .procedural-back-legend-swatch.without-amai {
+      background: linear-gradient(180deg, rgba(185, 109, 16, 0.88), rgba(185, 109, 16, 0.62));
+    }
+
+    .procedural-graph-panel {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+      border-radius: 12px;
+      background: var(--surface);
+      border: 1px solid var(--surface-border);
+    }
+
+    .procedural-graph-title {
+      margin: 0;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.01em;
+    }
+
+    .procedural-graph-note {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .procedural-axis-caption {
+      margin: 0;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.35;
+    }
+
+    .procedural-axis-frame {
+      display: grid;
+      gap: 8px;
+    }
+
+    .procedural-axis-frame.metric {
+      grid-template-columns: 74px minmax(0, 1fr);
+      align-items: start;
+    }
+
+    .procedural-axis-frame.history {
+      grid-template-columns: 52px minmax(0, 1fr);
+      align-items: stretch;
+    }
+
+    .procedural-y-axis {
+      display: grid;
+      align-content: stretch;
+      gap: 8px;
+      min-height: 100%;
+    }
+
+    .procedural-y-axis.metric {
+      justify-items: start;
+      padding-top: 30px;
+    }
+
+    .procedural-y-axis.history {
+      grid-template-rows: auto 1fr;
+      justify-items: end;
+    }
+
+    .procedural-y-axis-title {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.2;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .procedural-y-axis-ticks {
+      display: grid;
+      gap: 0;
+      width: 100%;
+      min-height: 96px;
+    }
+
+    .procedural-y-axis-ticks.history {
+      grid-template-rows: repeat(3, 1fr);
+      align-items: stretch;
+      justify-items: end;
+    }
+
+    .procedural-y-axis-tick {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .procedural-y-axis-tick.history.top {
+      align-self: start;
+    }
+
+    .procedural-y-axis-tick.history.middle {
+      align-self: center;
+    }
+
+    .procedural-y-axis-tick.history.bottom {
+      align-self: end;
+    }
+
+    .procedural-graph-rows {
+      display: grid;
+      gap: 10px;
+    }
+
+    .procedural-graph-row {
+      display: grid;
+      gap: 6px;
+    }
+
+    .procedural-graph-row-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .procedural-graph-row-label {
+      margin: 0;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.35;
+    }
+
+    .procedural-graph-row-values {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .procedural-graph-lanes {
+      display: grid;
+      gap: 6px;
+    }
+
+    .procedural-graph-lane {
+      display: grid;
+      grid-template-columns: 88px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .procedural-graph-lane-label,
+    .procedural-history-caption {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.3;
+    }
+
+    .procedural-graph-track {
+      position: relative;
+      height: 10px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(30, 42, 47, 0.08);
+    }
+
+    .procedural-x-axis-scale {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 2px;
+    }
+
+    .procedural-x-axis-scale span {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    .procedural-x-axis-scale span:nth-child(2) {
+      text-align: center;
+    }
+
+    .procedural-x-axis-scale span:nth-child(3) {
+      text-align: right;
+    }
+
+    .procedural-graph-fill {
+      position: absolute;
+      inset: 0 auto 0 0;
+      border-radius: inherit;
+    }
+
+    .procedural-graph-fill.with-amai {
+      background: linear-gradient(90deg, rgba(29, 124, 91, 0.60), rgba(29, 124, 91, 0.94));
+    }
+
+    .procedural-graph-fill.without-amai {
+      background: linear-gradient(90deg, rgba(185, 109, 16, 0.56), rgba(185, 109, 16, 0.92));
+    }
+
+    .procedural-graph-value {
+      color: var(--ink);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1;
+      min-width: 46px;
+      text-align: right;
+    }
+
+    .procedural-history-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(54px, 1fr));
+      gap: 8px;
+      align-items: end;
+      min-height: 140px;
+      position: relative;
+      background-image:
+        linear-gradient(to top, rgba(30, 42, 47, 0.10) 1px, transparent 1px),
+        linear-gradient(to top, rgba(30, 42, 47, 0.06) 1px, transparent 1px);
+      background-size: 100% 100%, 100% 50%;
+      background-position: 0 100%, 0 50%;
+      background-repeat: no-repeat;
+      padding-top: 4px;
+    }
+
+    .procedural-history-point {
+      display: grid;
+      gap: 6px;
+      align-items: end;
+      justify-items: center;
+    }
+
+    .procedural-history-bars {
+      width: 100%;
+      min-height: 96px;
+      display: flex;
+      align-items: end;
+      justify-content: center;
+      gap: 6px;
+      padding: 8px 6px;
+      border-radius: 10px;
+      background: rgba(30, 42, 47, 0.04);
+    }
+
+    .procedural-history-bar {
+      width: 16px;
+      min-height: 6px;
+      border-radius: 999px 999px 4px 4px;
+      box-shadow: inset 0 0 0 1px rgba(30, 42, 47, 0.06);
+    }
+
+    .procedural-history-bar.with-amai {
+      background: linear-gradient(180deg, rgba(29, 124, 91, 0.96), rgba(29, 124, 91, 0.56));
+    }
+
+    .procedural-history-bar.without-amai {
+      background: linear-gradient(180deg, rgba(185, 109, 16, 0.96), rgba(185, 109, 16, 0.56));
+    }
+
+    .procedural-history-label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.2;
+      text-align: center;
+    }
+
+    .procedural-history-values {
+      color: var(--ink);
+      font-size: 11px;
+      line-height: 1.35;
+      text-align: center;
+    }
+
+    .procedural-history-x-axis {
+      display: grid;
+      gap: 4px;
+    }
+
+    .procedural-history-x-axis-title {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.2;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      text-align: center;
+    }
+
+    .hierarchy-panel {
+      display: grid;
+      gap: 12px;
+    }
+
+    .hierarchy-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .hierarchy-legend-item,
+    .hierarchy-source-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.2;
+      background: var(--surface);
+      color: var(--ink);
+    }
+
+    .hierarchy-legend-item.pass,
+    .hierarchy-source-badge.pass {
+      background: var(--pass-soft);
+      color: var(--pass);
+    }
+
+    .hierarchy-legend-item.alert,
+    .hierarchy-source-badge.alert {
+      background: var(--alert-soft);
+      color: var(--alert);
+    }
+
+    .hierarchy-legend-item.waiting,
+    .hierarchy-source-badge.waiting {
+      background: var(--waiting-soft);
+      color: var(--waiting);
+    }
+
+    .hierarchy-projects,
+    .hierarchy-node-children {
+      display: grid;
+      gap: 10px;
+    }
+
+    .hierarchy-node {
+      border-radius: 12px;
+      padding: 12px;
+      background: var(--surface);
+      border: 1px solid var(--surface-border);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hierarchy-node::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 4px;
+      background: rgba(97, 113, 122, 0.30);
+    }
+
+    .hierarchy-node.pass::before { background: var(--pass); }
+    .hierarchy-node.alert::before { background: var(--alert); }
+    .hierarchy-node.waiting::before { background: var(--waiting); }
+    .hierarchy-node.unknown::before { background: var(--unknown); }
+
+    .hierarchy-node-header {
+      display: grid;
+      gap: 4px;
+    }
+
+    .hierarchy-node-title {
+      margin: 0;
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 800;
+      line-height: 1.3;
+    }
+
+    .hierarchy-node-summary {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .hierarchy-node-children {
+      margin-top: 10px;
+      margin-left: 10px;
+      padding-left: 14px;
+      border-left: 1px dashed rgba(30, 42, 47, 0.14);
+    }
+
+    .hierarchy-source-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .hierarchy-thread-meta,
+    .hierarchy-pending-list {
+      margin: 10px 0 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 8px;
+    }
+
+    .hierarchy-thread-meta li,
+    .hierarchy-pending-thread {
+      display: grid;
+      gap: 4px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.56);
+      border: 1px solid rgba(30, 42, 47, 0.06);
+    }
+
+    .hierarchy-thread-label {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .hierarchy-thread-value {
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.45;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .compare-table-wrap {
+      margin-top: 8px;
+      overflow-x: auto;
+      scrollbar-gutter: stable both-edges;
+      scrollbar-width: thin;
+      scrollbar-color: transparent transparent;
+    }
+
+    .compare-table-wrap::-webkit-scrollbar {
+      height: 12px;
+    }
+
+    .compare-table-wrap::-webkit-scrollbar-track {
+      background: transparent;
+      border-radius: 999px;
+    }
+
+    .compare-table-wrap::-webkit-scrollbar-thumb {
+      background: transparent;
+      border-radius: 999px;
+      border: 2px solid transparent;
+      transition: background 0.14s ease, border-width 0.14s ease, box-shadow 0.14s ease;
+    }
+
+    .compare-table-wrap::-webkit-scrollbar-corner {
+      background: transparent;
+    }
+
+    .compare-card:hover .compare-table-wrap,
+    .compare-table-wrap:hover,
+    .compare-table-wrap:focus-within {
+      scrollbar-color: var(--table-scroll-thumb) var(--table-scroll-track);
+    }
+
+    .compare-card:hover .compare-table-wrap::-webkit-scrollbar-track,
+    .compare-table-wrap:hover::-webkit-scrollbar-track,
+    .compare-table-wrap:focus-within::-webkit-scrollbar-track {
+      background: var(--table-scroll-track);
+    }
+
+    .compare-card:hover .compare-table-wrap::-webkit-scrollbar-thumb,
+    .compare-table-wrap:hover::-webkit-scrollbar-thumb,
+    .compare-table-wrap:focus-within::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, var(--table-scroll-thumb), var(--table-scroll-thumb-strong));
+      border: 2px solid var(--table-scroll-track);
+    }
+
+    .compare-card:hover .compare-table-wrap::-webkit-scrollbar-thumb:hover,
+    .compare-table-wrap:hover::-webkit-scrollbar-thumb:hover,
+    .compare-table-wrap:focus-within::-webkit-scrollbar-thumb:hover {
+      border-width: 0;
+      box-shadow: 0 0 0 1px rgba(78, 189, 171, 0.28);
+    }
+
+    .compare-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .compare-table th,
+    .compare-table td {
+      padding: 10px 12px;
+      border-top: 1px solid var(--surface-border);
+      text-align: right;
+      vertical-align: top;
+      white-space: nowrap;
+    }
+
+    .compare-table th:first-child,
+    .compare-table td:first-child {
+      text-align: left;
+      white-space: normal;
+    }
+
+    .compare-table thead th {
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .compare-value-stack {
+      display: inline-grid;
+      justify-items: end;
+      gap: 2px;
+      line-height: 1.1;
+    }
+
+    .compare-value-stack-primary {
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    .compare-value-stack-secondary {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      text-transform: none;
+    }
+
+    .compare-card.table-transposed .compare-table {
+      table-layout: fixed;
+    }
+
+    .compare-card.table-transposed .compare-table th,
+    .compare-card.table-transposed .compare-table td {
+      white-space: normal;
+      text-align: center;
+    }
+
+    .compare-card.table-transposed .compare-table th:first-child,
+    .compare-card.table-transposed .compare-table td:first-child {
+      text-align: left;
+      min-width: 160px;
+      width: 20%;
+    }
+
+    .service-headline {
+      margin: 0 0 6px;
+    }
+
+    .card-value,
+    .service-headline,
+    .compare-headline,
+    .compare-metric-value,
+    .machine-grid .machine-compact .card-value {
+      font-size: clamp(20px, 2.2vw, 22px);
+      line-height: 1.04;
+      letter-spacing: -0.03em;
+      font-weight: 800;
+    }
+
+    .detail-list,
+    .warning-list,
+    .glossary-list,
+    .next-list,
+    .link-list {
+      margin: 0;
+      padding-left: 18px;
+      display: grid;
+      gap: 8px;
+      color: var(--muted);
+    }
+
+    .muted {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .error-banner {
+      display: none;
+      padding: 16px 18px;
+      border-radius: 10px;
+      background: var(--critical-soft);
+      color: var(--critical);
+      font-weight: 700;
+      margin-bottom: 10px;
+      border: 1px solid var(--error-border);
+    }
+
+    .link-disabled {
+      color: var(--muted);
+      font-weight: 700;
+      text-decoration: none;
+      cursor: default;
+    }
+
+    .hero-links-block {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    .hero-links-block .link-list {
+      align-content: start;
+      padding-left: 0;
+      list-style: none;
+      gap: 10px;
+    }
+
+    .hero-links-block .link-list li {
+      display: block;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .link-item-main {
+      min-width: 0;
+      display: grid;
+      gap: 6px;
+    }
+
+    .link-item-main a,
+    .link-item-main .link-disabled {
+      font-weight: 700;
+      font-size: 14px;
+      line-height: 1.3;
+      text-decoration-thickness: 1px;
+    }
+
+    .link-item-note {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .link-group-title {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .link-group-note {
+      display: block;
+      margin-bottom: 10px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .link-group-items {
+      display: grid;
+      gap: 10px;
+    }
+
+    .link-group-item {
+      padding-top: 10px;
+      border-top: 1px solid var(--surface-border);
+    }
+
+    .link-group-item:first-child {
+      padding-top: 0;
+      border-top: none;
+    }
+
+    .link-inline {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 100%;
+      position: relative;
+    }
+
+    .copy-link-btn {
+      appearance: none;
+      border: none;
+      border-radius: 999px;
+      width: 24px;
+      height: 24px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(121, 210, 197, 0.10);
+      color: var(--accent);
+      font: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1;
+      cursor: pointer;
+      white-space: nowrap;
+      opacity: 0;
+      transform: translateY(1px);
+      transition: opacity 0.14s ease, background 0.14s ease, transform 0.14s ease;
+    }
+
+    .hero-links-block .link-list li:hover .copy-link-btn,
+    .hero-links-block .link-list li:focus-within .copy-link-btn,
+    .link-inline:hover .copy-link-btn,
+    .link-inline:focus-within .copy-link-btn {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .copy-link-btn:hover,
+    .copy-link-btn:focus-visible {
+      background: rgba(121, 210, 197, 0.20);
+      outline: none;
+    }
+
+    .inline-path,
+    .inline-copyable {
+      color: var(--accent);
+      font-weight: 700;
+      text-decoration: underline;
+      text-decoration-color: rgba(121, 210, 197, 0.42);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }
+
+    .inline-path {
+      white-space: nowrap;
+    }
+
+    code {
+      font-family: "IBM Plex Mono", "JetBrains Mono", "SFMono-Regular", monospace;
+      font-size: 0.92em;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --bg: radial-gradient(circle at top, #1b454b 0%, #14262d 38%, #0e181d 100%);
+        --paper: rgba(14, 20, 24, 0.92);
+        --ink: #eef4f7;
+        --muted: #a5b7bf;
+        --accent: #79d2c5;
+        --accent-soft: rgba(121, 210, 197, 0.14);
+        --pass: #7fd8ae;
+        --pass-soft: rgba(79, 158, 122, 0.22);
+        --alert: #f4c06a;
+        --alert-soft: rgba(185, 109, 16, 0.24);
+        --critical: #ff8f82;
+        --critical-soft: rgba(182, 56, 43, 0.24);
+        --waiting: #8fb9e0;
+        --waiting-soft: rgba(76, 127, 173, 0.24);
+        --unknown: #b2bfca;
+        --unknown-soft: rgba(97, 113, 122, 0.24);
+        --panel-outer-shadow:
+          0 0 2px rgba(0, 0, 0, 0.82),
+          0 0 16px rgba(0, 0, 0, 0.44),
+          0 0 40px rgba(0, 0, 0, 0.28),
+          0 24px 48px -32px rgba(0, 0, 0, 0.34);
+        --border: rgba(238, 244, 247, 0.08);
+        --surface: rgba(17, 25, 30, 0.78);
+        --surface-raised: rgba(17, 25, 30, 0.88);
+        --surface-solid: rgba(20, 30, 36, 0.94);
+        --surface-border: rgba(238, 244, 247, 0.08);
+        --table-scroll-track: rgba(14, 22, 27, 0.96);
+        --table-scroll-thumb: rgba(18, 104, 93, 0.88);
+        --table-scroll-thumb-strong: rgba(37, 147, 131, 0.96);
+        --hero-glow: rgba(121, 210, 197, 0.18);
+        --error-border: rgba(255, 143, 130, 0.30);
+        --card-outer-shadow:
+          0 0 1px rgba(0, 0, 0, 0.60),
+          0 0 10px rgba(0, 0, 0, 0.28),
+          0 0 22px rgba(0, 0, 0, 0.16),
+          0 18px 34px -26px rgba(0, 0, 0, 0.28);
+        --card-inner-shadow:
+          inset 0 0 0 1px rgba(10, 104, 88, 0.58),
+          inset 0 1px 0 rgba(255, 255, 255, 0.030),
+          inset 0 12px 18px -15px rgba(7, 82, 69, 0.26),
+          inset 0 -12px 18px -15px rgba(6, 63, 54, 0.20),
+          inset 12px 0 18px -15px rgba(7, 71, 61, 0.20),
+          inset -12px 0 18px -15px rgba(7, 71, 61, 0.20);
+      }
+    }
+
+    @media (max-width: 900px) {
+      .hero {
+        grid-template-columns: 1fr;
+      }
+
+      .hero-top {
+        grid-template-columns: 1fr;
+      }
+
+      .hero-cards {
+        grid-template-columns: 1fr;
+      }
+
+      .compare-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .machine-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 1200px) {
+      .benchmark-cards-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 640px) {
+      .benchmark-cards-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .machine-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div id="error-banner" class="error-banner"></div>
+    <section class="hero">
+      <div class="panel hero-main">
+        <div class="hero-top">
+          <div class="brand-line">
+            <img class="brand-lockup" src="/brand/amai_lockup.svg" alt="Amai">
+          </div>
+          <div class="side-block hero-summary-block">
+            <div id="summary-status"></div>
+            <div class="kv" id="headline-kv"></div>
+          </div>
+        </div>
+        <div class="hero-cards" id="hero-cards"></div>
+      </div>
+      <aside class="panel hero-side">
+        <div class="side-block hero-links-block">
+          <ul class="link-list" id="quick-links"></ul>
+        </div>
+      </aside>
+    </section>
+
+    <section class="panel section">
+      <h2 class="has-tooltip" tabindex="0" data-tip="Это именно текущая живая сессия. Здесь нет старых benchmark-цифр: только потоковые метрики, которые меняются по мере новых запросов и автообновляются на странице.">Live</h2>
+      <div class="cards" id="top-cards"></div>
+    </section>
+
+    <section class="panel section">
+      <h2>Последние Честные Проверки</h2>
+      <p class="muted">
+        Эти цифры не потоковые. Здесь лежат последние сохранённые отдельные проверки:
+        нагрузка быстрого пути, полный холодный прогон и проверка точности с изоляцией.
+        Они нужны, чтобы сравнивать систему с её целями на повторяемых измерениях.
+      </p>
+      <div class="cards benchmark-cards-grid" id="benchmark-cards"></div>
+    </section>
+
+    <section class="panel section">
+      <h2>Сервисы Прямо Сейчас</h2>
+      <p class="muted">
+        Это живые системные показатели: база метаданных, векторный слой и очередь событий.
+        Если какая-то строка берётся не из live probe, а из последнего измеренного прогона,
+        это будет подписано явно.
+      </p>
+      <div class="cards" id="service-cards"></div>
+    </section>
+
+    <section class="panel section">
+      <h2>Машина И Установка</h2>
+      <p class="muted">
+        Здесь видно, на каком железе сейчас всё работает и к какому клиенту уже привязана установка.
+      </p>
+      <div class="cards machine-grid" id="machine-cards"></div>
+    </section>
+
+    <section class="panel section">
+      <h2>Если есть проблемы</h2>
+      <div id="warnings-wrap"></div>
+    </section>
+
+    <section class="panel section">
+      <h2>Что Означают Термины И Метрики</h2>
+      <div class="cards" id="glossary-cards"></div>
+    </section>
+  </div>
+  <div id="tooltip-layer" class="tooltip-layer" hidden>
+    <button
+      id="tooltip-copy-btn"
+      class="tooltip-copy-btn"
+      type="button"
+      hidden
+      aria-label="Скопировать выделение"
+      title="Скопировать выделение"
+    >⧉</button>
+    <div id="tooltip-layer-content" class="tooltip-layer-content"></div>
+  </div>
+  <div id="dashboard-toast" class="dashboard-toast" hidden></div>
+
+  <script>
+    const REFRESH_MS = __REFRESH_MS__;
+    const CLIENT_BUDGET_LIVE_REFRESH_MS = Math.max(REFRESH_MS * 15, 20000);
+    const DASHBOARD_FETCH_TIMEOUT_MS = Math.min(Math.max(REFRESH_MS * 2, 4000), 15000);
+    const CLIENT_BUDGET_FETCH_TIMEOUT_MS = Math.min(Math.max(Math.floor(REFRESH_MS * 3 / 2), 3000), 12000);
+    const TOOLTIP_HIDE_GRACE_MS = 220;
+    const DASHBOARD_BOOTSTRAP_PAYLOAD = __BOOTSTRAP_PAYLOAD__;
+    const DASHBOARD_PAYLOAD_CACHE_KEY = "amai-human-dashboard-last-payload-v1";
+    const CLIENT_BUDGET_ROW_ALIASES = {
+      client_live_full_turn_savings: ["client_live_full_turn_savings", "Amai в полном live-turn"],
+      client_live_context: ["client_live_context", "Последний запрос клиента"],
+      client_live_limit: ["client_live_limit", "Лимит клиента сейчас", "Последний observed лимит клиента"],
+      client_limit_hourly_burn: ["client_limit_hourly_burn", "KPI 5ч лимита"],
+    };
+    const errorBanner = document.getElementById("error-banner");
+    const tooltipLayer = document.getElementById("tooltip-layer");
+    const tooltipLayerContent = document.getElementById("tooltip-layer-content");
+    const tooltipCopyBtn = document.getElementById("tooltip-copy-btn");
+    const dashboardToast = document.getElementById("dashboard-toast");
+    let refreshInFlight = false;
+    let interactionHoldUntil = 0;
+    let pendingForcedDashboardRefreshReason = null;
+    let pendingForcedDashboardRefreshTimer = null;
+    let lastDashboardRefreshStartedAt = 0;
+    let activeTooltipTarget = null;
+    let activeTooltipKind = null;
+    let tooltipSelectionValue = "";
+    let dashboardToastTimer = null;
+    let tooltipHideTimer = null;
+
+    function statusClass(status) {
+      return ["pass", "alert", "critical", "waiting", "unknown"].includes(status) ? status : "unknown";
+    }
+
+    function clearNode(node) {
+      while (node.firstChild) {
+        node.removeChild(node.firstChild);
+      }
+    }
+
+    function textNode(tag, className, text) {
+      const element = document.createElement(tag);
+      if (className) {
+        element.className = className;
+      }
+      element.textContent = text;
+      return element;
+    }
+
+    function dashboardLiveCompareCard(payload) {
+      if (!payload) {
+        return null;
+      }
+      if (payload.live_compare_card && payload.live_compare_card.kind === "live_compare") {
+        return payload.live_compare_card;
+      }
+      if (Array.isArray(payload.top_cards)) {
+        return payload.top_cards.find((card) => card && card.kind === "live_compare") || null;
+      }
+      return null;
+    }
+
+    function dashboardPayloadLiveSampleScore(payload) {
+      const card = dashboardLiveCompareCard(payload);
+      const rows = Array.isArray(card?.table?.rows) ? card.table.rows : [];
+      return rows.reduce((best, row) => {
+        const label = typeof row?.label === "string" ? row.label : "";
+        const values = Array.isArray(row?.values) ? row.values : [];
+        const raw = values[4];
+        const count = Number.parseInt(raw, 10);
+        if (!Number.isFinite(count)) {
+          return best;
+        }
+        if (!label.includes("текущая серия") && !label.includes("окно 24ч")) {
+          return best;
+        }
+        return Math.max(best, count);
+      }, 0);
+    }
+
+    function readCachedDashboardPayload() {
+      try {
+        const raw = window.localStorage.getItem(DASHBOARD_PAYLOAD_CACHE_KEY);
+        if (!raw) {
+          return null;
+        }
+        const payload = JSON.parse(raw);
+        return payload && typeof payload === "object" ? payload : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function writeCachedDashboardPayload(payload) {
+      try {
+        if (!payload || typeof payload !== "object") {
+          return;
+        }
+        if (dashboardPayloadLiveSampleScore(payload) <= 0) {
+          return;
+        }
+        window.localStorage.setItem(
+          DASHBOARD_PAYLOAD_CACHE_KEY,
+          JSON.stringify(payload),
+        );
+      } catch (_) {}
+    }
+
+    function chooseInitialDashboardPayload(bootstrapPayload) {
+      if (bootstrapPayload) {
+        return bootstrapPayload;
+      }
+      return null;
+    }
+
+    function isDocumentVisibleForRefresh() {
+      return document.visibilityState === "visible";
+    }
+
+    function metricRowKey(row) {
+      if (row && typeof row.key === "string" && row.key.trim()) {
+        return row.key.trim();
+      }
+      if (row && typeof row.label === "string" && row.label.trim()) {
+        return row.label.trim();
+      }
+      return "";
+    }
+
+    function safeJsonParse(value) {
+      if (typeof value !== "string" || !value.trim()) {
+        return null;
+      }
+      try {
+        return JSON.parse(value);
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function buildMetricRowValue(row) {
+      const key = metricRowKey(row);
+      if (key === "client_limit_hourly_burn" && row && row.target_selector) {
+        return buildClientBudgetTargetMetricValue(row);
+      }
+      return textNode("span", "metric-row-value", row.value);
+    }
+
+    function buildClientBudgetTargetMetricValue(row) {
+      const selector = row && typeof row.target_selector === "object" ? row.target_selector : null;
+      if (!selector || typeof selector.kpi_value_text !== "string" || !selector.kpi_value_text.trim()) {
+        return textNode("span", "metric-row-value", row.value);
+      }
+      const wrap = document.createElement("span");
+      wrap.className = "metric-row-value interactive-client-budget-value";
+      if (selector.value_prefix) {
+        wrap.appendChild(textNode("span", "", selector.value_prefix));
+      }
+      const trigger = document.createElement("button");
+      trigger.type = "button";
+      trigger.className = "client-budget-target-trigger has-tooltip";
+      trigger.textContent = selector.kpi_value_text;
+      trigger.tabIndex = 0;
+      trigger.dataset.tooltipKind = "client-budget-target-selector";
+      trigger.dataset.clientBudgetTargetSelector = JSON.stringify(selector);
+      trigger.setAttribute("data-tip", selector.tooltip_intro || row.tooltip || "");
+      trigger.setAttribute("aria-haspopup", "dialog");
+      trigger.setAttribute("aria-expanded", "false");
+      trigger.setAttribute(
+        "aria-label",
+        `5ч KPI ${selector.kpi_value_text}. Нажмите, чтобы выбрать целевой режим экономии.`
+      );
+      trigger.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        extendInteractionHold(4);
+        if (activeTooltipTarget === trigger && tooltipLayer && !tooltipLayer.hidden) {
+          hideTooltip(trigger);
+          return;
+        }
+        showTooltip(trigger);
+      });
+      wrap.appendChild(trigger);
+      if (selector.value_suffix) {
+        wrap.appendChild(textNode("span", "", selector.value_suffix));
+      }
+      return wrap;
+    }
+
+    function createMetricRow(row) {
+      const item = document.createElement("li");
+      item.className = "metric-row";
+      const key = metricRowKey(row);
+      if (key) {
+        item.dataset.metricRowKey = key;
+      }
+      if (row && typeof row.label === "string" && row.label.trim()) {
+        item.dataset.metricRowLabel = row.label.trim();
+      }
+      item.appendChild(labelWithTooltip(row.label, row.tooltip));
+      item.appendChild(buildMetricRowValue(row));
+      return item;
+    }
+
+    function normalizeAgentDisplayNameInput(value) {
+      return String(value || "")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .join(" ");
+    }
+
+    async function submitAgentDisplayNameUpdate(agentScope, displayName) {
+      const response = await fetch(apiPathWithThreadHint("/api/agent-display-name"), {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          agent_scope: agentScope,
+          display_name: displayName,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const errorText =
+          payload && typeof payload.error === "string" && payload.error.trim()
+            ? payload.error.trim()
+            : `HTTP ${response.status}`;
+        throw new Error(errorText);
+      }
+      return payload;
+    }
+
+    function renderEditableActiveAgentLabel(container, block, className) {
+      clearNode(container);
+      container.classList.remove("is-saving");
+      container.dataset.agentLabelEditable = "true";
+      const label = labelWithTooltip(
+        block.agent_label || "Активный агент",
+        block.agent_tooltip || null,
+        className
+      );
+      label.classList.add("active-agent-budget-agent-edit-label");
+      label.dataset.agentLabelEditable = "true";
+      container.appendChild(label);
+    }
+
+    function cancelActiveAgentLabelEdit() {
+      if (!activeAgentLabelEditor) {
+        return;
+      }
+      const editor = activeAgentLabelEditor;
+      activeAgentLabelEditor = null;
+      renderEditableActiveAgentLabel(editor.container, editor.block, editor.className);
+    }
+
+    async function commitActiveAgentLabelEdit() {
+      if (!activeAgentLabelEditor) {
+        return;
+      }
+      const editor = activeAgentLabelEditor;
+      const nextDisplayName = normalizeAgentDisplayNameInput(editor.input.value);
+      const currentDisplayName = normalizeAgentDisplayNameInput(editor.block.agent_label);
+      if (!nextDisplayName) {
+        showDashboardToast("Имя агента не может быть пустым.");
+        editor.input.focus();
+        editor.input.select();
+        return;
+      }
+      if (nextDisplayName === currentDisplayName) {
+        cancelActiveAgentLabelEdit();
+        return;
+      }
+      editor.container.classList.add("is-saving");
+      editor.input.disabled = true;
+      try {
+        const payload = await submitAgentDisplayNameUpdate(editor.block.agent_scope, nextDisplayName);
+        activeAgentLabelEditor = null;
+        if (payload?.dashboard_live_summary) {
+          applyDashboardLiveSummary(payload.dashboard_live_summary);
+        } else {
+          await loadDashboard(true);
+        }
+        const notice = payload?.chat_notice;
+        if (notice) {
+          emitClientBudgetChatNotice(notice);
+        }
+        showDashboardToast(
+          (notice && notice.message_text) || `Имя агента сохранено: ${nextDisplayName}.`
+        );
+      } catch (error) {
+        editor.container.classList.remove("is-saving");
+        editor.input.disabled = false;
+        showDashboardToast(`Не удалось сохранить имя агента: ${error.message}`);
+        editor.input.focus();
+        editor.input.select();
+      }
+    }
+
+    function startActiveAgentLabelEdit(container, block, className) {
+      const agentScope =
+        typeof block?.agent_scope === "string" ? block.agent_scope.trim() : "";
+      if (!agentScope) {
+        return;
+      }
+      if (activeAgentLabelEditor && activeAgentLabelEditor.container !== container) {
+        cancelActiveAgentLabelEdit();
+      }
+      if (activeAgentLabelEditor && activeAgentLabelEditor.container === container) {
+        return;
+      }
+      extendInteractionHold(12);
+      clearNode(container);
+      const input = document.createElement("input");
+      input.className = "active-agent-budget-agent-input";
+      input.type = "text";
+      input.maxLength = 120;
+      input.value = block.agent_label || "";
+      input.setAttribute("aria-label", "Имя агента");
+      input.dataset.agentLabelEditable = "true";
+      input.addEventListener("click", (event) => event.stopPropagation());
+      input.addEventListener("dblclick", (event) => event.stopPropagation());
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          cancelActiveAgentLabelEdit();
+          return;
+        }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          void commitActiveAgentLabelEdit();
+        }
+      });
+      input.addEventListener("blur", () => {
+        if (activeAgentLabelEditor?.input !== input) {
+          return;
+        }
+        void commitActiveAgentLabelEdit();
+      });
+      container.appendChild(input);
+      activeAgentLabelEditor = { container, block: { ...block }, className, input };
+      input.focus();
+      input.select();
+    }
+
+    function createEditableActiveAgentLabel(block, className = "active-agent-budget-agent-name") {
+      const agentScope =
+        typeof block?.agent_scope === "string" ? block.agent_scope.trim() : "";
+      if (!agentScope) {
+        return labelWithTooltip(
+          block?.agent_label || "Активный агент",
+          block?.agent_tooltip || null,
+          className
+        );
+      }
+      const container = document.createElement("span");
+      container.className = "active-agent-budget-agent-edit";
+      container.dataset.agentLabelEditable = "true";
+      container.dataset.agentScope = agentScope;
+      container.addEventListener("dblclick", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        startActiveAgentLabelEdit(container, block, className);
+      });
+      renderEditableActiveAgentLabel(container, block, className);
+      return container;
+    }
+
+    function createActiveAgentBudgetFieldWithNode(label, valueNode, tooltip) {
+      const field = document.createElement("section");
+      field.className = "active-agent-budget-field";
+      field.appendChild(labelWithTooltip(label, tooltip, "active-agent-budget-field-label"));
+      const valueWrap = document.createElement("div");
+      valueWrap.className = "active-agent-budget-field-value";
+      valueWrap.appendChild(valueNode);
+      field.appendChild(valueWrap);
+      return field;
+    }
+
+    function createActiveAgentBudgetField(label, value, tooltip) {
+      const field = document.createElement("section");
+      field.className = "active-agent-budget-field";
+      field.appendChild(labelWithTooltip(label, tooltip, "active-agent-budget-field-label"));
+      field.appendChild(textNode("div", "active-agent-budget-field-value", value || "ещё нет данных"));
+      return field;
+    }
+
+    function createActiveAgentBudgetCompactBlock(block) {
+      const section = document.createElement("section");
+      section.className = "active-agent-budget-block active-agent-budget-compact";
+      const head = document.createElement("div");
+      head.className = "active-agent-budget-compact-head";
+      head.appendChild(createEditableActiveAgentLabel(block, "active-agent-budget-agent-name"));
+      head.appendChild(
+        labelWithTooltip(
+          block.kpi_value || "5ч KPI: н/д",
+          block.kpi_tooltip || null,
+          "active-agent-budget-kpi-inline"
+        )
+      );
+      section.appendChild(head);
+      if (block.pressure_value) {
+        section.appendChild(
+          labelWithTooltip(
+            block.pressure_value,
+            block.pressure_tooltip || null,
+            "active-agent-budget-pressure-inline"
+          )
+        );
+      }
+      return section;
+    }
+
+    function renderActiveAgentBudgetBlocks(target, card) {
+      const blocks = Array.isArray(card.agent_blocks) ? card.agent_blocks : [];
+      if (card.shared_limit_value) {
+        target.appendChild(
+          createActiveAgentBudgetField(
+            card.shared_limit_label || "Лимит клиента сейчас:",
+            card.shared_limit_value,
+            card.shared_limit_tooltip || null
+          )
+        );
+      }
+      if (blocks.length === 0) {
+        return;
+      }
+      const wrap = document.createElement("div");
+      wrap.className = "active-agent-budget-blocks";
+      blocks.forEach((block) => {
+        if (!block.limit_value) {
+          wrap.appendChild(createActiveAgentBudgetCompactBlock(block));
+          return;
+        }
+        const section = document.createElement("section");
+        section.className = "active-agent-budget-block";
+        section.appendChild(
+          createActiveAgentBudgetFieldWithNode(
+            "Агент:",
+            createEditableActiveAgentLabel(block, "active-agent-budget-agent-name"),
+            block.agent_tooltip || null
+          )
+        );
+        section.appendChild(
+          block.limit_value
+            ? createActiveAgentBudgetField(
+                block.limit_label || "Лимит клиента сейчас:",
+                block.limit_value,
+                block.limit_tooltip || null
+              )
+            : document.createComment("shared limit rendered above blocks")
+        );
+        section.appendChild(
+          createActiveAgentBudgetField(
+            "KPI:",
+            block.kpi_value,
+            block.kpi_tooltip || null
+          )
+        );
+        wrap.appendChild(section);
+      });
+      target.appendChild(wrap);
+    }
+
+    function createActiveAgentBudgetSessionCardShell(card) {
+      return createCardShell(
+        "hero-cards",
+        card,
+        `metric-card hero-metric-card ${statusClass(card.status)}`,
+        (front) => {
+          const top = document.createElement("div");
+          top.className = "card-top";
+          const titleTooltip = mergeTooltipParts(card.title_tooltip, card.source_label);
+          top.appendChild(labelWithTooltip(card.title, titleTooltip));
+          const pill = statusPill(card.status, card.status_label, card.status_tooltip);
+          if (pill) {
+            top.appendChild(pill);
+          }
+          front.appendChild(top);
+          if (card.value) {
+            front.appendChild(textNode("p", "card-value", card.value));
+          }
+          if (card.note) {
+            front.appendChild(textNode("p", "card-note", card.note));
+          }
+          renderActiveAgentBudgetBlocks(front, card);
+        },
+        (back) => {
+          renderGenericBackHeader(back, card);
+          if (card.value) {
+            back.appendChild(textNode("p", "card-value", card.value));
+          }
+          if (card.note) {
+            back.appendChild(textNode("p", "card-back-note", card.note));
+          }
+          renderActiveAgentBudgetBlocks(back, card);
+        }
+      );
+    }
+
+    function replaceActiveAgentBudgetCard(card) {
+      if (!card || card.presentation_variant !== "active_agent_budget_grouped_v3") {
+        return;
+      }
+      const heroCards = document.getElementById("hero-cards");
+      if (!heroCards) {
+        return;
+      }
+      const replacement = createActiveAgentBudgetSessionCardShell(card);
+      const existing = heroCards.querySelector('[data-presentation-variant="active_agent_budget_grouped_v3"]');
+      if (existing) {
+        existing.replaceWith(replacement);
+      } else {
+        heroCards.prepend(replacement);
+      }
+    }
+
+    function metricRowAliases(rowOrKey) {
+      const key = typeof rowOrKey === "string" ? rowOrKey : metricRowKey(rowOrKey);
+      const aliases = CLIENT_BUDGET_ROW_ALIASES[key];
+      if (Array.isArray(aliases) && aliases.length > 0) {
+        return aliases;
+      }
+      if (typeof rowOrKey === "object" && rowOrKey && typeof rowOrKey.label === "string" && rowOrKey.label.trim()) {
+        return [key, rowOrKey.label.trim()].filter(Boolean);
+      }
+      return [key].filter(Boolean);
+    }
+
+    function metricRowIdentityMatches(item, rowOrKey) {
+      const aliases = metricRowAliases(rowOrKey);
+      if (aliases.length === 0) {
+        return false;
+      }
+      const dataKey = (item.dataset.metricRowKey || "").trim();
+      const dataLabel = (item.dataset.metricRowLabel || "").trim();
+      const renderedLabel = (item.querySelector(".metric-label")?.textContent || "").trim();
+      return aliases.includes(dataKey) || aliases.includes(dataLabel) || aliases.includes(renderedLabel);
+    }
+
+    function findMetricRowMatches(rowOrKey) {
+      return Array.from(document.querySelectorAll(".metric-row")).filter((item) =>
+        metricRowIdentityMatches(item, rowOrKey)
+      );
+    }
+
+    function currentSessionMetricRowLists() {
+      return Array.from(document.querySelectorAll(".card-shell"))
+        .filter((shell) =>
+          Array.from(shell.querySelectorAll(".card-title")).some(
+            (title) => (title.textContent || "").trim() === "Экономия токенов за текущую сессию"
+          )
+        )
+        .flatMap((shell) => Array.from(shell.querySelectorAll(".metric-rows")));
+    }
+
+    function removeMetricRows(rowOrKey) {
+      findMetricRowMatches(rowOrKey).forEach((item) => item.remove());
+    }
+
+    function upsertMetricRows(row) {
+      const matches = findMetricRowMatches(row);
+      if (matches.length > 0) {
+        matches.forEach((item) => {
+          item.replaceWith(createMetricRow(row));
+        });
+        return;
+      }
+
+      currentSessionMetricRowLists().forEach((list) => {
+        list.appendChild(createMetricRow(row));
+      });
+    }
+
+    function applyClientBudgetLiveRows(payload) {
+      const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+      const presentKeys = new Set(rows.map((row) => metricRowKey(row)).filter(Boolean));
+      Object.keys(CLIENT_BUDGET_ROW_ALIASES).forEach((key) => {
+        if (!presentKeys.has(key)) {
+          removeMetricRows(key);
+        }
+      });
+      rows.forEach((row) => upsertMetricRows(row));
+    }
+
+    let clientBudgetLiveRefreshPromise = null;
+    let dashboardLiveSummaryRefreshPromise = null;
+    const dashboardThreadId = new URLSearchParams(window.location.search).get("thread_id");
+
+    function apiPathWithThreadHint(path) {
+      if (!dashboardThreadId) {
+        return path;
+      }
+      const separator = path.includes("?") ? "&" : "?";
+      return `${path}${separator}thread_id=${encodeURIComponent(dashboardThreadId)}`;
+    }
+
+    async function fetchWithTimeout(path, timeoutMs, init = {}) {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(path, {
+          ...init,
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (error && error.name === "AbortError") {
+          throw new Error(`timeout after ${timeoutMs} ms`);
+        }
+        throw error;
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
+    }
+
+    async function fetchClientBudgetLivePayload(force = false) {
+      if (!force && !isDocumentVisibleForRefresh()) {
+        return null;
+      }
+      if (clientBudgetLiveRefreshPromise) {
+        return clientBudgetLiveRefreshPromise;
+      }
+      clientBudgetLiveRefreshPromise = (async () => {
+        const response = await fetchWithTimeout(
+          apiPathWithThreadHint("/api/client-budget-live"),
+          CLIENT_BUDGET_FETCH_TIMEOUT_MS,
+          {
+            cache: "no-store",
+          },
+        );
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return response.json();
+      })();
+      try {
+        return await clientBudgetLiveRefreshPromise;
+      } finally {
+        clientBudgetLiveRefreshPromise = null;
+      }
+    }
+
+    async function fetchDashboardLiveSummaryPayload(force = false) {
+      if (dashboardLiveSummaryRefreshPromise) {
+        return dashboardLiveSummaryRefreshPromise;
+      }
+      dashboardLiveSummaryRefreshPromise = (async () => {
+        const response = await fetchWithTimeout(
+          apiPathWithThreadHint("/api/dashboard-live-summary"),
+          DASHBOARD_FETCH_TIMEOUT_MS,
+          {
+            cache: "no-store",
+          },
+        );
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return response.json();
+      })();
+      try {
+        return await dashboardLiveSummaryRefreshPromise;
+      } finally {
+        dashboardLiveSummaryRefreshPromise = null;
+      }
+    }
+
+    async function syncClientBudgetLiveRows(force = false, payload = null) {
+      if (!force && !isDocumentVisibleForRefresh()) {
+        return null;
+      }
+      try {
+        const livePayload = payload || await fetchClientBudgetLivePayload(force);
+        if (livePayload) {
+          applyClientBudgetLiveRows(livePayload);
+        }
+        return livePayload;
+      } catch (error) {
+        if (force) {
+          console.warn(`Не удалось обновить live client-budget rows: ${error.message}`);
+        }
+        return null;
+      }
+    }
+
+    async function syncDashboardLiveSummary(force = false, payload = null) {
+      if (!force && !isDocumentVisibleForRefresh()) {
+        return null;
+      }
+      if (!force && isRefreshPaused()) {
+        return null;
+      }
+      if (refreshInFlight) {
+        return null;
+      }
+      try {
+        const livePayload = payload || await fetchDashboardLiveSummaryPayload(force);
+        if (livePayload) {
+          applyDashboardLiveSummary(livePayload);
+        }
+        return livePayload;
+      } catch (error) {
+        if (force) {
+          console.warn(`Не удалось обновить live summary дашборда: ${error.message}`);
+        }
+        return null;
+      }
+    }
+
+    function createCopyButton(valueToCopy) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "copy-link-btn";
+      button.textContent = "⧉";
+      button.setAttribute("aria-label", "Скопировать");
+      button.title = "Скопировать";
+      button.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+          await navigator.clipboard.writeText(valueToCopy);
+          button.textContent = "✓";
+          button.title = "Скопировано";
+          setTimeout(() => {
+            button.textContent = "⧉";
+            button.title = "Скопировать";
+          }, 1200);
+        } catch (_) {
+          button.textContent = "!";
+          button.title = "Не удалось скопировать";
+          setTimeout(() => {
+            button.textContent = "⧉";
+            button.title = "Скопировать";
+          }, 1200);
+        }
+      });
+      return button;
+    }
+
+    function createInlineCopyableText(label, copyValue, href = null, showCopyButton = true) {
+      const wrap = document.createElement("span");
+      wrap.className = "link-inline";
+      if (href) {
+        const link = document.createElement("a");
+        link.href = href;
+        link.textContent = label;
+        if (/^https?:\/\//.test(href)) {
+          link.target = "_blank";
+          link.rel = "noreferrer";
+        }
+        wrap.appendChild(link);
+      } else {
+        wrap.appendChild(textNode("span", "inline-copyable", label));
+        if (showCopyButton) {
+          wrap.appendChild(createCopyButton(copyValue));
+        }
+      }
+      return wrap;
+    }
+
+    function helpRouteForEnvVar(envVarName) {
+      if (envVarName === "AMI_GRAFANA_ADMIN_PASSWORD") {
+        return "/help/grafana-password";
+      }
+      return null;
+    }
+
+    function appendInlineNoteFragment(container, fragment, options = {}) {
+      const inlineCopyButtons = options.inlineCopyButtons !== false;
+      const urlMatch = fragment.match(/https?:\/\/[^\s]+/);
+      if (urlMatch) {
+        const [matched] = urlMatch;
+        const index = fragment.indexOf(matched);
+        if (index > 0) {
+          container.appendChild(document.createTextNode(fragment.slice(0, index)));
+        }
+        container.appendChild(createInlineCopyableText(matched, matched, matched, inlineCopyButtons));
+        const tail = fragment.slice(index + matched.length);
+        if (tail) {
+          appendInlineNoteFragment(container, tail, options);
+        }
+        return;
+      }
+
+      const envVarMatch = fragment.match(/\bAMI_[A-Z0-9_]+\b/);
+      if (envVarMatch) {
+        const [matched] = envVarMatch;
+        const index = fragment.indexOf(matched);
+        if (index > 0) {
+          container.appendChild(document.createTextNode(fragment.slice(0, index)));
+        }
+        const helpRoute = helpRouteForEnvVar(matched);
+        if (helpRoute) {
+          container.appendChild(createInlineCopyableText(matched, matched, helpRoute, inlineCopyButtons));
+        } else {
+          const envWrap = createInlineCopyableText(matched, matched, null, inlineCopyButtons);
+          const inlineEnv = envWrap.querySelector(".inline-copyable");
+          if (inlineEnv) {
+            inlineEnv.classList.add("inline-path");
+          }
+          container.appendChild(envWrap);
+        }
+        const tail = fragment.slice(index + matched.length);
+        if (tail) {
+          appendInlineNoteFragment(container, tail, options);
+        }
+        return;
+      }
+
+      const pathMatch = fragment.match(/(?:\.\.?\/[A-Za-z0-9_./-]+|\/[A-Za-z0-9_./-]+)/);
+      if (pathMatch) {
+        const [matched] = pathMatch;
+        const index = fragment.indexOf(matched);
+        if (index > 0) {
+          container.appendChild(document.createTextNode(fragment.slice(0, index)));
+        }
+        const pathWrap = createInlineCopyableText(matched, matched, null, inlineCopyButtons);
+        const inlinePath = pathWrap.querySelector(".inline-copyable");
+        if (inlinePath) {
+          inlinePath.classList.add("inline-path");
+        }
+        container.appendChild(pathWrap);
+        const tail = fragment.slice(index + matched.length);
+        if (tail) {
+          appendInlineNoteFragment(container, tail, options);
+        }
+        return;
+      }
+
+      container.appendChild(document.createTextNode(fragment));
+    }
+
+    function appendRichText(container, text, options = {}) {
+      const lines = String(text || "").split("\n");
+      lines.forEach((line, index) => {
+        if (index > 0) {
+          container.appendChild(document.createElement("br"));
+        }
+        if (line) {
+          appendInlineNoteFragment(container, line, options);
+        }
+      });
+    }
+
+    function labelWithTooltip(text, tooltip, className = "metric-label") {
+      const wrap = document.createElement("span");
+      wrap.className = className;
+      const content = tooltip ? document.createElement("span") : wrap;
+      if (tooltip) {
+        content.className = "tooltip-inline-trigger has-tooltip";
+        content.tabIndex = 0;
+        content.setAttribute("data-tip", tooltip);
+      }
+      if (text.includes("\n")) {
+        content.style.whiteSpace = "pre-line";
+        content.style.lineHeight = "1.08";
+      }
+      content.textContent = text;
+      if (tooltip) {
+        wrap.appendChild(content);
+      }
+      return wrap;
+    }
+
+    function mergeTooltipParts(...parts) {
+      return parts
+        .map((part) => (typeof part === "string" ? part.trim() : ""))
+        .filter(Boolean)
+        .join("\n\n");
+    }
+
+    function statusPill(status, label, tooltip = null) {
+      if (typeof label === "string" && !label.trim()) {
+        return null;
+      }
+      const pill = document.createElement("div");
+      pill.className = `status-pill ${statusClass(status)}${tooltip ? " has-tooltip" : ""}`;
+      pill.textContent = label;
+      if (tooltip) {
+        pill.tabIndex = 0;
+        pill.setAttribute("data-tip", tooltip);
+      }
+      return pill;
+    }
+
+    function tooltipContainsNode(node) {
+      return Boolean(tooltipLayer && node && tooltipLayer.contains(node));
+    }
+
+    function cancelTooltipHide() {
+      if (!tooltipHideTimer) {
+        return;
+      }
+      window.clearTimeout(tooltipHideTimer);
+      tooltipHideTimer = null;
+    }
+
+    function scheduleHideTooltip(target = null, delayMs = TOOLTIP_HIDE_GRACE_MS) {
+      if (!tooltipLayer) {
+        return;
+      }
+      if (target && activeTooltipTarget && target !== activeTooltipTarget) {
+        return;
+      }
+      cancelTooltipHide();
+      tooltipHideTimer = window.setTimeout(() => {
+        tooltipHideTimer = null;
+        hideTooltip(target);
+      }, Math.max(0, delayMs));
+    }
+
+    function selectionTextWithin(node) {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !node) {
+        return "";
+      }
+      const range = selection.getRangeAt(0);
+      const common = range.commonAncestorContainer;
+      if (
+        !common ||
+        !node.contains(common) ||
+        !node.contains(selection.anchorNode) ||
+        !node.contains(selection.focusNode)
+      ) {
+        return "";
+      }
+      return selection.toString().trim();
+    }
+
+    function looksLikeUrl(value) {
+      return /^(https?:\/\/|www\.)\S+$/i.test(value);
+    }
+
+    function resetTooltipCopyButton() {
+      tooltipSelectionValue = "";
+      if (!tooltipCopyBtn) {
+        return;
+      }
+      tooltipCopyBtn.hidden = true;
+      tooltipCopyBtn.classList.remove("visible");
+      tooltipCopyBtn.textContent = "⧉";
+      tooltipCopyBtn.title = "Скопировать выделение";
+      tooltipCopyBtn.setAttribute("aria-label", "Скопировать выделение");
+    }
+
+    function updateTooltipCopyButton() {
+      if (!tooltipCopyBtn) {
+        return;
+      }
+      const selected = selectionTextWithin(tooltipLayer);
+      tooltipSelectionValue = selected;
+      if (!selected) {
+        resetTooltipCopyButton();
+        return;
+      }
+      const copyTitle = looksLikeUrl(selected) ? "Скопировать ссылку" : "Скопировать выделение";
+      tooltipCopyBtn.hidden = false;
+      tooltipCopyBtn.classList.add("visible");
+      tooltipCopyBtn.textContent = "⧉";
+      tooltipCopyBtn.title = copyTitle;
+      tooltipCopyBtn.setAttribute("aria-label", copyTitle);
+      positionTooltip();
+    }
+
+    function showDashboardToast(message, isError = false) {
+      if (!dashboardToast || typeof message !== "string" || !message.trim()) {
+        return;
+      }
+      dashboardToast.hidden = false;
+      dashboardToast.textContent = message.trim();
+      dashboardToast.classList.toggle("error", Boolean(isError));
+      dashboardToast.classList.add("visible");
+      if (dashboardToastTimer) {
+        window.clearTimeout(dashboardToastTimer);
+      }
+      dashboardToastTimer = window.setTimeout(() => {
+        if (!dashboardToast) {
+          return;
+        }
+        dashboardToast.classList.remove("visible");
+        window.setTimeout(() => {
+          if (dashboardToast && !dashboardToast.classList.contains("visible")) {
+            dashboardToast.hidden = true;
+            dashboardToast.textContent = "";
+            dashboardToast.classList.remove("error");
+          }
+        }, 180);
+      }, isError ? 4200 : 3000);
+    }
+
+    function emitClientBudgetChatNotice(notice) {
+      if (!notice || typeof notice.message_text !== "string" || !notice.message_text.trim()) {
+        return;
+      }
+      const detail = {
+        ...notice,
+        source: "dashboard_client_budget_target",
+      };
+      window.dispatchEvent(new CustomEvent("amai:chat-notice", { detail }));
+      try {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ type: "amai:chat-notice", detail }, "*");
+        }
+      } catch (_) {}
+      try {
+        if (window.opener && window.opener !== window && !window.opener.closed) {
+          window.opener.postMessage({ type: "amai:chat-notice", detail }, "*");
+        }
+      } catch (_) {}
+    }
+
+    function launchExternalUri(uri) {
+      if (typeof uri !== "string" || !uri.trim()) {
+        throw new Error("external launch uri unavailable");
+      }
+      const anchor = document.createElement("a");
+      anchor.href = uri.trim();
+      anchor.rel = "noreferrer";
+      anchor.style.display = "none";
+      document.body.appendChild(anchor);
+      try {
+        anchor.click();
+      } finally {
+        anchor.remove();
+      }
+    }
+
+    function tooltipIsInteractiveSelector(target = activeTooltipTarget) {
+      return Boolean(
+        target &&
+        target.dataset &&
+        target.dataset.tooltipKind === "client-budget-target-selector"
+      );
+    }
+
+    async function applyClientBudgetTargetSwitch(percent, selectorState, target) {
+      const parsedPercent = Number(percent);
+      if (!Number.isFinite(parsedPercent)) {
+        throw new Error("invalid target percent");
+      }
+      const response = await fetch(apiPathWithThreadHint("/api/client-budget-target"), {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          percent: parsedPercent,
+          namespace: selectorState?.namespace || "continuity",
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const errorText =
+          payload && typeof payload.error === "string" && payload.error.trim()
+            ? payload.error.trim()
+            : `HTTP ${response.status}`;
+        throw new Error(errorText);
+      }
+      if (payload?.client_budget_live) {
+        applyClientBudgetLiveRows(payload.client_budget_live);
+      }
+      const notice = payload?.chat_notice || payload?.client_budget_target_update?.operator_notice;
+      if (notice) {
+        emitClientBudgetChatNotice(notice);
+        showDashboardToast(notice.message_text || `Целевая экономия переключена на ${parsedPercent}%.`);
+      } else {
+        showDashboardToast(`Целевая экономия переключена на ${parsedPercent}%.`);
+      }
+      hideTooltip(target);
+      await loadDashboard(true);
+      return payload;
+    }
+
+    function buildCompactChatAssistText(surface, note, requiredHostAction, promptFile) {
+      if (!surface || typeof surface !== "object") {
+        if (note || requiredHostAction) {
+          const fallbackParts = [];
+          if (note) {
+            fallbackParts.push(note);
+          }
+          if (requiredHostAction) {
+            fallbackParts.push(`Required host action: ${requiredHostAction}`);
+          }
+          if (promptFile) {
+            fallbackParts.push(`Prompt file: ${promptFile}`);
+          }
+          return fallbackParts.join(" · ");
+        }
+        return "";
+      }
+      const parts = [];
+      if (surface.fresh_chat_assist_summary) {
+        parts.push(surface.fresh_chat_assist_summary);
+      }
+      if (surface.startup_instruction_path) {
+        const startupPath =
+          typeof surface.startup_instruction_mode === "string" &&
+          surface.startup_instruction_mode.trim()
+            ? `${surface.startup_instruction_path} (${surface.startup_instruction_mode.trim()})`
+            : surface.startup_instruction_path;
+        parts.push(`Startup surface: ${startupPath}`);
+      }
+      if (surface.reconnect_shell_command) {
+        parts.push(`Reconnect: ${surface.reconnect_shell_command}`);
+      }
+      if (surface.reconnect_bootstrap_command) {
+        parts.push(`Bootstrap reconnect: ${surface.reconnect_bootstrap_command}`);
+      }
+      if (note) {
+        parts.push(note);
+      }
+      if (requiredHostAction) {
+        parts.push(`Required host action: ${requiredHostAction}`);
+      }
+      if (promptFile) {
+        parts.push(`Prompt file: ${promptFile}`);
+      }
+      return parts.join(" · ");
+    }
+
+    async function applyClientBudgetCompactChat(selectorState, target) {
+      const response = await fetch(apiPathWithThreadHint("/api/client-budget-compact-chat"), {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          namespace: selectorState?.namespace || "continuity",
+          launch_host: true,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const errorText =
+          payload && typeof payload.error === "string" && payload.error.trim()
+            ? payload.error.trim()
+            : `HTTP ${response.status}`;
+        throw new Error(errorText);
+      }
+      if (payload?.client_budget_live) {
+        applyClientBudgetLiveRows(payload.client_budget_live);
+      }
+      const notice = payload?.chat_notice || payload?.continuity_compact_chat?.operator_notice;
+      const assistText = buildCompactChatAssistText(
+        notice?.client_surface || payload?.continuity_compact_chat?.client_surface,
+        notice?.note || payload?.continuity_compact_chat?.operator_notice?.note,
+        notice?.required_host_action || payload?.continuity_compact_chat?.operator_notice?.required_host_action,
+        notice?.prompt_file || payload?.continuity_compact_chat?.operator_notice?.prompt_file
+      );
+      if (notice) {
+        const baseMessage =
+          notice.message_text || "Подготовлен fresh CHAT_START_RESTORE для compact chat.";
+        const enrichedMessage = assistText ? `${baseMessage}\n${assistText}` : baseMessage;
+        emitClientBudgetChatNotice({ ...notice, message_text: enrichedMessage });
+        showDashboardToast(enrichedMessage);
+      } else {
+        const fallbackMessage = assistText
+          ? `Подготовлен fresh CHAT_START_RESTORE для compact chat.\n${assistText}`
+          : "Подготовлен fresh CHAT_START_RESTORE для compact chat.";
+        showDashboardToast(fallbackMessage);
+      }
+      hideTooltip(target);
+      await loadDashboard(true);
+      return payload;
+    }
+
+    async function applyCurrentThreadHostControlFeedback(
+      feedbackKind,
+      selectorState,
+      target,
+      options = {}
+    ) {
+      const response = await fetch(
+        apiPathWithThreadHint("/api/client-budget-host-control-feedback"),
+        {
+          method: "POST",
+          cache: "no-store",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            feedback_kind: feedbackKind,
+            command_id:
+              options.commandId ||
+              selectorState?.host_current_thread_control_last_command_id ||
+              selectorState?.host_current_thread_control?.command_id ||
+              null,
+            namespace: selectorState?.namespace || "continuity",
+          }),
+        }
+      );
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const errorText =
+          payload && typeof payload.error === "string" && payload.error.trim()
+            ? payload.error.trim()
+            : `HTTP ${response.status}`;
+        throw new Error(errorText);
+      }
+      if (payload?.client_budget_live) {
+        applyClientBudgetLiveRows(payload.client_budget_live);
+      }
+      const notice =
+        payload?.chat_notice || payload?.client_budget_host_control_feedback?.operator_notice;
+      if (notice && options.emitNotice !== false) {
+        emitClientBudgetChatNotice(notice);
+      }
+      const subject =
+        options.subjectLabel ||
+        selectorState?.host_current_thread_control_last_button_label ||
+        "same-thread host control";
+      const defaultMessage =
+        feedbackKind === "requested"
+          ? `Попытка открыть ${subject} зафиксирована.`
+          : feedbackKind === "opened"
+            ? `Подтверждено: ${subject} открылся.`
+            : `Зафиксировано: ${subject} не открылся.`;
+      if (options.showToast !== false) {
+        showDashboardToast((notice && notice.message_text) || defaultMessage);
+      }
+      if (options.hideTooltip !== false) {
+        hideTooltip(target);
+      }
+      if (options.refresh !== false) {
+        await loadDashboard(true);
+      }
+      return payload;
+    }
+
+    async function requestCurrentThreadHostControlLaunch(selectorState, surface) {
+      const response = await fetch(
+        apiPathWithThreadHint("/api/client-budget-host-control-launch"),
+        {
+          method: "POST",
+          cache: "no-store",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            command_id: surface?.command_id || selectorState?.host_current_thread_control?.command_id || null,
+            namespace: selectorState?.namespace || "continuity",
+          }),
+        }
+      );
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const errorText =
+          payload && typeof payload.error === "string" && payload.error.trim()
+            ? payload.error.trim()
+            : `HTTP ${response.status}`;
+        throw new Error(errorText);
+      }
+      if (payload?.client_budget_live) {
+        applyClientBudgetLiveRows(payload.client_budget_live);
+      }
+      return payload;
+    }
+
+    async function applyCurrentThreadHostControl(selectorState, target, surfaceOverride = null) {
+      const surface =
+        surfaceOverride && typeof surfaceOverride === "object"
+          ? surfaceOverride
+          : selectorState && typeof selectorState.host_current_thread_control === "object"
+            ? selectorState.host_current_thread_control
+            : null;
+      if (!surface || typeof surface.command_id !== "string" || !surface.command_id.trim()) {
+        throw new Error("same-thread host control unavailable");
+      }
+      if (
+        selectorState?.host_current_thread_control_retry_allowed === false ||
+        surface?.retry_allowed === false
+      ) {
+        throw new Error(
+          (typeof surface?.retry_blocked_reason === "string" && surface.retry_blocked_reason.trim()
+            ? surface.retry_blocked_reason.trim()
+            : typeof selectorState?.host_current_thread_control_retry_blocked_reason === "string" &&
+                selectorState.host_current_thread_control_retry_blocked_reason.trim()
+              ? selectorState.host_current_thread_control_retry_blocked_reason.trim()
+              : "Same-thread control уже запущен; сначала дождись измеримого effect.")
+        );
+      }
+      const messageText =
+        typeof surface?.requested_message_text === "string" && surface.requested_message_text.trim()
+          ? surface.requested_message_text.trim()
+          : typeof selectorState?.host_current_thread_control_notice_message === "string" &&
+              selectorState.host_current_thread_control_notice_message.trim()
+            ? selectorState.host_current_thread_control_notice_message.trim()
+            : surface.summary || `Запрошен host current-thread control: ${surface.command_id}.`;
+      const externalLaunch =
+        surface && typeof surface.external_uri_launch === "object"
+          ? surface.external_uri_launch
+          : null;
+      const launchUri =
+        typeof externalLaunch?.uri === "string" && externalLaunch.uri.trim()
+          ? externalLaunch.uri.trim()
+          : null;
+      const observeApiLaunchAvailable = Boolean(externalLaunch?.observe_api_launch_available);
+      const requestedNotice = {
+        kind: launchUri
+          ? "host_current_thread_control_external_launch_requested"
+          : "host_current_thread_control_requested",
+        message_text: messageText,
+        reply_prefix: selectorState?.reply_prefix || null,
+        host_current_thread_control: surface,
+      };
+      if (launchUri) {
+        let launchSummary =
+          typeof surface.summary === "string" && surface.summary.trim()
+            ? `Requested: ${surface.summary.trim()}`
+            : `Requested host current-thread control: ${surface.command_id}.`;
+        if (observeApiLaunchAvailable) {
+          try {
+            const payload = await requestCurrentThreadHostControlLaunch(selectorState, surface);
+            const notice =
+              payload?.chat_notice || payload?.client_budget_host_control_launch?.operator_notice;
+            if (notice) {
+              emitClientBudgetChatNotice(notice);
+            }
+            launchSummary = (notice && notice.message_text) || messageText;
+            selectorState.host_current_thread_control_feedback_pending = true;
+            selectorState.host_current_thread_control_last_command_id = surface.command_id;
+            selectorState.host_current_thread_control_last_button_label =
+              surface.button_label || surface.command_id;
+            selectorState.host_current_thread_control_last_feedback_kind = "requested";
+            selectorState.host_current_thread_control_last_feedback_summary = launchSummary;
+            renderClientBudgetTargetSelectorTooltip(target, selectorState);
+            activeTooltipTarget = target;
+            activeTooltipKind = target.dataset.tooltipKind || null;
+            tooltipLayer.hidden = false;
+            tooltipLayer.classList.add("visible");
+            positionTooltip(target);
+            showDashboardToast(
+              `${(notice && notice.message_text) || messageText} Подтверди исход в tooltip.`
+            );
+            return surface;
+          } catch (_) {}
+        }
+        emitClientBudgetChatNotice(requestedNotice);
+        try {
+          await applyCurrentThreadHostControlFeedback("requested", selectorState, target, {
+            commandId: surface.command_id,
+            subjectLabel: surface.button_label || surface.command_id,
+            emitNotice: false,
+            hideTooltip: false,
+            refresh: false,
+            showToast: false,
+          });
+        } catch (_) {}
+        launchExternalUri(launchUri);
+        selectorState.host_current_thread_control_feedback_pending = true;
+        selectorState.host_current_thread_control_last_command_id = surface.command_id;
+        selectorState.host_current_thread_control_last_button_label =
+          surface.button_label || surface.command_id;
+        selectorState.host_current_thread_control_last_feedback_kind = "requested";
+        selectorState.host_current_thread_control_last_feedback_summary = launchSummary;
+        renderClientBudgetTargetSelectorTooltip(target, selectorState);
+        activeTooltipTarget = target;
+        activeTooltipKind = target.dataset.tooltipKind || null;
+        tooltipLayer.hidden = false;
+        tooltipLayer.classList.add("visible");
+        positionTooltip(target);
+        showDashboardToast(`${messageText} Подтверди исход в tooltip.`);
+        return surface;
+      }
+      emitClientBudgetChatNotice(requestedNotice);
+      showDashboardToast(messageText);
+      hideTooltip(target);
+      return surface;
+    }
+
+    function renderClientBudgetTargetSelectorTooltip(target, selectorState) {
+      if (!tooltipLayerContent) {
+        return false;
+      }
+      const allowedPercents = Array.isArray(selectorState?.allowed_target_percents)
+        ? selectorState.allowed_target_percents
+        : [];
+      if (allowedPercents.length === 0) {
+        return false;
+      }
+      const currentTargetPercent = Number(selectorState?.current_target_percent);
+      const shell = document.createElement("div");
+      shell.className = "tooltip-target-picker";
+      if (selectorState.tooltip_intro) {
+        shell.appendChild(textNode("div", "tooltip-target-picker-note", selectorState.tooltip_intro));
+      }
+      const grid = document.createElement("div");
+      grid.className = "tooltip-target-picker-grid";
+      allowedPercents.forEach((value) => {
+        const option = document.createElement("button");
+        option.type = "button";
+        option.className = "tooltip-target-picker-option";
+        option.textContent = `${value}%`;
+        if (Number(value) === currentTargetPercent) {
+          option.classList.add("active");
+          option.setAttribute("aria-pressed", "true");
+        } else {
+          option.setAttribute("aria-pressed", "false");
+        }
+        option.addEventListener("click", async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          extendInteractionHold(4);
+          const optionButtons = Array.from(grid.querySelectorAll("button"));
+          optionButtons.forEach((button) => {
+            button.disabled = true;
+          });
+          try {
+            await applyClientBudgetTargetSwitch(value, selectorState, target);
+          } catch (error) {
+            optionButtons.forEach((button) => {
+              button.disabled = false;
+            });
+            showDashboardToast(
+              `Не удалось переключить режим экономии: ${error.message || "unknown error"}`,
+              true
+            );
+          }
+        });
+        grid.appendChild(option);
+      });
+      shell.appendChild(grid);
+      if (selectorState.selected_chat_command) {
+        const command = document.createElement("div");
+        command.className = "tooltip-target-picker-note";
+        command.appendChild(document.createTextNode("Exact chat-команда: "));
+        command.appendChild(
+          textNode("span", "tooltip-target-picker-command", selectorState.selected_chat_command)
+        );
+        shell.appendChild(command);
+      }
+      if (selectorState.compact_chat_command) {
+        if (selectorState.compact_chat_intro) {
+          shell.appendChild(
+            textNode("div", "tooltip-target-picker-note", selectorState.compact_chat_intro)
+          );
+        }
+        const compactButton = document.createElement("button");
+        compactButton.type = "button";
+        compactButton.className = "tooltip-target-picker-option";
+        compactButton.textContent = selectorState.compact_chat_button_label || "Compact chat";
+        compactButton.addEventListener("click", async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          extendInteractionHold(4);
+          compactButton.disabled = true;
+          try {
+            await applyClientBudgetCompactChat(selectorState, target);
+          } catch (error) {
+            compactButton.disabled = false;
+            showDashboardToast(
+              `Не удалось подготовить compact chat: ${error.message || "unknown error"}`,
+              true
+            );
+          }
+        });
+        shell.appendChild(compactButton);
+        const compactCommand = document.createElement("div");
+        compactCommand.className = "tooltip-target-picker-note";
+        compactCommand.appendChild(document.createTextNode("Exact chat-команда: "));
+        compactCommand.appendChild(
+          textNode("span", "tooltip-target-picker-command", selectorState.compact_chat_command)
+        );
+        shell.appendChild(compactCommand);
+        if (selectorState.compact_chat_client_display_name) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              `Клиент fresh chat: ${selectorState.compact_chat_client_display_name}`
+            )
+          );
+        }
+        if (selectorState.compact_chat_assist_summary) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              selectorState.compact_chat_assist_summary
+            )
+          );
+        }
+        if (selectorState.compact_chat_startup_instruction_path) {
+          const startupPath =
+            typeof selectorState.compact_chat_startup_instruction_mode === "string" &&
+            selectorState.compact_chat_startup_instruction_mode.trim()
+              ? `${selectorState.compact_chat_startup_instruction_path} (${selectorState.compact_chat_startup_instruction_mode.trim()})`
+              : selectorState.compact_chat_startup_instruction_path;
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+            `Startup surface: ${startupPath}`
+            )
+          );
+        }
+        if (selectorState.compact_chat_required_host_action) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              `Required host action: ${selectorState.compact_chat_required_host_action}`
+            )
+          );
+        }
+        if (selectorState.compact_chat_prompt_file) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              `Prompt file: ${selectorState.compact_chat_prompt_file}`
+            )
+          );
+        }
+        if (selectorState.compact_chat_note) {
+          shell.appendChild(
+            textNode("div", "tooltip-target-picker-note", selectorState.compact_chat_note)
+          );
+        }
+        if (selectorState.compact_chat_reconnect_shell_command) {
+          const reconnectCommand = document.createElement("div");
+          reconnectCommand.className = "tooltip-target-picker-note";
+          reconnectCommand.appendChild(document.createTextNode("Reconnect command: "));
+          reconnectCommand.appendChild(
+            textNode(
+              "span",
+              "tooltip-target-picker-command",
+              selectorState.compact_chat_reconnect_shell_command
+            )
+          );
+          shell.appendChild(reconnectCommand);
+        }
+        if (selectorState.compact_chat_reconnect_bootstrap_command) {
+          const reconnectBootstrap = document.createElement("div");
+          reconnectBootstrap.className = "tooltip-target-picker-note";
+          reconnectBootstrap.appendChild(document.createTextNode("Bootstrap reconnect: "));
+          reconnectBootstrap.appendChild(
+            textNode(
+              "span",
+              "tooltip-target-picker-command",
+              selectorState.compact_chat_reconnect_bootstrap_command
+            )
+          );
+          shell.appendChild(reconnectBootstrap);
+        }
+      }
+      if (
+        selectorState.host_current_thread_control &&
+        typeof selectorState.host_current_thread_control === "object"
+      ) {
+        const hostControlRetryAllowed =
+          selectorState.host_current_thread_control_retry_allowed !== false;
+        const hostControlSurfaces = [selectorState.host_current_thread_control];
+        const alternateHostControls = Array.isArray(
+          selectorState.host_current_thread_control.alternate_controls
+        )
+          ? selectorState.host_current_thread_control.alternate_controls
+          : [];
+        alternateHostControls.forEach((surface) => {
+          if (surface && typeof surface === "object") {
+            hostControlSurfaces.push(surface);
+          }
+        });
+        hostControlSurfaces.forEach((surface, index) => {
+          const introMessage =
+            typeof surface?.intro_message === "string" && surface.intro_message.trim()
+              ? surface.intro_message.trim()
+              : index === 0 &&
+                  typeof selectorState.host_current_thread_control_intro === "string" &&
+                  selectorState.host_current_thread_control_intro.trim()
+                ? selectorState.host_current_thread_control_intro.trim()
+                : null;
+          if (introMessage) {
+            shell.appendChild(textNode("div", "tooltip-target-picker-note", introMessage));
+          }
+          const hostControlButton = document.createElement("button");
+          hostControlButton.type = "button";
+          hostControlButton.className = "tooltip-target-picker-option";
+          hostControlButton.textContent =
+            surface.button_label ||
+            (index === 0
+              ? selectorState.host_current_thread_control_button_label || "Same-thread control"
+              : "Host control");
+          if (!hostControlRetryAllowed || surface.retry_allowed === false) {
+            hostControlButton.disabled = true;
+          }
+          hostControlButton.addEventListener("click", async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            extendInteractionHold(2);
+            hostControlButton.disabled = true;
+            try {
+              await applyCurrentThreadHostControl(selectorState, target, surface);
+            } catch (error) {
+              hostControlButton.disabled = false;
+              showDashboardToast(
+                `Не удалось запросить same-thread host control: ${error.message || "unknown error"}`,
+                true
+              );
+              return;
+            }
+            hostControlButton.disabled = false;
+          });
+          shell.appendChild(hostControlButton);
+          if (surface.command_id) {
+            const hostControlCommand = document.createElement("div");
+            hostControlCommand.className = "tooltip-target-picker-note";
+            hostControlCommand.appendChild(document.createTextNode("Host internal command id: "));
+            hostControlCommand.appendChild(
+              textNode("span", "tooltip-target-picker-command", surface.command_id)
+            );
+            shell.appendChild(hostControlCommand);
+          }
+          const externalLaunch =
+            typeof surface.external_uri_launch === "object" ? surface.external_uri_launch : null;
+          if (externalLaunch && typeof externalLaunch.uri === "string" && externalLaunch.uri.trim()) {
+            const hostControlUri = document.createElement("div");
+            hostControlUri.className = "tooltip-target-picker-note";
+            hostControlUri.appendChild(document.createTextNode("VS Code URI launch: "));
+            hostControlUri.appendChild(
+              textNode("span", "tooltip-target-picker-command", externalLaunch.uri)
+            );
+            shell.appendChild(hostControlUri);
+          }
+          if (
+            externalLaunch &&
+            typeof externalLaunch.platform_launch_command === "string" &&
+            externalLaunch.platform_launch_command.trim()
+          ) {
+            const hostControlLaunch = document.createElement("div");
+            hostControlLaunch.className = "tooltip-target-picker-note";
+            hostControlLaunch.appendChild(document.createTextNode("Shell launch: "));
+            hostControlLaunch.appendChild(
+              textNode(
+                "span",
+                "tooltip-target-picker-command",
+                externalLaunch.platform_launch_command
+              )
+            );
+            shell.appendChild(hostControlLaunch);
+          }
+        });
+        if (
+          typeof selectorState.host_current_thread_control_retry_blocked_reason === "string" &&
+          selectorState.host_current_thread_control_retry_blocked_reason.trim()
+        ) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              selectorState.host_current_thread_control_retry_blocked_reason.trim()
+            )
+          );
+        }
+        if (selectorState.host_current_thread_control_last_feedback_summary) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              `Последний feedback: ${selectorState.host_current_thread_control_last_feedback_summary}`
+            )
+          );
+        }
+        if (
+          typeof selectorState.host_current_thread_control_effect_summary === "string" &&
+          selectorState.host_current_thread_control_effect_summary.trim()
+        ) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              selectorState.host_current_thread_control_effect_summary.trim()
+            )
+          );
+        }
+        if (
+          typeof selectorState.host_current_thread_control_effect_note === "string" &&
+          selectorState.host_current_thread_control_effect_note.trim()
+        ) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              selectorState.host_current_thread_control_effect_note.trim()
+            )
+          );
+        }
+        if (selectorState.host_current_thread_control_feedback_pending) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              selectorState.host_current_thread_control_ack_intro ||
+                selectorState.host_current_thread_control?.feedback_ack_intro ||
+                "После попытки запуска отметь исход same-thread host control."
+            )
+          );
+          const feedbackGrid = document.createElement("div");
+          feedbackGrid.className = "tooltip-target-picker-grid";
+          [
+            { kind: "opened", label: "Открылся" },
+            { kind: "failed", label: "Не открылся" },
+          ].forEach(({ kind, label }) => {
+            const feedbackButton = document.createElement("button");
+            feedbackButton.type = "button";
+            feedbackButton.className = "tooltip-target-picker-option";
+            feedbackButton.textContent = label;
+            feedbackButton.addEventListener("click", async (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              extendInteractionHold(4);
+              const buttons = Array.from(feedbackGrid.querySelectorAll("button"));
+              buttons.forEach((button) => {
+                button.disabled = true;
+              });
+              try {
+                await applyCurrentThreadHostControlFeedback(kind, selectorState, target, {
+                  commandId: selectorState.host_current_thread_control_last_command_id,
+                  subjectLabel:
+                    selectorState.host_current_thread_control_last_button_label ||
+                    selectorState.host_current_thread_control?.button_label ||
+                    "same-thread host control",
+                });
+              } catch (error) {
+                buttons.forEach((button) => {
+                  button.disabled = false;
+                });
+                showDashboardToast(
+                  `Не удалось записать feedback по same-thread host control: ${error.message || "unknown error"}`,
+                  true
+                );
+              }
+            });
+            feedbackGrid.appendChild(feedbackButton);
+          });
+          shell.appendChild(feedbackGrid);
+        }
+      }
+      if (selectorState.reply_prefix) {
+        shell.appendChild(
+          textNode("div", "tooltip-target-picker-note", `Текущий reply prefix: ${selectorState.reply_prefix}`)
+        );
+      }
+      clearNode(tooltipLayerContent);
+      tooltipLayerContent.appendChild(shell);
+      return true;
+    }
+
+    function showTooltip(target) {
+      if (!tooltipLayer || !tooltipLayerContent || !target) {
+        return;
+      }
+      cancelTooltipHide();
+      extendInteractionHold(2);
+      if (target.dataset.tooltipKind === "client-budget-target-selector") {
+        const selectorState = safeJsonParse(target.dataset.clientBudgetTargetSelector);
+        if (selectorState && renderClientBudgetTargetSelectorTooltip(target, selectorState)) {
+          activeTooltipTarget = target;
+          activeTooltipKind = target.dataset.tooltipKind || null;
+          resetTooltipCopyButton();
+          tooltipLayer.hidden = false;
+          tooltipLayer.classList.add("visible");
+          target.setAttribute("aria-describedby", "tooltip-layer");
+          target.setAttribute("aria-expanded", "true");
+          positionTooltip(target);
+          return;
+        }
+      }
+      const tip = target.getAttribute("data-tip");
+      if (!tip) {
+        hideTooltip();
+        return;
+      }
+      activeTooltipTarget = target;
+      activeTooltipKind = target.dataset.tooltipKind || null;
+      clearNode(tooltipLayerContent);
+      appendRichText(tooltipLayerContent, tip, { inlineCopyButtons: false });
+      resetTooltipCopyButton();
+      tooltipLayer.hidden = false;
+      tooltipLayer.classList.add("visible");
+      target.setAttribute("aria-describedby", "tooltip-layer");
+      target.setAttribute("aria-expanded", "true");
+      positionTooltip(target);
+    }
+
+    function hideTooltip(target = null) {
+      if (!tooltipLayer) {
+        return;
+      }
+      cancelTooltipHide();
+      if (target && activeTooltipTarget && target !== activeTooltipTarget) {
+        return;
+      }
+      if (activeTooltipTarget) {
+        activeTooltipTarget.removeAttribute("aria-describedby");
+        if (activeTooltipTarget.hasAttribute("aria-expanded")) {
+          activeTooltipTarget.setAttribute("aria-expanded", "false");
+        }
+      }
+      activeTooltipTarget = null;
+      activeTooltipKind = null;
+      tooltipLayer.classList.remove("visible");
+      tooltipLayer.hidden = true;
+      if (tooltipLayerContent) {
+        clearNode(tooltipLayerContent);
+      }
+      resetTooltipCopyButton();
+    }
+
+    function positionTooltip(target = activeTooltipTarget) {
+      if (!tooltipLayer || !target || tooltipLayer.hidden) {
+        return;
+      }
+
+      const margin = 12;
+      const targetRect = target.getBoundingClientRect();
+      tooltipLayer.style.left = "0px";
+      tooltipLayer.style.top = "0px";
+      tooltipLayer.style.maxWidth = `${Math.max(220, Math.min(360, window.innerWidth - margin * 2))}px`;
+      const tooltipRect = tooltipLayer.getBoundingClientRect();
+
+      let left = targetRect.left + targetRect.width / 2 - tooltipRect.width / 2;
+      left = Math.max(margin, Math.min(left, window.innerWidth - tooltipRect.width - margin));
+
+      let top = targetRect.top - tooltipRect.height - 12;
+      if (top < margin) {
+        top = Math.min(
+          window.innerHeight - tooltipRect.height - margin,
+          targetRect.bottom + 12
+        );
+      }
+
+      tooltipLayer.style.left = `${left}px`;
+      tooltipLayer.style.top = `${Math.max(margin, top)}px`;
+    }
+
+    function extendInteractionHold(multiplier = 4) {
+      interactionHoldUntil = Math.max(
+        interactionHoldUntil,
+        Date.now() + Math.max(REFRESH_MS * multiplier, 1500)
+      );
+    }
+
+    function hasActiveSelection() {
+      const selection = window.getSelection();
+      return Boolean(
+        selection &&
+        !selection.isCollapsed &&
+        selection.toString().trim().length > 0
+      );
+    }
+
+    function isRefreshPaused() {
+      if (Date.now() < interactionHoldUntil) {
+        return true;
+      }
+      if (hasActiveSelection()) {
+        return true;
+      }
+      return false;
+    }
+
+    const cardInteractionState = new Map();
+    let activeFullscreenCardKey = null;
+    let activeAgentLabelEditor = null;
+    let lastSecondaryGesture = { key: null, at: 0 };
+    let lastTouchGesture = { key: null, fingers: 0, at: 0 };
+
+    function cardStateKey(containerId, card) {
+      return `${containerId}::${card.kind || "metric"}::${card.title || "card"}`;
+    }
+
+    function readCardState(key) {
+      return cardInteractionState.get(key) || { flipped: false, fullscreen: false };
+    }
+
+    function writeCardState(key, patch) {
+      const next = { ...readCardState(key), ...patch };
+      if (!next.flipped && !next.fullscreen) {
+        cardInteractionState.delete(key);
+      } else {
+        cardInteractionState.set(key, next);
+      }
+    }
+
+    function syncBodyFullscreenState() {
+      document.body.classList.toggle(
+        "card-fullscreen-open",
+        Boolean(document.querySelector(".card-shell.card-fullscreen"))
+      );
+    }
+
+    function isInteractiveCardTarget(target) {
+      return Boolean(
+        target &&
+        target.closest &&
+        target.closest(".has-tooltip, a, button, input, textarea, .copy-link-btn, .compare-table-wrap, .tooltip-layer, [data-agent-label-editable=\"true\"]")
+      );
+    }
+
+    function applyStoredCardState(shell) {
+      const key = shell.dataset.cardKey;
+      const state = readCardState(key);
+      shell.classList.toggle("card-back-visible", Boolean(state.flipped));
+      shell.classList.toggle("card-fullscreen", Boolean(state.fullscreen));
+      if (state.fullscreen) {
+        activeFullscreenCardKey = key;
+      }
+      syncBodyFullscreenState();
+    }
+
+    function setCardBackVisible(shell, visible) {
+      shell.classList.toggle("card-back-visible", visible);
+      writeCardState(shell.dataset.cardKey, { flipped: visible });
+    }
+
+    function setCardFullscreenVisible(shell, visible) {
+      const key = shell.dataset.cardKey;
+      if (visible && activeFullscreenCardKey && activeFullscreenCardKey !== key) {
+        const previous = document.querySelector(`[data-card-key="${CSS.escape(activeFullscreenCardKey)}"]`);
+        if (previous) {
+          previous.classList.remove("card-fullscreen");
+        }
+        writeCardState(activeFullscreenCardKey, { fullscreen: false });
+      }
+      shell.classList.toggle("card-fullscreen", visible);
+      activeFullscreenCardKey = visible ? key : null;
+      writeCardState(key, { fullscreen: visible });
+      syncBodyFullscreenState();
+    }
+
+    function toggleCardBack(shell) {
+      setCardBackVisible(shell, !shell.classList.contains("card-back-visible"));
+      extendInteractionHold(8);
+    }
+
+    function toggleCardFullscreen(shell) {
+      setCardFullscreenVisible(shell, !shell.classList.contains("card-fullscreen"));
+      extendInteractionHold(10);
+    }
+
+    function wireCardShellInteractions(shell) {
+      shell.addEventListener("dblclick", (event) => {
+        if (event.button !== 0 || isInteractiveCardTarget(event.target) || hasActiveSelection()) {
+          return;
+        }
+        event.preventDefault();
+        toggleCardBack(shell);
+      });
+
+      shell.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+      });
+
+      shell.addEventListener("pointerup", (event) => {
+        if (event.button !== 2 || isInteractiveCardTarget(event.target) || hasActiveSelection()) {
+          return;
+        }
+        const key = shell.dataset.cardKey;
+        const now = Date.now();
+        if (lastSecondaryGesture.key === key && now - lastSecondaryGesture.at <= 420) {
+          event.preventDefault();
+          toggleCardFullscreen(shell);
+          lastSecondaryGesture = { key: null, at: 0 };
+          return;
+        }
+        lastSecondaryGesture = { key, at: now };
+      });
+
+      shell.addEventListener("touchstart", (event) => {
+        shell.dataset.touchFingers = String(event.touches.length);
+      }, { passive: true });
+
+      shell.addEventListener("touchend", (event) => {
+        const target = event.target;
+        if (isInteractiveCardTarget(target) || hasActiveSelection()) {
+          return;
+        }
+        const fingers = Number(shell.dataset.touchFingers || "1");
+        const key = shell.dataset.cardKey;
+        const now = Date.now();
+        const sameGesture =
+          lastTouchGesture.key === key &&
+          lastTouchGesture.fingers === fingers &&
+          now - lastTouchGesture.at <= 420;
+        if (sameGesture) {
+          event.preventDefault();
+          if (fingers >= 2) {
+            toggleCardFullscreen(shell);
+          } else {
+            toggleCardBack(shell);
+          }
+          lastTouchGesture = { key: null, fingers: 0, at: 0 };
+          return;
+        }
+        lastTouchGesture = { key, fingers, at: now };
+      }, { passive: false });
+    }
+
+    function createCardShell(containerId, card, baseClassName, populateFront, populateBack) {
+      const shell = document.createElement("article");
+      shell.className = `${baseClassName} card-shell`;
+      shell.dataset.cardKey = cardStateKey(containerId, card);
+      if (card.presentation_variant) {
+        shell.dataset.presentationVariant = card.presentation_variant;
+      }
+      addExtraClasses(shell, card.extra_class);
+      if (card.table_orientation === "transposed") {
+        shell.classList.add("table-transposed");
+      }
+
+      const stage = document.createElement("div");
+      stage.className = "card-flip-stage";
+      const front = document.createElement("div");
+      front.className = "card-face card-face-front";
+      populateFront(front);
+      const back = document.createElement("div");
+      back.className = "card-face card-face-back";
+      populateBack(back);
+      stage.appendChild(front);
+      stage.appendChild(back);
+      shell.appendChild(stage);
+      wireCardShellInteractions(shell);
+      applyStoredCardState(shell);
+      return shell;
+    }
+
+    function renderCompareHeader(target, card) {
+      const head = document.createElement("div");
+      head.className = "compare-head";
+      const titleTooltip = mergeTooltipParts(card.title_tooltip, card.source_label);
+      head.appendChild(labelWithTooltip(card.title, titleTooltip, "card-title"));
+      const pill = statusPill(card.status, card.status_label, card.status_tooltip);
+      if (pill) {
+        head.appendChild(pill);
+      }
+      target.appendChild(head);
+    }
+
+    function renderCompareMetrics(target, card) {
+      if (!card.metrics || card.metrics.length === 0) {
+        return;
+      }
+      const compareGrid = document.createElement("div");
+      compareGrid.className = "compare-grid";
+      card.metrics.forEach((metric) => {
+        const metricCard = document.createElement("section");
+        metricCard.className = "compare-metric";
+        metricCard.appendChild(labelWithTooltip(metric.label, metric.tooltip, "compare-metric-label"));
+        metricCard.appendChild(textNode("p", "compare-metric-value", metric.value));
+        metricCard.appendChild(textNode("p", "compare-metric-note", metric.note));
+        compareGrid.appendChild(metricCard);
+      });
+      target.appendChild(compareGrid);
+    }
+
+    function renderCompareTableWrap(target, card) {
+      const tableWrap = document.createElement("div");
+      tableWrap.className = "compare-table-wrap";
+      const table = document.createElement("table");
+      table.className = "compare-table";
+      renderCompareTable(table, card.table, card.table_orientation);
+      tableWrap.appendChild(table);
+      target.appendChild(tableWrap);
+    }
+
+    function renderCompareFront(target, card) {
+      renderCompareHeader(target, card);
+      if (card.headline_value) {
+        const headline = document.createElement("p");
+        headline.className = "service-headline compare-headline";
+        appendCompareCellValue(headline, card.headline_value);
+        target.appendChild(headline);
+      }
+      if (card.note) {
+        target.appendChild(textNode("p", "card-note", card.note));
+      }
+      renderCompareMetrics(target, card);
+      renderCompareTableWrap(target, card);
+    }
+
+    function renderGenericBackHeader(target, card) {
+      const head = document.createElement("div");
+      head.className = "card-top";
+      const titleTooltip = mergeTooltipParts(card.title_tooltip, card.source_label);
+      head.appendChild(labelWithTooltip(card.title, titleTooltip, "card-title"));
+      const pill = statusPill(card.status, card.status_label, card.status_tooltip);
+      if (pill) {
+        head.appendChild(pill);
+      }
+      target.appendChild(head);
+    }
+
+    function renderMetricRows(target, card) {
+      if (!card.rows || card.rows.length === 0) {
+        return;
+      }
+      const list = document.createElement("ul");
+      list.className = "metric-rows";
+      card.rows.forEach((row) => {
+        list.appendChild(createMetricRow(row));
+      });
+      target.appendChild(list);
+    }
+
+    function renderCardDetails(target, card) {
+      if (!card.details || card.details.length === 0) {
+        return;
+      }
+      target.appendChild(textNode("p", "card-back-section-title", "Дополнительные детали"));
+      const list = document.createElement("ul");
+      list.className = "detail-list";
+      card.details.forEach((detail) => {
+        list.appendChild(textNode("li", "", detail));
+      });
+      target.appendChild(list);
+    }
+
+    function proceduralMetricLabel(metricKey) {
+      const labels = {
+        reuse_quality: "Reuse quality",
+        bad_skill_suppression: "Bad-skill suppression",
+        stale_skill_suppression: "Stale-skill suppression",
+        shadow_to_verified_uplift: "Shadow-to-verified uplift",
+        evaluator_correctness: "Evaluator correctness",
+      };
+      if (labels[metricKey]) {
+        return labels[metricKey];
+      }
+      return String(metricKey || "ещё нет данных")
+        .split(/[_-]+/)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+    }
+
+    function clampProceduralPercent(value) {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) {
+        return 0;
+      }
+      const normalized = numeric >= 0 && numeric <= 1 ? numeric * 100 : numeric;
+      return Math.max(0, Math.min(100, normalized));
+    }
+
+    function formatProceduralPercent(value) {
+      const percent = clampProceduralPercent(value);
+      const rounded = Math.round(percent * 10) / 10;
+      const decimals = Number.isInteger(rounded) ? 0 : 1;
+      return `${rounded.toFixed(decimals)}%`;
+    }
+
+    function proceduralBarRow(label, withValue, withoutValue, withoutAvailable) {
+      const row = document.createElement("section");
+      row.className = "procedural-graph-row";
+
+      const head = document.createElement("div");
+      head.className = "procedural-graph-row-head";
+      head.appendChild(textNode("p", "procedural-graph-row-label", label));
+      const values = withoutAvailable
+        ? `С Amai ${formatProceduralPercent(withValue)} • Без Amai ${formatProceduralPercent(withoutValue)}`
+        : `С Amai ${formatProceduralPercent(withValue)} • Без Amai ещё не materialized`;
+      head.appendChild(textNode("p", "procedural-graph-row-values", values));
+      row.appendChild(head);
+
+      const lanes = document.createElement("div");
+      lanes.className = "procedural-graph-lanes";
+
+      [
+        {
+          css: "with-amai",
+          label: "С Amai",
+          value: withValue,
+          visible: true,
+        },
+        {
+          css: "without-amai",
+          label: "Без Amai",
+          value: withoutValue,
+          visible: withoutAvailable,
+        },
+      ].forEach((lane) => {
+        const laneWrap = document.createElement("div");
+        laneWrap.className = "procedural-graph-lane";
+        laneWrap.appendChild(textNode("span", "procedural-graph-lane-label", lane.label));
+
+        const track = document.createElement("div");
+        track.className = "procedural-graph-track";
+        const fill = document.createElement("div");
+        fill.className = `procedural-graph-fill ${lane.css}`;
+        fill.style.width = lane.visible ? `${clampProceduralPercent(lane.value)}%` : "0%";
+        track.appendChild(fill);
+        laneWrap.appendChild(track);
+
+        const valueLabel = lane.visible
+          ? formatProceduralPercent(lane.value)
+          : "н/д";
+        laneWrap.appendChild(textNode("span", "procedural-graph-value", valueLabel));
+        lanes.appendChild(laneWrap);
+      });
+
+      row.appendChild(lanes);
+      return row;
+    }
+
+    function renderProceduralMetricGraph(target, card) {
+      const section = document.createElement("section");
+      section.className = "procedural-graph-panel";
+      section.appendChild(textNode("p", "procedural-graph-title", "Skill-метрики по последнему benchmark run"));
+      section.appendChild(textNode(
+        "p",
+        "procedural-graph-note",
+        "Передняя сторона показывает таблицу проверки. Здесь те же метрики разложены как compare-график по двум benchmark-линиям."
+      ));
+
+      const frame = document.createElement("div");
+      frame.className = "procedural-axis-frame metric";
+      const yAxis = document.createElement("div");
+      yAxis.className = "procedural-y-axis metric";
+      yAxis.appendChild(textNode("p", "procedural-y-axis-title", "Y: skill-метрики"));
+      yAxis.appendChild(textNode("p", "procedural-axis-caption", "Каждая строка ниже — отдельная metric lane."));
+      frame.appendChild(yAxis);
+
+      const plot = document.createElement("div");
+      plot.className = "procedural-axis-plot";
+      const rows = document.createElement("div");
+      rows.className = "procedural-graph-rows";
+      const withSeries = Array.isArray(card.benchmark_with_amai_series)
+        ? card.benchmark_with_amai_series
+        : [];
+      const withoutSeries = Array.isArray(card.benchmark_without_amai_series)
+        ? card.benchmark_without_amai_series
+        : [];
+      const withoutAvailable = Boolean(card.without_amai_series_available);
+      const withoutByKey = new Map(
+        withoutSeries.map((item) => [item.metric_key, item.value])
+      );
+
+      withSeries.forEach((item) => {
+        rows.appendChild(
+          proceduralBarRow(
+            proceduralMetricLabel(item.metric_key),
+            item.value,
+            withoutByKey.get(item.metric_key),
+            withoutAvailable
+          )
+        );
+      });
+
+      if (!withSeries.length) {
+        rows.appendChild(textNode("p", "procedural-graph-note", "Series для последнего procedural benchmark ещё нет."));
+      }
+      plot.appendChild(rows);
+      plot.appendChild(textNode("p", "procedural-axis-caption", "X: pass rate по последнему benchmark run"));
+      const scale = document.createElement("div");
+      scale.className = "procedural-x-axis-scale";
+      ["0%", "50%", "100%"].forEach((label) => {
+        scale.appendChild(textNode("span", "", label));
+      });
+      plot.appendChild(scale);
+      frame.appendChild(plot);
+      section.appendChild(frame);
+      target.appendChild(section);
+    }
+
+    function renderProceduralHistoryGraph(target, card) {
+      const section = document.createElement("section");
+      section.className = "procedural-graph-panel";
+      section.appendChild(textNode("p", "procedural-graph-title", "История benchmark по прогонам"));
+      section.appendChild(textNode(
+        "p",
+        "procedural-graph-note",
+        "Это уже не live session, а persisted history compare-plane. Каждый столбец показывает pass-percent очередного procedural benchmark run."
+      ));
+
+      const frame = document.createElement("div");
+      frame.className = "procedural-axis-frame history";
+      const yAxis = document.createElement("div");
+      yAxis.className = "procedural-y-axis history";
+      yAxis.appendChild(textNode("p", "procedural-y-axis-title", "Y: pass rate %"));
+      const yTicks = document.createElement("div");
+      yTicks.className = "procedural-y-axis-ticks history";
+      [
+        ["100%", "top"],
+        ["50%", "middle"],
+        ["0%", "bottom"],
+      ].forEach(([label, pos]) => {
+        yTicks.appendChild(textNode("span", `procedural-y-axis-tick history ${pos}`, label));
+      });
+      yAxis.appendChild(yTicks);
+      frame.appendChild(yAxis);
+
+      const plot = document.createElement("div");
+      plot.className = "procedural-history-x-axis";
+      const historyGrid = document.createElement("div");
+      historyGrid.className = "procedural-history-grid";
+      const historyRows = Array.isArray(card.procedural_benchmark_history?.history_rows)
+        ? card.procedural_benchmark_history.history_rows
+        : [];
+      const visibleRows = historyRows.slice(-6);
+
+      visibleRows.forEach((row, index) => {
+        const point = document.createElement("section");
+        point.className = "procedural-history-point";
+
+        const bars = document.createElement("div");
+        bars.className = "procedural-history-bars";
+        [
+          {
+            css: "with-amai",
+            value: row.with_amai_pass_percent,
+            available: row.with_amai_pass_percent !== null && row.with_amai_pass_percent !== undefined,
+          },
+          {
+            css: "without-amai",
+            value: row.without_amai_pass_percent,
+            available: Boolean(row.without_amai_series_available),
+          },
+        ].forEach((lane) => {
+          const bar = document.createElement("div");
+          bar.className = `procedural-history-bar ${lane.css}`;
+          bar.style.height = lane.available
+            ? `${Math.max(6, clampProceduralPercent(lane.value))}%`
+            : "6px";
+          bar.style.opacity = lane.available ? "1" : "0.22";
+          bars.appendChild(bar);
+        });
+        point.appendChild(bars);
+
+        point.appendChild(textNode("span", "procedural-history-label", `run ${historyRows.length - visibleRows.length + index + 1}`));
+        const withLabel = row.with_amai_pass_percent == null
+          ? "С Amai н/д"
+          : `С Amai ${formatProceduralPercent(row.with_amai_pass_percent)}`;
+        const withoutLabel = row.without_amai_series_available
+          ? `Без Amai ${formatProceduralPercent(row.without_amai_pass_percent)}`
+          : "Без Amai н/д";
+        point.appendChild(textNode("span", "procedural-history-values", `${withLabel}\n${withoutLabel}`));
+        historyGrid.appendChild(point);
+      });
+
+      if (!visibleRows.length) {
+        historyGrid.appendChild(textNode("p", "procedural-graph-note", "Persisted history для procedural benchmark ещё не materialized."));
+      }
+
+      plot.appendChild(historyGrid);
+      plot.appendChild(textNode("p", "procedural-history-x-axis-title", "X: benchmark runs"));
+      frame.appendChild(plot);
+      section.appendChild(frame);
+      const caption = card.without_amai_series_available
+        ? "Зелёные столбцы: с Amai. Янтарные столбцы: without_amai_but_measuring."
+        : "Пока видна только линия с Amai; without_amai history ещё не materialized."
+      section.appendChild(textNode("p", "procedural-history-caption", caption));
+      target.appendChild(section);
+    }
+
+    function renderProceduralBenchmarkBack(target, card) {
+      renderGenericBackHeader(target, card);
+      const note = card.note
+        ? `${card.note} На обороте эта же truth-модель показывается графически: отдельно текущий run и отдельно persisted history.`
+        : "На обороте procedural benchmark показывается графически: отдельно текущий run и отдельно persisted history.";
+      target.appendChild(textNode("p", "card-back-note", note));
+      if (card.headline_value) {
+        const headline = document.createElement("p");
+        headline.className = "service-headline compare-headline";
+        appendCompareCellValue(headline, card.headline_value);
+        target.appendChild(headline);
+      }
+
+      const legend = document.createElement("ul");
+      legend.className = "procedural-back-legend";
+      [
+        ["with-amai", "С Amai"],
+        ["without-amai", "Без Amai"],
+      ].forEach(([css, label]) => {
+        const item = document.createElement("li");
+        item.className = "procedural-back-legend-item";
+        const swatch = document.createElement("span");
+        swatch.className = `procedural-back-legend-swatch ${css}`;
+        item.appendChild(swatch);
+        item.appendChild(textNode("span", "", label));
+        legend.appendChild(item);
+      });
+      target.appendChild(legend);
+
+      const layout = document.createElement("div");
+      layout.className = "procedural-back-layout";
+      renderProceduralMetricGraph(layout, card);
+      renderProceduralHistoryGraph(layout, card);
+      target.appendChild(layout);
+
+      if (card.source_label) {
+        target.appendChild(textNode("p", "card-back-source", card.source_label));
+      }
+    }
+
+    function createHierarchyNode(levelClass, node) {
+      const element = document.createElement("section");
+      element.className = `hierarchy-node hierarchy-${levelClass} ${statusClass(node.status)}`;
+      const header = document.createElement("div");
+      header.className = "hierarchy-node-header";
+      header.appendChild(textNode("h4", "hierarchy-node-title", node.label || "ещё нет данных"));
+      if (node.summary) {
+        header.appendChild(textNode("p", "hierarchy-node-summary", node.summary));
+      }
+      element.appendChild(header);
+      return element;
+    }
+
+    function renderHierarchyThreadMeta(target, thread) {
+      const list = document.createElement("ul");
+      list.className = "hierarchy-thread-meta";
+      const rows = [
+        ["Thread", thread.thread_id || "ещё нет данных"],
+        ["Заголовок", thread.title || "ещё нет данных"],
+        ["CWD", thread.cwd || "ещё нет данных"],
+        ["Последнее обновление", thread.updated_at || "ещё нет данных"],
+      ];
+      rows.forEach(([label, value]) => {
+        const item = document.createElement("li");
+        item.appendChild(textNode("span", "hierarchy-thread-label", label));
+        if (label === "Thread" && value && value !== "ещё нет данных") {
+          item.appendChild(createInlineCopyableText(value, value, null, true));
+        } else {
+          item.appendChild(textNode("span", "hierarchy-thread-value", value));
+        }
+        list.appendChild(item);
+      });
+      target.appendChild(list);
+    }
+
+    function renderHierarchyBackPanel(target, panel, card) {
+      renderGenericBackHeader(target, card);
+      target.appendChild(textNode("p", "card-back-note", panel.title || "Иерархия живых сущностей"));
+      if (panel.note) {
+        target.appendChild(textNode("p", "card-back-note", panel.note));
+      }
+
+      if (Array.isArray(panel.legend) && panel.legend.length > 0) {
+        const legend = document.createElement("ul");
+        legend.className = "hierarchy-legend";
+        panel.legend.forEach((entry) => {
+          const item = document.createElement("li");
+          item.className = `hierarchy-legend-item ${statusClass(entry.status)}`;
+          item.appendChild(textNode("span", "", entry.label || "ещё нет данных"));
+          if (entry.note) {
+            item.setAttribute("data-tip", entry.note);
+            item.classList.add("has-tooltip");
+          }
+          legend.appendChild(item);
+        });
+        target.appendChild(legend);
+      }
+
+      const projectsWrap = document.createElement("div");
+      projectsWrap.className = "hierarchy-projects";
+      (panel.projects || []).forEach((project) => {
+        const projectNode = createHierarchyNode("project", project);
+        const projectChildren = document.createElement("div");
+        projectChildren.className = "hierarchy-node-children";
+
+        (project.spaces || []).forEach((space) => {
+          const spaceNode = createHierarchyNode("space", space);
+          const spaceChildren = document.createElement("div");
+          spaceChildren.className = "hierarchy-node-children";
+
+          (space.agents || []).forEach((agent) => {
+            const agentNode = createHierarchyNode("agent", agent);
+            if (Array.isArray(agent.source_badges) && agent.source_badges.length > 0) {
+              const badges = document.createElement("div");
+              badges.className = "hierarchy-source-badges";
+              agent.source_badges.forEach((badge) => {
+                const chip = document.createElement("span");
+                chip.className = `hierarchy-source-badge ${statusClass(badge.status)}`;
+                chip.textContent = badge.label || "ещё нет данных";
+                badges.appendChild(chip);
+              });
+              agentNode.appendChild(badges);
+            }
+
+            if (agent.session) {
+              const sessionNode = createHierarchyNode("session", agent.session);
+              const sessionChildren = document.createElement("div");
+              sessionChildren.className = "hierarchy-node-children";
+
+              if (agent.session.thread) {
+                const threadNode = createHierarchyNode("thread", {
+                  label: "Thread / turn",
+                  status: agent.session.thread.thread_id ? "pass" : "unknown",
+                  summary: agent.session.thread.title || "ещё нет данных",
+                });
+                renderHierarchyThreadMeta(threadNode, agent.session.thread);
+                sessionChildren.appendChild(threadNode);
+              }
+
+              if (agent.session.model) {
+                const modelNode = createHierarchyNode("model", {
+                  label: "Модель",
+                  status: agent.session.model.status || "unknown",
+                  summary: agent.session.model.label || "ещё нет данных",
+                });
+                sessionChildren.appendChild(modelNode);
+              }
+
+              sessionNode.appendChild(sessionChildren);
+              agentNode.appendChild(sessionNode);
+            }
+
+            spaceChildren.appendChild(agentNode);
+          });
+
+          spaceNode.appendChild(spaceChildren);
+          projectChildren.appendChild(spaceNode);
+        });
+
+        if (Array.isArray(project.pending_threads) && project.pending_threads.length > 0) {
+          const pendingWrap = document.createElement("div");
+          pendingWrap.className = "hierarchy-node-children";
+          const pendingNode = createHierarchyNode("pending", {
+            label: "Raw client threads без Amai binding",
+            status: "alert",
+            summary: "Эти thread реально активны, но Amai ещё не связала их с пространством и сессией."
+          });
+          const pendingList = document.createElement("div");
+          pendingList.className = "hierarchy-pending-list";
+          project.pending_threads.forEach((thread) => {
+            const item = document.createElement("section");
+            item.className = "hierarchy-pending-thread";
+            item.appendChild(textNode("span", "hierarchy-thread-label", thread.label || "ещё нет данных"));
+            item.appendChild(textNode("span", "hierarchy-thread-value", thread.summary || "ещё нет данных"));
+            if (thread.thread_id) {
+              item.appendChild(createInlineCopyableText(thread.thread_id, thread.thread_id, null, true));
+            }
+            if (thread.updated_at) {
+              item.appendChild(textNode("span", "hierarchy-thread-label", `Обновлён: ${thread.updated_at}`));
+            }
+            pendingList.appendChild(item);
+          });
+          pendingNode.appendChild(pendingList);
+          pendingWrap.appendChild(pendingNode);
+          projectChildren.appendChild(pendingWrap);
+        }
+
+        projectNode.appendChild(projectChildren);
+        projectsWrap.appendChild(projectNode);
+      });
+      target.appendChild(projectsWrap);
+    }
+
+    function renderMetricBack(target, card) {
+      if (card.presentation_variant === "active_agent_budget_grouped_v3") {
+        renderGenericBackHeader(target, card);
+        if (card.value) {
+          target.appendChild(textNode("p", "card-value", card.value));
+        }
+        if (card.note) {
+          target.appendChild(textNode("p", "card-back-note", card.note));
+        }
+        renderActiveAgentBudgetBlocks(target, card);
+        return;
+      }
+      if (card.presentation_variant === "active_agent_budget_minimal_v2") {
+        renderGenericBackHeader(target, card);
+        target.appendChild(textNode("p", "card-value", card.value || "ещё нет данных"));
+        renderMetricRows(target, card);
+        return;
+      }
+      if (card.back_panel && card.back_panel.kind === "hierarchy_tree") {
+        renderHierarchyBackPanel(target, card.back_panel, card);
+        return;
+      }
+
+      renderGenericBackHeader(target, card);
+      const valueClass = card.kind === "service_card" ? "service-headline" : "card-value";
+      target.appendChild(textNode("p", valueClass, card.value || "ещё нет данных"));
+      const backNote = card.note
+        ? `${card.note} Оборотная сторона не добавляет новых источников, а разворачивает только уже materialized truth.`
+        : "Оборотная сторона не добавляет новых источников, а разворачивает только уже materialized truth.";
+      target.appendChild(textNode("p", "card-back-note", backNote));
+      renderMetricRows(target, card);
+      renderCardDetails(target, card);
+      if (card.source_label) {
+        target.appendChild(textNode("p", "card-back-source", card.source_label));
+      }
+    }
+
+    function renderCompareBack(target, card) {
+      if (card.benchmark_metric_kind === "procedural_skill_metrics") {
+        renderProceduralBenchmarkBack(target, card);
+        return;
+      }
+      renderGenericBackHeader(target, card);
+      const note = card.note
+        ? `${card.note} Оборотная сторона использует тот же materialized compare surface без скрытых линий и guessed overlays.`
+        : "Оборотная сторона использует тот же materialized compare surface без скрытых линий и guessed overlays.";
+      target.appendChild(textNode("p", "card-back-note", note));
+      if (card.headline_value) {
+        const headline = document.createElement("p");
+        headline.className = "service-headline compare-headline";
+        appendCompareCellValue(headline, card.headline_value);
+        target.appendChild(headline);
+      }
+      renderCompareMetrics(target, card);
+      renderCompareTableWrap(target, card);
+      if (card.source_label) {
+        target.appendChild(textNode("p", "card-back-source", card.source_label));
+      }
+    }
+
+    function renderCompareCard(containerId, container, card) {
+      const shell = createCardShell(
+        containerId,
+        card,
+        `compare-card ${statusClass(card.status)}`,
+        (front) => renderCompareFront(front, card),
+        (back) => renderCompareBack(back, card),
+      );
+      container.appendChild(shell);
+    }
+
+    function renderCompareTable(table, tableData, orientation) {
+      if (orientation === "transposed") {
+        renderTransposedCompareTable(table, tableData);
+        return;
+      }
+
+      renderStandardCompareTable(table, tableData);
+    }
+
+    function renderStandardCompareTable(table, tableData) {
+      const thead = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      tableData.columns.forEach((column) => {
+        const th = document.createElement("th");
+        th.appendChild(labelWithTooltip(column.label, column.tooltip, ""));
+        headRow.appendChild(th);
+      });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      const tbody = document.createElement("tbody");
+      tableData.rows.forEach((row) => {
+        const tr = document.createElement("tr");
+        const labelCell = document.createElement("td");
+        labelCell.appendChild(labelWithTooltip(row.label, row.tooltip, ""));
+        tr.appendChild(labelCell);
+        row.values.forEach((value) => {
+          const valueCell = document.createElement("td");
+          appendCompareCellValue(valueCell, value);
+          tr.appendChild(valueCell);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+    }
+
+    function renderTransposedCompareTable(table, tableData) {
+      const valueColumns = tableData.columns.slice(1);
+      const metrics = tableData.rows;
+
+      const thead = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      const scopeHeader = document.createElement("th");
+      scopeHeader.appendChild(labelWithTooltip("Срез", "Какой слой сравнения показан в строке: эталон или тестовые данные.", ""));
+      headRow.appendChild(scopeHeader);
+      metrics.forEach((metric) => {
+        const th = document.createElement("th");
+        th.appendChild(labelWithTooltip(metric.label, metric.tooltip, ""));
+        headRow.appendChild(th);
+      });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      const tbody = document.createElement("tbody");
+      valueColumns.forEach((column, columnIndex) => {
+        const tr = document.createElement("tr");
+        const labelCell = document.createElement("td");
+        labelCell.appendChild(labelWithTooltip(column.label, column.tooltip, ""));
+        tr.appendChild(labelCell);
+
+        metrics.forEach((metric) => {
+          const valueCell = document.createElement("td");
+          appendCompareCellValue(valueCell, metric.values[columnIndex] || "ещё нет данных");
+          tr.appendChild(valueCell);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+    }
+
+    function appendCompareCellValue(cell, value) {
+      if (typeof value === "string" && value.includes("\n")) {
+        const [primary, ...secondaryParts] = value.split("\n");
+        const stack = document.createElement("span");
+        stack.className = "compare-value-stack";
+        stack.appendChild(textNode("span", "compare-value-stack-primary", primary));
+        stack.appendChild(
+          textNode(
+            "span",
+            "compare-value-stack-secondary",
+            secondaryParts.join(" ").trim() || ""
+          )
+        );
+        cell.appendChild(stack);
+        return;
+      }
+      cell.textContent = value;
+    }
+
+    function addExtraClasses(element, extraClass) {
+      if (!extraClass) {
+        return;
+      }
+      extraClass
+        .split(/\s+/)
+        .filter(Boolean)
+        .forEach((className) => element.classList.add(className));
+    }
+
+    function renderSummary(meta, headline) {
+      const summary = document.getElementById("summary-status");
+      clearNode(summary);
+      const pill = statusPill(headline.status, headline.status_label, headline.status_tooltip);
+      const headRow = document.createElement("div");
+      headRow.className = "summary-head-row";
+      if (pill) {
+        headRow.appendChild(pill);
+      }
+      headRow.appendChild(textNode("div", "summary-version-label", "Версия"));
+      headRow.appendChild(textNode("div", "summary-version-inline", meta.package_version || "ещё нет данных"));
+      summary.appendChild(headRow);
+
+      const kv = document.getElementById("headline-kv");
+      clearNode(kv);
+      const currentValue = headline.token_scope
+        ? `${headline.token_value} (${headline.token_scope})`
+        : headline.token_value;
+      const rows = [
+        ["Почему такой статус", headline.status_reason],
+        ["Сейчас", currentValue],
+      ];
+      const cacheBits = [];
+      if (typeof meta.cache_refresh_duration_ms === "number") {
+        cacheBits.push(`refresh ${Math.round(meta.cache_refresh_duration_ms)} ms`);
+      }
+      if (typeof meta.cache_snapshot_age_ms === "number") {
+        cacheBits.push(`возраст ${Math.round(meta.cache_snapshot_age_ms)} ms`);
+      }
+      if (meta.cache_refresh_completed_at_label) {
+        cacheBits.push(`обновлён ${meta.cache_refresh_completed_at_label}`);
+      }
+      if (typeof meta.cache_stale === "boolean") {
+        cacheBits.push(meta.cache_stale ? "кэш устарел" : "кэш актуален");
+      }
+      if (cacheBits.length > 0) {
+        rows.push(["Снимок панели", cacheBits.join(" • ")]);
+      }
+      const refreshBits = [];
+      if (typeof meta.observe_refresh_total_ms === "number") {
+        refreshBits.push(`полный refresh ${Math.round(meta.observe_refresh_total_ms)} ms`);
+      }
+      if (meta.observe_refresh_slowest_stage && typeof meta.observe_refresh_slowest_stage_ms === "number") {
+        refreshBits.push(`узкое место ${meta.observe_refresh_slowest_stage} = ${Math.round(meta.observe_refresh_slowest_stage_ms)} ms`);
+      }
+      if (refreshBits.length > 0) {
+        rows.push(["Сборка снимка", refreshBits.join(" • ")]);
+      }
+      rows.forEach(([label, value]) => {
+        const row = document.createElement("div");
+        row.appendChild(textNode("span", "", label));
+        row.appendChild(textNode("strong", "", value || "ещё нет данных"));
+        kv.appendChild(row);
+      });
+    }
+
+    function applyDashboardLiveSummary(payload) {
+      if (!payload || !payload.meta || !payload.headline) {
+        return;
+      }
+      renderSummary(payload.meta, payload.headline);
+      if (payload.active_agent_card) {
+        replaceActiveAgentBudgetCard(payload.active_agent_card);
+      }
+      if (Array.isArray(payload.top_cards)) {
+        renderCards("top-cards", payload.top_cards, "metric-card");
+      }
+    }
+
+    function renderLinks(links) {
+      const list = document.getElementById("quick-links");
+      clearNode(list);
+      links.forEach((entry) => {
+        const li = document.createElement("li");
+        const items = Array.isArray(entry.items) ? entry.items : null;
+        if (items && items.length > 0) {
+          if (entry.label) {
+            li.appendChild(textNode("div", "link-group-title", entry.label));
+          }
+          if (entry.note) {
+            const note = document.createElement("span");
+            note.className = "link-group-note";
+            appendInlineNoteFragment(note, entry.note);
+            li.appendChild(note);
+          }
+          const group = document.createElement("div");
+          group.className = "link-group-items";
+          items.forEach((item) => {
+            const row = document.createElement("div");
+            row.className = "link-group-item";
+            const main = document.createElement("div");
+            main.className = "link-item-main";
+            if (item.url) {
+              main.appendChild(createInlineCopyableText(item.label, item.url, item.url));
+            } else {
+              main.appendChild(textNode("span", "link-disabled", item.label));
+            }
+            if (item.note) {
+              const note = document.createElement("span");
+              note.className = "link-item-note";
+              appendInlineNoteFragment(note, item.note);
+              main.appendChild(note);
+            }
+            row.appendChild(main);
+            group.appendChild(row);
+          });
+          li.appendChild(group);
+        } else {
+          const main = document.createElement("div");
+          main.className = "link-item-main";
+          if (entry.url) {
+            main.appendChild(createInlineCopyableText(entry.label, entry.url, entry.url));
+          } else {
+            main.appendChild(textNode("span", "link-disabled", entry.label));
+          }
+          if (entry.note) {
+            const note = document.createElement("span");
+            note.className = "link-item-note";
+            appendInlineNoteFragment(note, entry.note);
+            main.appendChild(note);
+          }
+          li.appendChild(main);
+        }
+        list.appendChild(li);
+      });
+    }
+
+    function renderCards(containerId, cards, kind) {
+      const container = document.getElementById(containerId);
+      clearNode(container);
+      cards.forEach((card) => {
+        if (card.kind === "live_compare" || card.kind === "compare_table") {
+          renderCompareCard(containerId, container, card);
+          return;
+        }
+        const shell = createCardShell(
+          containerId,
+          card,
+          `${kind} ${statusClass(card.status)}`,
+          (front) => {
+            if (card.presentation_variant === "active_agent_budget_grouped_v3") {
+              const top = document.createElement("div");
+              top.className = "card-top";
+              const titleTooltip = mergeTooltipParts(card.title_tooltip, card.source_label);
+              top.appendChild(labelWithTooltip(card.title, titleTooltip));
+              const pill = statusPill(card.status, card.status_label, card.status_tooltip);
+              if (pill) {
+                top.appendChild(pill);
+              }
+              front.appendChild(top);
+              if (card.value) {
+                front.appendChild(textNode("p", "card-value", card.value));
+              }
+              if (card.note) {
+                front.appendChild(textNode("p", "card-note", card.note));
+              }
+              renderActiveAgentBudgetBlocks(front, card);
+              return;
+            }
+            const top = document.createElement("div");
+            top.className = "card-top";
+            const titleTooltip = mergeTooltipParts(card.title_tooltip, card.source_label);
+            top.appendChild(labelWithTooltip(card.title, titleTooltip));
+            const pill = statusPill(card.status, card.status_label, card.status_tooltip);
+            if (pill) {
+              top.appendChild(pill);
+            }
+            front.appendChild(top);
+
+            const valueClass = kind.includes("service-card") ? "service-headline" : "card-value";
+            front.appendChild(textNode("p", valueClass, card.value));
+            if (card.note) {
+              front.appendChild(textNode("p", "card-note", card.note));
+            }
+            renderMetricRows(front, card);
+            if (card.details && card.details.length > 0) {
+              const list = document.createElement("ul");
+              list.className = "detail-list";
+              card.details.forEach((detail) => {
+                list.appendChild(textNode("li", "", detail));
+              });
+              front.appendChild(list);
+            }
+          },
+          (back) => renderMetricBack(back, card),
+        );
+        container.appendChild(shell);
+      });
+
+      if (containerId === "machine-cards") {
+        applyMasonryGrid(container);
+      }
+      syncBodyFullscreenState();
+    }
+
+    function applyMasonryGrid(container) {
+      if (!container || !container.classList.contains("machine-grid")) {
+        return;
+      }
+
+      const styles = window.getComputedStyle(container);
+      const rowGap = Number.parseFloat(styles.rowGap || "0");
+      const rowHeight = Number.parseFloat(styles.gridAutoRows || "0");
+      if (!rowHeight || Number.isNaN(rowHeight)) {
+        return;
+      }
+
+      const children = Array.from(container.children);
+      children.forEach((child) => {
+        child.style.gridRowEnd = "span 1";
+      });
+
+      requestAnimationFrame(() => {
+        children.forEach((child) => {
+          const height = child.getBoundingClientRect().height;
+          const span = Math.max(1, Math.ceil((height + rowGap) / (rowHeight + rowGap)));
+          child.style.gridRowEnd = `span ${span}`;
+        });
+      });
+    }
+
+    function renderWarnings(warnings) {
+      const wrap = document.getElementById("warnings-wrap");
+      clearNode(wrap);
+
+      if (!warnings || warnings.length === 0) {
+        wrap.appendChild(textNode("p", "muted", "Сейчас явных проблем не видно. Если ниже появится alert или critical, он окажется здесь простым русским текстом."));
+        return;
+      }
+
+      const list = document.createElement("ul");
+      list.className = "warning-list";
+      warnings.forEach((warning) => {
+        list.appendChild(textNode("li", "", warning));
+      });
+      wrap.appendChild(list);
+    }
+
+    function renderGlossary(glossary) {
+      const container = document.getElementById("glossary-cards");
+      clearNode(container);
+      glossary.forEach((entry) => {
+        const card = document.createElement("article");
+        card.className = "glossary-card";
+        card.appendChild(textNode("h3", "card-title", entry.term));
+        card.appendChild(textNode("p", "card-note", entry.meaning));
+        container.appendChild(card);
+      });
+    }
+
+    function renderDashboardPayload(payload) {
+      if (!payload) {
+        return;
+      }
+      hideError();
+      hideTooltip();
+      renderSummary(payload.meta, payload.headline);
+      renderLinks(payload.links);
+      renderCards("hero-cards", payload.hero_cards, "metric-card hero-metric-card");
+      renderCards("top-cards", payload.top_cards, "metric-card");
+      if (payload.client_budget_live) {
+        applyClientBudgetLiveRows(payload.client_budget_live);
+      }
+      renderCards("benchmark-cards", payload.benchmark_cards, "metric-card");
+      renderCards("service-cards", payload.service_cards, "service-card");
+      renderCards("machine-cards", payload.machine_cards, "metric-card");
+      renderWarnings(payload.warnings);
+      renderGlossary(payload.glossary);
+      writeCachedDashboardPayload(payload);
+    }
+
+    function showError(message) {
+      errorBanner.style.display = "block";
+      errorBanner.textContent = message;
+    }
+
+    function hideError() {
+      errorBanner.style.display = "none";
+      errorBanner.textContent = "";
+    }
+
+    async function loadDashboard(force = false) {
+      if (!force && isRefreshPaused()) {
+        return;
+      }
+      if (refreshInFlight) {
+        return;
+      }
+      refreshInFlight = true;
+      lastDashboardRefreshStartedAt = Date.now();
+      const clientBudgetLivePayloadPromise = fetchClientBudgetLivePayload(force).catch(() => null);
+      try {
+        const response = await fetchWithTimeout(
+          apiPathWithThreadHint("/api/dashboard"),
+          DASHBOARD_FETCH_TIMEOUT_MS,
+          {
+            cache: "no-store",
+          },
+        );
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        renderDashboardPayload(payload);
+        const livePayload = await clientBudgetLivePayloadPromise;
+        if (livePayload) {
+          applyClientBudgetLiveRows(livePayload);
+        }
+      } catch (error) {
+        showError(`Не удалось обновить панель Amai: ${error.message}`);
+      } finally {
+        refreshInFlight = false;
+        if (pendingForcedDashboardRefreshReason) {
+          scheduleForcedDashboardRefresh(pendingForcedDashboardRefreshReason, 0);
+        }
+      }
+    }
+
+    function scheduleForcedDashboardRefresh(reason = "forced_refresh", delayMs = 0) {
+      if (!isDocumentVisibleForRefresh()) {
+        return;
+      }
+      pendingForcedDashboardRefreshReason = reason;
+      if (pendingForcedDashboardRefreshTimer) {
+        window.clearTimeout(pendingForcedDashboardRefreshTimer);
+      }
+      const sinceLastRefreshMs = Date.now() - lastDashboardRefreshStartedAt;
+      const cooldownMs = Math.max(0, 900 - Math.max(0, sinceLastRefreshMs));
+      const waitMs = Math.max(delayMs, cooldownMs);
+      pendingForcedDashboardRefreshTimer = window.setTimeout(() => {
+        pendingForcedDashboardRefreshTimer = null;
+        const nextReason = pendingForcedDashboardRefreshReason || reason;
+        pendingForcedDashboardRefreshReason = null;
+        loadDashboard(true).catch((error) => {
+          console.warn(`Не удалось выполнить forced dashboard refresh (${nextReason}): ${error.message}`);
+        });
+      }, waitMs);
+    }
+
+    document.addEventListener("pointerdown", (event) => {
+      extendInteractionHold(2);
+      if (!activeTooltipTarget || !tooltipIsInteractiveSelector()) {
+        return;
+      }
+      const insideTooltip = tooltipContainsNode(event.target);
+      const insideActiveTrigger =
+        activeTooltipTarget &&
+        event.target &&
+        activeTooltipTarget.contains &&
+        activeTooltipTarget.contains(event.target);
+      if (!insideTooltip && !insideActiveTrigger) {
+        hideTooltip();
+      }
+    }, true);
+    document.addEventListener("selectionchange", () => {
+      updateTooltipCopyButton();
+      if (hasActiveSelection()) {
+        extendInteractionHold(8);
+      }
+    });
+    document.addEventListener("focusin", (event) => {
+      const tooltipTarget =
+        event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
+      if (tooltipTarget) {
+        showTooltip(tooltipTarget);
+      }
+    }, true);
+    document.addEventListener("focusout", (event) => {
+      const tooltipTarget =
+        event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
+      const relatedInsideTooltip = tooltipContainsNode(event.relatedTarget);
+      if (tooltipTarget && activeTooltipTarget === tooltipTarget && tooltipIsInteractiveSelector()) {
+        return;
+      }
+      if (tooltipTarget && !relatedInsideTooltip) {
+        scheduleHideTooltip(tooltipTarget);
+      }
+    }, true);
+    document.addEventListener("mouseover", (event) => {
+      const tooltipTarget =
+        event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
+      if (tooltipTarget) {
+        showTooltip(tooltipTarget);
+      }
+    }, true);
+    document.addEventListener("mouseout", (event) => {
+      if (tooltipContainsNode(event.target)) {
+        return;
+      }
+      const tooltipTarget =
+        event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
+      const relatedTooltip =
+        event.relatedTarget && event.relatedTarget.closest
+          ? event.relatedTarget.closest(".has-tooltip")
+          : null;
+      const relatedInsideTooltip = tooltipContainsNode(event.relatedTarget);
+      if (tooltipTarget && activeTooltipTarget === tooltipTarget && tooltipIsInteractiveSelector()) {
+        return;
+      }
+      if (tooltipTarget && relatedTooltip !== tooltipTarget && !relatedInsideTooltip) {
+        scheduleHideTooltip(tooltipTarget);
+      }
+    }, true);
+    document.addEventListener("scroll", () => positionTooltip(), true);
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !activeTooltipTarget || !tooltipIsInteractiveSelector()) {
+        return;
+      }
+      const target = activeTooltipTarget;
+      hideTooltip();
+      if (target && typeof target.focus === "function") {
+        target.focus();
+      }
+    }, true);
+
+    if (tooltipLayer) {
+      tooltipLayer.addEventListener("mouseenter", () => {
+        cancelTooltipHide();
+        extendInteractionHold(2);
+      }, true);
+      tooltipLayer.addEventListener("focusin", () => {
+        cancelTooltipHide();
+        extendInteractionHold(2);
+      }, true);
+      tooltipLayer.addEventListener("mouseleave", (event) => {
+        if (tooltipIsInteractiveSelector()) {
+          return;
+        }
+        if (
+          tooltipContainsNode(event.relatedTarget) ||
+          (activeTooltipTarget &&
+            event.relatedTarget &&
+            activeTooltipTarget.contains(event.relatedTarget))
+        ) {
+          return;
+        }
+        scheduleHideTooltip();
+      }, true);
+    }
+
+    if (tooltipCopyBtn) {
+      tooltipCopyBtn.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+      });
+      tooltipCopyBtn.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const valueToCopy = selectionTextWithin(tooltipLayer) || tooltipSelectionValue;
+        if (!valueToCopy) {
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(valueToCopy);
+          tooltipCopyBtn.textContent = "✓";
+          tooltipCopyBtn.title = "Скопировано";
+          setTimeout(() => updateTooltipCopyButton(), 1200);
+        } catch (_) {
+          tooltipCopyBtn.textContent = "!";
+          tooltipCopyBtn.title = "Не удалось скопировать";
+          setTimeout(() => updateTooltipCopyButton(), 1200);
+        }
+      });
+    }
+
+    window.addEventListener("resize", () => {
+      positionTooltip();
+      const machineCards = document.getElementById("machine-cards");
+      if (machineCards && machineCards.children.length > 0) {
+        applyMasonryGrid(machineCards);
+      }
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        scheduleForcedDashboardRefresh("visibility_visible");
+      }
+    });
+    window.addEventListener("focus", () => scheduleForcedDashboardRefresh("window_focus"));
+    window.addEventListener("pageshow", () => scheduleForcedDashboardRefresh("window_pageshow"));
+
+    renderDashboardPayload(chooseInitialDashboardPayload(DASHBOARD_BOOTSTRAP_PAYLOAD));
+    scheduleForcedDashboardRefresh("initial_boot");
+    setInterval(() => syncClientBudgetLiveRows(false), CLIENT_BUDGET_LIVE_REFRESH_MS);
+  </script>
+</body>
+</html>

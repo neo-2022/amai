@@ -7,6 +7,16 @@ CACHE_PATH="${REPO_ROOT}/state/observe/client_budget_gate_cache.json"
 
 cd "${REPO_ROOT}"
 
+reply_blocking_removed="false"
+if command -v jq >/dev/null 2>&1 && [[ -f ".amai/onboarding/project-chat-startup-contract.json" ]]; then
+  reply_blocking_removed="$(
+    jq -r '
+      .startup_contract.live_client_budget_enforcement.reply_blocking_removed
+      // false
+    ' .amai/onboarding/project-chat-startup-contract.json 2>/dev/null || printf 'false'
+  )"
+fi
+
 backup_path=""
 if [[ -f "${CACHE_PATH}" ]]; then
   backup_path="$(mktemp)"
@@ -28,7 +38,7 @@ now_ms="$(date +%s%3N)"
 
 cat >"${CACHE_PATH}" <<EOF
 {
-  "cache_version": "client-budget-gate-cache-v1",
+  "cache_version": "client-budget-gate-cache-v7",
   "fetched_at_epoch_ms": ${now_ms},
   "gate": {
     "client_budget_reply_gate": {
@@ -65,6 +75,20 @@ output="$(
 )"
 rc=$?
 set -e
+
+if [[ "${reply_blocking_removed}" == "true" ]]; then
+  # In removed mode, reply gate must not block even if cache payload says it should.
+  if [[ "${rc}" -ne 0 ]]; then
+    echo "expected exit code 0 (reply_blocking_removed=true), got ${rc}" >&2
+    exit 1
+  fi
+  if [[ -n "${output}" ]]; then
+    echo "expected empty output (reply_blocking_removed=true), got non-empty output" >&2
+    exit 1
+  fi
+  echo "proof_client_budget_reply_gate_cache_fallback: PASS (reply_blocking_removed=true)"
+  exit 0
+fi
 
 if [[ "${rc}" -ne 10 ]]; then
   echo "expected exit code 10, got ${rc}" >&2

@@ -6,6 +6,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${REPO_ROOT}/scripts/load_env.sh"
 
 cd "${REPO_ROOT}"
+./scripts/benchmark_contamination_preflight.sh
 
 run_matrix() {
     cargo run --release --quiet -- verify memory-matrix --matrix letta_memory_local --project-prefix "${project_prefix}"

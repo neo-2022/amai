@@ -7,6 +7,9 @@ output="tmp/onboarding/proof-vscode-mcp.json"
 human_output="tmp/onboarding/proof-vscode.out"
 startup_output=".github/instructions/amai-continuity-startup.instructions.md"
 startup_contract=".amai/onboarding/project-chat-startup-contract.json"
+agent_preflight_contract=".amai/onboarding/project-agent-preflight-contract.json"
+agent_preflight_agent_contract=".amai/onboarding/project-agent-preflight-agent-contract.json"
+agent_preflight_state=".amai/onboarding/project-agent-preflight-state.json"
 rm -f "${output}" "${human_output}" "${startup_output}" "${startup_contract}"
 
 cargo build --release --quiet
@@ -17,6 +20,9 @@ test -f "${output}"
 test -f "${human_output}"
 test -f "${startup_output}"
 test -f "${startup_contract}"
+test -f "${agent_preflight_contract}"
+test -f "${agent_preflight_agent_contract}"
+test -f "${agent_preflight_state}"
 grep -q '"servers"' "${output}"
 grep -q 'run_mcp_stdio.sh' "${output}"
 jq -e '.artifact_version == "workspace-startup-contract-v1"' "${startup_contract}" >/dev/null
@@ -35,7 +41,7 @@ jq -e '.startup_contract.live_client_budget_enforcement.target_control.shell_com
 jq -e '.startup_contract.live_client_budget_enforcement.compact_chat_control.exact_chat_command == "компакт_чат"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.live_client_budget_enforcement.compact_chat_control.cli_command == "continuity compact-chat"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.live_client_budget_enforcement.compact_chat_control.shell_command == "./scripts/continuity_compact_chat.sh"' "${startup_contract}" >/dev/null
-jq -e '.startup_contract.live_client_budget_enforcement.compact_chat_control.required_host_action == "open_clean_chat_surface_and_inject_prompt_text"' "${startup_contract}" >/dev/null
+jq -e '.startup_contract.live_client_budget_enforcement.compact_chat_control.required_host_action == "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.runtime_state_artifact.workspace_runtime_state_relative_path == ".amai/continuity/project-chat-startup-state.json"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.runtime_state_artifact.startup_execution_gate_field == "startup_execution_gate"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.runtime_state_artifact.gate_semantics_consistent_field == "gate_semantics_consistent"' "${startup_contract}" >/dev/null
@@ -67,6 +73,14 @@ jq -e '.startup_contract.runtime_state_artifact.inspection_fallback_cli.command 
 jq -e '.startup_contract.runtime_state_artifact.startup_execution_gate_field == "startup_execution_gate"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.required_summary_fields | index("project_task_tree") != null' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.required_summary_fields | index("project_task_ledger") != null' "${startup_contract}" >/dev/null
+jq -e '.artifact_version == "workspace-agent-preflight-contract-v1"' "${agent_preflight_contract}" >/dev/null
+jq -e '.preflight_contract.contract_version == "agent-preflight-contract-v1"' "${agent_preflight_contract}" >/dev/null
+jq -e '.preflight_contract.refresh_commands.shell_command == "./scripts/agent_preflight.sh"' "${agent_preflight_contract}" >/dev/null
+jq -e '.artifact_version == "workspace-agent-preflight-agent-contract-v1"' "${agent_preflight_agent_contract}" >/dev/null
+jq -e '.runtime_state_artifact.workspace_runtime_state_relative_path == ".amai/onboarding/project-agent-preflight-state.json"' "${agent_preflight_agent_contract}" >/dev/null
+jq -e '.artifact_version == "workspace-agent-preflight-state-v1"' "${agent_preflight_state}" >/dev/null
+jq -e '.agent_preflight_summary.stage_checklist | length > 0' "${agent_preflight_state}" >/dev/null
+jq -e '.agent_preflight_summary.next_required_stage.label | type == "string" and length > 0' "${agent_preflight_state}" >/dev/null
 grep -q 'amai_continuity_startup' "${startup_output}"
 grep -q '.amai/onboarding/project-chat-startup-contract.json' "${startup_output}"
 grep -q 'startup_contract_sha256 = "' "${startup_output}"
@@ -107,7 +121,7 @@ grep -q 'reply_execution_gate.reply_prefix' "${startup_output}"
 grep -q 'точную команду `компакт_чат`' "${startup_output}"
 grep -q './scripts/continuity_client_budget_target.sh --repo-root' "${startup_output}"
 grep -q './scripts/continuity_compact_chat.sh --repo-root' "${startup_output}"
-grep -q 'open_clean_chat_surface_and_inject_prompt_text' "${startup_output}"
+grep -q 'open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable' "${startup_output}"
 grep -q 'warning/advisory pressure signal' "${startup_output}"
 grep -q 'response_kind = "wait_for_budget_only"' "${startup_output}"
 grep -q 'required_return_task' "${startup_output}"
@@ -117,6 +131,9 @@ grep -q 'project_task_ledger' "${startup_output}"
 grep -q 'project_task_ledger_summary' "${startup_output}"
 grep -q 'Auto-start readiness: instruction-backed' "${human_output}"
 grep -q 'Machine-readable startup contract:' "${human_output}"
+grep -q 'Machine-readable agent preflight:' "${human_output}"
+grep -q 'Где лежит agent preflight contract JSON:' "${human_output}"
+grep -q 'Где лежит agent preflight runtime state JSON:' "${human_output}"
 grep -q 'Где лежит startup contract JSON:' "${human_output}"
 grep -q 'Startup contract SHA-256:' "${human_output}"
 grep -q 'Почему такой режим:' "${human_output}"

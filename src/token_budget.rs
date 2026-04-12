@@ -1,6 +1,5 @@
 use crate::cli::{
     ContextPackArgs, ObserveClientLimitHourlyBurnArgs, ObserveClientLimitTrendAnalysisArgs,
-    ObserveTokenAdjustmentAddArgs, ObserveTokenAdjustmentRegistryArgs,
     ObserveTokenContractualSourcesArgs, ObserveTokenEvidencePackArgs, ObserveTokenReportArgs,
     ObserveTokenRolloutAssistantGenerationArgs, ObserveTokenStatementExportArgs,
     ObserveTokenWholeCycleAttachArgs, ObserveTokenWholeCycleTurnAttachArgs,
@@ -32,6 +31,159 @@ use tokio::time::timeout;
 use tokio_postgres::Client;
 use uuid::Uuid;
 
+#[path = "token_budget/active_agent_support.rs"]
+mod active_agent_support;
+#[path = "token_budget/client_meter_kpi.rs"]
+mod client_meter_kpi;
+#[path = "token_budget/dashboard_active_agents.rs"]
+mod dashboard_active_agents;
+#[path = "token_budget/dashboard_agent_scope_activity.rs"]
+mod dashboard_agent_scope_activity;
+#[path = "token_budget/dashboard_assistant_scope.rs"]
+mod dashboard_assistant_scope;
+#[path = "token_budget/dashboard_current_session_report.rs"]
+mod dashboard_current_session_report;
+#[path = "token_budget/dashboard_event_cache_runtime.rs"]
+mod dashboard_event_cache_runtime;
+#[path = "token_budget/dashboard_event_caches.rs"]
+mod dashboard_event_caches;
+#[path = "token_budget/dashboard_exact_client_limits.rs"]
+mod dashboard_exact_client_limits;
+#[path = "token_budget/dashboard_live_response_latency.rs"]
+mod dashboard_live_response_latency;
+#[path = "token_budget/dashboard_report_cache_support.rs"]
+mod dashboard_report_cache_support;
+#[path = "token_budget/dashboard_report_core.rs"]
+mod dashboard_report_core;
+#[path = "token_budget/dashboard_report_surface.rs"]
+mod dashboard_report_surface;
+#[path = "token_budget/dashboard_shared_hints.rs"]
+mod dashboard_shared_hints;
+#[path = "token_budget/dashboard_statement_preview.rs"]
+mod dashboard_statement_preview;
+#[path = "token_budget/external_truth.rs"]
+mod external_truth;
+#[path = "token_budget/personal_kpi_window.rs"]
+mod personal_kpi_window;
+#[path = "token_budget/token_adjustments.rs"]
+mod token_adjustments;
+use self::active_agent_support::{
+    ACTIVE_AGENT_RECENT_THREAD_FALLBACK_MAX_AGE_MS, ACTIVE_AGENT_SECONDARY_LIMIT_WINDOW_HOURS,
+    active_agent_limit_percent_text, active_agent_personal_kpi_window,
+};
+use self::client_meter_kpi::{
+    damp_signed_kpi_percent_for_window_progress, personal_agent_online_kpi_from_client_live_meter,
+    preferred_active_agent_limit_surface, preferred_online_limit_surface,
+    reply_prefix_for_signed_kpi_percent, signed_kpi_classification,
+};
+pub(crate) use self::dashboard_active_agents::collect_active_agent_live_budget_surface;
+use self::dashboard_active_agents::user_visible_agent_activity_is_proof_runtime;
+#[cfg(test)]
+use self::dashboard_active_agents::{
+    active_agent_kpi_aggregate, attach_active_agent_personal_limit_surfaces,
+    dedup_active_agents_by_identity, resolved_active_agent_label,
+};
+#[cfg(test)]
+use self::dashboard_agent_scope_activity::active_agent_activity_entries;
+pub(crate) use self::dashboard_agent_scope_activity::{
+    active_agent_thread_ids_from_activity, collect_agent_scope_activity,
+};
+#[cfg(test)]
+use self::dashboard_assistant_scope::dashboard_assistant_scope_source_signature;
+use self::dashboard_assistant_scope::{
+    DashboardAssistantScopeDebug, dashboard_assistant_scope_debug_value,
+    derive_dashboard_rollout_assistant_generation_scopes,
+};
+use self::dashboard_current_session_report::active_agent_budget_fields_from_thread_bound_snapshot;
+pub(crate) use self::dashboard_current_session_report::{
+    collect_dashboard_current_session_budget_report_with_thread_hint_and_base,
+    collect_live_current_session_budget_guard,
+};
+#[cfg(test)]
+use self::dashboard_current_session_report::{
+    restore_context_thread_id_hint, reusable_exact_thread_budget_live_surfaces_from_base_report,
+    reusable_exact_thread_budget_live_surfaces_from_thread_bound_snapshot,
+    reusable_exact_thread_current_session_budget_report_from_base_report,
+    thread_bound_budget_snapshot_shared_cache_path,
+    thread_bound_snapshot_invalidation_shared_cache_path,
+};
+pub(crate) use self::dashboard_event_cache_runtime::{
+    bump_dashboard_live_turn_retrieval_invalidation, bump_dashboard_token_events_invalidation,
+};
+use self::dashboard_event_cache_runtime::{
+    cached_dashboard_current_session_events, cached_dashboard_live_turn_retrieval,
+    cached_dashboard_token_events, cached_dashboard_token_events_entry,
+    current_dashboard_live_turn_retrieval_invalidation_epoch_ms,
+    current_dashboard_token_events_invalidation_epoch_ms, dashboard_token_events_delta_limit,
+    event_shadow_version_key, live_usage_identity_shadow_key, merge_dashboard_token_events,
+    store_dashboard_current_session_events, store_dashboard_live_turn_retrieval,
+    store_dashboard_token_events,
+};
+use self::dashboard_event_caches::{
+    DashboardCurrentSessionEventsCache, DashboardLiveTurnRetrievalCache, DashboardTokenEventsCache,
+    load_shared_dashboard_current_session_events, load_shared_dashboard_live_turn_retrieval_cache,
+    load_shared_dashboard_live_turn_retrieval_invalidation, load_shared_dashboard_token_events,
+    load_shared_dashboard_token_events_invalidation, write_shared_dashboard_current_session_events,
+    write_shared_dashboard_live_turn_retrieval_cache,
+    write_shared_dashboard_live_turn_retrieval_invalidation, write_shared_dashboard_token_events,
+    write_shared_dashboard_token_events_invalidation,
+};
+use self::dashboard_exact_client_limits::{
+    DashboardExactClientLimitsCache, dashboard_exact_client_rate_limits_resolution,
+};
+#[cfg(test)]
+use self::dashboard_exact_client_limits::{
+    best_effort_exact_client_limit_observation_from_result,
+    load_shared_dashboard_exact_client_limits_cache,
+    write_shared_dashboard_exact_client_limits_cache,
+};
+use self::dashboard_live_response_latency::{
+    annotate_live_response_latency_surface, build_live_response_latency_surface,
+    current_workspace_live_response_scope, live_response_latency_surface_signature,
+};
+#[cfg(test)]
+use self::dashboard_live_response_latency::{
+    build_current_thread_live_file_hints, current_session_live_response_turns,
+};
+use self::dashboard_report_cache_support::{
+    dashboard_precache_stage_ms_value, dashboard_report_cache_debug,
+    dashboard_same_meter_sync_signature, record_dashboard_precache_stage_ms,
+    record_dashboard_stage_ms, should_run_dashboard_same_meter_sync,
+};
+#[cfg(test)]
+use self::dashboard_report_cache_support::{
+    dashboard_same_meter_sync_shared_cache_path, load_shared_dashboard_same_meter_sync_signature,
+    write_shared_dashboard_same_meter_sync_signature,
+};
+use self::dashboard_report_core::{
+    DashboardReportCache, DashboardReportSignatureComponents, cached_dashboard_report_entry,
+    dashboard_report_signature, dashboard_report_signature_components,
+    refresh_dashboard_report_live_ages, store_dashboard_report,
+};
+use self::dashboard_report_surface::{
+    DashboardReadOnlyStatementSurfaces, build_dashboard_current_session_statement_preview,
+    build_dashboard_read_only_statement_surfaces,
+};
+#[cfg(test)]
+use self::dashboard_shared_hints::{
+    PersistedActiveThreadHintCache, active_thread_hint_shared_cache_path,
+};
+use self::dashboard_shared_hints::{
+    continuity_restore_observed_event_recently_recorded, load_shared_active_thread_hint,
+    write_continuity_restore_observed_dedupe_cache,
+};
+use self::dashboard_statement_preview::{
+    build_client_limit_boundary_review_surface, build_dashboard_statement_export_preview,
+    build_dashboard_statement_preview, observed_whole_cycle_with_assistant_scope_tokens,
+    verified_observed_whole_cycle_with_assistant_scope_tokens,
+};
+use self::personal_kpi_window::{
+    default_agent_scope_label, filter_events_for_personal_kpi_selector,
+    normalize_token_event_agent_scope, personal_kpi_window_events,
+    rolling_window_events_for_duration,
+};
+pub use self::token_adjustments::{add_adjustment_entry, print_adjustment_registry};
+
 const CONFIG_RELATIVE_PATH: &str = "config/token_budget_profiles.toml";
 const AGENT_CYCLE_TIMELINE_MAX_POINTS: usize = 256;
 const ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS: i64 = 60_000;
@@ -39,26 +191,26 @@ const ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND: &str = "assistant_genera
 const CONTINUITY_SNAPSHOT_QUERY_LABEL: &str = "Continuity snapshot";
 const CONTINUITY_PRE_AMAI_BASELINE_STRATEGY: &str = "truthful_pre_amai_continuity_summaries_v1";
 const DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS: u64 = 10_000;
-const DASHBOARD_ASSISTANT_SCOPE_SHARED_CACHE_RELATIVE_PATH: &str =
-    "state/token_budget/dashboard_assistant_scope_cache.json";
-const DASHBOARD_ASSISTANT_SCOPE_SHARED_CACHE_VERSION: &str =
-    "dashboard-assistant-scope-cache-v1";
-const DASHBOARD_ASSISTANT_SCOPE_SOURCE_SHARED_CACHE_RELATIVE_PATH: &str =
-    "state/token_budget/dashboard_assistant_scope_source_cache.json";
-const DASHBOARD_ASSISTANT_SCOPE_SOURCE_SHARED_CACHE_VERSION: &str =
-    "dashboard-assistant-scope-source-cache-v1";
 const DASHBOARD_EXACT_CLIENT_LIMITS_SHARED_CACHE_RELATIVE_PATH: &str =
     "state/token_budget/exact_client_limits_cache.json";
 const DASHBOARD_EXACT_CLIENT_LIMITS_SHARED_CACHE_VERSION: &str =
     "dashboard-exact-client-limits-cache-v1";
 const DASHBOARD_TOKEN_EVENTS_SHARED_CACHE_RELATIVE_PATH: &str =
     "state/token_budget/dashboard_token_events_cache.json";
-const DASHBOARD_TOKEN_EVENTS_SHARED_CACHE_VERSION: &str =
-    "dashboard-token-events-cache-v1";
+const DASHBOARD_TOKEN_EVENTS_SHARED_CACHE_VERSION: &str = "dashboard-token-events-cache-v2";
+const DASHBOARD_TOKEN_EVENTS_INVALIDATION_SHARED_CACHE_RELATIVE_PATH: &str =
+    "state/token_budget/dashboard_token_events_invalidation.json";
+const DASHBOARD_TOKEN_EVENTS_INVALIDATION_SHARED_CACHE_VERSION: &str =
+    "dashboard-token-events-invalidation-v1";
 const DASHBOARD_CURRENT_SESSION_EVENTS_SHARED_CACHE_RELATIVE_PATH: &str =
     "state/token_budget/dashboard_current_session_events_cache.json";
 const DASHBOARD_CURRENT_SESSION_EVENTS_SHARED_CACHE_VERSION: &str =
-    "dashboard-current-session-events-cache-v1";
+    "dashboard-current-session-events-cache-v2";
+const CONTINUITY_RESTORE_OBSERVED_DEDUPE_SHARED_CACHE_RELATIVE_PATH: &str =
+    "state/token_budget/continuity_restore_observed_dedupe.json";
+const CONTINUITY_RESTORE_OBSERVED_DEDUPE_SHARED_CACHE_VERSION: &str =
+    "continuity-restore-observed-dedupe-v1";
+const CONTINUITY_RESTORE_OBSERVED_DEDUPE_TTL_MS: u64 = 30_000;
 const DASHBOARD_LIVE_TURN_RETRIEVAL_SHARED_CACHE_RELATIVE_PATH: &str =
     "state/token_budget/live_turn_retrieval_context_pack_cache.json";
 const DASHBOARD_LIVE_TURN_RETRIEVAL_SHARED_CACHE_VERSION: &str =
@@ -70,13 +222,32 @@ const DASHBOARD_LIVE_TURN_RETRIEVAL_INVALIDATION_SHARED_CACHE_VERSION: &str =
 const ACTIVE_THREAD_HINT_SHARED_CACHE_RELATIVE_PATH: &str = "state/observe/active_thread_hint.json";
 const ACTIVE_THREAD_HINT_SHARED_CACHE_VERSION: &str = "active-thread-hint-cache-v1";
 const ACTIVE_THREAD_HINT_MAX_AGE_MS: u64 = 30 * 60 * 1000;
+const THREAD_BOUND_BUDGET_SNAPSHOT_SHARED_CACHE_VERSION: &str =
+    "thread-bound-budget-snapshot-cache-v2";
+const THREAD_BOUND_SNAPSHOT_INVALIDATION_SHARED_CACHE_VERSION: &str =
+    "thread-bound-snapshot-invalidation-v1";
 const DASHBOARD_SAME_METER_SYNC_SHARED_CACHE_RELATIVE_PATH: &str =
     "state/token_budget/dashboard_same_meter_sync_cache.json";
-const DASHBOARD_SAME_METER_SYNC_SHARED_CACHE_VERSION: &str =
-    "dashboard-same-meter-sync-cache-v1";
+const DASHBOARD_SAME_METER_SYNC_SHARED_CACHE_VERSION: &str = "dashboard-same-meter-sync-cache-v1";
 const DASHBOARD_CURRENT_SESSION_RECENT_EVENTS_LIMIT: i64 = 512;
 const EXACT_CLIENT_LIMIT_SAMPLE_SNAPSHOT_KIND: &str = "client_status_bar_rate_limits";
 const CLIENT_LIMIT_TREND_ANALYSIS_SNAPSHOT_KIND: &str = "client_limit_hourly_burn_trend";
+const PERSONAL_AGENT_KPI_WINDOW_HOURS: i64 = 5;
+
+fn continuity_profile_enabled() -> bool {
+    std::env::var("AMAI_PROFILE_CONTINUITY")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !normalized.is_empty() && normalized != "0" && normalized != "false"
+        })
+        .unwrap_or(false)
+}
+
+fn continuity_profile_log(stage: &str, elapsed_ms: u128, extra: &str) {
+    if continuity_profile_enabled() {
+        eprintln!("[amai-continuity-profile] stage={stage} elapsed_ms={elapsed_ms} {extra}");
+    }
+}
 const DEFAULT_CLIENT_LIMIT_HOURLY_BURN_WINDOW_MINUTES: u64 = 60;
 const DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MAX_LIVE_AGE_SECONDS: u64 = 10;
 const DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MIN_HISTORY_SPAN_MINUTES: u64 = 55;
@@ -91,14 +262,8 @@ const MCP_CONTEXT_PACK_TOOL_OVERHEAD_CONTRACT_VERSION: &str =
 static DASHBOARD_ROLLOUT_OBSERVATION_CACHE: OnceLock<
     Mutex<Option<DashboardRolloutObservationCache>>,
 > = OnceLock::new();
-static DASHBOARD_ASSISTANT_SCOPE_SOURCE_CACHE: OnceLock<
-    Mutex<Option<DashboardAssistantScopeSourceCache>>,
-> = OnceLock::new();
-static DASHBOARD_ASSISTANT_SCOPE_CACHE: OnceLock<Mutex<Option<DashboardAssistantScopeCache>>> =
-    OnceLock::new();
 static DASHBOARD_SAME_METER_SYNC_CACHE: OnceLock<Mutex<Option<DashboardSameMeterSyncCache>>> =
     OnceLock::new();
-static DASHBOARD_REPORT_CACHE: OnceLock<Mutex<Option<DashboardReportCache>>> = OnceLock::new();
 static DASHBOARD_TOKEN_EVENTS_CACHE: OnceLock<Mutex<Option<DashboardTokenEventsCache>>> =
     OnceLock::new();
 static DASHBOARD_CURRENT_SESSION_EVENTS_CACHE: OnceLock<
@@ -113,11 +278,13 @@ static DASHBOARD_WORKING_STATE_METADATA_CACHE: OnceLock<
 static DASHBOARD_EXACT_CLIENT_LIMITS_CACHE: OnceLock<
     Mutex<Option<DashboardExactClientLimitsCache>>,
 > = OnceLock::new();
+static TOKEN_BUDGET_CONFIG_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedTokenBudgetConfig>>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone, Deserialize)]
-struct TokenBudgetConfigFile {
+pub(crate) struct TokenBudgetConfigFile {
     default_profile: String,
-    measurement: MeasurementConfig,
+    pub(crate) measurement: MeasurementConfig,
     #[serde(default)]
     contract: TokenBudgetContractConfig,
     #[serde(default)]
@@ -126,9 +293,16 @@ struct TokenBudgetConfigFile {
     client_budget_overrides: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone)]
+struct CachedTokenBudgetConfig {
+    size_bytes: u64,
+    modified_epoch_ms: u64,
+    config: TokenBudgetConfigFile,
+}
+
 #[derive(Debug, Clone, Deserialize)]
-struct MeasurementConfig {
-    tokenizer: String,
+pub(crate) struct MeasurementConfig {
+    pub(crate) tokenizer: String,
     naive_limit_files: usize,
     naive_max_bytes_per_file: usize,
     #[serde(default)]
@@ -329,115 +503,6 @@ struct ResolvedProfile {
     rolling_window_hours: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct AdjustmentRegistryFile {
-    #[serde(default)]
-    adjustments: Vec<AdjustmentRegistryEntry>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct AdjustmentRegistryEntry {
-    adjustment_id: String,
-    scope_code: String,
-    kind: String,
-    status: String,
-    reason_code: String,
-    created_at_epoch_ms: i64,
-    #[serde(default)]
-    tokens_delta: Option<i64>,
-    #[serde(default)]
-    amount_delta: Option<f64>,
-    #[serde(default)]
-    currency_profile: Option<String>,
-    #[serde(default)]
-    related_statement_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct RateCardFile {
-    schema_version: String,
-    rate_card_version: String,
-    currency_profile: String,
-    provider: String,
-    default_input_cost_per_1k_tokens: f64,
-    default_output_cost_per_1k_tokens: f64,
-    #[serde(default)]
-    effective_from_epoch_ms: Option<i64>,
-    #[serde(default)]
-    effective_to_epoch_ms: Option<i64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct ProviderUsageExportFile {
-    schema_version: String,
-    provider: String,
-    #[serde(default)]
-    currency_profile: Option<String>,
-    #[serde(default)]
-    scopes: Vec<ProviderUsageScopeEntry>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ProviderUsageScopeEntry {
-    scope_code: String,
-    #[serde(default)]
-    input_tokens: Option<u64>,
-    #[serde(default)]
-    output_tokens: Option<u64>,
-    #[serde(default)]
-    total_tokens: Option<u64>,
-    #[serde(default)]
-    provider_cost_amount: Option<f64>,
-    #[serde(default)]
-    currency_profile: Option<String>,
-    #[serde(default)]
-    period_start_epoch_ms: Option<i64>,
-    #[serde(default)]
-    period_end_epoch_ms: Option<i64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct ProviderInvoiceExportFile {
-    schema_version: String,
-    provider: String,
-    #[serde(default)]
-    currency_profile: Option<String>,
-    #[serde(default)]
-    scopes: Vec<ProviderInvoiceScopeEntry>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ProviderInvoiceScopeEntry {
-    scope_code: String,
-    invoice_amount: f64,
-    #[serde(default)]
-    currency_profile: Option<String>,
-    #[serde(default)]
-    invoice_id: Option<String>,
-    #[serde(default)]
-    period_start_epoch_ms: Option<i64>,
-    #[serde(default)]
-    period_end_epoch_ms: Option<i64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct InfraCostProfileFile {
-    schema_version: String,
-    infra_cost_profile_version: String,
-    currency_profile: String,
-    #[serde(default)]
-    provider: Option<String>,
-    cost_per_1k_internal_billed_tokens: f64,
-    #[serde(default)]
-    cost_per_live_event: f64,
-    #[serde(default)]
-    fixed_scope_cost_amount: f64,
-    #[serde(default)]
-    effective_from_epoch_ms: Option<i64>,
-    #[serde(default)]
-    effective_to_epoch_ms: Option<i64>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TokenBudgetEvent {
     snapshot_id: Option<Uuid>,
@@ -447,6 +512,7 @@ struct TokenBudgetEvent {
     context_pack_id: Option<String>,
     thread_id: Option<String>,
     turn_id: Option<String>,
+    agent_scope: String,
     payload_origin: String,
     session_id: String,
     rolling_window_profile: String,
@@ -501,6 +567,7 @@ struct TokenBudgetEvent {
     cold_warm_state: String,
     baseline_strategy: String,
     retrieval_mode: Option<String>,
+    retrieval_scope_signature: Option<String>,
     tokenizer: String,
     latency_ms: f64,
     saved_tokens: u64,
@@ -591,25 +658,6 @@ struct DashboardRolloutObservationCache {
 }
 
 #[derive(Debug, Clone)]
-struct DashboardAssistantScopeCache {
-    repo_root: PathBuf,
-    signature: String,
-    scopes: Vec<AssistantGenerationScopeObservation>,
-}
-
-#[derive(Debug, Clone)]
-struct DashboardAssistantScopeSourceCache {
-    repo_root: PathBuf,
-    signature: String,
-    target_context_pack_ids: BTreeSet<String>,
-    direct_turns: Vec<AssistantGenerationTurnObservedSnapshot>,
-    metadata: BTreeMap<String, WorkingStateContextPackMeta>,
-    helper_only_context_pack_ids_by_thread: BTreeMap<String, BTreeSet<String>>,
-    turns_by_thread:
-        BTreeMap<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>,
-}
-
-#[derive(Debug, Clone)]
 struct DashboardSameMeterSyncCache {
     repo_root: PathBuf,
     signature: String,
@@ -623,253 +671,9 @@ struct PersistedDashboardSameMeterSyncCache {
 }
 
 #[derive(Debug, Clone)]
-struct DashboardReportCache {
-    repo_root: PathBuf,
-    signature: String,
-    components: DashboardReportSignatureComponents,
-    report: Value,
-}
-
-#[derive(Debug, Clone)]
-struct DashboardTokenEventsCache {
-    repo_root: PathBuf,
-    signature: String,
-    snapshot_kinds: Vec<String>,
-    summary: Vec<postgres::ObservabilitySnapshotKindSummary>,
-    raw_events: Vec<TokenBudgetEvent>,
-}
-
-#[derive(Debug, Clone)]
-struct DashboardCurrentSessionEventsCache {
-    repo_root: PathBuf,
-    signature: String,
-    session_gap_ms: i64,
-    events: Vec<TokenBudgetEvent>,
-}
-
-#[derive(Debug, Clone)]
-struct DashboardLiveTurnRetrievalCache {
-    repo_root: PathBuf,
-    thread_id: String,
-    lower_bound: i64,
-    upper_bound: i64,
-    invalidation_epoch_ms: i64,
-    context_pack_ids: BTreeSet<String>,
-    retrieval_count: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedDashboardTokenEventsCache {
-    cache_version: String,
-    repo_root: String,
-    signature: String,
-    snapshot_kinds: Vec<String>,
-    raw_events: Vec<TokenBudgetEvent>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedDashboardCurrentSessionEventsCache {
-    cache_version: String,
-    repo_root: String,
-    signature: String,
-    session_gap_ms: i64,
-    events: Vec<TokenBudgetEvent>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedDashboardLiveTurnRetrievalCache {
-    cache_version: String,
-    repo_root: String,
-    thread_id: String,
-    lower_bound: i64,
-    upper_bound: i64,
-    invalidation_epoch_ms: i64,
-    context_pack_ids: BTreeSet<String>,
-    retrieval_count: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedDashboardLiveTurnRetrievalInvalidationCache {
-    cache_version: String,
-    repo_root: String,
-    latest_recorded_at_epoch_ms: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedActiveThreadHintCache {
-    cache_version: String,
-    updated_at_epoch_ms: u64,
-    thread_id: String,
-}
-
-#[derive(Debug, Clone)]
 struct DashboardWorkingStateMetadataCache {
     signature: String,
     metadata: BTreeMap<String, WorkingStateContextPackMeta>,
-}
-
-#[derive(Debug, Clone)]
-struct DashboardExactClientLimitsCache {
-    fetched_at_epoch_ms: u64,
-    observation: Option<CodexAppServerRateLimitsObservation>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedDashboardAssistantScopeCache {
-    cache_version: String,
-    repo_root: String,
-    signature: String,
-    scopes: Vec<AssistantGenerationScopeObservation>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedDashboardAssistantScopeSourceCache {
-    cache_version: String,
-    repo_root: String,
-    signature: String,
-    target_context_pack_ids: BTreeSet<String>,
-    direct_turns: Vec<AssistantGenerationTurnObservedSnapshot>,
-    metadata: BTreeMap<String, WorkingStateContextPackMeta>,
-    helper_only_context_pack_ids_by_thread: BTreeMap<String, BTreeSet<String>>,
-    turns_by_thread: BTreeMap<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DashboardExactClientLimitsResolutionSource {
-    LiveAppServer,
-    InProcessCache,
-    SharedFileCache,
-    Missing,
-}
-
-impl DashboardExactClientLimitsResolutionSource {
-    fn should_persist_exact_sample(self) -> bool {
-        matches!(self, Self::LiveAppServer)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct DashboardExactClientLimitsResolution {
-    observation: Option<CodexAppServerRateLimitsObservation>,
-    source: DashboardExactClientLimitsResolutionSource,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedDashboardExactClientLimitsCache {
-    cache_version: String,
-    fetched_at_epoch_ms: u64,
-    observation: Option<CodexAppServerRateLimitsObservation>,
-}
-
-fn cached_dashboard_exact_client_limits_observation() -> Option<CodexAppServerRateLimitsObservation>
-{
-    let cache = DASHBOARD_EXACT_CLIENT_LIMITS_CACHE.get_or_init(|| Mutex::new(None));
-    cache
-        .lock()
-        .ok()
-        .and_then(|guard| guard.as_ref().and_then(|entry| entry.observation.clone()))
-}
-
-fn fresh_dashboard_exact_client_limits_cache_entry(
-    now_epoch_ms: u64,
-) -> Option<DashboardExactClientLimitsCache> {
-    let cache = DASHBOARD_EXACT_CLIENT_LIMITS_CACHE.get_or_init(|| Mutex::new(None));
-    cache.lock().ok().and_then(|guard| {
-        guard.as_ref().and_then(|entry| {
-            (now_epoch_ms.saturating_sub(entry.fetched_at_epoch_ms)
-                <= DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS)
-                .then(|| entry.clone())
-        })
-    })
-}
-
-fn set_dashboard_exact_client_limits_cache(entry: DashboardExactClientLimitsCache) {
-    let cache = DASHBOARD_EXACT_CLIENT_LIMITS_CACHE.get_or_init(|| Mutex::new(None));
-    if let Ok(mut guard) = cache.lock() {
-        *guard = Some(entry);
-    }
-}
-
-fn dashboard_exact_client_limits_shared_cache_path(repo_root: &Path) -> PathBuf {
-    repo_root.join(DASHBOARD_EXACT_CLIENT_LIMITS_SHARED_CACHE_RELATIVE_PATH)
-}
-
-fn discovered_dashboard_exact_client_limits_shared_cache_path() -> Option<PathBuf> {
-    config::discover_repo_root(None)
-        .ok()
-        .map(|repo_root| dashboard_exact_client_limits_shared_cache_path(&repo_root))
-}
-
-fn active_thread_hint_shared_cache_path(repo_root: &Path) -> PathBuf {
-    repo_root.join(ACTIVE_THREAD_HINT_SHARED_CACHE_RELATIVE_PATH)
-}
-
-fn load_shared_active_thread_hint(repo_root: &Path, now_epoch_ms: u64) -> Option<String> {
-    let path = active_thread_hint_shared_cache_path(repo_root);
-    let payload = fs::read_to_string(path).ok()?;
-    let persisted: PersistedActiveThreadHintCache = serde_json::from_str(&payload).ok()?;
-    if persisted.cache_version != ACTIVE_THREAD_HINT_SHARED_CACHE_VERSION {
-        return None;
-    }
-    let thread_id = persisted.thread_id.trim();
-    if thread_id.is_empty() {
-        return None;
-    }
-    if now_epoch_ms.saturating_sub(persisted.updated_at_epoch_ms) > ACTIVE_THREAD_HINT_MAX_AGE_MS {
-        return None;
-    }
-    Some(thread_id.to_string())
-}
-
-fn load_shared_dashboard_exact_client_limits_cache(
-    path: &Path,
-    now_epoch_ms: u64,
-) -> Option<DashboardExactClientLimitsCache> {
-    let payload = fs::read_to_string(path).ok()?;
-    let persisted: PersistedDashboardExactClientLimitsCache =
-        serde_json::from_str(&payload).ok()?;
-    if persisted.cache_version != DASHBOARD_EXACT_CLIENT_LIMITS_SHARED_CACHE_VERSION {
-        return None;
-    }
-    if now_epoch_ms.saturating_sub(persisted.fetched_at_epoch_ms)
-        > DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS
-    {
-        return None;
-    }
-    Some(DashboardExactClientLimitsCache {
-        fetched_at_epoch_ms: persisted.fetched_at_epoch_ms,
-        observation: persisted.observation,
-    })
-}
-
-fn write_shared_dashboard_exact_client_limits_cache(
-    path: &Path,
-    entry: &DashboardExactClientLimitsCache,
-) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let payload = PersistedDashboardExactClientLimitsCache {
-        cache_version: DASHBOARD_EXACT_CLIENT_LIMITS_SHARED_CACHE_VERSION.to_string(),
-        fetched_at_epoch_ms: entry.fetched_at_epoch_ms,
-        observation: entry.observation.clone(),
-    };
-    fs::write(path, serde_json::to_vec(&payload)?)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
-}
-
-#[cfg(test)]
-fn best_effort_exact_client_limit_observation_from_result(
-    result: Result<Option<CodexAppServerRateLimitsObservation>>,
-    cached: Option<CodexAppServerRateLimitsObservation>,
-) -> Option<CodexAppServerRateLimitsObservation> {
-    match result {
-        Ok(Some(observation)) => Some(observation),
-        Ok(None) => cached,
-        Err(_) => cached,
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -887,17 +691,91 @@ struct AssistantGenerationTurnObservedSnapshot {
     context_pack_ids: BTreeSet<String>,
 }
 
+#[derive(Debug, Clone)]
+struct LiveResponseTurnObservation {
+    thread_id: String,
+    turn_id: String,
+    state: String,
+    started_at_epoch_ms: i64,
+    ended_at_epoch_ms: i64,
+    latency_ms: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct DashboardReportSignatureComponents {
-    current_session_events: String,
-    rolling_window_events: String,
-    lifetime_events: String,
-    current_session_assistant_scope: String,
-    rolling_window_assistant_scope: String,
-    lifetime_assistant_scope: String,
-    client_live_meter: String,
-    exact_client_limits: String,
-    client_budget_target_percent: u64,
+struct PersonalKpiSelector {
+    project_code: String,
+    namespace_code: String,
+    agent_scope: String,
+    thread_id: Option<String>,
+}
+
+impl PersonalKpiSelector {
+    fn signature_key(&self) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            self.project_code,
+            self.namespace_code,
+            self.agent_scope,
+            self.thread_id.as_deref().unwrap_or("no-thread")
+        )
+    }
+
+    fn scope_kind(&self) -> &'static str {
+        if self.thread_id.is_some() {
+            "personal_thread_scope"
+        } else {
+            "personal_agent_scope"
+        }
+    }
+
+    fn scope_label(&self) -> &str {
+        self.thread_id
+            .as_deref()
+            .unwrap_or(self.agent_scope.as_str())
+    }
+}
+
+async fn load_agent_display_name_overrides_for_scopes(
+    db: &Client,
+    scopes: impl IntoIterator<Item = String>,
+) -> Result<HashMap<String, String>> {
+    let mut overrides = HashMap::new();
+    let mut seen = BTreeSet::new();
+    for scope in scopes {
+        let scope = scope.trim();
+        if scope.is_empty() || !seen.insert(scope.to_string()) {
+            continue;
+        }
+        if let Some(display_name) = postgres::find_agent_display_name_by_code(db, scope).await? {
+            overrides.insert(scope.to_string(), display_name);
+        }
+    }
+    Ok(overrides)
+}
+
+fn recent_client_thread_record_has_connected_model(
+    thread: &codex_threads::RecentClientThreadRecord,
+) -> bool {
+    thread
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+}
+
+fn recent_client_thread_json_has_connected_model(thread: &Value) -> bool {
+    thread["model"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+}
+
+fn json_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().map(|value| value as i64))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -968,16 +846,6 @@ struct ExactClientLimitSample {
 struct DashboardReportPreCacheTimings {
     stage_ms: BTreeMap<String, u64>,
     total_ms: u64,
-}
-
-#[derive(Debug, Clone, Default)]
-struct DashboardAssistantScopeDebug {
-    source_cache_status: String,
-    source_stage_ms: BTreeMap<String, u64>,
-    source_total_ms: u64,
-    scope_cache_status: String,
-    scope_stage_ms: BTreeMap<String, u64>,
-    scope_total_ms: u64,
 }
 
 fn deserialize_f64_from_number_or_string<'de, D>(deserializer: D) -> Result<f64, D::Error>
@@ -1770,24 +1638,6 @@ fn build_suitability_contract_json(contract: &TokenBudgetContractConfig) -> Valu
     })
 }
 
-fn parse_rate_card_file(raw: &str) -> Result<RateCardFile> {
-    serde_json::from_str::<RateCardFile>(raw)
-        .or_else(|_| toml::from_str::<RateCardFile>(raw).map_err(anyhow::Error::from))
-        .context("failed to parse rate-card file as JSON or TOML")
-}
-
-fn parse_provider_usage_export_file(raw: &str) -> Result<ProviderUsageExportFile> {
-    serde_json::from_str::<ProviderUsageExportFile>(raw)
-        .or_else(|_| toml::from_str::<ProviderUsageExportFile>(raw).map_err(anyhow::Error::from))
-        .context("failed to parse provider usage export as JSON or TOML")
-}
-
-fn parse_provider_invoice_export_file(raw: &str) -> Result<ProviderInvoiceExportFile> {
-    serde_json::from_str::<ProviderInvoiceExportFile>(raw)
-        .or_else(|_| toml::from_str::<ProviderInvoiceExportFile>(raw).map_err(anyhow::Error::from))
-        .context("failed to parse provider invoice export as JSON or TOML")
-}
-
 fn file_last_modified_epoch_ms(path: &Path) -> Option<i64> {
     let modified = fs::metadata(path).ok()?.modified().ok()?;
     let duration = modified.duration_since(UNIX_EPOCH).ok()?;
@@ -1801,204 +1651,6 @@ fn attach_source_file_evidence(base: &mut Value, path: &Path, raw: &str) {
         Some(value) => json!(value),
         None => Value::Null,
     };
-}
-
-fn parse_infra_cost_profile_file(raw: &str) -> Result<InfraCostProfileFile> {
-    serde_json::from_str::<InfraCostProfileFile>(raw)
-        .or_else(|_| toml::from_str::<InfraCostProfileFile>(raw).map_err(anyhow::Error::from))
-        .context("failed to parse infra cost profile as JSON or TOML")
-}
-
-fn bind_rate_card_json_from_source(source: &Value, contract: &TokenBudgetContractConfig) -> Value {
-    let mut base = json!({
-        "binding_model_version": contract.rate_card_binding_model_version.clone(),
-        "configured_contract_version": contract.rate_card_version.clone(),
-        "configured_currency_profile": contract.currency_profile.clone(),
-        "source": source.clone(),
-        "source_bytes": Value::Null,
-        "source_sha256": Value::Null,
-        "source_last_modified_epoch_ms": Value::Null,
-        "money_conversion_enabled": false,
-        "status": source["status"].clone(),
-        "bound_rate_card_version": Value::Null,
-        "bound_currency_profile": Value::Null,
-        "provider": Value::Null,
-        "default_input_cost_per_1k_tokens": Value::Null,
-        "default_output_cost_per_1k_tokens": Value::Null,
-        "effective_from_epoch_ms": Value::Null,
-        "effective_to_epoch_ms": Value::Null,
-        "temporal_scope_state": "source_period_unspecified",
-        "note": "Денежная конверсия включается только после честного bind на versioned rate-card file."
-    });
-
-    if !matches!(
-        source["status"].as_str(),
-        Some("configured_existing_path" | "default_existing_path")
-    ) {
-        return base;
-    }
-    let Some(path) = source["resolved_path"].as_str() else {
-        return base;
-    };
-
-    let raw = match fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(error) => {
-            base["status"] = Value::String("read_error".to_string());
-            base["source"]["binding_status"] = Value::String("read_error".to_string());
-            base["read_error"] = Value::String(error.to_string());
-            return base;
-        }
-    };
-    attach_source_file_evidence(&mut base, Path::new(path), &raw);
-    let rate_card = match parse_rate_card_file(&raw) {
-        Ok(rate_card) => rate_card,
-        Err(error) => {
-            base["status"] = Value::String("parse_error".to_string());
-            base["source"]["binding_status"] = Value::String("parse_error".to_string());
-            base["parse_error"] = Value::String(error.to_string());
-            return base;
-        }
-    };
-
-    let money_conversion_enabled = rate_card.default_input_cost_per_1k_tokens > 0.0
-        && rate_card.default_output_cost_per_1k_tokens > 0.0;
-    base["status"] = Value::String(if money_conversion_enabled {
-        "priced_bound".to_string()
-    } else {
-        "bound_but_unpriced".to_string()
-    });
-    base["source"]["binding_status"] = base["status"].clone();
-    base["money_conversion_enabled"] = Value::Bool(money_conversion_enabled);
-    base["schema_version"] = Value::String(rate_card.schema_version);
-    base["bound_rate_card_version"] = Value::String(rate_card.rate_card_version);
-    base["bound_currency_profile"] = Value::String(rate_card.currency_profile);
-    base["provider"] = Value::String(rate_card.provider);
-    base["default_input_cost_per_1k_tokens"] =
-        Value::from(rate_card.default_input_cost_per_1k_tokens);
-    base["default_output_cost_per_1k_tokens"] =
-        Value::from(rate_card.default_output_cost_per_1k_tokens);
-    base["effective_from_epoch_ms"] = match rate_card.effective_from_epoch_ms {
-        Some(value) => json!(value),
-        None => Value::Null,
-    };
-    base["effective_to_epoch_ms"] = match rate_card.effective_to_epoch_ms {
-        Some(value) => json!(value),
-        None => Value::Null,
-    };
-    base["temporal_scope_state"] = Value::String(
-        source_temporal_scope_state(
-            rate_card.effective_from_epoch_ms,
-            rate_card.effective_to_epoch_ms,
-        )
-        .to_string(),
-    );
-    base
-}
-
-fn build_rate_card_json(repo_root: &Path, contract: &TokenBudgetContractConfig) -> Value {
-    let source = configured_provider_rate_card_source(repo_root);
-    bind_rate_card_json_from_source(&source, contract)
-}
-
-fn bind_infra_cost_profile_json_from_source(
-    source: &Value,
-    contract: &TokenBudgetContractConfig,
-) -> Value {
-    let mut base = json!({
-        "binding_model_version": contract.infra_cost_binding_model_version.clone(),
-        "configured_contract_version": contract.infra_cost_profile_version.clone(),
-        "source": source.clone(),
-        "source_bytes": Value::Null,
-        "source_sha256": Value::Null,
-        "source_last_modified_epoch_ms": Value::Null,
-        "status": source["status"].clone(),
-        "schema_version": Value::Null,
-        "bound_profile_version": Value::Null,
-        "bound_currency_profile": Value::Null,
-        "provider": Value::Null,
-        "cost_per_1k_internal_billed_tokens": Value::Null,
-        "cost_per_live_event": Value::Null,
-        "fixed_scope_cost_amount": Value::Null,
-        "effective_from_epoch_ms": Value::Null,
-        "effective_to_epoch_ms": Value::Null,
-        "temporal_scope_state": "source_period_unspecified",
-        "money_margin_enabled": false,
-        "note": "Infra cost profile начинает влиять на margin preview только после честного bind на versioned machine-readable profile."
-    });
-
-    if !matches!(
-        source["status"].as_str(),
-        Some("configured_existing_path" | "default_existing_path")
-    ) {
-        return base;
-    }
-    let Some(path) = source["resolved_path"].as_str() else {
-        return base;
-    };
-
-    let raw = match fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(error) => {
-            base["status"] = Value::String("read_error".to_string());
-            base["source"]["binding_status"] = Value::String("read_error".to_string());
-            base["read_error"] = Value::String(error.to_string());
-            return base;
-        }
-    };
-    attach_source_file_evidence(&mut base, Path::new(path), &raw);
-    let profile = match parse_infra_cost_profile_file(&raw) {
-        Ok(profile) => profile,
-        Err(error) => {
-            base["status"] = Value::String("parse_error".to_string());
-            base["source"]["binding_status"] = Value::String("parse_error".to_string());
-            base["parse_error"] = Value::String(error.to_string());
-            return base;
-        }
-    };
-
-    let money_margin_enabled = profile.cost_per_1k_internal_billed_tokens > 0.0
-        || profile.cost_per_live_event > 0.0
-        || profile.fixed_scope_cost_amount > 0.0;
-    base["status"] = Value::String(if money_margin_enabled {
-        "priced_bound".to_string()
-    } else {
-        "bound_but_unpriced".to_string()
-    });
-    base["source"]["binding_status"] = base["status"].clone();
-    base["schema_version"] = Value::String(profile.schema_version);
-    base["bound_profile_version"] = Value::String(profile.infra_cost_profile_version);
-    base["bound_currency_profile"] = Value::String(profile.currency_profile);
-    base["provider"] = match profile.provider {
-        Some(provider) => Value::String(provider),
-        None => Value::Null,
-    };
-    base["cost_per_1k_internal_billed_tokens"] =
-        Value::from(profile.cost_per_1k_internal_billed_tokens);
-    base["cost_per_live_event"] = Value::from(profile.cost_per_live_event);
-    base["fixed_scope_cost_amount"] = Value::from(profile.fixed_scope_cost_amount);
-    base["effective_from_epoch_ms"] = match profile.effective_from_epoch_ms {
-        Some(value) => json!(value),
-        None => Value::Null,
-    };
-    base["effective_to_epoch_ms"] = match profile.effective_to_epoch_ms {
-        Some(value) => json!(value),
-        None => Value::Null,
-    };
-    base["temporal_scope_state"] = Value::String(
-        source_temporal_scope_state(
-            profile.effective_from_epoch_ms,
-            profile.effective_to_epoch_ms,
-        )
-        .to_string(),
-    );
-    base["money_margin_enabled"] = Value::Bool(money_margin_enabled);
-    base
-}
-
-fn build_infra_cost_profile_json(repo_root: &Path, contract: &TokenBudgetContractConfig) -> Value {
-    let source = configured_infra_cost_profile_source(repo_root);
-    bind_infra_cost_profile_json_from_source(&source, contract)
 }
 
 fn build_settlement_contract_json(contract: &TokenBudgetContractConfig) -> Value {
@@ -2185,272 +1837,6 @@ fn build_statement_period_json(
     })
 }
 
-fn build_adjustment_request_schema_json(contract: &TokenBudgetContractConfig) -> Value {
-    json!({
-        "schema_version": contract.adjustment_request_schema_version.clone(),
-        "required_fields": [
-            "adjustment_id",
-            "scope_code",
-            "kind",
-            "status",
-            "reason_code",
-            "created_at_epoch_ms"
-        ],
-        "allowed_kinds": [
-            "credit_note",
-            "adjustment_entry",
-            "dispute_hold"
-        ],
-        "allowed_statuses": [
-            "requested",
-            "pending_review",
-            "approved_but_unapplied",
-            "applied_report_only",
-            "disputed",
-            "rejected"
-        ],
-        "retroactive_rewrite_policy": "forbidden_use_adjustment_entries",
-        "note": "Adjustment request schema существует затем, чтобы corrections/disputes materialize-ились отдельными entries, а не тихой перезаписью старого statement."
-    })
-}
-
-fn adjustment_entry_json(entry: &AdjustmentRegistryEntry) -> Value {
-    json!({
-        "adjustment_id": entry.adjustment_id,
-        "scope_code": entry.scope_code,
-        "kind": entry.kind,
-        "status": entry.status,
-        "reason_code": entry.reason_code,
-        "created_at_epoch_ms": entry.created_at_epoch_ms,
-        "tokens_delta": entry.tokens_delta,
-        "amount_delta": entry.amount_delta,
-        "currency_profile": entry.currency_profile,
-        "related_statement_id": entry.related_statement_id,
-    })
-}
-
-fn adjustment_status_matches(status: Option<&str>, expected: &[&str]) -> bool {
-    let Some(status) = status else {
-        return false;
-    };
-    expected.iter().any(|candidate| *candidate == status)
-}
-
-fn sum_adjustment_tokens(entries: &[Value], statuses: &[&str]) -> i64 {
-    entries
-        .iter()
-        .filter(|entry| adjustment_status_matches(entry["status"].as_str(), statuses))
-        .map(|entry| entry["tokens_delta"].as_i64().unwrap_or(0))
-        .sum()
-}
-
-fn sum_adjustment_amount(entries: &[Value], statuses: &[&str]) -> f64 {
-    entries
-        .iter()
-        .filter(|entry| adjustment_status_matches(entry["status"].as_str(), statuses))
-        .map(|entry| entry["amount_delta"].as_f64().unwrap_or(0.0))
-        .sum()
-}
-
-fn load_adjustment_registry_from_source(
-    source: &Value,
-    contract: &TokenBudgetContractConfig,
-) -> Value {
-    let mut base = json!({
-        "schema_version": contract.adjustment_registry_version.clone(),
-        "request_schema_version": contract.adjustment_request_schema_version.clone(),
-        "source": source.clone(),
-        "source_bytes": Value::Null,
-        "source_sha256": Value::Null,
-        "source_last_modified_epoch_ms": Value::Null,
-        "status": source["status"].clone(),
-        "entries_count": 0,
-        "pending_entries_count": 0,
-        "applied_entries_count": 0,
-        "disputed_entries_count": 0,
-        "registry_hash": Value::Null,
-        "scopes": {
-            "current_session": {
-                "entries_count": 0,
-                "pending_entries_count": 0,
-                "applied_entries_count": 0,
-                "disputed_entries_count": 0,
-                "scope_hash": Value::Null,
-            },
-            "rolling_window": {
-                "entries_count": 0,
-                "pending_entries_count": 0,
-                "applied_entries_count": 0,
-                "disputed_entries_count": 0,
-                "scope_hash": Value::Null,
-            },
-            "lifetime": {
-                "entries_count": 0,
-                "pending_entries_count": 0,
-                "applied_entries_count": 0,
-                "disputed_entries_count": 0,
-                "scope_hash": Value::Null,
-            }
-        },
-        "note": "Adjustment registry пока optional: без него report-only tokenonomics не переписывает прошлые периоды и не притворяется credit workflow."
-    });
-
-    let source_status = source["status"].as_str().unwrap_or("unknown");
-    if !matches!(
-        source_status,
-        "configured_existing_path" | "default_existing_path"
-    ) {
-        return base;
-    }
-
-    let Some(path) = source["resolved_path"].as_str() else {
-        return base;
-    };
-
-    let content = match fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(error) => {
-            base["status"] = Value::String("read_error".to_string());
-            base["source"]["binding_status"] = Value::String("read_error".to_string());
-            base["read_error"] = Value::String(error.to_string());
-            return base;
-        }
-    };
-    attach_source_file_evidence(&mut base, Path::new(path), &content);
-    let registry = match serde_json::from_str::<AdjustmentRegistryFile>(&content) {
-        Ok(registry) => registry,
-        Err(error) => {
-            base["status"] = Value::String("parse_error".to_string());
-            base["source"]["binding_status"] = Value::String("parse_error".to_string());
-            base["parse_error"] = Value::String(error.to_string());
-            return base;
-        }
-    };
-
-    let entries = registry
-        .adjustments
-        .iter()
-        .map(adjustment_entry_json)
-        .collect::<Vec<_>>();
-
-    let mut scope_map = serde_json::Map::new();
-    for scope_code in ["current_session", "rolling_window", "lifetime"] {
-        let scope_entries = registry
-            .adjustments
-            .iter()
-            .filter(|entry| entry.scope_code == scope_code)
-            .map(adjustment_entry_json)
-            .collect::<Vec<_>>();
-        let pending_entries_count = scope_entries
-            .iter()
-            .filter(|entry| {
-                adjustment_status_matches(
-                    entry["status"].as_str(),
-                    &["requested", "pending_review", "approved_but_unapplied"],
-                )
-            })
-            .count();
-        let applied_entries_count = scope_entries
-            .iter()
-            .filter(|entry| {
-                adjustment_status_matches(entry["status"].as_str(), &["applied_report_only"])
-            })
-            .count();
-        let disputed_entries_count = scope_entries
-            .iter()
-            .filter(|entry| adjustment_status_matches(entry["status"].as_str(), &["disputed"]))
-            .count();
-        scope_map.insert(
-            scope_code.to_string(),
-            json!({
-                "entries_count": scope_entries.len(),
-                "pending_entries_count": pending_entries_count,
-                "applied_entries_count": applied_entries_count,
-                "disputed_entries_count": disputed_entries_count,
-                "pending_tokens_delta": sum_adjustment_tokens(
-                    &scope_entries,
-                    &["requested", "pending_review", "approved_but_unapplied"],
-                ),
-                "pending_amount_delta": sum_adjustment_amount(
-                    &scope_entries,
-                    &["requested", "pending_review", "approved_but_unapplied"],
-                ),
-                "applied_tokens_delta": sum_adjustment_tokens(
-                    &scope_entries,
-                    &["applied_report_only"],
-                ),
-                "applied_amount_delta": sum_adjustment_amount(
-                    &scope_entries,
-                    &["applied_report_only"],
-                ),
-                "disputed_tokens_delta": sum_adjustment_tokens(
-                    &scope_entries,
-                    &["disputed"],
-                ),
-                "disputed_amount_delta": sum_adjustment_amount(
-                    &scope_entries,
-                    &["disputed"],
-                ),
-                "scope_hash": hash_line_items(&scope_entries).ok(),
-            }),
-        );
-    }
-
-    let pending_entries_count = entries
-        .iter()
-        .filter(|entry| {
-            adjustment_status_matches(
-                entry["status"].as_str(),
-                &["requested", "pending_review", "approved_but_unapplied"],
-            )
-        })
-        .count();
-    let applied_entries_count = entries
-        .iter()
-        .filter(|entry| {
-            adjustment_status_matches(entry["status"].as_str(), &["applied_report_only"])
-        })
-        .count();
-    let disputed_entries_count = entries
-        .iter()
-        .filter(|entry| adjustment_status_matches(entry["status"].as_str(), &["disputed"]))
-        .count();
-
-    base["status"] = Value::String("loaded".to_string());
-    base["source"]["binding_status"] = Value::String(if source_status == "default_existing_path" {
-        "default_loaded".to_string()
-    } else {
-        "loaded".to_string()
-    });
-    base["entries_count"] = json!(entries.len());
-    base["pending_entries_count"] = json!(pending_entries_count);
-    base["applied_entries_count"] = json!(applied_entries_count);
-    base["disputed_entries_count"] = json!(disputed_entries_count);
-    base["pending_tokens_delta"] = json!(sum_adjustment_tokens(
-        &entries,
-        &["requested", "pending_review", "approved_but_unapplied"],
-    ));
-    base["pending_amount_delta"] = json!(sum_adjustment_amount(
-        &entries,
-        &["requested", "pending_review", "approved_but_unapplied"],
-    ));
-    base["applied_tokens_delta"] =
-        json!(sum_adjustment_tokens(&entries, &["applied_report_only"],));
-    base["applied_amount_delta"] =
-        json!(sum_adjustment_amount(&entries, &["applied_report_only"],));
-    base["disputed_tokens_delta"] = json!(sum_adjustment_tokens(&entries, &["disputed"]));
-    base["disputed_amount_delta"] = json!(sum_adjustment_amount(&entries, &["disputed"]));
-    base["registry_hash"] =
-        Value::String(hash_line_items(&entries).unwrap_or_else(|_| "hash_error".to_string()));
-    base["scopes"] = Value::Object(scope_map);
-    base
-}
-
-fn build_adjustment_registry_json(repo_root: &Path, contract: &TokenBudgetContractConfig) -> Value {
-    let source = configured_adjustment_registry_source(repo_root, contract);
-    load_adjustment_registry_from_source(&source, contract)
-}
-
 fn build_adjustment_preview_json(
     scope_code: &str,
     contract: &TokenBudgetContractConfig,
@@ -2629,50 +2015,6 @@ fn build_telemetry_surfaces_json(contract: &TokenBudgetContractConfig) -> Value 
     })
 }
 
-fn build_external_truth_sources_json(repo_root: &Path) -> Value {
-    json!({
-        "provider_usage_export": configured_provider_usage_source(repo_root),
-        "provider_invoice_export": configured_provider_invoice_source(repo_root),
-        "provider_rate_card": configured_provider_rate_card_source(repo_root),
-        "infra_cost_profile": configured_infra_cost_profile_source(repo_root),
-    })
-}
-
-fn external_truth_source_roles(code: &str) -> Value {
-    match code {
-        "provider_usage_export" => json!({
-            "required_for_usage_truth": true,
-            "required_for_cost_truth": true,
-            "required_for_invoice_evidence": false,
-            "required_for_margin_truth": true,
-        }),
-        "provider_rate_card" => json!({
-            "required_for_usage_truth": false,
-            "required_for_cost_truth": true,
-            "required_for_invoice_evidence": false,
-            "required_for_margin_truth": true,
-        }),
-        "provider_invoice_export" => json!({
-            "required_for_usage_truth": false,
-            "required_for_cost_truth": false,
-            "required_for_invoice_evidence": true,
-            "required_for_margin_truth": false,
-        }),
-        "infra_cost_profile" => json!({
-            "required_for_usage_truth": false,
-            "required_for_cost_truth": false,
-            "required_for_invoice_evidence": false,
-            "required_for_margin_truth": true,
-        }),
-        _ => json!({
-            "required_for_usage_truth": false,
-            "required_for_cost_truth": false,
-            "required_for_invoice_evidence": false,
-            "required_for_margin_truth": false,
-        }),
-    }
-}
-
 fn source_codes_with_truth_role(external_sources: &Value, role_key: &str) -> Value {
     let mut codes = external_sources
         .as_object()
@@ -2712,209 +2054,6 @@ fn infra_cost_profile_priced_bound(status: &str) -> bool {
 
 fn provider_invoice_bound(status: &str) -> bool {
     status == "invoice_bound"
-}
-
-fn configured_external_truth_source(
-    repo_root: &Path,
-    env_var: &str,
-    code: &str,
-    label: &str,
-    required_for_reconciliation: bool,
-) -> Value {
-    let configured_value = std::env::var(env_var)
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    let resolved_path = configured_value.as_ref().map(|raw| {
-        let candidate = PathBuf::from(raw);
-        if candidate.is_absolute() {
-            candidate
-        } else {
-            repo_root.join(candidate)
-        }
-    });
-    let path_exists = resolved_path
-        .as_ref()
-        .map(|path| path.exists())
-        .unwrap_or(false);
-    let status = match (configured_value.as_ref(), path_exists) {
-        (None, _) => "not_configured",
-        (Some(_), false) => "configured_path_missing",
-        (Some(_), true) => "configured_existing_path",
-    };
-    let binding_status = match status {
-        "not_configured" => "not_configured",
-        "configured_path_missing" => "configured_path_missing",
-        "configured_existing_path" => "configured_but_unbound",
-        _ => "unknown",
-    };
-    json!({
-        "code": code,
-        "label": label,
-        "env_var": env_var,
-        "required_for_reconciliation": required_for_reconciliation,
-        "truth_roles": external_truth_source_roles(code),
-        "configured_value": configured_value,
-        "resolved_path": resolved_path.map(|path| path.display().to_string()),
-        "status": status,
-        "binding_status": binding_status,
-        "note": "Источник может уже существовать как файл, но пока Amai не привязывает его автоматически к canonical reconciliation ledger."
-    })
-}
-
-fn configured_defaultable_external_truth_source(
-    repo_root: &Path,
-    env_var: &str,
-    code: &str,
-    label: &str,
-    required_for_reconciliation: bool,
-    default_relative_path: &str,
-    note: &str,
-) -> Value {
-    let source = configured_external_truth_source(
-        repo_root,
-        env_var,
-        code,
-        label,
-        required_for_reconciliation,
-    );
-    if source["status"].as_str() != Some("not_configured") {
-        return source;
-    }
-    let default_path = repo_root.join(default_relative_path);
-    let default_exists = default_path.exists();
-    json!({
-        "code": code,
-        "label": label,
-        "env_var": env_var,
-        "required_for_reconciliation": required_for_reconciliation,
-        "truth_roles": external_truth_source_roles(code),
-        "configured_value": Value::Null,
-        "resolved_path": default_path.display().to_string(),
-        "status": if default_exists {
-            "default_existing_path"
-        } else {
-            "default_path_missing"
-        },
-        "binding_status": if default_exists {
-            "default_but_unbound"
-        } else {
-            "not_configured"
-        },
-        "note": note
-    })
-}
-
-fn adjustment_registry_default_path(repo_root: &Path) -> PathBuf {
-    repo_root.join("state/token_adjustment_registry.json")
-}
-
-fn provider_usage_default_path(repo_root: &Path) -> PathBuf {
-    repo_root.join("state/provider_usage_export.json")
-}
-
-fn provider_invoice_default_path(repo_root: &Path) -> PathBuf {
-    repo_root.join("state/provider_invoice_export.json")
-}
-
-fn provider_rate_card_default_path(repo_root: &Path) -> PathBuf {
-    repo_root.join("state/provider_rate_card.json")
-}
-
-fn infra_cost_profile_default_path(repo_root: &Path) -> PathBuf {
-    repo_root.join("state/infra_cost_profile.json")
-}
-
-fn configured_adjustment_registry_source(
-    repo_root: &Path,
-    contract: &TokenBudgetContractConfig,
-) -> Value {
-    let source = configured_defaultable_external_truth_source(
-        repo_root,
-        "AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH",
-        "token_adjustment_registry",
-        "Report-only registry для correction/credit/dispute entries",
-        false,
-        "state/token_adjustment_registry.json",
-        "Если env-binding не задан, token adjustment registry может жить в repo-local state/token_adjustment_registry.json как operator-safe report-only ledger.",
-    );
-    if source["status"].as_str() == Some("not_configured") {
-        return source;
-    }
-    let mut enriched = source;
-    enriched["schema_version"] = Value::String(contract.adjustment_registry_version.clone());
-    enriched
-}
-
-fn configured_provider_usage_source(repo_root: &Path) -> Value {
-    configured_defaultable_external_truth_source(
-        repo_root,
-        "AMAI_PROVIDER_USAGE_EXPORT_PATH",
-        "provider_usage_export",
-        "Выгрузка usage/tokens от внешнего model provider",
-        true,
-        "state/provider_usage_export.json",
-        "Если env-binding не задан, provider usage export может жить в repo-local state/provider_usage_export.json как report-only reconciliation source.",
-    )
-}
-
-fn configured_provider_invoice_source(repo_root: &Path) -> Value {
-    configured_defaultable_external_truth_source(
-        repo_root,
-        "AMAI_PROVIDER_INVOICE_EXPORT_PATH",
-        "provider_invoice_export",
-        "Invoice/export от внешнего provider",
-        false,
-        "state/provider_invoice_export.json",
-        "Если env-binding не задан, provider invoice export может жить в repo-local state/provider_invoice_export.json как optional settlement-side evidence source.",
-    )
-}
-
-fn configured_provider_rate_card_source(repo_root: &Path) -> Value {
-    configured_defaultable_external_truth_source(
-        repo_root,
-        "AMAI_PROVIDER_RATE_CARD_PATH",
-        "provider_rate_card",
-        "Versioned rate-card для денежной конверcии tokenonomics",
-        true,
-        "state/provider_rate_card.json",
-        "Если env-binding не задан, provider rate card может жить в repo-local state/provider_rate_card.json как versioned money conversion source.",
-    )
-}
-
-fn configured_infra_cost_profile_source(repo_root: &Path) -> Value {
-    configured_defaultable_external_truth_source(
-        repo_root,
-        "AMAI_INFRA_COST_PROFILE_PATH",
-        "infra_cost_profile",
-        "Профиль собственных infra costs для Amai",
-        false,
-        "state/infra_cost_profile.json",
-        "Если env-binding не задан, infra cost profile может жить в repo-local state/infra_cost_profile.json как report-only margin source.",
-    )
-}
-
-fn provider_usage_total_tokens(entry: &ProviderUsageScopeEntry) -> Option<u64> {
-    entry
-        .total_tokens
-        .or_else(|| match (entry.input_tokens, entry.output_tokens) {
-            (Some(input), Some(output)) => Some(input.saturating_add(output)),
-            (Some(input), None) => Some(input),
-            (None, Some(output)) => Some(output),
-            (None, None) => None,
-        })
-}
-
-fn provider_usage_cost_amount(entry: &ProviderUsageScopeEntry, rate_card: &Value) -> Option<f64> {
-    if let Some(amount) = entry.provider_cost_amount {
-        return Some(amount);
-    }
-    let input_rate = rate_card["default_input_cost_per_1k_tokens"].as_f64()?;
-    let output_rate = rate_card["default_output_cost_per_1k_tokens"].as_f64()?;
-    let input_tokens = entry.input_tokens?;
-    let output_tokens = entry.output_tokens?;
-    Some(
-        (input_tokens as f64 / 1000.0) * input_rate + (output_tokens as f64 / 1000.0) * output_rate,
-    )
 }
 
 fn internal_provider_cost_estimate_amount(
@@ -3326,182 +2465,6 @@ fn reconciliation_governance_blocking_reasons(
         reasons.push("provider_invoice_source_error");
     }
     reasons
-}
-
-fn load_provider_usage_binding_from_source(source: &Value, rate_card: &Value) -> Value {
-    let mut base = json!({
-        "status": source["status"].clone(),
-        "source": source.clone(),
-        "source_bytes": Value::Null,
-        "source_sha256": Value::Null,
-        "source_last_modified_epoch_ms": Value::Null,
-        "schema_version": Value::Null,
-        "provider": Value::Null,
-        "bound_currency_profile": Value::Null,
-        "scope_count": 0,
-        "scopes": {},
-        "cost_binding_status": if rate_card["money_conversion_enabled"].as_bool() == Some(true) {
-            "awaiting_usage_export"
-        } else {
-            "unpriced_rate_card"
-        },
-        "note": "Provider usage binding должен показывать реальные billed tokens по scope, а не подменять их lower-bound savings."
-    });
-
-    if !matches!(
-        source["status"].as_str(),
-        Some("configured_existing_path" | "default_existing_path")
-    ) {
-        return base;
-    }
-    let Some(path) = source["resolved_path"].as_str() else {
-        return base;
-    };
-
-    let raw = match fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(error) => {
-            base["status"] = Value::String("read_error".to_string());
-            base["source"]["binding_status"] = Value::String("read_error".to_string());
-            base["read_error"] = Value::String(error.to_string());
-            return base;
-        }
-    };
-    attach_source_file_evidence(&mut base, Path::new(path), &raw);
-    let export = match parse_provider_usage_export_file(&raw) {
-        Ok(export) => export,
-        Err(error) => {
-            base["status"] = Value::String("parse_error".to_string());
-            base["source"]["binding_status"] = Value::String("parse_error".to_string());
-            base["parse_error"] = Value::String(error.to_string());
-            return base;
-        }
-    };
-
-    let mut scope_map = serde_json::Map::new();
-    let mut has_any_cost = false;
-    for entry in &export.scopes {
-        let total_tokens = provider_usage_total_tokens(entry);
-        let cost_amount = provider_usage_cost_amount(entry, rate_card);
-        if cost_amount.is_some() {
-            has_any_cost = true;
-        }
-        scope_map.insert(
-            entry.scope_code.clone(),
-            json!({
-                "input_tokens": entry.input_tokens,
-                "output_tokens": entry.output_tokens,
-                "total_tokens": total_tokens,
-                "provider_cost_amount": cost_amount,
-                "period_start_epoch_ms": entry.period_start_epoch_ms,
-                "period_end_epoch_ms": entry.period_end_epoch_ms,
-                "temporal_scope_state": source_temporal_scope_state(entry.period_start_epoch_ms, entry.period_end_epoch_ms),
-                "currency_profile": entry
-                    .currency_profile
-                    .clone()
-                    .or_else(|| export.currency_profile.clone()),
-            }),
-        );
-    }
-
-    base["schema_version"] = Value::String(export.schema_version);
-    base["provider"] = Value::String(export.provider);
-    base["bound_currency_profile"] = match export.currency_profile {
-        Some(currency) => Value::String(currency),
-        None => Value::Null,
-    };
-    base["scope_count"] = json!(scope_map.len());
-    base["scopes"] = Value::Object(scope_map);
-    base["status"] = Value::String(if has_any_cost {
-        "usage_and_cost_bound".to_string()
-    } else {
-        "usage_bound".to_string()
-    });
-    base["source"]["binding_status"] = base["status"].clone();
-    base["cost_binding_status"] = Value::String(if has_any_cost {
-        "cost_bound".to_string()
-    } else if rate_card["money_conversion_enabled"].as_bool() == Some(true) {
-        "usage_bound_cost_unavailable".to_string()
-    } else {
-        "unpriced_rate_card".to_string()
-    });
-    base
-}
-
-fn load_provider_invoice_binding_from_source(source: &Value) -> Value {
-    let mut base = json!({
-        "status": source["status"].clone(),
-        "source": source.clone(),
-        "source_bytes": Value::Null,
-        "source_sha256": Value::Null,
-        "source_last_modified_epoch_ms": Value::Null,
-        "schema_version": Value::Null,
-        "provider": Value::Null,
-        "bound_currency_profile": Value::Null,
-        "scope_count": 0,
-        "scopes": {},
-        "note": "Provider invoice binding остаётся optional: он не подменяет usage truth, а только даёт отдельный settlement-side evidence слой."
-    });
-
-    if !matches!(
-        source["status"].as_str(),
-        Some("configured_existing_path" | "default_existing_path")
-    ) {
-        return base;
-    }
-    let Some(path) = source["resolved_path"].as_str() else {
-        return base;
-    };
-
-    let raw = match fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(error) => {
-            base["status"] = Value::String("read_error".to_string());
-            base["source"]["binding_status"] = Value::String("read_error".to_string());
-            base["read_error"] = Value::String(error.to_string());
-            return base;
-        }
-    };
-    attach_source_file_evidence(&mut base, Path::new(path), &raw);
-    let export = match parse_provider_invoice_export_file(&raw) {
-        Ok(export) => export,
-        Err(error) => {
-            base["status"] = Value::String("parse_error".to_string());
-            base["source"]["binding_status"] = Value::String("parse_error".to_string());
-            base["parse_error"] = Value::String(error.to_string());
-            return base;
-        }
-    };
-
-    let mut scope_map = serde_json::Map::new();
-    for entry in &export.scopes {
-        scope_map.insert(
-            entry.scope_code.clone(),
-            json!({
-                "invoice_amount": entry.invoice_amount,
-                "period_start_epoch_ms": entry.period_start_epoch_ms,
-                "period_end_epoch_ms": entry.period_end_epoch_ms,
-                "temporal_scope_state": source_temporal_scope_state(entry.period_start_epoch_ms, entry.period_end_epoch_ms),
-                "currency_profile": entry
-                    .currency_profile
-                    .clone()
-                    .or_else(|| export.currency_profile.clone()),
-                "invoice_id": entry.invoice_id,
-            }),
-        );
-    }
-
-    base["schema_version"] = Value::String(export.schema_version);
-    base["provider"] = Value::String(export.provider);
-    base["bound_currency_profile"] = match export.currency_profile {
-        Some(currency) => Value::String(currency),
-        None => Value::Null,
-    };
-    base["scope_count"] = json!(scope_map.len());
-    base["scopes"] = Value::Object(scope_map);
-    base["status"] = Value::String("invoice_bound".to_string());
-    base["source"]["binding_status"] = Value::String("invoice_bound".to_string());
-    base
 }
 
 fn provider_usage_scope_alignment_state(
@@ -6027,210 +4990,6 @@ fn build_statement_preview(
     })
 }
 
-fn build_client_limit_boundary_review_surface(statement_preview: &Value) -> Value {
-    let alignment = &statement_preview["client_limit_meter_alignment"];
-    let explicit_boundary_surface = alignment["explicit_boundary_surface"].clone();
-    let continuity_boundary_rollup = alignment["continuity_boundary_rollup"].clone();
-    let pre_amai_baseline_source_status = alignment["pre_amai_baseline_source_status"].clone();
-    let exact_pair_status = alignment["exact_pair_status"].clone();
-    let frozen_gap_review_surface = alignment["frozen_gap_review_surface"].clone();
-    let strict_client_meter_slice = alignment["strict_client_meter_slice"].clone();
-    let same_meter_as_client_limit =
-        alignment["same_meter_as_client_limit"].as_bool() == Some(true);
-    let review_state = if same_meter_as_client_limit {
-        "same_meter_equivalent"
-    } else {
-        match (
-            continuity_boundary_rollup["state"]
-                .as_str()
-                .unwrap_or("unknown"),
-            explicit_boundary_surface["state"]
-                .as_str()
-                .unwrap_or("unknown"),
-            strict_client_meter_slice["state"]
-                .as_str()
-                .unwrap_or("unknown"),
-        ) {
-            ("amai_continuity_boundary_observed", "amai_continuity_boundary", _) => {
-                "strict_slice_plus_observed_amai_continuity_boundary"
-            }
-            ("amai_continuity_boundary_present_without_tokens", "amai_continuity_boundary", _) => {
-                "strict_slice_plus_empty_amai_continuity_boundary"
-            }
-            (_, "amai_continuity_boundary", _) => "amai_continuity_boundary_present",
-            (_, "no_explicit_boundary", "strict_slice_covers_all_applicable_components") => {
-                "strict_slice_covers_all_applicable_components"
-            }
-            (_, "no_explicit_boundary", "strict_slice_partial_lower_bound") => {
-                "strict_slice_partial_without_explicit_boundary"
-            }
-            _ => "client_limit_boundary_review_unknown",
-        }
-    };
-    let note = match review_state {
-        "same_meter_equivalent" => {
-            "В этом scope full same-meter equivalence уже materialized: карточка и model-token percent теперь можно читать в том же meter, которым клиент считает лимит."
-        }
-        "strict_slice_plus_observed_amai_continuity_boundary" => {
-            "Strict client-meter slice уже measured, а Amai-specific continuity boundary вынесена отдельно как observed token weight вне same-meter slice."
-        }
-        "strict_slice_plus_empty_amai_continuity_boundary" => {
-            "Amai continuity boundary уже объявлена как explicit boundary, но в текущем scope у неё ещё нет observed token weight."
-        }
-        "amai_continuity_boundary_present" => {
-            "В этом scope остаётся explicit Amai continuity boundary, поэтому full same-meter equivalence с клиентским лимитом честно не заявляется."
-        }
-        "strict_slice_covers_all_applicable_components" => {
-            "В этом scope strict client-meter slice покрывает все applicable components без отдельной explicit boundary."
-        }
-        "strict_slice_partial_without_explicit_boundary" => {
-            "Strict client-meter slice уже materialized, но пока покрывает только часть applicable components и не должен выдаваться за полный client-limit meter."
-        }
-        _ => {
-            "Этот surface оставляет boundary semantics отдельным review/export слоем: он показывает measured strict slice и explicit continuity boundary без operational same-meter детализации."
-        }
-    };
-    let note = if frozen_gap_review_surface["state"].as_str() == Some("review_required") {
-        format!(
-            "{note} Дополнительно exact raw history здесь ещё честно unavailable: irrecoverable historical debt уже требует отдельного frozen-gap review и запрещает claim raw exact history."
-        )
-    } else {
-        note.to_string()
-    };
-    json!({
-        "same_meter_as_client_limit": same_meter_as_client_limit,
-        "alignment_state": alignment["alignment_state"].clone(),
-        "baseline_equivalence_state": alignment["baseline_equivalence"]["state"].clone(),
-        "review_state": review_state,
-        "strict_client_meter_slice": strict_client_meter_slice,
-        "explicit_boundary_surface": explicit_boundary_surface,
-        "continuity_boundary_rollup": continuity_boundary_rollup,
-        "pre_amai_baseline_source_status": pre_amai_baseline_source_status,
-        "exact_pair_status": exact_pair_status,
-        "frozen_gap_review_surface": frozen_gap_review_surface,
-        "note": note,
-    })
-}
-
-fn build_dashboard_statement_preview(
-    scope_code: &str,
-    scope_label: &str,
-    summary: &Value,
-    events: &[TokenBudgetEvent],
-    contract: &TokenBudgetContractConfig,
-    rollout_observations: &[codex_threads::RolloutAssistantGenerationObservation],
-    assistant_scope: Option<&AssistantGenerationScopeObservation>,
-) -> Value {
-    let with_amai_measured_tokens = summary["total_context_tokens"]
-        .as_u64()
-        .unwrap_or(0)
-        .saturating_add(summary["total_recovery_tokens"].as_u64().unwrap_or(0));
-    let verified_with_amai_measured_tokens = summary["verified_delivered_tokens"]
-        .as_u64()
-        .unwrap_or(0)
-        .saturating_add(summary["verified_recovery_tokens"].as_u64().unwrap_or(0));
-    let observed_whole_cycle_with_amai_tokens =
-        observed_whole_cycle_with_assistant_scope_tokens(summary, assistant_scope)
-            .unwrap_or(with_amai_measured_tokens);
-    let verified_observed_whole_cycle_with_amai_tokens =
-        verified_observed_whole_cycle_with_assistant_scope_tokens(summary, assistant_scope)
-            .unwrap_or(verified_with_amai_measured_tokens);
-    json!({
-        "scope_code": scope_code,
-        "scope_label": scope_label,
-        "statement_status": "dashboard_read_only_preview",
-        "preliminary": summary["preliminary"].clone(),
-        "counted_events": summary["counted_events"].clone(),
-        "events_total": summary["events_total"].clone(),
-        "coverage": summary["coverage"].clone(),
-        "client_limit_meter_alignment": build_client_limit_meter_alignment(
-            contract,
-            "dashboard_statement_preview",
-            summary,
-            Some(events),
-            Some(rollout_observations),
-            assistant_scope,
-        ),
-        "observed_client_prompt_tokens": summary["observed_client_prompt_tokens"].clone(),
-        "observed_assistant_generation_tokens": Value::from(
-            assistant_scope
-                .map(|scope| scope.observed_tokens)
-                .unwrap_or_else(|| summary["observed_assistant_generation_tokens"].as_u64().unwrap_or(0))
-        ),
-        "observed_tool_overhead_tokens": summary["observed_tool_overhead_tokens"].clone(),
-        "observed_continuity_restore_tokens": summary["observed_continuity_restore_tokens"].clone(),
-        "without_amai_measured_tokens": summary["total_naive_tokens"].as_u64().unwrap_or(0),
-        "with_amai_measured_tokens": with_amai_measured_tokens,
-        "observed_whole_cycle_with_amai_tokens": observed_whole_cycle_with_amai_tokens,
-        "measured_saved_tokens": summary["total_effective_saved_tokens"].as_i64().unwrap_or(0),
-        "measured_saved_pct": summary["effective_savings_pct"].as_f64().unwrap_or(0.0),
-        "verified_without_amai_measured_tokens": summary["verified_baseline_tokens"].as_u64().unwrap_or(0),
-        "verified_with_amai_measured_tokens": verified_with_amai_measured_tokens,
-        "verified_observed_whole_cycle_with_amai_tokens": verified_observed_whole_cycle_with_amai_tokens,
-        "verified_measured_saved_tokens": summary["verified_effective_saved_tokens"].as_i64().unwrap_or(0),
-        "verified_measured_saved_pct": summary["verified_effective_savings_pct"].as_f64().unwrap_or(0.0),
-        "note": "Dashboard preview intentionally stays read-only and lightweight: it is for fast operator cards, not for contractual export, settlement, or billing semantics."
-    })
-}
-
-fn build_dashboard_statement_export_preview(
-    statement_preview: &Value,
-    contract: &TokenBudgetContractConfig,
-) -> Value {
-    if statement_preview.is_null() {
-        return Value::Null;
-    }
-    let client_limit_boundary_semantics =
-        build_client_limit_boundary_review_surface(statement_preview);
-    json!({
-        "surface": "dashboard_export_compact",
-        "reviewed_frozen_debt_export_surface": build_reviewed_frozen_debt_export_surface(
-            contract,
-            &client_limit_boundary_semantics,
-            statement_preview["scope_code"].as_str(),
-        ),
-    })
-}
-
-fn observed_whole_cycle_with_assistant_scope_tokens(
-    summary: &Value,
-    assistant_scope: Option<&AssistantGenerationScopeObservation>,
-) -> Option<u64> {
-    let observed_whole_cycle_with_amai_tokens =
-        summary["observed_whole_cycle_with_amai_tokens"].as_u64()?;
-    let observed_assistant_generation_tokens = summary["observed_assistant_generation_tokens"]
-        .as_u64()
-        .unwrap_or(0);
-    Some(
-        observed_whole_cycle_with_amai_tokens.saturating_add(
-            assistant_scope
-                .map(|scope| scope.observed_tokens)
-                .unwrap_or(observed_assistant_generation_tokens)
-                .saturating_sub(observed_assistant_generation_tokens),
-        ),
-    )
-}
-
-fn verified_observed_whole_cycle_with_assistant_scope_tokens(
-    summary: &Value,
-    assistant_scope: Option<&AssistantGenerationScopeObservation>,
-) -> Option<u64> {
-    let verified_observed_whole_cycle_with_amai_tokens =
-        summary["verified_observed_whole_cycle_with_amai_tokens"].as_u64()?;
-    let verified_observed_assistant_generation_tokens =
-        summary["verified_observed_assistant_generation_tokens"]
-            .as_u64()
-            .unwrap_or(0);
-    Some(
-        verified_observed_whole_cycle_with_amai_tokens.saturating_add(
-            assistant_scope
-                .map(|scope| scope.observed_tokens)
-                .unwrap_or(verified_observed_assistant_generation_tokens)
-                .saturating_sub(verified_observed_assistant_generation_tokens),
-        ),
-    )
-}
-
 fn contractual_line_item_json(event: &TokenBudgetEvent) -> Value {
     json!({
         "event_id": event.event_id.clone(),
@@ -6949,195 +5708,6 @@ fn build_contractual_evidence_pack(
     }))
 }
 
-fn validate_adjustment_scope(scope: &str) -> Result<()> {
-    if matches!(scope, "current_session" | "rolling_window" | "lifetime") {
-        Ok(())
-    } else {
-        bail!(
-            "unsupported adjustment scope {} (expected current_session, rolling_window or lifetime)",
-            scope
-        )
-    }
-}
-
-fn validate_adjustment_kind(kind: &str) -> Result<()> {
-    if matches!(kind, "credit_note" | "adjustment_entry" | "dispute_hold") {
-        Ok(())
-    } else {
-        bail!(
-            "unsupported adjustment kind {} (expected credit_note, adjustment_entry or dispute_hold)",
-            kind
-        )
-    }
-}
-
-fn validate_adjustment_status(status: &str) -> Result<()> {
-    if matches!(
-        status,
-        "requested"
-            | "pending_review"
-            | "approved_but_unapplied"
-            | "applied_report_only"
-            | "disputed"
-            | "rejected"
-    ) {
-        Ok(())
-    } else {
-        bail!(
-            "unsupported adjustment status {} (expected requested, pending_review, approved_but_unapplied, applied_report_only, disputed or rejected)",
-            status
-        )
-    }
-}
-
-fn adjustment_registry_write_path(repo_root: &Path) -> PathBuf {
-    std::env::var("AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                repo_root.join(path)
-            }
-        })
-        .unwrap_or_else(|| adjustment_registry_default_path(repo_root))
-}
-
-fn load_adjustment_registry_file_for_write(path: &Path) -> Result<AdjustmentRegistryFile> {
-    if !path.exists() {
-        return Ok(AdjustmentRegistryFile::default());
-    }
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read adjustment registry {}", path.display()))?;
-    serde_json::from_str(&content)
-        .with_context(|| format!("failed to parse adjustment registry {}", path.display()))
-}
-
-fn write_adjustment_registry_file(path: &Path, registry: &AdjustmentRegistryFile) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create parent directory for adjustment registry {}",
-                path.display()
-            )
-        })?;
-    }
-    let content =
-        serde_json::to_string_pretty(registry).context("failed to encode adjustment registry")?;
-    fs::write(path, content)
-        .with_context(|| format!("failed to write adjustment registry {}", path.display()))
-}
-
-async fn resolve_statement_preview_id_for_scope(
-    repo_root: &Path,
-    config: &TokenBudgetConfigFile,
-    budget_profile: Option<&str>,
-    include_verify_events: Option<bool>,
-    scope: &str,
-) -> Result<String> {
-    let cfg = AppConfig::from_env()?;
-    let db = postgres::connect_admin(&cfg).await?;
-    let report = collect_report(
-        repo_root,
-        &db,
-        budget_profile,
-        include_verify_events.unwrap_or(config.measurement.include_verify_events_by_default),
-        None,
-    )
-    .await?;
-    let statement_preview_id =
-        report["token_budget_report"]["statement_export_previews"][scope]["statement_preview_id"]
-            .as_str()
-            .ok_or_else(|| anyhow!("statement preview id unavailable for scope {scope}"))?;
-    Ok(statement_preview_id.to_string())
-}
-
-pub async fn print_adjustment_registry(args: &ObserveTokenAdjustmentRegistryArgs) -> Result<()> {
-    if let Some(scope) = args.scope.as_deref() {
-        validate_adjustment_scope(scope)?;
-    }
-    let repo_root = config::discover_repo_root(None)?;
-    let config = load_config(&repo_root)?;
-    let registry = build_adjustment_registry_json(&repo_root, &config.contract);
-    let payload = if let Some(scope) = args.scope.as_deref() {
-        json!({
-            "token_adjustment_registry": registry,
-            "scope_code": scope,
-            "scope_summary": registry["scopes"][scope].clone(),
-            "adjustment_request_schema": build_adjustment_request_schema_json(&config.contract),
-        })
-    } else {
-        json!({
-            "token_adjustment_registry": registry,
-            "adjustment_request_schema": build_adjustment_request_schema_json(&config.contract),
-        })
-    };
-    println!("{}", serde_json::to_string_pretty(&payload)?);
-    Ok(())
-}
-
-pub async fn add_adjustment_entry(args: &ObserveTokenAdjustmentAddArgs) -> Result<()> {
-    validate_adjustment_scope(&args.scope)?;
-    validate_adjustment_kind(&args.kind)?;
-    validate_adjustment_status(&args.status)?;
-    let repo_root = config::discover_repo_root(None)?;
-    let config = load_config(&repo_root)?;
-    let related_statement_id = match (
-        args.related_statement_id.as_ref(),
-        args.resolve_related_statement_id,
-    ) {
-        (Some(explicit), _) => Some(explicit.clone()),
-        (None, true) => Some(
-            resolve_statement_preview_id_for_scope(
-                &repo_root,
-                &config,
-                args.budget_profile.as_deref(),
-                args.include_verify_events,
-                &args.scope,
-            )
-            .await?,
-        ),
-        (None, false) => None,
-    };
-    let path = adjustment_registry_write_path(&repo_root);
-    let mut registry = load_adjustment_registry_file_for_write(&path)?;
-    let entry = AdjustmentRegistryEntry {
-        adjustment_id: args
-            .adjustment_id
-            .clone()
-            .unwrap_or_else(|| Uuid::new_v4().to_string()),
-        scope_code: args.scope.clone(),
-        kind: args.kind.clone(),
-        status: args.status.clone(),
-        reason_code: args.reason_code.clone(),
-        created_at_epoch_ms: current_epoch_ms()?,
-        tokens_delta: args.tokens_delta,
-        amount_delta: args.amount_delta,
-        currency_profile: args.currency_profile.clone(),
-        related_statement_id: related_statement_id.clone(),
-    };
-    registry.adjustments.push(entry.clone());
-    write_adjustment_registry_file(&path, &registry)?;
-    let registry_preview = build_adjustment_registry_json(&repo_root, &config.contract);
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "token_adjustment_add": {
-                "registry_path": path.display().to_string(),
-                "entry": adjustment_entry_json(&entry),
-                "scope_summary": registry_preview["scopes"][args.scope.as_str()].clone(),
-                "registry_status": registry_preview["status"].clone(),
-                "resolved_related_statement_id": related_statement_id,
-                "request_schema_version": config.contract.adjustment_request_schema_version,
-                "note": "Adjustment entry materialized отдельно от token events: historical usage не переписывается, а correction/dispute живёт как отдельный registry layer."
-            }
-        }))?
-    );
-    Ok(())
-}
-
 pub async fn print_report(db: &Client, args: &ObserveTokenReportArgs) -> Result<()> {
     let repo_root = config::discover_repo_root(None)?;
     let config = load_config(&repo_root)?;
@@ -7292,10 +5862,10 @@ fn build_contractual_sources_value(
         "transactional_statuses": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["transactional_statuses"].clone(),
         "customer_contractual_boundary": customer_contractual_boundary,
         "suggested_repo_local_paths": {
-            "provider_usage_export": provider_usage_default_path(repo_root).display().to_string(),
-            "provider_invoice_export": provider_invoice_default_path(repo_root).display().to_string(),
-            "provider_rate_card": provider_rate_card_default_path(repo_root).display().to_string(),
-            "infra_cost_profile": infra_cost_profile_default_path(repo_root).display().to_string(),
+            "provider_usage_export": external_truth::provider_usage_default_path(repo_root).display().to_string(),
+            "provider_invoice_export": external_truth::provider_invoice_default_path(repo_root).display().to_string(),
+            "provider_rate_card": external_truth::provider_rate_card_default_path(repo_root).display().to_string(),
+            "infra_cost_profile": external_truth::infra_cost_profile_default_path(repo_root).display().to_string(),
         },
         "note": "Этот inspect-layer нужен затем, чтобы provider truth sources, rate card, reconciliation и margin были видны как отдельный contractual contour, а не прятались внутри большого token report."
     })
@@ -7623,6 +6193,12 @@ pub async fn repair_token_ledger_events(
             rewrite_source_kind,
             if apply { "apply" } else { "dry_run" }
         );
+        if apply && changed > 0 {
+            let repo_root = config::discover_repo_root(None)?;
+            let recorded_at_epoch_ms = current_epoch_ms()?;
+            bump_dashboard_token_events_invalidation(&repo_root, recorded_at_epoch_ms)?;
+            bump_dashboard_live_turn_retrieval_invalidation(&repo_root, recorded_at_epoch_ms)?;
+        }
         return Ok(());
     }
 
@@ -7895,12 +6471,50 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         "current_live_turn",
         stage_started_at,
     );
+    let stage_started_at = Instant::now();
+    let live_response_scope = current_workspace_live_response_scope(db, &repo_root).await?;
+    record_dashboard_precache_stage_ms(
+        &mut pre_cache_timings,
+        "live_response_scope",
+        stage_started_at,
+    );
+    let stage_started_at = Instant::now();
+    let mut live_response_latency = build_live_response_latency_surface(
+        &repo_root,
+        live_response_scope
+            .as_ref()
+            .map(|(project_code, _)| project_code.as_str()),
+        live_response_scope
+            .as_ref()
+            .map(|(_, namespace_code)| namespace_code.as_str()),
+        if profile.rolling_window_hours.is_some() {
+            &rolling_window_events
+        } else {
+            &events
+        },
+        profile.rolling_window_hours,
+        profile.session_gap_minutes,
+        60,
+        now_epoch_ms,
+    )?;
+    annotate_live_response_latency_surface(&mut live_response_latency, &current_live_turn);
+    record_dashboard_precache_stage_ms(
+        &mut pre_cache_timings,
+        "live_response_latency",
+        stage_started_at,
+    );
+    let personal_agent_scope =
+        current_workspace_personal_kpi_selector(db, &repo_root, None).await?;
+    let personal_agent_5h_events =
+        personal_kpi_window_events(&events, personal_agent_scope.as_ref(), now_epoch_ms);
 
     let stage_started_at = Instant::now();
     let report_components = dashboard_report_signature_components(
         &session_events,
         &rolling_window_events,
         &events,
+        personal_agent_scope.as_ref(),
+        &personal_agent_5h_events,
         &current_session_assistant_scope,
         rolling_window_assistant_scope
             .as_ref()
@@ -7909,6 +6523,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         client_live_meter_observation.as_ref(),
         client_live_meter_binding_hint.as_deref(),
         exact_client_limits_observation.as_ref(),
+        &live_response_latency,
         client_budget_target_percent,
     );
     let report_signature = dashboard_report_signature(&report_components);
@@ -7957,76 +6572,47 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     };
     let lifetime_summary =
         summarize_events(&events, now_epoch_ms, &config.measurement, &config.contract);
-    let current_session_statement_preview = json!({
-        "client_limit_meter_alignment": build_client_limit_meter_alignment(
-            &config.contract,
-            "dashboard_statement_preview",
-            &current_session_summary,
-            Some(&session_events),
-            Some(&rollout_observations),
-            materialized_assistant_scope(&current_session_assistant_scope),
-        ),
-    });
-    let rolling_window_statement_preview = if profile.rolling_window_hours.is_some() {
-        build_dashboard_statement_preview(
-            "rolling_window",
-            &format!("окно {}", profile.display_name),
-            &rolling_window_summary,
-            &rolling_window_events,
-            &config.contract,
-            &rollout_observations,
-            rolling_window_assistant_scope
-                .as_ref()
-                .and_then(|scope| materialized_assistant_scope(scope)),
-        )
-    } else {
-        Value::Null
-    };
-    let lifetime_statement_preview = build_dashboard_statement_preview(
-        "lifetime",
-        "всё время записи",
-        &lifetime_summary,
-        &events,
+    let personal_agent_5h_summary = summarize_events(
+        &personal_agent_5h_events,
+        now_epoch_ms,
+        &config.measurement,
+        &config.contract,
+    );
+    let client_live_meter = build_client_live_meter_json(
+        client_live_meter_observation.as_ref(),
+        client_live_meter_binding_hint.as_deref(),
+        exact_client_limits_observation.as_ref(),
+    );
+    let personal_agent_kpi = preferred_personal_agent_kpi(
+        &personal_agent_5h_summary,
+        personal_agent_scope.as_ref(),
+        Some(&client_live_meter),
+    );
+    let DashboardReadOnlyStatementSurfaces {
+        current_session_statement_preview,
+        rolling_window_statement_preview,
+        lifetime_statement_preview,
+        current_session_statement_export_preview,
+        rolling_window_statement_export_preview,
+        lifetime_statement_export_preview,
+        headline_summary,
+    } = build_dashboard_read_only_statement_surfaces(
+        &profile,
         &config.contract,
         &rollout_observations,
+        &current_session_summary,
+        &session_events,
+        materialized_assistant_scope(&current_session_assistant_scope),
+        &rolling_window_summary,
+        &rolling_window_events,
+        rolling_window_assistant_scope
+            .as_ref()
+            .and_then(|scope| materialized_assistant_scope(scope)),
+        &lifetime_summary,
+        &events,
         materialized_assistant_scope(&lifetime_assistant_scope),
+        client_budget_target_percent,
     );
-    let current_session_statement_export_preview = build_dashboard_statement_export_preview(
-        &current_session_statement_preview,
-        &config.contract,
-    );
-    let rolling_window_statement_export_preview = if profile.rolling_window_hours.is_some() {
-        build_dashboard_statement_export_preview(
-            &rolling_window_statement_preview,
-            &config.contract,
-        )
-    } else {
-        Value::Null
-    };
-    let lifetime_statement_export_preview =
-        build_dashboard_statement_export_preview(&lifetime_statement_preview, &config.contract);
-    let rolling_window_headline_boundary = if profile.rolling_window_hours.is_some() {
-        build_client_limit_boundary_review_surface(&rolling_window_statement_preview)
-    } else {
-        Value::Null
-    };
-    let lifetime_headline_boundary =
-        build_client_limit_boundary_review_surface(&lifetime_statement_preview);
-    let headline_summary = if profile.rolling_window_hours.is_some() {
-        build_product_headline_with_target(
-            &rolling_window_summary,
-            &format!("окно {}", profile.display_name),
-            Some(&rolling_window_headline_boundary),
-            client_budget_target_percent,
-        )
-    } else {
-        build_product_headline_with_target(
-            &lifetime_summary,
-            "всё время записи",
-            Some(&lifetime_headline_boundary),
-            client_budget_target_percent,
-        )
-    };
     let mut report = json!({
         "token_budget_report": {
             "surface": "dashboard_read_only",
@@ -8063,13 +6649,11 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
                 },
                 "lifetime": lifetime_statement_export_preview,
             },
-            "client_live_meter": build_client_live_meter_json(
-                client_live_meter_observation.as_ref(),
-                client_live_meter_binding_hint.as_deref(),
-                exact_client_limits_observation.as_ref(),
-            ),
+            "client_live_meter": client_live_meter,
+            "personal_agent_kpi": personal_agent_kpi,
             "client_limit_hourly_burn": client_limit_hourly_burn,
             "current_live_turn": current_live_turn,
+            "live_response_latency": live_response_latency,
             "cache_debug": cache_debug,
             "note": "Это облегчённый dashboard report: он сохраняет честные current_session / rolling_window / lifetime rollups, client-limit alignment и live client meter, не разворачивает полный contractual/export contour, но поднимает compact statement_export_previews для reviewed frozen-debt surfaces. Quiet same-meter sync/write-back всё так же ограничен active live scope текущей сессии и рабочего окна. Sync write-back может materialize-иться в этом тике, а обновлённые token events подхватываются следующим refresh, чтобы текущий pass не делал лишний full reload.",
         }
@@ -8093,271 +6677,6 @@ async fn preferred_dashboard_thread_binding_hint_with_override(
         return Ok(Some(thread_id.to_string()));
     }
     preferred_dashboard_thread_binding_hint(db, repo_root).await
-}
-
-pub async fn collect_dashboard_current_session_budget_report(db: &Client) -> Result<Value> {
-    collect_dashboard_current_session_budget_report_with_thread_hint_and_base(db, None, None).await
-}
-
-pub async fn collect_dashboard_current_session_budget_report_with_thread_hint_and_base(
-    db: &Client,
-    base_report: Option<&Value>,
-    explicit_thread_id_hint: Option<&str>,
-) -> Result<Value> {
-    let repo_root = config::discover_repo_root(None)?;
-    if let Some(report) = reusable_exact_thread_current_session_budget_report_from_base_report(
-        base_report,
-        explicit_thread_id_hint,
-    ) {
-        return Ok(report);
-    }
-    let repo_root_str = repo_root
-        .to_str()
-        .ok_or_else(|| anyhow!("repo_root must be valid UTF-8"))?;
-    let config = load_config(&repo_root)?;
-    let profile = resolve_profile(&config, None, &repo_root)?;
-    let include_verify_events = config.measurement.include_verify_events_by_default;
-    let session_gap_ms = profile.session_gap_minutes.saturating_mul(60_000) as i64;
-
-    let (rollout_observation_signature, rollout_observations) =
-        dashboard_rollout_assistant_generation_observations_for_repo(&repo_root)?;
-    let mut session_events = load_dashboard_current_session_events(
-        db,
-        &repo_root,
-        include_verify_events,
-        session_gap_ms,
-    )
-    .await?;
-    let dashboard_sync_signature =
-        dashboard_same_meter_sync_signature(&session_events, &rollout_observation_signature);
-
-    let (tool_overhead_changed, assistant_generation_changed, continuity_baseline_changed) =
-        if should_run_dashboard_same_meter_sync(&repo_root, &dashboard_sync_signature) {
-            (
-                sync_context_pack_tool_overhead_for_events(db, &repo_root, &session_events).await?,
-                sync_rollout_assistant_generation_for_events(
-                    db,
-                    &session_events,
-                    &rollout_observations,
-                )
-                .await?,
-                sync_continuity_pre_amai_baseline_for_events(db, &repo_root, &session_events)
-                    .await?,
-            )
-        } else {
-            (false, false, false)
-        };
-
-    if tool_overhead_changed || assistant_generation_changed || continuity_baseline_changed {
-        session_events = load_dashboard_current_session_events(
-            db,
-            &repo_root,
-            include_verify_events,
-            session_gap_ms,
-        )
-        .await?;
-    }
-
-    let reusable_live_surfaces =
-        reusable_exact_thread_budget_live_surfaces_from_base_report(base_report, explicit_thread_id_hint);
-    let can_reuse_base_report = base_report.is_some_and(|report| {
-        report["current_session"].is_object()
-            && report["statement_previews"]["current_session"]
-                ["client_limit_meter_alignment"]
-                .is_object()
-            && report["client_limit_hourly_burn"].is_object()
-    });
-    let client_budget_target_percent = base_report
-        .and_then(|report| report["client_budget_target_percent"].as_u64())
-        .unwrap_or(client_budget_target_percent_for_repo(db, &repo_root).await?);
-    let (current_session_summary, current_session_statement_preview, client_limit_hourly_burn) =
-        if let Some(report) = base_report.filter(|_| can_reuse_base_report) {
-            (
-                report["current_session"].clone(),
-                report["statement_previews"]["current_session"].clone(),
-                report["client_limit_hourly_burn"].clone(),
-            )
-        } else {
-            let now_epoch_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .context("system clock before unix epoch")?
-                .as_millis() as i64;
-            let current_session_assistant_scope = derive_dashboard_rollout_assistant_generation_scopes(
-                db,
-                &repo_root,
-                &[session_events.as_slice()],
-            )
-            .await?
-            .0
-            .into_iter()
-            .next()
-            .unwrap_or_default();
-            let current_session_summary = summarize_events(
-                &session_events,
-                now_epoch_ms,
-                &config.measurement,
-                &config.contract,
-            );
-            let current_session_statement_preview = json!({
-                "client_limit_meter_alignment": build_client_limit_meter_alignment(
-                    &config.contract,
-                    "dashboard_statement_preview",
-                    &current_session_summary,
-                    Some(&session_events),
-                    Some(&rollout_observations),
-                    materialized_assistant_scope(&current_session_assistant_scope),
-                ),
-            });
-            let exact_client_limits_resolution = dashboard_exact_client_rate_limits_resolution().await?;
-            let exact_client_limits_observation = exact_client_limits_resolution.observation.clone();
-            let client_limit_hourly_burn = collect_exact_client_limit_hourly_burn(
-                db,
-                exact_client_limits_observation.as_ref(),
-                exact_client_limits_resolution
-                    .source
-                    .should_persist_exact_sample(),
-                DEFAULT_CLIENT_LIMIT_HOURLY_BURN_WINDOW_MINUTES,
-                DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MAX_LIVE_AGE_SECONDS,
-                DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MIN_HISTORY_SPAN_MINUTES,
-            )
-            .await?;
-            (
-                current_session_summary,
-                current_session_statement_preview,
-                client_limit_hourly_burn,
-            )
-        };
-    let (client_live_meter, current_live_turn) = if let Some((client_live_meter, current_live_turn)) =
-        reusable_live_surfaces
-    {
-        (client_live_meter, current_live_turn)
-    } else {
-        let client_live_meter_binding_hint =
-            preferred_dashboard_thread_binding_hint_with_override(
-                db,
-                &repo_root,
-                explicit_thread_id_hint,
-            )
-            .await?;
-        let client_live_meter_observation = preferred_rollout_client_meter_observation(
-            db,
-            &repo_root,
-            repo_root_str,
-            client_live_meter_binding_hint.as_deref(),
-        )
-        .await?;
-        let exact_client_limits_resolution = dashboard_exact_client_rate_limits_resolution().await?;
-        let exact_client_limits_observation = exact_client_limits_resolution.observation.clone();
-        let current_live_turn = build_current_live_turn_surface(
-            &repo_root,
-            db,
-            &session_events,
-            client_live_meter_observation.as_ref(),
-            client_live_meter_binding_hint.as_deref(),
-            &config.measurement,
-            &config.contract,
-            &rollout_observations,
-        )
-        .await?;
-        let client_live_meter = build_client_live_meter_json(
-            client_live_meter_observation.as_ref(),
-            client_live_meter_binding_hint.as_deref(),
-            exact_client_limits_observation.as_ref(),
-        );
-        (client_live_meter, current_live_turn)
-    };
-    Ok(json!({
-        "token_budget_report": {
-            "surface": "dashboard_current_session_budget_only",
-            "filters": {
-                "include_verify_events": include_verify_events,
-            },
-            "client_budget_target_percent": client_budget_target_percent,
-            "current_session": current_session_summary,
-            "statement_previews": {
-                "current_session": current_session_statement_preview,
-            },
-            "client_live_meter": client_live_meter,
-            "client_limit_hourly_burn": client_limit_hourly_burn,
-            "current_live_turn": current_live_turn,
-            "note": "Это минимальный current-session budget report для root-cause/gate surfaces: он не строит rolling/lifetime/export контуры и существует только для дешёвого live client-budget enforcement."
-        }
-    }))
-}
-
-fn reusable_exact_thread_current_session_budget_report_from_base_report(
-    base_report: Option<&Value>,
-    explicit_thread_id_hint: Option<&str>,
-) -> Option<Value> {
-    let report = base_report?;
-    let client_budget_target_percent = report["client_budget_target_percent"].clone();
-    let current_session = report["current_session"].clone();
-    let current_session_statement_preview = report["statement_previews"]["current_session"].clone();
-    let client_limit_hourly_burn = report["client_limit_hourly_burn"].clone();
-    let (client_live_meter, current_live_turn) =
-        reusable_exact_thread_budget_live_surfaces_from_base_report(base_report, explicit_thread_id_hint)?;
-    if !current_session.is_object()
-        || !current_session_statement_preview["client_limit_meter_alignment"].is_object()
-        || !client_limit_hourly_burn.is_object()
-    {
-        return None;
-    }
-    Some(json!({
-        "token_budget_report": {
-            "surface": "dashboard_current_session_budget_only",
-            "filters": report["filters"].clone(),
-            "client_budget_target_percent": client_budget_target_percent,
-            "current_session": current_session,
-            "statement_previews": {
-                "current_session": current_session_statement_preview,
-            },
-            "client_live_meter": client_live_meter,
-            "client_limit_hourly_burn": client_limit_hourly_burn,
-            "current_live_turn": current_live_turn,
-            "note": "Это минимальный current-session budget report для root-cause/gate surfaces: он не строит rolling/lifetime/export контуры и существует только для дешёвого live client-budget enforcement."
-        }
-    }))
-}
-
-fn reusable_exact_thread_budget_live_surfaces_from_base_report(
-    base_report: Option<&Value>,
-    explicit_thread_id_hint: Option<&str>,
-) -> Option<(Value, Value)> {
-    let thread_id_hint = explicit_thread_id_hint?.trim();
-    if thread_id_hint.is_empty() {
-        return None;
-    }
-    let report = base_report?;
-    let client_live_meter = report["client_live_meter"].clone();
-    let current_live_turn = report["current_live_turn"].clone();
-    if !client_live_meter.is_object() || !current_live_turn.is_object() {
-        return None;
-    }
-    let meter_thread_id = client_live_meter["thread_id"].as_str().unwrap_or_default().trim();
-    let meter_bound = client_live_meter["current_thread_bound"]
-        .as_bool()
-        .unwrap_or(false);
-    let turn_thread_id = current_live_turn["thread_id"].as_str().unwrap_or_default().trim();
-    if !meter_bound || meter_thread_id != thread_id_hint || turn_thread_id != thread_id_hint {
-        return None;
-    }
-    Some((client_live_meter, current_live_turn))
-}
-
-pub async fn collect_live_current_session_budget_guard(
-    db: &Client,
-    restore_context: Option<&Value>,
-) -> Result<Value> {
-    let report = collect_dashboard_current_session_budget_report(db).await?;
-    let snapshot = json!({
-        "token_budget_report": {
-            "token_budget_report": report["token_budget_report"].clone(),
-        },
-        "latest_repo_working_state_restore": restore_context
-            .cloned()
-            .unwrap_or_else(|| json!({ "working_state_restore": {} })),
-    });
-    Ok(dashboard::current_session_budget_guard(&snapshot))
 }
 
 pub async fn collect_default_report_with_overrides(
@@ -8389,7 +6708,7 @@ pub async fn record_context_pack_event(
     let config = load_config(&repo_root)?;
     let traffic_class = derive_traffic_class(source_kind);
     let payload_origin = if traffic_class == "live" {
-        "context_pack_token_budget"
+        "context_pack_token_budget_v13"
     } else {
         source_kind
     };
@@ -8400,6 +6719,32 @@ pub async fn record_context_pack_event(
         source_kind,
         payload_origin,
     )?;
+    if let Some(node) = event["token_budget_event"].as_object_mut() {
+        let thread_id_missing = node
+            .get("thread_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none();
+        if thread_id_missing
+            && let Some(thread_id) = preferred_dashboard_thread_binding_hint(db, &repo_root).await?
+        {
+            node.insert("thread_id".to_string(), Value::String(thread_id.clone()));
+            let turn_id_missing = node
+                .get("turn_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none();
+            if turn_id_missing
+                && let Ok(Some(observation)) =
+                    codex_threads::latest_rollout_client_meter_observation_for_thread(&thread_id)
+                && !observation.turn_id.trim().is_empty()
+            {
+                node.insert("turn_id".to_string(), Value::String(observation.turn_id));
+            }
+        }
+    }
     if traffic_class == "live" {
         let profile = resolve_profile(&config, None, &repo_root)?;
         enrich_live_event_payload(db, &mut event, &profile, &repo_root).await?;
@@ -8676,6 +7021,10 @@ fn dashboard_client_live_meter_signature(
                 "latest_model_context_window": item.latest_model_context_window,
                 "latest_primary_limit_used_percent": item.latest_primary_limit_used_percent,
                 "latest_secondary_limit_used_percent": item.latest_secondary_limit_used_percent,
+                "latest_primary_window_duration_mins": item.latest_primary_window_duration_mins,
+                "latest_primary_resets_at_epoch_seconds": item.latest_primary_resets_at_epoch_seconds,
+                "latest_secondary_window_duration_mins": item.latest_secondary_window_duration_mins,
+                "latest_secondary_resets_at_epoch_seconds": item.latest_secondary_resets_at_epoch_seconds,
                 "thread_binding_state": thread_binding_state,
                 "current_thread_bound": current_thread_bound,
             })
@@ -8806,7 +7155,7 @@ fn dashboard_thread_binding_hint_from_working_state_restore(restore: &Value) -> 
     Some(thread_id.to_string())
 }
 
-async fn preferred_dashboard_thread_binding_hint(
+pub(crate) async fn preferred_dashboard_thread_binding_hint(
     db: &Client,
     repo_root: &Path,
 ) -> Result<Option<String>> {
@@ -8822,6 +7171,18 @@ async fn preferred_dashboard_thread_binding_hint(
         .context("system clock before unix epoch")?
         .as_millis() as u64;
     if let Some(thread_id) = load_shared_active_thread_hint(repo_root, now_epoch_ms) {
+        return Ok(Some(thread_id));
+    }
+
+    if let Some(thread_id) = repo_root
+        .to_str()
+        .filter(|value| !value.trim().is_empty())
+        .and_then(|value| {
+            codex_threads::preferred_thread_id_for_repo(value)
+                .ok()
+                .flatten()
+        })
+    {
         return Ok(Some(thread_id));
     }
 
@@ -8861,6 +7222,141 @@ async fn client_budget_target_percent_for_repo(db: &Client, repo_root: &Path) ->
             )
         })
         .unwrap_or_else(working_state::default_client_budget_target_percent))
+}
+
+async fn current_workspace_personal_kpi_selector(
+    db: &Client,
+    repo_root: &Path,
+    explicit_thread_id_hint: Option<&str>,
+) -> Result<Option<PersonalKpiSelector>> {
+    let repo_root_display = repo_root.display().to_string();
+    let Ok(project) = postgres::get_project_by_repo_root(db, &repo_root_display).await else {
+        return Ok(None);
+    };
+    let snapshot = postgres::latest_observability_snapshot_for_project(
+        db,
+        "working_state_restore",
+        "working_state_restore",
+        &project.code,
+    )
+    .await?;
+    let namespace_code = snapshot
+        .as_ref()
+        .and_then(|value| value["working_state_restore"]["namespace"]["code"].as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("continuity")
+        .to_string();
+    let agent_scope = working_state::current_agent_scope_for(&project.code, &namespace_code);
+    let thread_id = preferred_dashboard_thread_binding_hint_with_override(
+        db,
+        repo_root,
+        explicit_thread_id_hint,
+    )
+    .await?;
+    Ok(Some(PersonalKpiSelector {
+        project_code: project.code,
+        namespace_code,
+        agent_scope,
+        thread_id,
+    }))
+}
+
+#[cfg(test)]
+fn personal_agent_kpi_from_summary(
+    summary: &Value,
+    selector: Option<&PersonalKpiSelector>,
+) -> Value {
+    let (scope_kind, scope_label) = selector
+        .map(|value| (value.scope_kind(), value.scope_label()))
+        .unwrap_or(("unbound", "unbound"));
+    let events_total = summary["events_total"].as_u64().unwrap_or(0);
+    let counted_events = summary["counted_events"].as_u64().unwrap_or(0);
+    let (status, confidence, kpi_percent) = if counted_events > 0 {
+        (
+            "observed",
+            "verified",
+            summary["verified_effective_savings_pct"]
+                .as_f64()
+                .unwrap_or(0.0),
+        )
+    } else if events_total > 0 {
+        (
+            "observed",
+            "preliminary",
+            summary["effective_savings_pct"].as_f64().unwrap_or(0.0),
+        )
+    } else {
+        ("missing", "missing", 0.0)
+    };
+    if status == "missing" {
+        return json!({
+            "status": "missing",
+            "confidence": confidence,
+            "scope_kind": scope_kind,
+            "scope_label": scope_label,
+            "window_hours": PERSONAL_AGENT_KPI_WINDOW_HOURS,
+            "events_total": events_total,
+            "counted_events": counted_events,
+            "reply_prefix": "5ч KPI: н/д",
+            "summary": "Для личного 5ч KPI этого agent_scope пока нет measured событий.",
+        });
+    }
+    let classification = signed_kpi_classification(kpi_percent);
+    let reply_prefix = reply_prefix_for_signed_kpi_percent(kpi_percent);
+    json!({
+        "status": "observed",
+        "confidence": confidence,
+        "scope_kind": scope_kind,
+        "scope_label": scope_label,
+        "window_hours": PERSONAL_AGENT_KPI_WINDOW_HOURS,
+        "events_total": events_total,
+        "counted_events": counted_events,
+        "classification": classification,
+        "kpi_percent": kpi_percent.abs(),
+        "signed_kpi_percent": kpi_percent,
+        "reply_prefix": reply_prefix,
+        "summary": match classification {
+            "saving" => format!(
+                "Личный 5ч KPI текущего agent_scope идёт в экономии {:.2}% по measured token budget.",
+                kpi_percent
+            ),
+            "overspend" => format!(
+                "Личный 5ч KPI текущего agent_scope идёт в переплате {:.2}% по measured token budget.",
+                kpi_percent.abs()
+            ),
+            _ => "Личный 5ч KPI текущего agent_scope идёт примерно 1:1 по measured token budget."
+                .to_string(),
+        },
+    })
+}
+
+fn preferred_personal_agent_kpi(
+    summary: &Value,
+    selector: Option<&PersonalKpiSelector>,
+    client_live_meter: Option<&Value>,
+) -> Value {
+    let (scope_kind, scope_label) = selector
+        .map(|value| (value.scope_kind(), value.scope_label()))
+        .unwrap_or(("unbound", "unbound"));
+    if let Some(online) = client_live_meter.and_then(|meter| {
+        personal_agent_online_kpi_from_client_live_meter(meter, scope_kind, scope_label)
+    }) {
+        return online;
+    }
+    let events_total = summary["events_total"].as_u64().unwrap_or(0);
+    let counted_events = summary["counted_events"].as_u64().unwrap_or(0);
+    json!({
+        "status": "missing",
+        "confidence": "missing",
+        "scope_kind": scope_kind,
+        "scope_label": scope_label,
+        "window_hours": PERSONAL_AGENT_KPI_WINDOW_HOURS,
+        "events_total": events_total,
+        "counted_events": counted_events,
+        "reply_prefix": "5ч KPI: н/д",
+        "summary": "Для личного 5ч KPI нет exact VS Code status-bar rate-limit contour. Measured token-budget fallback для этого KPI запрещён.",
+    })
 }
 
 fn codex_extension_relative_codex_path() -> &'static str {
@@ -9050,70 +7546,6 @@ async fn query_codex_app_server_rate_limits(
     Ok(observed)
 }
 
-async fn dashboard_exact_client_rate_limits_resolution()
--> Result<DashboardExactClientLimitsResolution> {
-    let now_epoch_ms = current_epoch_ms().unwrap_or_default() as u64;
-    if let Some(entry) = fresh_dashboard_exact_client_limits_cache_entry(now_epoch_ms) {
-        return Ok(DashboardExactClientLimitsResolution {
-            source: if entry.observation.is_some() {
-                DashboardExactClientLimitsResolutionSource::InProcessCache
-            } else {
-                DashboardExactClientLimitsResolutionSource::Missing
-            },
-            observation: entry.observation,
-        });
-    }
-    if let Some(path) = discovered_dashboard_exact_client_limits_shared_cache_path() {
-        if let Some(entry) = load_shared_dashboard_exact_client_limits_cache(&path, now_epoch_ms) {
-            set_dashboard_exact_client_limits_cache(entry.clone());
-            return Ok(DashboardExactClientLimitsResolution {
-                source: if entry.observation.is_some() {
-                    DashboardExactClientLimitsResolutionSource::SharedFileCache
-                } else {
-                    DashboardExactClientLimitsResolutionSource::Missing
-                },
-                observation: entry.observation,
-            });
-        }
-    }
-    let stale_cached_observation = cached_dashboard_exact_client_limits_observation();
-    let live_query_result = if let Some(executable) = discover_local_codex_app_server_executable() {
-        query_codex_app_server_rate_limits(&executable).await
-    } else {
-        Ok(None)
-    };
-    let (observation, source) = match live_query_result {
-        Ok(observation) => {
-            let cache_entry = DashboardExactClientLimitsCache {
-                fetched_at_epoch_ms: now_epoch_ms,
-                observation: observation.clone(),
-            };
-            set_dashboard_exact_client_limits_cache(cache_entry.clone());
-            if let Some(path) = discovered_dashboard_exact_client_limits_shared_cache_path() {
-                let _ = write_shared_dashboard_exact_client_limits_cache(&path, &cache_entry);
-            }
-            let source = if observation.is_some() {
-                DashboardExactClientLimitsResolutionSource::LiveAppServer
-            } else {
-                DashboardExactClientLimitsResolutionSource::Missing
-            };
-            (observation, source)
-        }
-        Err(_) => {
-            let source = if stale_cached_observation.is_some() {
-                DashboardExactClientLimitsResolutionSource::InProcessCache
-            } else {
-                DashboardExactClientLimitsResolutionSource::Missing
-            };
-            (stale_cached_observation, source)
-        }
-    };
-    Ok(DashboardExactClientLimitsResolution {
-        observation,
-        source,
-    })
-}
-
 fn build_status_bar_rate_limits_json(
     observation: Option<&CodexAppServerRateLimitsObservation>,
 ) -> Value {
@@ -9254,7 +7686,7 @@ fn exact_client_limit_hourly_burn_value(
     now_epoch_ms: u64,
     window_minutes: u64,
     max_live_age_seconds: u64,
-    _min_history_span_minutes: u64,
+    min_history_span_minutes: u64,
 ) -> Value {
     let window_minutes = window_minutes.max(1);
     let max_live_age_seconds = max_live_age_seconds.max(1);
@@ -9329,18 +7761,31 @@ fn exact_client_limit_hourly_burn_value(
     } else {
         actual_used_percent / ideal_used_percent
     };
-    let classification = if (ratio_to_ideal - 1.0).abs() <= 0.005 {
+    let raw_classification = if (ratio_to_ideal - 1.0).abs() <= 0.005 {
         "one_to_one"
     } else if ratio_to_ideal > 1.0 {
         "overspend"
     } else {
         "saving"
     };
-    let kpi_percent = match classification {
+    let raw_kpi_percent = match raw_classification {
         "overspend" => (ratio_to_ideal - 1.0) * 100.0,
         "saving" => (1.0 - ratio_to_ideal) * 100.0,
         _ => 0.0,
     };
+    let raw_signed_kpi_percent = match raw_classification {
+        "overspend" => -raw_kpi_percent,
+        "saving" => raw_kpi_percent,
+        _ => 0.0,
+    };
+    let (signed_kpi_percent, window_progress_state, window_progress_ratio) =
+        damp_signed_kpi_percent_for_window_progress(
+            raw_signed_kpi_percent,
+            elapsed_window_minutes,
+            min_history_span_minutes,
+        );
+    let kpi_percent = signed_kpi_percent.abs();
+    let classification = signed_kpi_classification(signed_kpi_percent);
     let reply_prefix = match classification {
         "overspend" => format!("5ч KPI: переплата {kpi_percent:.2}%"),
         "saving" => format!("5ч KPI: экономия {kpi_percent:.2}%"),
@@ -9378,17 +7823,41 @@ fn exact_client_limit_hourly_burn_value(
         "projected_full_window_minutes": projected_full_window_minutes,
         "projected_reset_delta_minutes": projected_reset_delta_minutes,
         "classification": classification,
+        "raw_classification": raw_classification,
+        "window_progress_state": window_progress_state,
+        "window_progress_ratio": window_progress_ratio,
+        "minimum_elapsed_window_minutes": min_history_span_minutes,
+        "raw_kpi_percent": raw_kpi_percent,
+        "raw_signed_kpi_percent": raw_signed_kpi_percent,
         "kpi_percent": kpi_percent,
         "reply_prefix": reply_prefix,
         "summary": match classification {
             "overspend" => format!(
-                "По текущему положению окна 5ч burn идёт быстрее нормы: использовано {actual_used_percent:.2}% вместо идеальных {ideal_used_percent:.2}% к этому моменту."
+                "По текущему положению окна 5ч burn идёт быстрее нормы: использовано {actual_used_percent:.2}% вместо идеальных {ideal_used_percent:.2}% к этому моменту{}."
+                ,
+                if window_progress_state == "preliminary" {
+                    " (раннее окно сглажено)"
+                } else {
+                    ""
+                }
             ),
             "saving" => format!(
-                "По текущему положению окна 5ч burn идёт экономно: использовано {actual_used_percent:.2}% вместо идеальных {ideal_used_percent:.2}% к этому моменту."
+                "По текущему положению окна 5ч burn идёт экономно: использовано {actual_used_percent:.2}% вместо идеальных {ideal_used_percent:.2}% к этому моменту{}."
+                ,
+                if window_progress_state == "preliminary" {
+                    " (раннее окно сглажено)"
+                } else {
+                    ""
+                }
             ),
             _ => format!(
-                "По текущему положению окна 5ч burn идёт почти один в один: использовано {actual_used_percent:.2}% при идеальных {ideal_used_percent:.2}%."
+                "По текущему положению окна 5ч burn идёт почти один в один: использовано {actual_used_percent:.2}% при идеальных {ideal_used_percent:.2}%{}."
+                ,
+                if window_progress_state == "preliminary" {
+                    " (раннее окно сглажено)"
+                } else {
+                    ""
+                }
             ),
         },
     })
@@ -9719,15 +8188,35 @@ fn build_client_live_meter_json(
         "context_remaining_tokens": context_remaining_tokens,
         "primary_limit_used_percent": observation.latest_primary_limit_used_percent,
         "primary_limit_remaining_percent": 100_u64.saturating_sub(observation.latest_primary_limit_used_percent),
+        "primary_window_duration_mins": observation.latest_primary_window_duration_mins,
+        "primary_resets_at_epoch_seconds": observation.latest_primary_resets_at_epoch_seconds,
         "secondary_limit_used_percent": observation.latest_secondary_limit_used_percent,
         "secondary_limit_remaining_percent": 100_u64.saturating_sub(observation.latest_secondary_limit_used_percent),
+        "secondary_window_duration_mins": observation.latest_secondary_window_duration_mins,
+        "secondary_resets_at_epoch_seconds": observation.latest_secondary_resets_at_epoch_seconds,
+        "rollout_jsonl_tolerance_summary": observation.rollout_jsonl_tolerance_summary,
+        "rollout_jsonl_tolerated_skips_present": observation.rollout_jsonl_tolerance_summary.has_tolerated_skips(),
+        "rollout_jsonl_malformed_objects_fail_closed": true,
         "status_bar_rate_limits": build_status_bar_rate_limits_json(exact_client_limits),
         "note": if current_thread_bound {
-            "Этот surface поднимает именно live meter клиента из rollout token_count/rate_limits: он нужен, чтобы отделять Amai-side same-meter delta от полного расхода turn/context в самом клиенте. Exact текущие 5ч/7д лимиты при этом отдельно приходят из codex app-server status-bar source."
+            "Этот surface поднимает именно live meter клиента из rollout token_count/rate_limits: per-thread 5ч/7д contour берётся из собственного workspace агента, а codex app-server status-bar source остаётся только fallback/global surface."
         } else {
-            "Этот surface поднят из rollout token_count/rate_limits, но текущий thread ещё не привязан к observation. Пока не materialized current-thread meter, live-turn rows и rotate-pressure должны деградировать до unknown/stale, а не наследоваться от предыдущего thread. Exact текущие 5ч/7д лимиты при этом отдельно приходят из codex app-server status-bar source."
+            "Этот surface поднят из rollout token_count/rate_limits, но текущий thread ещё не привязан к observation. Пока не materialized current-thread meter, live-turn rows и rotate-pressure должны деградировать до unknown/stale, а не наследоваться от предыдущего thread. Codex app-server status-bar source при этом остаётся только fallback/global surface."
         }
     })
+}
+
+fn client_live_meter_with_exact_status_bar(
+    mut client_live_meter: Value,
+    exact_client_limits: Option<&CodexAppServerRateLimitsObservation>,
+) -> Value {
+    if let Some(root) = client_live_meter.as_object_mut() {
+        root.insert(
+            "status_bar_rate_limits".to_string(),
+            build_status_bar_rate_limits_json(exact_client_limits),
+        );
+    }
+    client_live_meter
 }
 
 fn store_dashboard_rollout_observations(
@@ -9821,105 +8310,6 @@ async fn sync_rollout_assistant_generation_for_events(
         }
     }
     Ok(changed)
-}
-
-fn dashboard_same_meter_sync_signature(
-    events: &[TokenBudgetEvent],
-    rollout_observation_signature: &str,
-) -> String {
-    let assistant_generation_missing_context_pack_ids = events
-        .iter()
-        .filter(|event| {
-            event.traffic_class == "live"
-                && event.measurement_scope == "retrieval_lower_bound"
-                && event.assistant_generation_tokens.is_none()
-        })
-        .filter_map(event_context_pack_id)
-        .collect::<BTreeSet<_>>();
-    let tool_overhead_missing_context_pack_ids = events
-        .iter()
-        .filter(|event| {
-            event.traffic_class == "live"
-                && event.measurement_scope == "retrieval_lower_bound"
-                && event.tool_overhead_tokens.is_none()
-        })
-        .filter_map(event_context_pack_id)
-        .collect::<BTreeSet<_>>();
-    let payload = json!({
-        "assistant_generation_missing_context_pack_ids": assistant_generation_missing_context_pack_ids,
-        "tool_overhead_missing_context_pack_ids": tool_overhead_missing_context_pack_ids,
-        "rollout_observation_signature": rollout_observation_signature,
-    });
-    hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
-}
-
-fn dashboard_same_meter_sync_shared_cache_path(repo_root: &Path) -> PathBuf {
-    canonical_repo_root(repo_root).join(DASHBOARD_SAME_METER_SYNC_SHARED_CACHE_RELATIVE_PATH)
-}
-
-fn load_shared_dashboard_same_meter_sync_signature(repo_root: &Path) -> Option<String> {
-    let path = dashboard_same_meter_sync_shared_cache_path(repo_root);
-    let bytes = fs::read(&path).ok()?;
-    let cache: PersistedDashboardSameMeterSyncCache = serde_json::from_slice(&bytes).ok()?;
-    if cache.cache_version != DASHBOARD_SAME_METER_SYNC_SHARED_CACHE_VERSION {
-        return None;
-    }
-    let expected_repo_root = canonical_repo_root(repo_root);
-    let cached_repo_root = canonical_repo_root(Path::new(&cache.repo_root));
-    if cached_repo_root != expected_repo_root {
-        return None;
-    }
-    Some(cache.signature)
-}
-
-fn write_shared_dashboard_same_meter_sync_signature(
-    repo_root: &Path,
-    signature: &str,
-) -> Result<()> {
-    let canonical_repo_root = canonical_repo_root(repo_root);
-    let path =
-        canonical_repo_root.join(DASHBOARD_SAME_METER_SYNC_SHARED_CACHE_RELATIVE_PATH);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let cache = PersistedDashboardSameMeterSyncCache {
-        cache_version: DASHBOARD_SAME_METER_SYNC_SHARED_CACHE_VERSION.to_string(),
-        repo_root: canonical_repo_root.display().to_string(),
-        signature: signature.to_string(),
-    };
-    fs::write(&path, serde_json::to_vec(&cache)?)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
-}
-
-fn should_run_dashboard_same_meter_sync(repo_root: &Path, signature: &str) -> bool {
-    let cache = DASHBOARD_SAME_METER_SYNC_CACHE.get_or_init(|| Mutex::new(None));
-    let Some(mut guard) = cache.lock().ok() else {
-        return true;
-    };
-    let repo_root = canonical_repo_root(repo_root);
-    if let Some(entry) = guard.as_ref() {
-        if entry.repo_root == repo_root && entry.signature == signature {
-            return false;
-        }
-    }
-    if load_shared_dashboard_same_meter_sync_signature(&repo_root)
-        .as_deref()
-        == Some(signature)
-    {
-        *guard = Some(DashboardSameMeterSyncCache {
-            repo_root,
-            signature: signature.to_string(),
-        });
-        return false;
-    }
-    *guard = Some(DashboardSameMeterSyncCache {
-        repo_root: repo_root.clone(),
-        signature: signature.to_string(),
-    });
-    let _ = write_shared_dashboard_same_meter_sync_signature(&repo_root, signature);
-    true
 }
 
 async fn sync_context_pack_tool_overhead_for_events(
@@ -10350,6 +8740,90 @@ fn merged_context_pack_thread_ids(
     merged
 }
 
+fn merged_context_pack_thread_ids_with_repo_fallback(
+    metadata: &BTreeMap<String, WorkingStateContextPackMeta>,
+    rows: &BTreeMap<String, ObservabilitySnapshotRecord>,
+    repo_thread_ids: &BTreeMap<String, String>,
+    context_pack_ids: &BTreeSet<String>,
+) -> BTreeMap<String, String> {
+    let mut merged = merged_context_pack_thread_ids(metadata, rows, context_pack_ids);
+    for context_pack_id in context_pack_ids {
+        if merged.contains_key(context_pack_id) {
+            continue;
+        }
+        let Some(thread_id) = repo_thread_ids
+            .get(context_pack_id)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        merged.insert(context_pack_id.clone(), thread_id.to_string());
+    }
+    merged
+}
+
+async fn context_pack_repo_roots(
+    db: &Client,
+    context_pack_ids: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>> {
+    if context_pack_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let target_ids = context_pack_ids.iter().cloned().collect::<Vec<_>>();
+    let rows = db
+        .query(
+            r#"
+            SELECT
+                context_pack_id::text,
+                payload->'project'->>'repo_root' AS repo_root
+            FROM ami.context_packs
+            WHERE context_pack_id::text = ANY($1)
+            "#,
+            &[&target_ids],
+        )
+        .await
+        .context("failed to load context pack repo_root bindings")?;
+    let mut repo_roots = BTreeMap::new();
+    for row in rows {
+        let context_pack_id: String = row.get(0);
+        let repo_root = row.get::<_, Option<String>>(1).unwrap_or_default();
+        if context_pack_ids.contains(&context_pack_id) && !repo_root.trim().is_empty() {
+            repo_roots.insert(context_pack_id, repo_root);
+        }
+    }
+    Ok(repo_roots)
+}
+
+async fn repo_fallback_thread_ids_for_context_packs(
+    db: &Client,
+    context_pack_ids: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>> {
+    let repo_roots = context_pack_repo_roots(db, context_pack_ids).await?;
+    let mut grouped_ids = BTreeMap::<String, Vec<String>>::new();
+    for (context_pack_id, repo_root) in repo_roots {
+        grouped_ids
+            .entry(repo_root)
+            .or_default()
+            .push(context_pack_id);
+    }
+
+    let mut resolved = BTreeMap::new();
+    for (repo_root, ids) in grouped_ids {
+        let Some(thread_id) = preferred_dashboard_thread_binding_hint(db, Path::new(&repo_root))
+            .await?
+            .filter(|value| !value.trim().is_empty())
+        else {
+            continue;
+        };
+        for context_pack_id in ids {
+            resolved.insert(context_pack_id, thread_id.clone());
+        }
+    }
+    Ok(resolved)
+}
+
 async fn assistant_generation_turn_observed_snapshots_for_context_packs(
     db: &Client,
     context_pack_ids: &BTreeSet<String>,
@@ -10434,7 +8908,13 @@ async fn attach_whole_cycle_observed_to_turn_group(
     }
     let rows = latest_token_budget_snapshots_for_context_packs(db, context_pack_ids).await?;
     let metadata = latest_working_state_context_pack_metadata(db, context_pack_ids).await?;
-    let merged_thread_ids = merged_context_pack_thread_ids(&metadata, &rows, context_pack_ids);
+    let repo_thread_ids = repo_fallback_thread_ids_for_context_packs(db, context_pack_ids).await?;
+    let merged_thread_ids = merged_context_pack_thread_ids_with_repo_fallback(
+        &metadata,
+        &rows,
+        &repo_thread_ids,
+        context_pack_ids,
+    );
     let missing_context_pack_thread_ids = context_pack_ids
         .difference(&merged_thread_ids.keys().cloned().collect::<BTreeSet<_>>())
         .cloned()
@@ -10662,742 +9142,6 @@ async fn derive_rollout_assistant_generation_scope(
     ))
 }
 
-async fn dashboard_assistant_scope_sources(
-    db: &Client,
-    repo_root: &Path,
-    union_target_ids: &BTreeSet<String>,
-) -> Result<(
-    Vec<AssistantGenerationTurnObservedSnapshot>,
-    BTreeMap<String, WorkingStateContextPackMeta>,
-    BTreeMap<String, BTreeSet<String>>,
-    BTreeMap<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>,
-    DashboardAssistantScopeDebug,
-)> {
-    let source_started_at = Instant::now();
-    let mut debug = DashboardAssistantScopeDebug {
-        source_cache_status: "miss".to_string(),
-        scope_cache_status: "unknown".to_string(),
-        ..Default::default()
-    };
-    let stage_started_at = Instant::now();
-    let working_state_summary =
-        postgres::summarize_observability_snapshots_by_kinds(db, &["working_state_event"]).await?;
-    record_dashboard_stage_ms(
-        &mut debug.source_stage_ms,
-        "working_state_summary",
-        stage_started_at,
-    );
-    let stage_started_at = Instant::now();
-    let direct_turn_summary = postgres::summarize_observability_snapshots_by_kinds(
-        db,
-        &[ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND],
-    )
-    .await?;
-    record_dashboard_stage_ms(
-        &mut debug.source_stage_ms,
-        "direct_turn_summary",
-        stage_started_at,
-    );
-    let stage_started_at = Instant::now();
-    let token_budget_summary =
-        postgres::summarize_observability_snapshots_by_kinds(db, &["token_budget_event"]).await?;
-    record_dashboard_stage_ms(
-        &mut debug.source_stage_ms,
-        "token_budget_summary",
-        stage_started_at,
-    );
-    let stage_started_at = Instant::now();
-    if let Some((direct_turns, metadata, helper_only_context_pack_ids_by_thread, turns_by_thread)) =
-        cached_dashboard_assistant_scope_sources(
-            repo_root,
-            union_target_ids,
-            &working_state_summary,
-            &direct_turn_summary,
-            &token_budget_summary,
-        )?
-    {
-        record_dashboard_stage_ms(
-            &mut debug.source_stage_ms,
-            "source_cache_lookup",
-            stage_started_at,
-        );
-        debug.source_cache_status = "hit".to_string();
-        debug.source_total_ms = source_started_at.elapsed().as_millis() as u64;
-        return Ok((
-            direct_turns,
-            metadata,
-            helper_only_context_pack_ids_by_thread,
-            turns_by_thread,
-            debug,
-        ));
-    }
-    record_dashboard_stage_ms(
-        &mut debug.source_stage_ms,
-        "source_cache_lookup",
-        stage_started_at,
-    );
-
-    let stage_started_at = Instant::now();
-    let direct_turns =
-        assistant_generation_turn_observed_snapshots_for_context_packs(db, union_target_ids)
-            .await?;
-    record_dashboard_stage_ms(
-        &mut debug.source_stage_ms,
-        "direct_turn_snapshots",
-        stage_started_at,
-    );
-    let direct_turn_covered_context_pack_ids = direct_turns
-        .iter()
-        .flat_map(|turn| turn.context_pack_ids.iter().cloned())
-        .collect::<BTreeSet<_>>();
-    if direct_turn_covered_context_pack_ids == *union_target_ids {
-        debug
-            .source_stage_ms
-            .insert("direct_turn_full_coverage_short_circuit".to_string(), 0);
-        let empty_metadata = BTreeMap::new();
-        let empty_turns_by_thread = BTreeMap::new();
-        let thread_signatures = BTreeMap::new();
-        let signature = dashboard_assistant_scope_source_signature(
-            union_target_ids,
-            &working_state_summary,
-            &direct_turn_summary,
-            &token_budget_summary,
-            &thread_signatures,
-        );
-        store_dashboard_assistant_scope_sources(
-            repo_root,
-            &signature,
-            union_target_ids,
-            &direct_turns,
-            &empty_metadata,
-            &BTreeMap::new(),
-            &empty_turns_by_thread,
-        );
-        debug.source_total_ms = source_started_at.elapsed().as_millis() as u64;
-        return Ok((
-            direct_turns,
-            empty_metadata,
-            BTreeMap::new(),
-            empty_turns_by_thread,
-            debug,
-        ));
-    }
-    let stage_started_at = Instant::now();
-    let token_budget_rows =
-        latest_token_budget_snapshots_for_context_packs(db, union_target_ids).await?;
-    let metadata = merged_context_pack_rollout_metadata(
-        &latest_working_state_context_pack_metadata(db, union_target_ids).await?,
-        &token_budget_rows,
-        union_target_ids,
-    );
-    record_dashboard_stage_ms(
-        &mut debug.source_stage_ms,
-        "working_state_plus_token_budget_lineage",
-        stage_started_at,
-    );
-    let thread_ids = metadata
-        .values()
-        .map(|item| item.thread_id.clone())
-        .collect::<BTreeSet<_>>();
-    let mut turns_by_thread =
-        BTreeMap::<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>::new();
-    let mut helper_only_context_pack_ids_by_thread = BTreeMap::<String, BTreeSet<String>>::new();
-    let stage_started_at = Instant::now();
-    for thread_id in &thread_ids {
-        let turns =
-            codex_threads::rollout_assistant_generation_turn_observations_for_thread(thread_id)?;
-        if !turns.is_empty() {
-            turns_by_thread.insert(thread_id.clone(), turns);
-        }
-        let helper_only_context_pack_ids =
-            codex_threads::rollout_helper_only_context_pack_ids_for_thread(thread_id)?;
-        if !helper_only_context_pack_ids.is_empty() {
-            helper_only_context_pack_ids_by_thread
-                .insert(thread_id.clone(), helper_only_context_pack_ids);
-        }
-    }
-    record_dashboard_stage_ms(
-        &mut debug.source_stage_ms,
-        "rollout_turn_threads",
-        stage_started_at,
-    );
-    let stage_started_at = Instant::now();
-    let thread_signatures = dashboard_assistant_scope_thread_signatures(&thread_ids)?;
-    let signature = dashboard_assistant_scope_source_signature(
-        union_target_ids,
-        &working_state_summary,
-        &direct_turn_summary,
-        &token_budget_summary,
-        &thread_signatures,
-    );
-    record_dashboard_stage_ms(
-        &mut debug.source_stage_ms,
-        "source_signature",
-        stage_started_at,
-    );
-    store_dashboard_assistant_scope_sources(
-        repo_root,
-        &signature,
-        union_target_ids,
-        &direct_turns,
-        &metadata,
-        &helper_only_context_pack_ids_by_thread,
-        &turns_by_thread,
-    );
-    debug.source_total_ms = source_started_at.elapsed().as_millis() as u64;
-    Ok((
-        direct_turns,
-        metadata,
-        helper_only_context_pack_ids_by_thread,
-        turns_by_thread,
-        debug,
-    ))
-}
-
-async fn derive_dashboard_rollout_assistant_generation_scopes(
-    db: &Client,
-    repo_root: &Path,
-    events_by_scope: &[&[TokenBudgetEvent]],
-) -> Result<(
-    Vec<AssistantGenerationScopeObservation>,
-    DashboardAssistantScopeDebug,
-)> {
-    let scope_started_at = Instant::now();
-    let mut debug = DashboardAssistantScopeDebug {
-        source_cache_status: "miss".to_string(),
-        scope_cache_status: "miss".to_string(),
-        ..Default::default()
-    };
-    let target_sets = events_by_scope
-        .iter()
-        .map(|events| assistant_generation_missing_scope_context_pack_ids(Some(events)))
-        .collect::<Vec<_>>();
-    let union_target_ids = target_sets
-        .iter()
-        .flat_map(|set| set.iter().cloned())
-        .collect::<BTreeSet<_>>();
-    if union_target_ids.is_empty() {
-        debug.source_cache_status = "not_applicable".to_string();
-        debug.scope_cache_status = "not_applicable".to_string();
-        debug.scope_total_ms = scope_started_at.elapsed().as_millis() as u64;
-        return Ok((
-            vec![AssistantGenerationScopeObservation::default(); events_by_scope.len()],
-            debug,
-        ));
-    }
-
-    let stage_started_at = Instant::now();
-    let (
-        direct_turns,
-        metadata,
-        helper_only_context_pack_ids_by_thread,
-        turns_by_thread,
-        source_debug,
-    ) = dashboard_assistant_scope_sources(db, repo_root, &union_target_ids).await?;
-    debug.source_cache_status = source_debug.source_cache_status;
-    debug.source_stage_ms = source_debug.source_stage_ms;
-    debug.source_total_ms = source_debug.source_total_ms;
-    record_dashboard_stage_ms(&mut debug.scope_stage_ms, "source_bundle", stage_started_at);
-    let stage_started_at = Instant::now();
-    let signature = dashboard_assistant_scope_signature(
-        &target_sets,
-        &direct_turns,
-        &metadata,
-        &helper_only_context_pack_ids_by_thread,
-        &turns_by_thread,
-    );
-    record_dashboard_stage_ms(
-        &mut debug.scope_stage_ms,
-        "scope_signature",
-        stage_started_at,
-    );
-    if let Some(scopes) = cached_dashboard_assistant_generation_scopes(repo_root, &signature) {
-        debug.scope_cache_status = "hit".to_string();
-        debug.scope_total_ms = scope_started_at.elapsed().as_millis() as u64;
-        return Ok((scopes, debug));
-    }
-    let stage_started_at = Instant::now();
-    let scopes = target_sets
-        .iter()
-        .zip(events_by_scope.iter())
-        .map(|(target_context_pack_ids, scope_events)| {
-            derive_rollout_assistant_generation_scope_from_sources(
-                target_context_pack_ids,
-                &direct_turns,
-                &metadata,
-                &turns_by_thread,
-                &helper_only_context_pack_ids_for_scope(
-                    &metadata,
-                    &helper_only_context_pack_ids_by_thread,
-                ),
-                &helper_only_non_model_visible_context_pack_ids(
-                    scope_events,
-                    &metadata,
-                    &helper_only_context_pack_ids_by_thread,
-                ),
-            )
-        })
-        .collect::<Vec<_>>();
-    record_dashboard_stage_ms(&mut debug.scope_stage_ms, "scope_build", stage_started_at);
-    store_dashboard_assistant_generation_scopes(repo_root, &signature, &scopes);
-    debug.scope_total_ms = scope_started_at.elapsed().as_millis() as u64;
-    Ok((scopes, debug))
-}
-
-fn dashboard_assistant_scope_signature(
-    target_sets: &[BTreeSet<String>],
-    direct_turns: &[AssistantGenerationTurnObservedSnapshot],
-    metadata: &BTreeMap<String, WorkingStateContextPackMeta>,
-    helper_only_context_pack_ids_by_thread: &BTreeMap<String, BTreeSet<String>>,
-    turns_by_thread: &BTreeMap<
-        String,
-        Vec<codex_threads::RolloutAssistantGenerationTurnObservation>,
-    >,
-) -> String {
-    let target_sets = target_sets
-        .iter()
-        .map(|set| set.iter().cloned().collect::<Vec<_>>())
-        .collect::<Vec<_>>();
-    let direct_turns = direct_turns
-        .iter()
-        .map(|item| {
-            json!({
-                "thread_id": item.thread_id,
-                "turn_id": item.turn_id,
-                "assistant_generation_tokens": item.assistant_generation_tokens,
-                "context_pack_ids": item.context_pack_ids,
-            })
-        })
-        .collect::<Vec<_>>();
-    let metadata = metadata
-        .iter()
-        .map(|(context_pack_id, item)| {
-            json!({
-                "context_pack_id": context_pack_id,
-                "thread_id": item.thread_id,
-                "captured_at_epoch_ms": item.captured_at_epoch_ms,
-                "turn_id": item.turn_id,
-            })
-        })
-        .collect::<Vec<_>>();
-    let helper_only_context_pack_ids_by_thread = helper_only_context_pack_ids_by_thread
-        .iter()
-        .map(|(thread_id, context_pack_ids)| {
-            json!({
-                "thread_id": thread_id,
-                "context_pack_ids": context_pack_ids,
-            })
-        })
-        .collect::<Vec<_>>();
-    let turns_by_thread = turns_by_thread
-        .iter()
-        .map(|(thread_id, turns)| {
-            let turns = turns
-                .iter()
-                .map(|turn| {
-                    json!({
-                        "thread_id": turn.thread_id,
-                        "turn_id": turn.turn_id,
-                        "started_at_epoch_ms": turn.started_at_epoch_ms,
-                        "ended_at_epoch_ms": turn.ended_at_epoch_ms,
-                        "assistant_generation_tokens": turn.assistant_generation_tokens,
-                        "token_count_events": turn.token_count_events,
-                        "approved_context_pack_calls": turn.approved_context_pack_calls,
-                    })
-                })
-                .collect::<Vec<_>>();
-            json!({
-                "thread_id": thread_id,
-                "turns": turns,
-            })
-        })
-        .collect::<Vec<_>>();
-    let payload = json!({
-        "target_sets": target_sets,
-        "direct_turns": direct_turns,
-        "metadata": metadata,
-        "helper_only_context_pack_ids_by_thread": helper_only_context_pack_ids_by_thread,
-        "turns_by_thread": turns_by_thread,
-    });
-    hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
-}
-
-fn dashboard_assistant_scope_source_signature(
-    target_context_pack_ids: &BTreeSet<String>,
-    working_state_summary: &[postgres::ObservabilitySnapshotKindSummary],
-    direct_turn_summary: &[postgres::ObservabilitySnapshotKindSummary],
-    token_budget_summary: &[postgres::ObservabilitySnapshotKindSummary],
-    rollout_thread_signatures: &BTreeMap<String, String>,
-) -> String {
-    let summary_json = |items: &[postgres::ObservabilitySnapshotKindSummary]| {
-        items
-            .iter()
-            .map(|item| {
-                json!({
-                    "snapshot_kind": item.snapshot_kind,
-                    "snapshots_count": item.snapshots_count,
-                    "latest_created_at_epoch_ms": item.latest_created_at_epoch_ms,
-                })
-            })
-            .collect::<Vec<_>>()
-    };
-    let payload = json!({
-        "target_context_pack_ids": target_context_pack_ids.iter().cloned().collect::<Vec<_>>(),
-        "working_state_summary": summary_json(working_state_summary),
-        "direct_turn_summary": summary_json(direct_turn_summary),
-        "token_budget_summary": summary_json(token_budget_summary),
-        "rollout_thread_signatures": rollout_thread_signatures,
-    });
-    hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
-}
-
-fn dashboard_assistant_scope_thread_signatures(
-    thread_ids: &BTreeSet<String>,
-) -> Result<BTreeMap<String, String>> {
-    let mut signatures = BTreeMap::new();
-    for thread_id in thread_ids {
-        let signature =
-            codex_threads::rollout_assistant_generation_turn_source_signature_for_thread(
-                thread_id,
-            )?
-            .unwrap_or_else(|| "no_rollout_source".to_string());
-        signatures.insert(thread_id.clone(), signature);
-    }
-    Ok(signatures)
-}
-
-fn dashboard_assistant_scope_shared_cache_path(repo_root: &Path) -> PathBuf {
-    canonical_repo_root(repo_root).join(DASHBOARD_ASSISTANT_SCOPE_SHARED_CACHE_RELATIVE_PATH)
-}
-
-fn dashboard_assistant_scope_source_shared_cache_path(repo_root: &Path) -> PathBuf {
-    canonical_repo_root(repo_root)
-        .join(DASHBOARD_ASSISTANT_SCOPE_SOURCE_SHARED_CACHE_RELATIVE_PATH)
-}
-
-fn load_shared_dashboard_assistant_scope_sources(
-    repo_root: &Path,
-) -> Option<DashboardAssistantScopeSourceCache> {
-    let path = dashboard_assistant_scope_source_shared_cache_path(repo_root);
-    let bytes = fs::read(&path).ok()?;
-    let persisted: PersistedDashboardAssistantScopeSourceCache =
-        serde_json::from_slice(&bytes).ok()?;
-    if persisted.cache_version != DASHBOARD_ASSISTANT_SCOPE_SOURCE_SHARED_CACHE_VERSION {
-        return None;
-    }
-    if canonical_repo_root(Path::new(&persisted.repo_root)) != canonical_repo_root(repo_root) {
-        return None;
-    }
-    Some(DashboardAssistantScopeSourceCache {
-        repo_root: canonical_repo_root(repo_root),
-        signature: persisted.signature,
-        target_context_pack_ids: persisted.target_context_pack_ids,
-        direct_turns: persisted.direct_turns,
-        metadata: persisted.metadata,
-        helper_only_context_pack_ids_by_thread: persisted.helper_only_context_pack_ids_by_thread,
-        turns_by_thread: persisted.turns_by_thread,
-    })
-}
-
-fn write_shared_dashboard_assistant_scope_sources(
-    repo_root: &Path,
-    entry: &DashboardAssistantScopeSourceCache,
-) -> Result<()> {
-    let path = dashboard_assistant_scope_source_shared_cache_path(repo_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let persisted = PersistedDashboardAssistantScopeSourceCache {
-        cache_version: DASHBOARD_ASSISTANT_SCOPE_SOURCE_SHARED_CACHE_VERSION.to_string(),
-        repo_root: canonical_repo_root(repo_root).display().to_string(),
-        signature: entry.signature.clone(),
-        target_context_pack_ids: entry.target_context_pack_ids.clone(),
-        direct_turns: entry.direct_turns.clone(),
-        metadata: entry.metadata.clone(),
-        helper_only_context_pack_ids_by_thread: entry.helper_only_context_pack_ids_by_thread.clone(),
-        turns_by_thread: entry.turns_by_thread.clone(),
-    };
-    fs::write(&path, serde_json::to_vec(&persisted)?)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
-}
-
-fn load_shared_dashboard_assistant_generation_scopes(
-    repo_root: &Path,
-) -> Option<DashboardAssistantScopeCache> {
-    let path = dashboard_assistant_scope_shared_cache_path(repo_root);
-    let bytes = fs::read(&path).ok()?;
-    let persisted: PersistedDashboardAssistantScopeCache =
-        serde_json::from_slice(&bytes).ok()?;
-    if persisted.cache_version != DASHBOARD_ASSISTANT_SCOPE_SHARED_CACHE_VERSION {
-        return None;
-    }
-    if canonical_repo_root(Path::new(&persisted.repo_root)) != canonical_repo_root(repo_root) {
-        return None;
-    }
-    Some(DashboardAssistantScopeCache {
-        repo_root: canonical_repo_root(repo_root),
-        signature: persisted.signature,
-        scopes: persisted.scopes,
-    })
-}
-
-fn write_shared_dashboard_assistant_generation_scopes(
-    repo_root: &Path,
-    entry: &DashboardAssistantScopeCache,
-) -> Result<()> {
-    let path = dashboard_assistant_scope_shared_cache_path(repo_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let persisted = PersistedDashboardAssistantScopeCache {
-        cache_version: DASHBOARD_ASSISTANT_SCOPE_SHARED_CACHE_VERSION.to_string(),
-        repo_root: canonical_repo_root(repo_root).display().to_string(),
-        signature: entry.signature.clone(),
-        scopes: entry.scopes.clone(),
-    };
-    fs::write(&path, serde_json::to_vec(&persisted)?)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
-}
-
-fn cached_dashboard_assistant_scope_sources(
-    repo_root: &Path,
-    target_context_pack_ids: &BTreeSet<String>,
-    working_state_summary: &[postgres::ObservabilitySnapshotKindSummary],
-    direct_turn_summary: &[postgres::ObservabilitySnapshotKindSummary],
-    token_budget_summary: &[postgres::ObservabilitySnapshotKindSummary],
-) -> Result<
-    Option<(
-        Vec<AssistantGenerationTurnObservedSnapshot>,
-        BTreeMap<String, WorkingStateContextPackMeta>,
-        BTreeMap<String, BTreeSet<String>>,
-        BTreeMap<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>,
-    )>,
-> {
-    let cache = DASHBOARD_ASSISTANT_SCOPE_SOURCE_CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cache
-        .lock()
-        .map_err(|_| anyhow!("dashboard assistant scope source cache poisoned"))?;
-    let repo_root = canonical_repo_root(repo_root);
-    let candidate = guard
-        .as_ref()
-        .filter(|entry| repo_root == entry.repo_root)
-        .cloned()
-        .or_else(|| load_shared_dashboard_assistant_scope_sources(&repo_root));
-    let Some(entry) = candidate else {
-        return Ok(None);
-    };
-    if target_context_pack_ids != &entry.target_context_pack_ids {
-        return Ok(None);
-    }
-    let thread_ids = entry
-        .metadata
-        .values()
-        .map(|item| item.thread_id.clone())
-        .collect::<BTreeSet<_>>();
-    let thread_signatures = dashboard_assistant_scope_thread_signatures(&thread_ids)?;
-    let signature = dashboard_assistant_scope_source_signature(
-        target_context_pack_ids,
-        working_state_summary,
-        direct_turn_summary,
-        token_budget_summary,
-        &thread_signatures,
-    );
-    if entry.signature != signature {
-        return Ok(None);
-    }
-    *guard = Some(entry.clone());
-    Ok(Some((
-        entry.direct_turns,
-        entry.metadata,
-        entry.helper_only_context_pack_ids_by_thread,
-        entry.turns_by_thread,
-    )))
-}
-
-fn store_dashboard_assistant_scope_sources(
-    repo_root: &Path,
-    signature: &str,
-    target_context_pack_ids: &BTreeSet<String>,
-    direct_turns: &[AssistantGenerationTurnObservedSnapshot],
-    metadata: &BTreeMap<String, WorkingStateContextPackMeta>,
-    helper_only_context_pack_ids_by_thread: &BTreeMap<String, BTreeSet<String>>,
-    turns_by_thread: &BTreeMap<
-        String,
-        Vec<codex_threads::RolloutAssistantGenerationTurnObservation>,
-    >,
-) {
-    let cache = DASHBOARD_ASSISTANT_SCOPE_SOURCE_CACHE.get_or_init(|| Mutex::new(None));
-    let Some(mut guard) = cache.lock().ok() else {
-        return;
-    };
-    let entry = DashboardAssistantScopeSourceCache {
-        repo_root: canonical_repo_root(repo_root),
-        signature: signature.to_string(),
-        target_context_pack_ids: target_context_pack_ids.clone(),
-        direct_turns: direct_turns.to_vec(),
-        metadata: metadata.clone(),
-        helper_only_context_pack_ids_by_thread: helper_only_context_pack_ids_by_thread.clone(),
-        turns_by_thread: turns_by_thread.clone(),
-    };
-    let _ = write_shared_dashboard_assistant_scope_sources(repo_root, &entry);
-    *guard = Some(entry);
-}
-
-fn cached_dashboard_assistant_generation_scopes(
-    repo_root: &Path,
-    signature: &str,
-) -> Option<Vec<AssistantGenerationScopeObservation>> {
-    let cache = DASHBOARD_ASSISTANT_SCOPE_CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cache.lock().ok()?;
-    let repo_root = canonical_repo_root(repo_root);
-    let entry = guard
-        .as_ref()
-        .filter(|entry| repo_root == entry.repo_root)
-        .cloned()
-        .or_else(|| load_shared_dashboard_assistant_generation_scopes(&repo_root))?;
-    if entry.signature != signature {
-        return None;
-    }
-    *guard = Some(entry.clone());
-    Some(entry.scopes)
-}
-
-fn store_dashboard_assistant_generation_scopes(
-    repo_root: &Path,
-    signature: &str,
-    scopes: &[AssistantGenerationScopeObservation],
-) {
-    let cache = DASHBOARD_ASSISTANT_SCOPE_CACHE.get_or_init(|| Mutex::new(None));
-    let Some(mut guard) = cache.lock().ok() else {
-        return;
-    };
-    let entry = DashboardAssistantScopeCache {
-        repo_root: canonical_repo_root(repo_root),
-        signature: signature.to_string(),
-        scopes: scopes.to_vec(),
-    };
-    let _ = write_shared_dashboard_assistant_generation_scopes(repo_root, &entry);
-    *guard = Some(entry);
-}
-
-fn dashboard_report_signature_components(
-    current_session_events: &[TokenBudgetEvent],
-    rolling_window_events: &[TokenBudgetEvent],
-    lifetime_events: &[TokenBudgetEvent],
-    current_session_assistant_scope: &AssistantGenerationScopeObservation,
-    rolling_window_assistant_scope: Option<&AssistantGenerationScopeObservation>,
-    lifetime_assistant_scope: &AssistantGenerationScopeObservation,
-    client_live_meter_observation: Option<&codex_threads::RolloutClientMeterObservation>,
-    client_live_meter_binding_hint: Option<&str>,
-    exact_client_limits_observation: Option<&CodexAppServerRateLimitsObservation>,
-    client_budget_target_percent: u64,
-) -> DashboardReportSignatureComponents {
-    DashboardReportSignatureComponents {
-        current_session_events: dashboard_report_events_signature(current_session_events),
-        rolling_window_events: dashboard_report_events_signature(rolling_window_events),
-        lifetime_events: dashboard_report_events_signature(lifetime_events),
-        current_session_assistant_scope: dashboard_report_assistant_scope_signature(
-            current_session_assistant_scope,
-        ),
-        rolling_window_assistant_scope: rolling_window_assistant_scope
-            .map(dashboard_report_assistant_scope_signature)
-            .unwrap_or_else(|| hex_sha256(b"dashboard_rolling_window_scope:null")),
-        lifetime_assistant_scope: dashboard_report_assistant_scope_signature(
-            lifetime_assistant_scope,
-        ),
-        client_live_meter: dashboard_client_live_meter_signature(
-            client_live_meter_observation,
-            client_live_meter_binding_hint,
-        ),
-        exact_client_limits: dashboard_exact_client_limits_signature(
-            exact_client_limits_observation,
-        ),
-        client_budget_target_percent,
-    }
-}
-
-fn dashboard_report_signature(components: &DashboardReportSignatureComponents) -> String {
-    let payload = json!({
-        "current_session_events": components.current_session_events,
-        "rolling_window_events": components.rolling_window_events,
-        "lifetime_events": components.lifetime_events,
-        "current_session_assistant_scope": components.current_session_assistant_scope,
-        "rolling_window_assistant_scope": components.rolling_window_assistant_scope,
-        "lifetime_assistant_scope": components.lifetime_assistant_scope,
-        "client_live_meter": components.client_live_meter,
-        "exact_client_limits": components.exact_client_limits,
-        "client_budget_target_percent": components.client_budget_target_percent,
-    });
-    hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
-}
-
-fn refresh_dashboard_report_live_ages(
-    mut report: Value,
-    now_epoch_ms: i64,
-    current_session_events: &[TokenBudgetEvent],
-    rolling_window_events: &[TokenBudgetEvent],
-    lifetime_events: &[TokenBudgetEvent],
-    pre_cache_timings: &DashboardReportPreCacheTimings,
-    assistant_scope_debug: &DashboardAssistantScopeDebug,
-) -> Value {
-    if let Some(node) = report["token_budget_report"]["cache_debug"].as_object_mut() {
-        node.insert("status".to_string(), Value::from("hit"));
-        node.insert(
-            "pre_cache_total_ms".to_string(),
-            Value::from(pre_cache_timings.total_ms),
-        );
-        node.insert(
-            "pre_cache_stage_ms".to_string(),
-            dashboard_precache_stage_ms_value(pre_cache_timings),
-        );
-        node.insert(
-            "assistant_scope_debug".to_string(),
-            dashboard_assistant_scope_debug_value(assistant_scope_debug),
-        );
-    }
-    refresh_dashboard_report_scope_age(
-        &mut report,
-        "current_session",
-        now_epoch_ms,
-        current_session_events,
-    );
-    refresh_dashboard_report_scope_age(
-        &mut report,
-        "rolling_window",
-        now_epoch_ms,
-        rolling_window_events,
-    );
-    refresh_dashboard_report_scope_age(&mut report, "lifetime", now_epoch_ms, lifetime_events);
-    report
-}
-
-fn refresh_dashboard_report_scope_age(
-    report: &mut Value,
-    scope_key: &str,
-    now_epoch_ms: i64,
-    events: &[TokenBudgetEvent],
-) {
-    let Some(scope) = report["token_budget_report"][scope_key].as_object_mut() else {
-        return;
-    };
-    if events.is_empty() {
-        scope.insert("age_ms_since_latest".to_string(), Value::Null);
-        return;
-    }
-    let latest_epoch_ms = events
-        .last()
-        .map(|event| event.created_at_epoch_ms)
-        .unwrap_or_default();
-    scope.insert(
-        "age_ms_since_latest".to_string(),
-        Value::from(now_epoch_ms.saturating_sub(latest_epoch_ms)),
-    );
-}
-
 fn dashboard_report_events_signature(events: &[TokenBudgetEvent]) -> String {
     let mut buffer = String::new();
     for event in events {
@@ -11493,128 +9237,6 @@ fn append_sorted_signature_items(buffer: &mut String, values: &BTreeSet<String>)
         let _ = write!(buffer, "{}\u{1f}", value);
     }
     buffer.push('\u{1e}');
-}
-
-fn dashboard_report_cache_debug(
-    previous_entry: Option<&DashboardReportCache>,
-    report_signature: &str,
-    components: &DashboardReportSignatureComponents,
-    pre_cache_timings: &DashboardReportPreCacheTimings,
-    assistant_scope_debug: &DashboardAssistantScopeDebug,
-) -> Value {
-    let mut reasons = Vec::new();
-    let mut previous_signature = Value::Null;
-    if let Some(previous) = previous_entry {
-        previous_signature = Value::from(previous.signature.clone());
-        if previous.components.current_session_events != components.current_session_events {
-            reasons.push("current_session_events");
-        }
-        if previous.components.rolling_window_events != components.rolling_window_events {
-            reasons.push("rolling_window_events");
-        }
-        if previous.components.lifetime_events != components.lifetime_events {
-            reasons.push("lifetime_events");
-        }
-        if previous.components.current_session_assistant_scope
-            != components.current_session_assistant_scope
-        {
-            reasons.push("current_session_assistant_scope");
-        }
-        if previous.components.rolling_window_assistant_scope
-            != components.rolling_window_assistant_scope
-        {
-            reasons.push("rolling_window_assistant_scope");
-        }
-        if previous.components.lifetime_assistant_scope != components.lifetime_assistant_scope {
-            reasons.push("lifetime_assistant_scope");
-        }
-        if previous.components.client_live_meter != components.client_live_meter {
-            reasons.push("client_live_meter");
-        }
-        if previous.components.exact_client_limits != components.exact_client_limits {
-            reasons.push("exact_client_limits");
-        }
-    } else {
-        reasons.push("cold_start");
-    }
-    json!({
-        "status": "miss",
-        "signature": report_signature,
-        "previous_signature": previous_signature,
-        "changed_components": reasons,
-        "pre_cache_total_ms": pre_cache_timings.total_ms,
-        "pre_cache_stage_ms": dashboard_precache_stage_ms_value(pre_cache_timings),
-        "assistant_scope_debug": dashboard_assistant_scope_debug_value(assistant_scope_debug),
-    })
-}
-
-fn record_dashboard_precache_stage_ms(
-    timings: &mut DashboardReportPreCacheTimings,
-    stage_key: &str,
-    started_at: Instant,
-) {
-    record_dashboard_stage_ms(&mut timings.stage_ms, stage_key, started_at);
-}
-
-fn dashboard_precache_stage_ms_value(timings: &DashboardReportPreCacheTimings) -> Value {
-    Value::Object(
-        timings
-            .stage_ms
-            .iter()
-            .map(|(stage_key, elapsed_ms)| (stage_key.clone(), Value::from(*elapsed_ms)))
-            .collect(),
-    )
-}
-
-fn record_dashboard_stage_ms(
-    stage_ms: &mut BTreeMap<String, u64>,
-    stage_key: &str,
-    started_at: Instant,
-) {
-    stage_ms.insert(
-        stage_key.to_string(),
-        started_at.elapsed().as_millis() as u64,
-    );
-}
-
-fn dashboard_assistant_scope_debug_value(debug: &DashboardAssistantScopeDebug) -> Value {
-    json!({
-        "source_cache_status": debug.source_cache_status,
-        "source_stage_ms": debug.source_stage_ms,
-        "source_total_ms": debug.source_total_ms,
-        "scope_cache_status": debug.scope_cache_status,
-        "scope_stage_ms": debug.scope_stage_ms,
-        "scope_total_ms": debug.scope_total_ms,
-    })
-}
-
-fn cached_dashboard_report_entry(repo_root: &Path) -> Option<DashboardReportCache> {
-    let cache = DASHBOARD_REPORT_CACHE.get_or_init(|| Mutex::new(None));
-    let guard = cache.lock().ok()?;
-    let entry = guard.as_ref()?;
-    if canonical_repo_root(repo_root) == entry.repo_root {
-        Some(entry.clone())
-    } else {
-        None
-    }
-}
-
-fn store_dashboard_report(
-    repo_root: &Path,
-    signature: &str,
-    components: &DashboardReportSignatureComponents,
-    report: &Value,
-) {
-    let cache = DASHBOARD_REPORT_CACHE.get_or_init(|| Mutex::new(None));
-    let Some(mut guard) = cache.lock().ok() else {
-        return;
-    };
-    *guard = Some(DashboardReportCache {
-        repo_root: canonical_repo_root(repo_root),
-        signature: signature.to_string(),
-        components: components.clone(),
-        report: report.clone(),
-    });
 }
 
 fn canonical_repo_root(path: &Path) -> PathBuf {
@@ -11946,6 +9568,17 @@ fn materialized_assistant_scope<'a>(
     assistant_scope_is_materialized(scope).then_some(scope)
 }
 
+pub(crate) fn continuity_restore_observed_config(
+    repo_root: &Path,
+) -> Result<TokenBudgetConfigFile> {
+    load_config(repo_root)
+}
+
+pub(crate) fn prewarm_shared_tokenizer(name: &str) -> Result<()> {
+    let _ = shared_tokenizer(name)?;
+    Ok(())
+}
+
 pub async fn record_continuity_restore_observed_event(
     db: &Client,
     project_code: &str,
@@ -11953,14 +9586,55 @@ pub async fn record_continuity_restore_observed_event(
     prompt_text: &str,
     source_kind: &str,
 ) -> Result<()> {
+    let repo_root = config::discover_repo_root(None)?;
+    let config = load_config(&repo_root)?;
+    record_continuity_restore_observed_event_with_config(
+        db,
+        project_code,
+        namespace_code,
+        prompt_text,
+        source_kind,
+        &repo_root,
+        &config,
+    )
+    .await
+}
+
+pub(crate) async fn record_continuity_restore_observed_event_with_config(
+    db: &Client,
+    project_code: &str,
+    namespace_code: &str,
+    prompt_text: &str,
+    source_kind: &str,
+    repo_root: &Path,
+    config: &TokenBudgetConfigFile,
+) -> Result<()> {
+    let total_started = Instant::now();
     let prompt_text = prompt_text.trim();
     if prompt_text.is_empty() {
         return Ok(());
     }
 
-    let repo_root = config::discover_repo_root(None)?;
-    let config = load_config(&repo_root)?;
-    let tokenizer = build_tokenizer(&config.measurement.tokenizer)?;
+    let prompt_hash = hex_sha256(prompt_text.as_bytes());
+    let now_epoch_ms = current_epoch_ms().unwrap_or_default() as u64;
+    if continuity_restore_observed_event_recently_recorded(
+        repo_root,
+        project_code,
+        namespace_code,
+        source_kind,
+        &prompt_hash,
+        now_epoch_ms,
+    ) {
+        return Ok(());
+    }
+    let step_started = Instant::now();
+    let tokenizer = shared_tokenizer(&config.measurement.tokenizer)?;
+    continuity_profile_log(
+        "record_continuity_restore_observed_event.load_config_and_tokenizer",
+        step_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project_code, namespace_code),
+    );
+    let step_started = Instant::now();
     let continuity_restore_tokens = tokenizer.encode_with_special_tokens(prompt_text).len() as u64;
     let traffic_class = derive_traffic_class(source_kind);
     let mut event = build_continuity_restore_observed_event(
@@ -11972,30 +9646,56 @@ pub async fn record_continuity_restore_observed_event(
         prompt_text,
         continuity_restore_tokens,
     )?;
-    let continuity_snapshots = postgres::list_scoped_observability_snapshots_by_kinds(
-        db,
-        &["continuity_import", "continuity_handoff"],
-        project_code,
-        namespace_code,
-        None,
-    )
-    .await?;
+    continuity_profile_log(
+        "record_continuity_restore_observed_event.build_event",
+        step_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project_code, namespace_code),
+    );
     let occurred_at_epoch_ms = event["token_budget_event"]["occurred_at_epoch_ms"]
         .as_i64()
         .unwrap_or_else(|| current_epoch_ms().unwrap_or_default());
+    let step_started = Instant::now();
+    let latest_continuity_import = postgres::list_scoped_observability_snapshots_by_kinds(
+        db,
+        &["continuity_import"],
+        project_code,
+        namespace_code,
+        Some(1),
+    )
+    .await?;
+    continuity_profile_log(
+        "record_continuity_restore_observed_event.latest_continuity_import",
+        step_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project_code, namespace_code),
+    );
+    let step_started = Instant::now();
+    let latest_continuity_handoff = postgres::list_scoped_observability_snapshots_by_kinds(
+        db,
+        &["continuity_handoff"],
+        project_code,
+        namespace_code,
+        Some(1),
+    )
+    .await?;
+    continuity_profile_log(
+        "record_continuity_restore_observed_event.latest_continuity_handoff",
+        step_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project_code, namespace_code),
+    );
+    let step_started = Instant::now();
     if let Some(materialization) = continuity_pre_amai_baseline_materialization(
         &tokenizer,
         project_code,
         namespace_code,
         latest_scoped_continuity_snapshot_before(
-            &continuity_snapshots,
+            &latest_continuity_import,
             "continuity_import",
             project_code,
             namespace_code,
             occurred_at_epoch_ms,
         ),
         latest_scoped_continuity_snapshot_before(
-            &continuity_snapshots,
+            &latest_continuity_handoff,
             "continuity_handoff",
             project_code,
             namespace_code,
@@ -12004,11 +9704,41 @@ pub async fn record_continuity_restore_observed_event(
     ) {
         let _ = apply_continuity_pre_amai_baseline(&mut event, &materialization)?;
     }
+    continuity_profile_log(
+        "record_continuity_restore_observed_event.materialize_baseline",
+        step_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project_code, namespace_code),
+    );
     if traffic_class == "live" {
-        let profile = resolve_profile(&config, None, &repo_root)?;
-        enrich_live_event_payload(db, &mut event, &profile, &repo_root).await?;
+        let step_started = Instant::now();
+        let profile = resolve_profile(config, None, repo_root)?;
+        enrich_live_event_payload(db, &mut event, &profile, repo_root).await?;
+        continuity_profile_log(
+            "record_continuity_restore_observed_event.enrich_live_event_payload",
+            step_started.elapsed().as_millis(),
+            &format!("project={} namespace={}", project_code, namespace_code),
+        );
     }
+    let step_started = Instant::now();
     let _ = postgres::insert_observability_snapshot(db, "token_budget_event", &event).await?;
+    continuity_profile_log(
+        "record_continuity_restore_observed_event.insert_snapshot",
+        step_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project_code, namespace_code),
+    );
+    let _ = write_continuity_restore_observed_dedupe_cache(
+        &repo_root,
+        project_code,
+        namespace_code,
+        source_kind,
+        &prompt_hash,
+        now_epoch_ms,
+    );
+    continuity_profile_log(
+        "record_continuity_restore_observed_event.total",
+        total_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project_code, namespace_code),
+    );
     Ok(())
 }
 
@@ -12159,6 +9889,69 @@ async fn live_turn_retrieval_context_pack_ids(
         retrieval_count,
     );
     Ok((context_pack_ids, retrieval_count))
+}
+
+async fn recent_thread_live_retrieval_context_pack_ids_after_turn(
+    db: &Client,
+    thread_id: &str,
+    ended_at_epoch_ms: i64,
+    grace_ms: i64,
+) -> Result<(BTreeSet<String>, u64)> {
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return Ok((BTreeSet::new(), 0));
+    }
+    let lower_bound = ended_at_epoch_ms.saturating_add(1);
+    let upper_bound = current_epoch_ms()
+        .unwrap_or(ended_at_epoch_ms)
+        .saturating_add(grace_ms.max(0));
+    if lower_bound <= 0 || upper_bound < lower_bound {
+        return Ok((BTreeSet::new(), 0));
+    }
+    let rows = db
+        .query(
+            "
+            SELECT
+                payload->'working_state_event'->>'context_pack_id' AS context_pack_id
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = 'working_state_event'
+              AND payload->'working_state_event'->>'event_kind' = 'retrieval_context_pack'
+              AND payload->'working_state_event'->>'thread_id' = $1
+              AND captured_at_epoch_ms BETWEEN $2 AND $3
+              AND (
+                    payload->'working_state_event'->>'traffic_class' = 'live'
+                    OR payload->'working_state_event'->>'token_source_kind' LIKE 'live\\_%' ESCAPE '\\'
+                  )
+            ORDER BY captured_at_epoch_ms DESC, created_at DESC
+            ",
+            &[&thread_id, &lower_bound, &upper_bound],
+        )
+        .await?;
+    let retrieval_count = rows.len() as u64;
+    let context_pack_ids = rows
+        .into_iter()
+        .filter_map(|row| row.get::<_, Option<String>>("context_pack_id"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>();
+    Ok((context_pack_ids, retrieval_count))
+}
+
+fn apply_open_turn_pending_activity_surface(
+    surface: &mut Value,
+    pending_context_pack_ids_count: u64,
+    pending_retrieval_context_pack_count: u64,
+) -> bool {
+    if pending_retrieval_context_pack_count == 0 {
+        return false;
+    }
+    surface["status"] = Value::from("thread_activity_observed_turn_open");
+    surface["matched_context_pack_ids_count"] = Value::from(pending_context_pack_ids_count);
+    surface["retrieval_context_pack_count"] = Value::from(pending_retrieval_context_pack_count);
+    surface["note"] = Value::from(
+        "На текущем thread уже observed новые retrieval_context_pack от Amai после последнего завершённого client-meter turn. Exact pair materialize-ится после закрытия текущего turn, поэтому вклад Amai уже виден как thread activity, но ещё не сводится в same-turn exact pair.",
+    );
+    true
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -12327,6 +10120,21 @@ async fn build_current_live_turn_surface(
     surface["retrieval_context_pack_count"] = Value::from(retrieval_context_pack_count);
 
     if matched_events.is_empty() && retrieval_context_pack_count == 0 {
+        let (pending_context_pack_ids, pending_retrieval_context_pack_count) =
+            recent_thread_live_retrieval_context_pack_ids_after_turn(
+                db,
+                &observation.thread_id,
+                observation.ended_at_epoch_ms,
+                grace_ms,
+            )
+            .await?;
+        if apply_open_turn_pending_activity_surface(
+            &mut surface,
+            pending_context_pack_ids.len() as u64,
+            pending_retrieval_context_pack_count,
+        ) {
+            return Ok(surface);
+        }
         surface["status"] = Value::from("no_amai_activity_in_current_live_turn");
         surface["exact_pair_available"] = Value::from(true);
         surface["exact_pair"] = json!({
@@ -12488,6 +10296,9 @@ async fn collect_report(
         &rollout_observations,
     )
     .await?;
+    let personal_agent_scope = current_workspace_personal_kpi_selector(db, repo_root, None).await?;
+    let personal_agent_5h_events =
+        personal_kpi_window_events(&events, personal_agent_scope.as_ref(), now_epoch_ms);
 
     let latest_event = events
         .last()
@@ -12517,6 +10328,22 @@ async fn collect_report(
     };
     let lifetime_summary =
         summarize_events(&events, now_epoch_ms, &config.measurement, &config.contract);
+    let personal_agent_5h_summary = summarize_events(
+        &personal_agent_5h_events,
+        now_epoch_ms,
+        &config.measurement,
+        &config.contract,
+    );
+    let client_live_meter = build_client_live_meter_json(
+        client_live_meter_observation.as_ref(),
+        client_live_meter_binding_hint.as_deref(),
+        exact_client_limits_observation.as_ref(),
+    );
+    let personal_agent_kpi = preferred_personal_agent_kpi(
+        &personal_agent_5h_summary,
+        personal_agent_scope.as_ref(),
+        Some(&client_live_meter),
+    );
     let agent_cycle_economics = build_agent_cycle_economics(
         &config.measurement,
         &config.contract,
@@ -12556,13 +10383,13 @@ async fn collect_report(
         now_epoch_ms,
         &events,
     );
-    let external_truth_sources = build_external_truth_sources_json(repo_root);
-    let rate_card = build_rate_card_json(repo_root, &config.contract);
-    let provider_usage_binding = load_provider_usage_binding_from_source(
+    let external_truth_sources = external_truth::build_external_truth_sources_json(repo_root);
+    let rate_card = external_truth::build_rate_card_json(repo_root, &config.contract);
+    let provider_usage_binding = external_truth::load_provider_usage_binding_from_source(
         &external_truth_sources["provider_usage_export"],
         &rate_card,
     );
-    let provider_invoice_binding = load_provider_invoice_binding_from_source(
+    let provider_invoice_binding = external_truth::load_provider_invoice_binding_from_source(
         &external_truth_sources["provider_invoice_export"],
     );
     let reconciliation_contract = build_reconciliation_contract_json(
@@ -12572,8 +10399,10 @@ async fn collect_report(
         &provider_invoice_binding,
         &rate_card,
     );
-    let adjustment_registry = build_adjustment_registry_json(repo_root, &config.contract);
-    let infra_cost_profile = build_infra_cost_profile_json(repo_root, &config.contract);
+    let adjustment_registry =
+        token_adjustments::build_adjustment_registry_json(repo_root, &config.contract);
+    let infra_cost_profile =
+        external_truth::build_infra_cost_profile_json(repo_root, &config.contract);
     let current_session_statement_preview = build_statement_preview(
         "current_session",
         "текущая сессия",
@@ -12861,7 +10690,7 @@ async fn collect_report(
             "rate_card": rate_card.clone(),
             "settlement_contract": build_settlement_contract_json(&config.contract),
             "telemetry_surfaces": build_telemetry_surfaces_json(&config.contract),
-            "adjustment_request_schema": build_adjustment_request_schema_json(&config.contract),
+            "adjustment_request_schema": token_adjustments::build_adjustment_request_schema_json(&config.contract),
             "adjustment_registry": adjustment_registry.clone(),
             "reconciliation_contract": reconciliation_contract.clone(),
             "external_truth_sources": external_truth_sources.clone(),
@@ -12928,11 +10757,8 @@ async fn collect_report(
                 "rolling_window": rolling_window_settlement_report_preview,
                 "lifetime": lifetime_settlement_report_preview,
             },
-            "client_live_meter": build_client_live_meter_json(
-                client_live_meter_observation.as_ref(),
-                client_live_meter_binding_hint.as_deref(),
-                exact_client_limits_observation.as_ref(),
-            ),
+            "client_live_meter": client_live_meter,
+            "personal_agent_kpi": personal_agent_kpi,
             "current_live_turn": current_live_turn,
             "source_breakdown": source_breakdown,
             "query_slices": query_slices,
@@ -12995,11 +10821,26 @@ async fn enrich_live_event_payload(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    let is_continuity_restore_event =
+        query_type == "continuity_restore" || target_kind == "continuity_restore";
+    let current_agent_scope = working_state::current_agent_scope_for(&project, &namespace);
     let session_gap_ms = profile.session_gap_minutes as i64 * 60_000;
-    let mut events = load_events(db, false, Some(64)).await?;
+    let session_lookup_limit = if is_continuity_restore_event { 8 } else { 64 };
+    let mut events = load_events(db, false, Some(session_lookup_limit)).await?;
     events.sort_by_key(|event| event.created_at_epoch_ms);
-    let session_id =
-        resolve_session_id(&events, timestamp_utc, session_gap_ms, &current_source_kind);
+    let session_id = resolve_session_id(
+        &events,
+        timestamp_utc,
+        session_gap_ms,
+        &current_source_kind,
+        &project,
+        &namespace,
+        &current_agent_scope,
+    );
+    node.insert(
+        "agent_scope".to_string(),
+        Value::String(current_agent_scope.clone()),
+    );
     node.insert("session_id".to_string(), Value::String(session_id));
     let thread_id = node
         .get("thread_id")
@@ -13040,6 +10881,10 @@ async fn enrich_live_event_payload(
         Value::String(profile.code.clone()),
     );
 
+    if is_continuity_restore_event {
+        return Ok(());
+    }
+
     let current_key = FollowupEventKey {
         query: &query,
         query_hash: &query_hash,
@@ -13068,6 +10913,7 @@ async fn enrich_live_event_payload(
             && previous.resolved_by_event_id.is_none()
             && previous.project == project
             && previous.namespace == namespace
+            && previous.agent_scope == current_agent_scope
             && timestamp_utc.saturating_sub(previous.created_at_epoch_ms) <= session_gap_ms
             && followup_queries_related(followup_event_key(previous), current_key)
     }) {
@@ -13168,9 +11014,48 @@ async fn enrich_live_event_payload(
 
 fn load_config(repo_root: &Path) -> Result<TokenBudgetConfigFile> {
     let path = repo_root.join(CONFIG_RELATIVE_PATH);
+    let canonical_repo_root =
+        fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    if let Some((size_bytes, modified_epoch_ms)) = token_budget_config_file_signature(&path) {
+        let cache = TOKEN_BUDGET_CONFIG_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Ok(guard) = cache.lock() {
+            if let Some(entry) = guard.get(&canonical_repo_root) {
+                if entry.size_bytes == size_bytes && entry.modified_epoch_ms == modified_epoch_ms {
+                    return Ok(entry.config.clone());
+                }
+            }
+        }
+    }
     let raw =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+    let config: TokenBudgetConfigFile =
+        toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))?;
+    if let Some((size_bytes, modified_epoch_ms)) = token_budget_config_file_signature(&path) {
+        let cache = TOKEN_BUDGET_CONFIG_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Ok(mut guard) = cache.lock() {
+            guard.insert(
+                canonical_repo_root,
+                CachedTokenBudgetConfig {
+                    size_bytes,
+                    modified_epoch_ms,
+                    config: config.clone(),
+                },
+            );
+        }
+    }
+    Ok(config)
+}
+
+fn token_budget_config_file_signature(path: &Path) -> Option<(u64, u64)> {
+    let metadata = fs::metadata(path).ok()?;
+    let size_bytes = metadata.len();
+    let modified_epoch_ms = metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    Some((size_bytes, modified_epoch_ms))
 }
 
 fn resolve_profile(
@@ -13214,8 +11099,12 @@ async fn load_events(
     include_verify_events: bool,
     limit: Option<i64>,
 ) -> Result<Vec<TokenBudgetEvent>> {
-    let events = load_raw_events(db, dashboard_event_snapshot_kinds(include_verify_events), limit)
-        .await?;
+    let events = load_raw_events(
+        db,
+        dashboard_event_snapshot_kinds(include_verify_events),
+        limit,
+    )
+    .await?;
     Ok(filter_dashboard_token_events(events, include_verify_events))
 }
 
@@ -13252,6 +11141,7 @@ fn filter_dashboard_token_events(
         .filter(|event| {
             include_traffic_class_in_report(&event.traffic_class, include_verify_events)
                 && !live_event_is_engineering_runtime_contamination(event)
+                && !live_event_has_invalid_runtime_contract(event)
         })
         .collect()
 }
@@ -13280,7 +11170,9 @@ async fn load_dashboard_token_events_with_summary(
     snapshot_kinds: &[&str],
     summary: &[postgres::ObservabilitySnapshotKindSummary],
 ) -> Result<Vec<TokenBudgetEvent>> {
-    let signature = dashboard_token_events_signature_from_summary(snapshot_kinds, &summary);
+    let invalidation_epoch_ms = current_dashboard_token_events_invalidation_epoch_ms(repo_root);
+    let signature =
+        dashboard_token_events_signature(snapshot_kinds, &summary, invalidation_epoch_ms);
     if let Some(raw_events) = cached_dashboard_token_events(repo_root, snapshot_kinds, &signature) {
         return Ok(filter_dashboard_token_events(
             raw_events,
@@ -13358,7 +11250,9 @@ async fn load_dashboard_current_session_events(
 ) -> Result<Vec<TokenBudgetEvent>> {
     let snapshot_kinds = dashboard_event_snapshot_kinds(include_verify_events);
     let summary = postgres::summarize_observability_snapshots_by_kinds(db, snapshot_kinds).await?;
-    let signature = dashboard_token_events_signature_from_summary(snapshot_kinds, &summary);
+    let invalidation_epoch_ms = current_dashboard_token_events_invalidation_epoch_ms(repo_root);
+    let signature =
+        dashboard_token_events_signature(snapshot_kinds, &summary, invalidation_epoch_ms);
     if let Some(events) =
         cached_dashboard_current_session_events(repo_root, &signature, session_gap_ms)
     {
@@ -13408,12 +11302,14 @@ async fn load_dashboard_current_session_events(
     Ok(events)
 }
 
-fn dashboard_token_events_signature_from_summary(
+fn dashboard_token_events_signature(
     snapshot_kinds: &[&str],
     summary: &[postgres::ObservabilitySnapshotKindSummary],
+    invalidation_epoch_ms: i64,
 ) -> String {
     let payload = json!({
         "snapshot_kinds": snapshot_kinds,
+        "invalidation_epoch_ms": invalidation_epoch_ms,
         "summary": summary
             .iter()
             .map(|item| {
@@ -13426,6 +11322,14 @@ fn dashboard_token_events_signature_from_summary(
             .collect::<Vec<_>>(),
     });
     hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
+}
+
+#[cfg(test)]
+fn dashboard_token_events_signature_from_summary(
+    snapshot_kinds: &[&str],
+    summary: &[postgres::ObservabilitySnapshotKindSummary],
+) -> String {
+    dashboard_token_events_signature(snapshot_kinds, summary, 0)
 }
 
 fn dashboard_working_state_metadata_signature(
@@ -13488,476 +11392,6 @@ fn filter_context_pack_metadata(
         .collect()
 }
 
-fn dashboard_token_events_shared_cache_path(repo_root: &Path) -> PathBuf {
-    canonical_repo_root(repo_root).join(DASHBOARD_TOKEN_EVENTS_SHARED_CACHE_RELATIVE_PATH)
-}
-
-fn dashboard_current_session_events_shared_cache_path(repo_root: &Path) -> PathBuf {
-    canonical_repo_root(repo_root).join(DASHBOARD_CURRENT_SESSION_EVENTS_SHARED_CACHE_RELATIVE_PATH)
-}
-
-fn dashboard_live_turn_retrieval_shared_cache_path(repo_root: &Path) -> PathBuf {
-    canonical_repo_root(repo_root).join(DASHBOARD_LIVE_TURN_RETRIEVAL_SHARED_CACHE_RELATIVE_PATH)
-}
-
-fn dashboard_live_turn_retrieval_invalidation_shared_cache_path(repo_root: &Path) -> PathBuf {
-    canonical_repo_root(repo_root).join(
-        DASHBOARD_LIVE_TURN_RETRIEVAL_INVALIDATION_SHARED_CACHE_RELATIVE_PATH,
-    )
-}
-
-fn load_shared_dashboard_token_events(repo_root: &Path) -> Option<DashboardTokenEventsCache> {
-    let path = dashboard_token_events_shared_cache_path(repo_root);
-    let bytes = fs::read(&path).ok()?;
-    let persisted: PersistedDashboardTokenEventsCache = serde_json::from_slice(&bytes).ok()?;
-    if persisted.cache_version != DASHBOARD_TOKEN_EVENTS_SHARED_CACHE_VERSION {
-        return None;
-    }
-    if canonical_repo_root(Path::new(&persisted.repo_root)) != canonical_repo_root(repo_root) {
-        return None;
-    }
-    Some(DashboardTokenEventsCache {
-        repo_root: canonical_repo_root(repo_root),
-        signature: persisted.signature,
-        snapshot_kinds: persisted.snapshot_kinds,
-        summary: Vec::new(),
-        raw_events: persisted.raw_events,
-    })
-}
-
-fn load_shared_dashboard_current_session_events(
-    repo_root: &Path,
-    signature: &str,
-    session_gap_ms: i64,
-) -> Option<Vec<TokenBudgetEvent>> {
-    let path = dashboard_current_session_events_shared_cache_path(repo_root);
-    let bytes = fs::read(&path).ok()?;
-    let persisted: PersistedDashboardCurrentSessionEventsCache = serde_json::from_slice(&bytes).ok()?;
-    if persisted.cache_version != DASHBOARD_CURRENT_SESSION_EVENTS_SHARED_CACHE_VERSION {
-        return None;
-    }
-    if canonical_repo_root(Path::new(&persisted.repo_root)) != canonical_repo_root(repo_root) {
-        return None;
-    }
-    if persisted.signature != signature || persisted.session_gap_ms != session_gap_ms {
-        return None;
-    }
-    Some(persisted.events)
-}
-
-fn load_shared_dashboard_live_turn_retrieval_cache(
-    repo_root: &Path,
-) -> Option<DashboardLiveTurnRetrievalCache> {
-    let path = dashboard_live_turn_retrieval_shared_cache_path(repo_root);
-    let bytes = fs::read(&path).ok()?;
-    let persisted: PersistedDashboardLiveTurnRetrievalCache = serde_json::from_slice(&bytes).ok()?;
-    if persisted.cache_version != DASHBOARD_LIVE_TURN_RETRIEVAL_SHARED_CACHE_VERSION {
-        return None;
-    }
-    if canonical_repo_root(Path::new(&persisted.repo_root)) != canonical_repo_root(repo_root) {
-        return None;
-    }
-    Some(DashboardLiveTurnRetrievalCache {
-        repo_root: canonical_repo_root(repo_root),
-        thread_id: persisted.thread_id,
-        lower_bound: persisted.lower_bound,
-        upper_bound: persisted.upper_bound,
-        invalidation_epoch_ms: persisted.invalidation_epoch_ms,
-        context_pack_ids: persisted.context_pack_ids,
-        retrieval_count: persisted.retrieval_count,
-    })
-}
-
-fn write_shared_dashboard_live_turn_retrieval_cache(
-    entry: &DashboardLiveTurnRetrievalCache,
-) -> Result<()> {
-    let path = dashboard_live_turn_retrieval_shared_cache_path(&entry.repo_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let persisted = PersistedDashboardLiveTurnRetrievalCache {
-        cache_version: DASHBOARD_LIVE_TURN_RETRIEVAL_SHARED_CACHE_VERSION.to_string(),
-        repo_root: entry.repo_root.display().to_string(),
-        thread_id: entry.thread_id.clone(),
-        lower_bound: entry.lower_bound,
-        upper_bound: entry.upper_bound,
-        invalidation_epoch_ms: entry.invalidation_epoch_ms,
-        context_pack_ids: entry.context_pack_ids.clone(),
-        retrieval_count: entry.retrieval_count,
-    };
-    fs::write(&path, serde_json::to_vec(&persisted)?)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
-}
-
-fn load_shared_dashboard_live_turn_retrieval_invalidation(repo_root: &Path) -> Option<i64> {
-    let path = dashboard_live_turn_retrieval_invalidation_shared_cache_path(repo_root);
-    let bytes = fs::read(&path).ok()?;
-    let persisted: PersistedDashboardLiveTurnRetrievalInvalidationCache =
-        serde_json::from_slice(&bytes).ok()?;
-    if persisted.cache_version != DASHBOARD_LIVE_TURN_RETRIEVAL_INVALIDATION_SHARED_CACHE_VERSION {
-        return None;
-    }
-    if canonical_repo_root(Path::new(&persisted.repo_root)) != canonical_repo_root(repo_root) {
-        return None;
-    }
-    Some(persisted.latest_recorded_at_epoch_ms)
-}
-
-fn write_shared_dashboard_live_turn_retrieval_invalidation(
-    repo_root: &Path,
-    latest_recorded_at_epoch_ms: i64,
-) -> Result<()> {
-    let repo_root = canonical_repo_root(repo_root);
-    let path = dashboard_live_turn_retrieval_invalidation_shared_cache_path(&repo_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let persisted = PersistedDashboardLiveTurnRetrievalInvalidationCache {
-        cache_version: DASHBOARD_LIVE_TURN_RETRIEVAL_INVALIDATION_SHARED_CACHE_VERSION
-            .to_string(),
-        repo_root: repo_root.display().to_string(),
-        latest_recorded_at_epoch_ms,
-    };
-    fs::write(&path, serde_json::to_vec(&persisted)?)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
-}
-
-fn write_shared_dashboard_token_events(entry: &DashboardTokenEventsCache) -> Result<()> {
-    let path = dashboard_token_events_shared_cache_path(&entry.repo_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let persisted = PersistedDashboardTokenEventsCache {
-        cache_version: DASHBOARD_TOKEN_EVENTS_SHARED_CACHE_VERSION.to_string(),
-        repo_root: entry.repo_root.display().to_string(),
-        signature: entry.signature.clone(),
-        snapshot_kinds: entry.snapshot_kinds.clone(),
-        raw_events: entry.raw_events.clone(),
-    };
-    fs::write(&path, serde_json::to_vec(&persisted)?)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
-}
-
-fn write_shared_dashboard_current_session_events(
-    entry: &DashboardCurrentSessionEventsCache,
-) -> Result<()> {
-    let path = dashboard_current_session_events_shared_cache_path(&entry.repo_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let persisted = PersistedDashboardCurrentSessionEventsCache {
-        cache_version: DASHBOARD_CURRENT_SESSION_EVENTS_SHARED_CACHE_VERSION.to_string(),
-        repo_root: entry.repo_root.display().to_string(),
-        signature: entry.signature.clone(),
-        session_gap_ms: entry.session_gap_ms,
-        events: entry.events.clone(),
-    };
-    fs::write(&path, serde_json::to_vec(&persisted)?)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
-}
-
-fn cached_dashboard_token_events(
-    repo_root: &Path,
-    snapshot_kinds: &[&str],
-    signature: &str,
-) -> Option<Vec<TokenBudgetEvent>> {
-    let cache = DASHBOARD_TOKEN_EVENTS_CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cache.lock().ok()?;
-    let repo_root = canonical_repo_root(repo_root);
-    let entry = guard
-        .as_ref()
-        .filter(|entry| repo_root == entry.repo_root)
-        .cloned()
-        .or_else(|| load_shared_dashboard_token_events(&repo_root))?;
-    if entry.signature != signature
-        || !entry
-            .snapshot_kinds
-            .iter()
-            .map(String::as_str)
-            .eq(snapshot_kinds.iter().copied())
-    {
-        return None;
-    }
-    *guard = Some(entry.clone());
-    Some(entry.raw_events)
-}
-
-fn cached_dashboard_current_session_events(
-    repo_root: &Path,
-    signature: &str,
-    session_gap_ms: i64,
-) -> Option<Vec<TokenBudgetEvent>> {
-    let cache = DASHBOARD_CURRENT_SESSION_EVENTS_CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cache.lock().ok()?;
-    let repo_root = canonical_repo_root(repo_root);
-    let entry = guard
-        .as_ref()
-        .filter(|entry| repo_root == entry.repo_root)
-        .cloned()
-        .or_else(|| {
-            load_shared_dashboard_current_session_events(&repo_root, signature, session_gap_ms)
-                .map(|events| DashboardCurrentSessionEventsCache {
-                    repo_root: repo_root.clone(),
-                    signature: signature.to_string(),
-                    session_gap_ms,
-                    events,
-                })
-        })?;
-    if entry.signature != signature || entry.session_gap_ms != session_gap_ms {
-        return None;
-    }
-    *guard = Some(entry.clone());
-    Some(entry.events)
-}
-
-fn current_dashboard_live_turn_retrieval_invalidation_epoch_ms(repo_root: &Path) -> i64 {
-    load_shared_dashboard_live_turn_retrieval_invalidation(repo_root).unwrap_or_default()
-}
-
-pub(crate) fn bump_dashboard_live_turn_retrieval_invalidation(
-    repo_root: &Path,
-    recorded_at_epoch_ms: i64,
-) -> Result<()> {
-    let latest = current_dashboard_live_turn_retrieval_invalidation_epoch_ms(repo_root)
-        .max(recorded_at_epoch_ms);
-    write_shared_dashboard_live_turn_retrieval_invalidation(repo_root, latest)
-}
-
-fn cached_dashboard_live_turn_retrieval(
-    repo_root: &Path,
-    thread_id: &str,
-    lower_bound: i64,
-    upper_bound: i64,
-    invalidation_epoch_ms: i64,
-) -> Option<(BTreeSet<String>, u64)> {
-    let cache = DASHBOARD_LIVE_TURN_RETRIEVAL_CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cache.lock().ok()?;
-    let repo_root = canonical_repo_root(repo_root);
-    let entry = guard
-        .as_ref()
-        .filter(|entry| repo_root == entry.repo_root)
-        .cloned()
-        .or_else(|| load_shared_dashboard_live_turn_retrieval_cache(&repo_root))?;
-    let exact_window_match = entry.thread_id == thread_id
-        && entry.lower_bound == lower_bound
-        && entry.upper_bound == upper_bound
-        && entry.invalidation_epoch_ms == invalidation_epoch_ms;
-    let extendable_same_turn_window = entry.thread_id == thread_id
-        && entry.lower_bound == lower_bound
-        && entry.upper_bound <= upper_bound
-        && entry.invalidation_epoch_ms == invalidation_epoch_ms;
-    if !exact_window_match && !extendable_same_turn_window {
-        return None;
-    }
-    let mut entry = entry;
-    if extendable_same_turn_window && entry.upper_bound != upper_bound {
-        entry.upper_bound = upper_bound;
-        let _ = write_shared_dashboard_live_turn_retrieval_cache(&entry);
-    }
-    *guard = Some(entry.clone());
-    Some((entry.context_pack_ids, entry.retrieval_count))
-}
-
-fn store_dashboard_live_turn_retrieval(
-    repo_root: &Path,
-    thread_id: &str,
-    lower_bound: i64,
-    upper_bound: i64,
-    invalidation_epoch_ms: i64,
-    context_pack_ids: &BTreeSet<String>,
-    retrieval_count: u64,
-) {
-    let cache = DASHBOARD_LIVE_TURN_RETRIEVAL_CACHE.get_or_init(|| Mutex::new(None));
-    let Some(mut guard) = cache.lock().ok() else {
-        return;
-    };
-    let entry = DashboardLiveTurnRetrievalCache {
-        repo_root: canonical_repo_root(repo_root),
-        thread_id: thread_id.to_string(),
-        lower_bound,
-        upper_bound,
-        invalidation_epoch_ms,
-        context_pack_ids: context_pack_ids.clone(),
-        retrieval_count,
-    };
-    let _ = write_shared_dashboard_live_turn_retrieval_cache(&entry);
-    *guard = Some(entry);
-}
-
-fn cached_dashboard_token_events_entry(
-    repo_root: &Path,
-    snapshot_kinds: &[&str],
-) -> Option<(
-    Vec<postgres::ObservabilitySnapshotKindSummary>,
-    Vec<TokenBudgetEvent>,
-)> {
-    let cache = DASHBOARD_TOKEN_EVENTS_CACHE.get_or_init(|| Mutex::new(None));
-    let guard = cache.lock().ok()?;
-    let entry = guard.as_ref()?;
-    if canonical_repo_root(repo_root) == entry.repo_root
-        && entry
-            .snapshot_kinds
-            .iter()
-            .map(String::as_str)
-            .eq(snapshot_kinds.iter().copied())
-    {
-        Some((entry.summary.clone(), entry.raw_events.clone()))
-    } else {
-        None
-    }
-}
-
-fn store_dashboard_token_events(
-    repo_root: &Path,
-    snapshot_kinds: &[&str],
-    signature: &str,
-    summary: &[postgres::ObservabilitySnapshotKindSummary],
-    raw_events: &[TokenBudgetEvent],
-) {
-    let cache = DASHBOARD_TOKEN_EVENTS_CACHE.get_or_init(|| Mutex::new(None));
-    let Some(mut guard) = cache.lock().ok() else {
-        return;
-    };
-    let entry = DashboardTokenEventsCache {
-        repo_root: canonical_repo_root(repo_root),
-        signature: signature.to_string(),
-        snapshot_kinds: snapshot_kinds.iter().map(|kind| (*kind).to_string()).collect(),
-        summary: summary.to_vec(),
-        raw_events: raw_events.to_vec(),
-    };
-    let _ = write_shared_dashboard_token_events(&entry);
-    *guard = Some(entry);
-}
-
-fn store_dashboard_current_session_events(
-    repo_root: &Path,
-    signature: &str,
-    session_gap_ms: i64,
-    events: &[TokenBudgetEvent],
-) {
-    let cache = DASHBOARD_CURRENT_SESSION_EVENTS_CACHE.get_or_init(|| Mutex::new(None));
-    let Some(mut guard) = cache.lock().ok() else {
-        return;
-    };
-    let entry = DashboardCurrentSessionEventsCache {
-        repo_root: canonical_repo_root(repo_root),
-        signature: signature.to_string(),
-        session_gap_ms,
-        events: events.to_vec(),
-    };
-    let _ = write_shared_dashboard_current_session_events(&entry);
-    *guard = Some(entry);
-}
-
-fn dashboard_token_events_delta_limit(
-    previous: &[postgres::ObservabilitySnapshotKindSummary],
-    current: &[postgres::ObservabilitySnapshotKindSummary],
-    max_delta: i64,
-) -> Option<i64> {
-    let previous = previous
-        .iter()
-        .map(|item| (item.snapshot_kind.clone(), item))
-        .collect::<BTreeMap<_, _>>();
-    let current = current
-        .iter()
-        .map(|item| (item.snapshot_kind.clone(), item))
-        .collect::<BTreeMap<_, _>>();
-    let kinds = previous
-        .keys()
-        .chain(current.keys())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut delta_total = 0_i64;
-    for kind in kinds {
-        let previous_item = previous.get(&kind);
-        let current_item = current.get(&kind);
-        let previous_count = previous_item.map(|item| item.snapshots_count).unwrap_or(0);
-        let current_count = current_item.map(|item| item.snapshots_count).unwrap_or(0);
-        if current_count < previous_count {
-            return None;
-        }
-        let previous_latest = previous_item.and_then(|item| item.latest_created_at_epoch_ms);
-        let current_latest = current_item.and_then(|item| item.latest_created_at_epoch_ms);
-        if current_latest < previous_latest {
-            return None;
-        }
-        delta_total = delta_total.saturating_add(current_count.saturating_sub(previous_count));
-    }
-    if delta_total == 0 || delta_total > max_delta {
-        None
-    } else {
-        Some(delta_total)
-    }
-}
-
-fn event_shadow_version_key(event: &TokenBudgetEvent) -> (i64, i64, String) {
-    (
-        event.created_at_epoch_ms,
-        event.ingested_at_epoch_ms,
-        event
-            .snapshot_id
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| event.event_id.clone()),
-    )
-}
-
-fn live_usage_identity_shadow_key(event: &TokenBudgetEvent) -> Option<String> {
-    if event.traffic_class != "live" {
-        return None;
-    }
-    let correlation_id = event_context_pack_id(event)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| event.event_id.clone());
-    if correlation_id.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "{}:{}:{}:{}:{}",
-        event.project, event.namespace, event.measurement_scope, event.source_kind, correlation_id
-    ))
-}
-
-fn dashboard_token_event_merge_key(event: &TokenBudgetEvent) -> String {
-    live_usage_identity_shadow_key(event).unwrap_or_else(|| {
-        format!(
-            "{}:{}:{}:{}:{}:{}",
-            event.project,
-            event.namespace,
-            event.measurement_scope,
-            event.traffic_class,
-            event.source_kind,
-            event.event_id
-        )
-    })
-}
-
-fn merge_dashboard_token_events(
-    previous_events: Vec<TokenBudgetEvent>,
-    delta_events: Vec<TokenBudgetEvent>,
-) -> Vec<TokenBudgetEvent> {
-    let mut merged = BTreeMap::<String, TokenBudgetEvent>::new();
-    for event in previous_events.into_iter().chain(delta_events) {
-        let key = dashboard_token_event_merge_key(&event);
-        let version = event_shadow_version_key(&event);
-        match merged.get(&key) {
-            Some(existing) if event_shadow_version_key(existing) >= version => {}
-            _ => {
-                merged.insert(key, event);
-            }
-        }
-    }
-    merged.into_values().collect()
-}
-
 fn can_shadow_live_report_event(event: &TokenBudgetEvent) -> bool {
     if event.traffic_class == "live" {
         return false;
@@ -13975,12 +11409,49 @@ fn live_event_is_engineering_runtime_contamination(event: &TokenBudgetEvent) -> 
     if event.source_kind.starts_with("live_proof_") {
         return true;
     }
+    if event.source_kind.starts_with("live_matrix_turn_")
+        || event.source_kind.starts_with("live_art_continuity_")
+        || event.source_kind.starts_with("live_debug_art_probe")
+    {
+        return true;
+    }
+    if event.project.starts_with("proof_") || event.project.starts_with("proofshape_") {
+        return true;
+    }
+    if event.project.starts_with("proof_shape_") {
+        return true;
+    }
     let thread_id = event.thread_id.as_deref().unwrap_or_default().trim();
-    if thread_id.starts_with("proof-") || thread_id.starts_with("proof_") {
+    if thread_id.starts_with("proof-")
+        || thread_id.starts_with("proof_")
+        || thread_id.starts_with("matrix-live-turn-")
+        || thread_id.starts_with("art-live-turn-")
+        || thread_id.starts_with("art-debug-")
+        || thread_id.starts_with("debug-art-")
+    {
         return true;
     }
     let turn_id = event.turn_id.as_deref().unwrap_or_default().trim();
-    turn_id.starts_with("turn-proof-") || turn_id.starts_with("turn_proof_")
+    turn_id.starts_with("turn-proof-")
+        || turn_id.starts_with("turn_proof_")
+        || turn_id.starts_with("turn-art-")
+}
+
+fn live_event_has_invalid_runtime_contract(event: &TokenBudgetEvent) -> bool {
+    event.traffic_class == "live"
+        && event.source_kind == "live_context_pack"
+        && matches!(
+            event.payload_origin.as_str(),
+            "context_pack_token_budget_v6"
+                | "context_pack_token_budget_v7"
+                | "context_pack_token_budget_v8"
+                | "context_pack_token_budget_v9"
+                | "context_pack_token_budget_v10"
+                | "context_pack_token_budget_v11"
+                | "context_pack_token_budget_v13"
+                | "context_pack_token_budget_v12"
+        )
+        && event.retrieval_scope_signature.is_none()
 }
 
 fn shadowed_live_event_key(event: &TokenBudgetEvent) -> Option<String> {
@@ -13989,8 +11460,8 @@ fn shadowed_live_event_key(event: &TokenBudgetEvent) -> Option<String> {
         return None;
     }
     Some(format!(
-        "{}:{}:{}:{}",
-        event.project, event.namespace, event.measurement_scope, correlation_id
+        "{}:{}:{}:{}:{}",
+        event.project, event.namespace, event.agent_scope, event.measurement_scope, correlation_id
     ))
 }
 
@@ -14068,10 +11539,8 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .or(fallback_source_kind)
         .unwrap_or("unknown")
         .to_string();
-    let traffic_class = node["traffic_class"]
-        .as_str()
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| derive_traffic_class(&source_kind));
+    let traffic_class =
+        normalize_token_event_traffic_class(node["traffic_class"].as_str(), &source_kind);
     let project = node["project"]
         .as_str()
         .or_else(|| node["project_code"].as_str())
@@ -14109,6 +11578,11 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| derive_baseline_strategy(&query_type).to_string());
     let retrieval_mode = node["retrieval_mode"].as_str().map(ToOwned::to_owned);
+    let retrieval_scope_signature = node["retrieval_runtime"]["scope_signature"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let tokenizer = node["tokenizer"].as_str().unwrap_or_default().to_string();
     let latency_ms = node["latency_ms"].as_f64().unwrap_or(0.0);
     let event_id = node["event_id"]
@@ -14131,6 +11605,8 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let agent_scope =
+        normalize_token_event_agent_scope(node["agent_scope"].as_str(), &project, &namespace);
     let payload_origin = node["payload_origin"]
         .as_str()
         .unwrap_or("unknown")
@@ -14375,6 +11851,7 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         context_pack_id,
         thread_id,
         turn_id,
+        agent_scope,
         payload_origin,
         session_id,
         rolling_window_profile,
@@ -14429,6 +11906,7 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         cold_warm_state,
         baseline_strategy,
         retrieval_mode,
+        retrieval_scope_signature,
         tokenizer,
         latency_ms,
         saved_tokens,
@@ -14472,10 +11950,8 @@ fn needs_live_reverification(payload: &Value) -> bool {
         return false;
     }
     let source_kind = node["source_kind"].as_str().unwrap_or_default();
-    let traffic_class = node["traffic_class"]
-        .as_str()
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| derive_traffic_class(source_kind));
+    let traffic_class =
+        normalize_token_event_traffic_class(node["traffic_class"].as_str(), source_kind);
     if traffic_class != "live" {
         return false;
     }
@@ -14735,6 +12211,7 @@ async fn reverify_live_event_payload(
         limit_symbols: 8,
         limit_chunks: 8,
         limit_semantic_chunks: 8,
+        at_epoch_ms: None,
         token_source_kind: "proof_reverify_context_pack".to_string(),
         client_prompt_tokens: None,
         assistant_generation_tokens: None,
@@ -15044,6 +12521,9 @@ fn resolve_session_id(
     current_ts: i64,
     session_gap_ms: i64,
     current_source_kind: &str,
+    current_project: &str,
+    current_namespace: &str,
+    current_agent_scope: &str,
 ) -> String {
     if source_kind_starts_new_session(current_source_kind) {
         return Uuid::new_v4().to_string();
@@ -15053,6 +12533,9 @@ fn resolve_session_id(
         .rev()
         .find(|event| {
             event.traffic_class == "live"
+                && event.project == current_project
+                && event.namespace == current_namespace
+                && event.agent_scope == current_agent_scope
                 && current_ts.saturating_sub(event.created_at_epoch_ms) <= session_gap_ms
         })
         .map(|event| {
@@ -18175,11 +15658,40 @@ fn temperature_slice_breakdown(
 }
 
 fn latency_slice_breakdown(events: &[TokenBudgetEvent]) -> Value {
+    let active_live_origin = [
+        "context_pack_token_budget_v13",
+        "context_pack_token_budget_v12",
+        "context_pack_token_budget_v11",
+        "context_pack_token_budget_v10",
+        "context_pack_token_budget_v9",
+        "context_pack_token_budget_v8",
+        "context_pack_token_budget_v7",
+        "context_pack_token_budget_v6",
+        "context_pack_token_budget_v5",
+        "context_pack_token_budget_v4",
+        "context_pack_token_budget_v3",
+        "context_pack_token_budget_v2",
+    ]
+    .into_iter()
+    .find(|origin| {
+        events.iter().any(|event| {
+            event.measurement_scope == "retrieval_lower_bound" && event.payload_origin == *origin
+        })
+    });
     let mut grouped = BTreeMap::<String, Vec<f64>>::new();
     let mut current_latency = BTreeMap::<String, f64>::new();
 
     for event in events {
         if event.measurement_scope != "retrieval_lower_bound" {
+            continue;
+        }
+        if event.traffic_class == "live" && !event.quality_ok {
+            continue;
+        }
+        if event.traffic_class == "live"
+            && active_live_origin.is_some()
+            && Some(event.payload_origin.as_str()) != active_live_origin
+        {
             continue;
         }
         if !event.latency_ms.is_finite() {
@@ -18697,6 +16209,7 @@ fn build_event_payload(
             },
             "baseline_strategy": baseline_strategy,
             "retrieval_mode": payload["effective_retrieval_mode"].clone(),
+            "retrieval_runtime": compact_token_budget_retrieval_runtime(&payload["retrieval_runtime"]),
             "tokenizer": measurement.tokenizer,
             "latency_ms": latency_ms,
             "baseline_tokens": naive_tokens,
@@ -18757,6 +16270,26 @@ fn build_event_payload(
             }
         }
     }))
+}
+
+fn compact_token_budget_retrieval_runtime(value: &Value) -> Value {
+    if !value.is_object() {
+        return Value::Null;
+    }
+    json!({
+        "cache_hit": value["cache_hit"].clone(),
+        "scope_signature": value["scope_signature"].clone(),
+        "resolve_scope_ms": value["resolve_scope_ms"].clone(),
+        "cache_lookup_ms": value["cache_lookup_ms"].clone(),
+        "exact_lookup_ms": value["exact_lookup_ms"].clone(),
+        "symbol_lookup_ms": value["symbol_lookup_ms"].clone(),
+        "lexical_lookup_ms": value["lexical_lookup_ms"].clone(),
+        "query_embed_ms": value["query_embed_ms"].clone(),
+        "semantic_search_ms": value["semantic_search_ms"].clone(),
+        "semantic_hydrate_ms": value["semantic_hydrate_ms"].clone(),
+        "retrieval_lower_bound_ms": value["retrieval_lower_bound_ms"].clone(),
+        "total_ms": value["total_ms"].clone(),
+    })
 }
 
 fn observed_tool_overhead_payload(text: &str, structured_content: &Value) -> Value {
@@ -19461,6 +16994,25 @@ fn build_continuity_restore_observed_event(
     let timestamp_utc = current_epoch_ms()?;
     let event_id = Uuid::new_v4().to_string();
     let traffic_class = derive_traffic_class(source_kind);
+    let agent_scope = working_state::current_agent_scope_for(project_code, namespace_code);
+    let thread_id = codex_threads::current_thread_id()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let turn_id = thread_id
+        .as_deref()
+        .and_then(|thread_id| {
+            codex_threads::latest_rollout_client_meter_observation_for_thread(thread_id)
+                .ok()
+                .flatten()
+        })
+        .and_then(|observation| {
+            let turn_id = observation.turn_id.trim().to_string();
+            if turn_id.is_empty() {
+                None
+            } else {
+                Some(turn_id)
+            }
+        });
     Ok(json!({
         "token_budget_event": {
             "event_id": event_id,
@@ -19478,6 +17030,9 @@ fn build_continuity_restore_observed_event(
             "project_code": project_code,
             "namespace": namespace_code,
             "namespace_code": namespace_code,
+            "agent_scope": agent_scope,
+            "thread_id": thread_id,
+            "turn_id": turn_id,
             "query": "CHAT_START_RESTORE",
             "query_hash": hex_sha256(prompt_text.as_bytes()),
             "query_type": "continuity_restore",
@@ -19853,7 +17408,10 @@ fn apply_continuity_pre_amai_baseline(
 }
 
 pub(crate) fn derive_traffic_class(source_kind: &str) -> String {
-    if source_kind.starts_with("live_") {
+    if source_kind.starts_with("live_")
+        || source_kind.starts_with("operator_continuity_")
+        || source_kind == "operator_client_budget_target"
+    {
         "live".to_string()
     } else if source_kind.starts_with("verify_") {
         "verify".to_string()
@@ -19863,6 +17421,21 @@ pub(crate) fn derive_traffic_class(source_kind: &str) -> String {
         "benchmark".to_string()
     } else {
         "unknown".to_string()
+    }
+}
+
+fn normalize_token_event_traffic_class(
+    raw_traffic_class: Option<&str>,
+    source_kind: &str,
+) -> String {
+    let derived = derive_traffic_class(source_kind);
+    let raw = raw_traffic_class
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match raw {
+        Some("unknown") if derived != "unknown" => derived,
+        Some(value) => value.to_string(),
+        None => derived,
     }
 }
 
@@ -20278,6 +17851,9 @@ fn current_epoch_ms() -> Result<i64> {
 
 fn total_latency_ms(payload: &Value) -> f64 {
     let runtime = &payload["retrieval_runtime"];
+    if let Some(value) = runtime["retrieval_lower_bound_ms"].as_f64() {
+        return value;
+    }
     if let Some(value) = runtime["total_ms"].as_f64() {
         return value;
     }
@@ -20296,6 +17872,25 @@ fn total_latency_ms(payload: &Value) -> f64 {
     .iter()
     .map(|key| runtime[*key].as_f64().unwrap_or(0.0))
     .sum()
+}
+
+#[cfg(test)]
+mod latency_measurement_tests {
+    use super::total_latency_ms;
+    use serde_json::json;
+
+    #[test]
+    fn total_latency_prefers_retrieval_lower_bound_when_present() {
+        let payload = json!({
+            "retrieval_runtime": {
+                "retrieval_lower_bound_ms": 7.0,
+                "total_ms": 99.0,
+                "resolve_scope_ms": 1.0,
+                "cache_lookup_ms": 1.0
+            }
+        });
+        assert_eq!(total_latency_ms(&payload), 7.0);
+    }
 }
 
 fn percent_from_signed(saved_tokens: i64, baseline_tokens: u64) -> f64 {
@@ -20826,24 +18421,32 @@ fn build_tokenizer(name: &str) -> Result<CoreBPE> {
     }
 }
 
+fn shared_tokenizer(name: &str) -> Result<&'static CoreBPE> {
+    static O200K_BASE: OnceLock<CoreBPE> = OnceLock::new();
+    static CL100K_BASE: OnceLock<CoreBPE> = OnceLock::new();
+    match name {
+        "o200k_base" => Ok(O200K_BASE
+            .get_or_init(|| o200k_base().expect("failed to initialize o200k_base tokenizer"))),
+        "cl100k_base" => Ok(CL100K_BASE
+            .get_or_init(|| cl100k_base().expect("failed to initialize cl100k_base tokenizer"))),
+        other => Err(anyhow!("unsupported tokenizer: {other}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::external_truth;
     use super::{
         AssistantGenerationScopeObservation, MeasurementConfig, NaiveScope,
         TokenBudgetContractConfig, TokenBudgetEvent, TokenLedgerRepairRequest,
-        apply_reverification_metadata, baseline_strategy_breakdown,
-        bind_infra_cost_profile_json_from_source, bind_rate_card_json_from_source,
-        build_adjustment_registry_json, build_adjustment_request_schema_json,
-        build_baseline_contract_json, build_billing_policy_json,
-        build_continuity_restore_observed_event, build_contractual_evidence_pack,
-        build_contractual_statement_summary, build_event_payload,
-        build_external_truth_sources_json, build_margin_contract_json, build_margin_scope,
-        build_metering_freshness_contract_json, build_metering_freshness_summary,
-        build_product_headline, build_rate_card_json, build_reconciliation_contract_json,
-        build_reconciliation_preview, build_settlement_contract_json,
-        build_statement_export_preview, build_statement_preview, build_telemetry_surfaces_json,
-        build_usage_event_schema_json, configured_provider_rate_card_source,
-        configured_provider_usage_source, contractual_line_item_json,
+        apply_reverification_metadata, baseline_strategy_breakdown, build_baseline_contract_json,
+        build_billing_policy_json, build_continuity_restore_observed_event,
+        build_contractual_evidence_pack, build_contractual_statement_summary, build_event_payload,
+        build_margin_contract_json, build_margin_scope, build_metering_freshness_contract_json,
+        build_metering_freshness_summary, build_product_headline,
+        build_reconciliation_contract_json, build_reconciliation_preview,
+        build_settlement_contract_json, build_statement_export_preview, build_statement_preview,
+        build_telemetry_surfaces_json, build_usage_event_schema_json, contractual_line_item_json,
         count_cli_context_pack_output_overhead_tokens, count_tool_overhead_tokens,
         current_session_events, dashboard_assistant_scope_source_signature,
         dashboard_report_signature, dashboard_report_signature_components,
@@ -20866,13 +18469,10 @@ mod tests {
         default_usage_event_schema_version, default_usage_lifecycle_model_version,
         derive_baseline_strategy, derive_quality_verdict, derive_query_type, derive_traffic_class,
         event_to_json, followup_queries_related, hex_sha256, include_traffic_class_in_report,
-        latency_slice_breakdown, load_adjustment_registry_from_source,
-        load_provider_invoice_binding_from_source, load_provider_usage_binding_from_source,
-        matches_token_ledger_repair_selector, needs_live_reverification,
-        parse_infra_cost_profile_file, parse_rate_card_file, parse_snapshot_event,
-        provider_rate_card_default_path, provider_usage_default_path, reconcile_followup_recovery,
-        render_context_pack_prompt, repair_legacy_token_event_payload, report_contract_json,
-        resolve_session_id, rewrite_token_ledger_source_kind_payload, summarize_events,
+        latency_slice_breakdown, matches_token_ledger_repair_selector, needs_live_reverification,
+        parse_snapshot_event, reconcile_followup_recovery, render_context_pack_prompt,
+        repair_legacy_token_event_payload, report_contract_json, resolve_session_id,
+        resolved_active_agent_label, rewrite_token_ledger_source_kind_payload, summarize_events,
         suppress_shadowed_live_events,
     };
     use crate::postgres::{ObservabilitySnapshotKindSummary, ObservabilitySnapshotRecord};
@@ -20912,6 +18512,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn resolved_active_agent_label_prefers_user_defined_display_name() {
+        let thread = json!({
+            "agent_nickname": "Codex",
+            "agent_role": "Assistant"
+        });
+        let label = resolved_active_agent_label(
+            Some("Мой агент"),
+            Some(&thread),
+            "Amai",
+            Some("active headline"),
+            "amai::continuity::default",
+        );
+        assert_eq!(label, "Мой агент");
+    }
+
     fn unique_temp_path(prefix: &str, extension: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -20921,15 +18537,18 @@ mod tests {
     }
 
     fn adjustment_registry_fixture(contract: &TokenBudgetContractConfig) -> serde_json::Value {
-        build_adjustment_registry_json(Path::new("/tmp/amai-no-adjustments"), contract)
+        super::token_adjustments::build_adjustment_registry_json(
+            Path::new("/tmp/amai-no-adjustments"),
+            contract,
+        )
     }
 
     fn rate_card_fixture(contract: &TokenBudgetContractConfig) -> serde_json::Value {
-        build_rate_card_json(Path::new("/tmp/amai-no-rate-card"), contract)
+        external_truth::build_rate_card_json(Path::new("/tmp/amai-no-rate-card"), contract)
     }
 
     fn provider_usage_binding_fixture(rate_card: &serde_json::Value) -> serde_json::Value {
-        load_provider_usage_binding_from_source(
+        external_truth::load_provider_usage_binding_from_source(
             &json!({
                 "status": "not_configured",
                 "binding_status": "not_configured",
@@ -20939,7 +18558,7 @@ mod tests {
     }
 
     fn provider_invoice_binding_fixture() -> serde_json::Value {
-        load_provider_invoice_binding_from_source(&json!({
+        external_truth::load_provider_invoice_binding_from_source(&json!({
             "status": "not_configured",
             "binding_status": "not_configured",
         }))
@@ -20956,6 +18575,7 @@ mod tests {
                     context_pack_id: None,
                     thread_id: None,
                     turn_id: None,
+                    agent_scope: "art::continuity::default".to_string(),
                     payload_origin: "context_pack_token_budget".to_string(),
                     session_id: "session-default".to_string(),
                     rolling_window_profile: "codex_5h".to_string(),
@@ -21010,6 +18630,7 @@ mod tests {
                     cold_warm_state: "warm".to_string(),
                     baseline_strategy: "naive_top_files".to_string(),
                     retrieval_mode: Some("local_strict".to_string()),
+                    retrieval_scope_signature: Some("local_fast_cache".to_string()),
                     tokenizer: "o200k_base".to_string(),
                     latency_ms: 0.0,
                     saved_tokens: 0,
@@ -21108,7 +18729,7 @@ mod tests {
         let stale = token_event! {
             created_at_epoch_ms: 100,
             ingested_at_epoch_ms: 100,
-            event_id: "live-event-stale".to_string(),
+            event_id: "live-event".to_string(),
             correlation_id: "".to_string(),
             context_pack_id: Some("cp-1".to_string()),
             source_kind: "live_context_pack".to_string(),
@@ -21120,7 +18741,7 @@ mod tests {
         let refreshed = token_event! {
             created_at_epoch_ms: 200,
             ingested_at_epoch_ms: 200,
-            event_id: "live-event-refreshed".to_string(),
+            event_id: "live-event".to_string(),
             correlation_id: "".to_string(),
             context_pack_id: Some("cp-1".to_string()),
             source_kind: "live_context_pack".to_string(),
@@ -21137,6 +18758,45 @@ mod tests {
             refreshed.created_at_epoch_ms
         );
         assert_eq!(filtered[0].tool_overhead_tokens, Some(33));
+    }
+
+    #[test]
+    fn suppress_shadowed_live_events_keeps_distinct_repeat_live_events_for_same_context_pack() {
+        let first = token_event! {
+            created_at_epoch_ms: 100,
+            ingested_at_epoch_ms: 100,
+            event_id: "live-event-a".to_string(),
+            correlation_id: "".to_string(),
+            context_pack_id: Some("cp-1".to_string()),
+            source_kind: "live_context_pack".to_string(),
+            traffic_class: "live".to_string(),
+            payload_origin: "context_pack_token_budget".to_string(),
+            measurement_scope: "retrieval_lower_bound".to_string(),
+        };
+        let second = token_event! {
+            created_at_epoch_ms: 200,
+            ingested_at_epoch_ms: 200,
+            event_id: "live-event-b".to_string(),
+            correlation_id: "".to_string(),
+            context_pack_id: Some("cp-1".to_string()),
+            source_kind: "live_context_pack".to_string(),
+            traffic_class: "live".to_string(),
+            payload_origin: "context_pack_token_budget".to_string(),
+            measurement_scope: "retrieval_lower_bound".to_string(),
+        };
+
+        let filtered = suppress_shadowed_live_events(vec![first.clone(), second.clone()]);
+        assert_eq!(filtered.len(), 2);
+        assert!(
+            filtered
+                .iter()
+                .any(|event| event.event_id == first.event_id)
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|event| event.event_id == second.event_id)
+        );
     }
 
     #[test]
@@ -21229,6 +18889,78 @@ mod tests {
     }
 
     #[test]
+    fn filter_dashboard_token_events_drops_live_matrix_and_art_debug_contamination() {
+        let matrix_live = token_event! {
+            created_at_epoch_ms: 100,
+            event_id: "matrix-live".to_string(),
+            correlation_id: "ctx-matrix".to_string(),
+            context_pack_id: Some("ctx-matrix".to_string()),
+            source_kind: "live_matrix_turn_123_semantic".to_string(),
+            payload_origin: "context_pack_token_budget_v13".to_string(),
+            thread_id: Some("matrix-live-turn-123".to_string()),
+            turn_id: Some("turn-semantic".to_string()),
+            project: "proof_shape_alpha_123".to_string(),
+            cold_warm_state: "cold".to_string(),
+            latency_ms: 1534.0,
+        };
+        let art_debug_live = token_event! {
+            created_at_epoch_ms: 110,
+            event_id: "art-debug-live".to_string(),
+            correlation_id: "ctx-art-debug".to_string(),
+            context_pack_id: Some("ctx-art-debug".to_string()),
+            source_kind: "live_art_continuity_123".to_string(),
+            payload_origin: "context_pack_token_budget_v13".to_string(),
+            thread_id: Some("art-live-turn-123".to_string()),
+            turn_id: Some("turn-art-continuity".to_string()),
+            project: "art".to_string(),
+            cold_warm_state: "cold".to_string(),
+            latency_ms: 12.0,
+        };
+        let real_live = token_event! {
+            created_at_epoch_ms: 120,
+            event_id: "real-live".to_string(),
+            correlation_id: "ctx-real".to_string(),
+            context_pack_id: Some("ctx-real".to_string()),
+            source_kind: "live_context_pack".to_string(),
+            payload_origin: "context_pack_token_budget_v13".to_string(),
+            thread_id: Some("019d38ab-7c35-7553-b1c0-ae83c5eabf3f".to_string()),
+            turn_id: Some("019d59c7-c0de-75d2-80c3-07eefad8ef5f".to_string()),
+            project: "amai".to_string(),
+            cold_warm_state: "cold".to_string(),
+            latency_ms: 4.0,
+        };
+
+        let filtered = super::filter_dashboard_token_events(
+            vec![matrix_live, art_debug_live, real_live.clone()],
+            false,
+        );
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].event_id, real_live.event_id);
+    }
+
+    #[test]
+    fn filter_dashboard_token_events_drops_malformed_v6_live_runtime_without_scope_signature() {
+        let malformed = token_event! {
+            created_at_epoch_ms: 100,
+            event_id: "malformed-live".to_string(),
+            payload_origin: "context_pack_token_budget_v6".to_string(),
+            retrieval_scope_signature: None,
+        };
+        let valid = token_event! {
+            created_at_epoch_ms: 200,
+            event_id: "valid-live".to_string(),
+            payload_origin: "context_pack_token_budget_v6".to_string(),
+            retrieval_scope_signature: Some("local_fast_cache".to_string()),
+        };
+
+        let filtered = super::filter_dashboard_token_events(vec![malformed, valid.clone()], false);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].event_id, valid.event_id);
+    }
+
+    #[test]
     fn merge_dashboard_token_events_replaces_stale_live_sibling() {
         let stale = token_event! {
             created_at_epoch_ms: 100,
@@ -21264,11 +18996,35 @@ mod tests {
     #[test]
     fn traffic_class_comes_from_source_kind_prefix() {
         assert_eq!(derive_traffic_class("live_context_pack"), "live");
+        assert_eq!(derive_traffic_class("operator_continuity_startup"), "live");
+        assert_eq!(
+            derive_traffic_class("operator_continuity_compact_chat"),
+            "live"
+        );
+        assert_eq!(
+            derive_traffic_class("operator_client_budget_target"),
+            "live"
+        );
         assert_eq!(derive_traffic_class("verify_context_pack"), "verify");
         assert_eq!(derive_traffic_class("verify_token_benchmark"), "verify");
         assert_eq!(derive_traffic_class("proof_hostile"), "proof");
         assert_eq!(derive_traffic_class("benchmark_hot_path"), "benchmark");
         assert_eq!(derive_traffic_class("custom_unknown"), "unknown");
+    }
+
+    #[test]
+    fn normalize_token_event_traffic_class_upgrades_known_operator_source_from_unknown() {
+        assert_eq!(
+            super::normalize_token_event_traffic_class(
+                Some("unknown"),
+                "operator_continuity_startup"
+            ),
+            "live"
+        );
+        assert_eq!(
+            super::normalize_token_event_traffic_class(Some("verify"), "verify_context_pack"),
+            "verify"
+        );
     }
 
     #[test]
@@ -21714,7 +19470,8 @@ mod tests {
         let measurement = measurement_fixture();
         let contract = contract_fixture();
         let billing_policy = build_billing_policy_json(&contract, &measurement);
-        let rate_card = build_rate_card_json(Path::new("/tmp/amai-no-rate-card"), &contract);
+        let rate_card =
+            external_truth::build_rate_card_json(Path::new("/tmp/amai-no-rate-card"), &contract);
         let baseline_contract = build_baseline_contract_json(&contract);
 
         assert_eq!(billing_policy["mode"], "report_only");
@@ -21732,7 +19489,7 @@ mod tests {
 
     #[test]
     fn rate_card_parser_accepts_machine_readable_profile() {
-        let parsed = parse_rate_card_file(
+        let parsed = external_truth::parse_rate_card_file(
             r#"{
                 "schema_version":"provider-rate-card-v1",
                 "rate_card_version":"demo-priced-v1",
@@ -21774,7 +19531,7 @@ effective_to_epoch_ms = 2000
             "resolved_path": path.display().to_string(),
             "binding_status": "configured_but_unbound"
         });
-        let rate_card = bind_rate_card_json_from_source(&source, &contract);
+        let rate_card = external_truth::bind_rate_card_json_from_source(&source, &contract);
         let _ = fs::remove_file(&path);
 
         assert_eq!(rate_card["status"], "priced_bound");
@@ -21798,7 +19555,7 @@ effective_to_epoch_ms = 2000
 
     #[test]
     fn infra_cost_profile_parser_accepts_machine_readable_profile() {
-        let parsed = parse_infra_cost_profile_file(
+        let parsed = external_truth::parse_infra_cost_profile_file(
             r#"{
                 "schema_version":"infra-cost-profile-v1",
                 "infra_cost_profile_version":"demo-infra-v1",
@@ -21842,7 +19599,7 @@ effective_to_epoch_ms = 2000
             "resolved_path": path.display().to_string(),
             "binding_status": "configured_but_unbound"
         });
-        let binding = bind_infra_cost_profile_json_from_source(&source, &contract);
+        let binding = external_truth::bind_infra_cost_profile_json_from_source(&source, &contract);
         let _ = fs::remove_file(&path);
 
         assert_eq!(binding["status"], "priced_bound");
@@ -21886,7 +19643,8 @@ effective_to_epoch_ms = 2000
             "resolved_path": path.display().to_string(),
             "binding_status": "configured_but_unbound"
         });
-        let registry = load_adjustment_registry_from_source(&source, &contract);
+        let registry =
+            super::token_adjustments::load_adjustment_registry_from_source(&source, &contract);
         let _ = fs::remove_file(&path);
 
         assert_eq!(registry["status"], "loaded");
@@ -21931,7 +19689,7 @@ effective_to_epoch_ms = 2000
             "status": "priced_bound"
         });
 
-        let binding = load_provider_usage_binding_from_source(&source, &rate_card);
+        let binding = external_truth::load_provider_usage_binding_from_source(&source, &rate_card);
         let _ = fs::remove_file(&path);
 
         assert_eq!(binding["status"], "usage_and_cost_bound");
@@ -21978,7 +19736,7 @@ effective_to_epoch_ms = 2000
             "binding_status": "configured_but_unbound"
         });
 
-        let binding = load_provider_invoice_binding_from_source(&source);
+        let binding = external_truth::load_provider_invoice_binding_from_source(&source);
         let _ = fs::remove_file(&path);
 
         assert_eq!(binding["status"], "invoice_bound");
@@ -22002,7 +19760,8 @@ effective_to_epoch_ms = 2000
         let profile = profile_fixture();
         let adjustment_registry = adjustment_registry_fixture(&contract);
         let rate_card = rate_card_fixture(&contract);
-        let sources = build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
+        let sources =
+            external_truth::build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
         let provider_usage_binding = provider_usage_binding_fixture(&rate_card);
         let provider_invoice_binding = provider_invoice_binding_fixture();
         let settlement_contract = build_settlement_contract_json(&contract);
@@ -22193,7 +19952,7 @@ effective_to_epoch_ms = 2000
         let rate_card = rate_card_fixture(&contract);
         let reconciliation_contract = build_reconciliation_contract_json(
             &contract,
-            &build_external_truth_sources_json(Path::new("/tmp/amai-no-sources")),
+            &external_truth::build_external_truth_sources_json(Path::new("/tmp/amai-no-sources")),
             &provider_usage_binding_fixture(&rate_card),
             &provider_invoice_binding_fixture(),
             &rate_card,
@@ -22288,7 +20047,7 @@ effective_to_epoch_ms = 2000
         let rate_card = rate_card_fixture(&contract);
         let reconciliation_contract = build_reconciliation_contract_json(
             &contract,
-            &build_external_truth_sources_json(Path::new("/tmp/amai-no-sources")),
+            &external_truth::build_external_truth_sources_json(Path::new("/tmp/amai-no-sources")),
             &provider_usage_binding_fixture(&rate_card),
             &provider_invoice_binding_fixture(),
             &rate_card,
@@ -22349,7 +20108,7 @@ effective_to_epoch_ms = 2000
         let rate_card = rate_card_fixture(&contract);
         let reconciliation_contract = build_reconciliation_contract_json(
             &contract,
-            &build_external_truth_sources_json(Path::new("/tmp/amai-no-sources")),
+            &external_truth::build_external_truth_sources_json(Path::new("/tmp/amai-no-sources")),
             &provider_usage_binding_fixture(&rate_card),
             &provider_invoice_binding_fixture(),
             &rate_card,
@@ -22437,7 +20196,7 @@ effective_to_epoch_ms = 2000
     #[test]
     fn adjustment_request_schema_and_registry_are_truthful_when_missing() {
         let contract = contract_fixture();
-        let schema = build_adjustment_request_schema_json(&contract);
+        let schema = super::token_adjustments::build_adjustment_request_schema_json(&contract);
         let registry = adjustment_registry_fixture(&contract);
 
         assert_eq!(schema["schema_version"], "adjustment-request-v1");
@@ -22453,7 +20212,8 @@ effective_to_epoch_ms = 2000
     #[test]
     fn reconciliation_contract_is_truthful_without_external_sources() {
         let contract = contract_fixture();
-        let sources = build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
+        let sources =
+            external_truth::build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
         let rate_card = rate_card_fixture(&contract);
         let provider_usage_binding = provider_usage_binding_fixture(&rate_card);
         let provider_invoice_binding = provider_invoice_binding_fixture();
@@ -22541,7 +20301,8 @@ effective_to_epoch_ms = 2000
         let contract = contract_fixture();
         let profile = profile_fixture();
         let adjustment_registry = adjustment_registry_fixture(&contract);
-        let sources = build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
+        let sources =
+            external_truth::build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
         let rate_card = rate_card_fixture(&contract);
         let provider_usage_binding = provider_usage_binding_fixture(&rate_card);
         let provider_invoice_binding = provider_invoice_binding_fixture();
@@ -22643,7 +20404,8 @@ effective_to_epoch_ms = 2000
     #[test]
     fn margin_contract_stays_unknown_without_rate_card_and_infra_cost_profile() {
         let contract = contract_fixture();
-        let sources = build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
+        let sources =
+            external_truth::build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
         let rate_card = rate_card_fixture(&contract);
         let provider_usage_binding = provider_usage_binding_fixture(&rate_card);
         let provider_invoice_binding = provider_invoice_binding_fixture();
@@ -22717,7 +20479,8 @@ effective_to_epoch_ms = 2000
         let contract = contract_fixture();
         let profile = profile_fixture();
         let adjustment_registry = adjustment_registry_fixture(&contract);
-        let sources = build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
+        let sources =
+            external_truth::build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
         let rate_card = rate_card_fixture(&contract);
         let provider_usage_binding = provider_usage_binding_fixture(&rate_card);
         let provider_invoice_binding = provider_invoice_binding_fixture();
@@ -25562,8 +23325,8 @@ effective_to_epoch_ms = 2000
     }
 
     #[test]
-    fn client_limit_meter_alignment_materializes_same_meter_without_quality_gate_when_strict_slice_is_complete(
-    ) {
+    fn client_limit_meter_alignment_materializes_same_meter_without_quality_gate_when_strict_slice_is_complete()
+     {
         let summary = json!({
             "events_total": 1,
             "live_events_count": 1,
@@ -25945,6 +23708,7 @@ effective_to_epoch_ms = 2000
             turn_id: "turn-1".to_string(),
             started_at_epoch_ms: 100,
             ended_at_epoch_ms: 200,
+            first_assistant_response_at_epoch_ms: None,
             client_turn_total_tokens: 94,
             client_turn_input_tokens: 12,
             client_turn_cached_input_tokens: 0,
@@ -25954,6 +23718,12 @@ effective_to_epoch_ms = 2000
             latest_model_context_window: 258400,
             latest_primary_limit_used_percent: 10,
             latest_secondary_limit_used_percent: 20,
+            latest_primary_window_duration_mins: None,
+            latest_primary_resets_at_epoch_seconds: None,
+            latest_secondary_window_duration_mins: None,
+            latest_secondary_resets_at_epoch_seconds: None,
+            rollout_jsonl_tolerance_summary:
+                crate::codex_threads::RolloutJsonlToleranceSummary::default(),
             observation_source: "codex_rollout_client_meter_v2".to_string(),
         };
 
@@ -26080,6 +23850,7 @@ effective_to_epoch_ms = 2000
             turn_id: "turn-1".to_string(),
             started_at_epoch_ms: 100,
             ended_at_epoch_ms: 200,
+            first_assistant_response_at_epoch_ms: None,
             client_turn_total_tokens: 94,
             client_turn_input_tokens: 12,
             client_turn_cached_input_tokens: 0,
@@ -26089,6 +23860,12 @@ effective_to_epoch_ms = 2000
             latest_model_context_window: 258400,
             latest_primary_limit_used_percent: 10,
             latest_secondary_limit_used_percent: 20,
+            latest_primary_window_duration_mins: None,
+            latest_primary_resets_at_epoch_seconds: None,
+            latest_secondary_window_duration_mins: None,
+            latest_secondary_resets_at_epoch_seconds: None,
+            rollout_jsonl_tolerance_summary:
+                crate::codex_threads::RolloutJsonlToleranceSummary::default(),
             observation_source: "codex_rollout_client_meter_v2".to_string(),
         };
         let assistant_scope = super::current_live_turn_assistant_scope_from_client_meter(
@@ -26159,6 +23936,7 @@ effective_to_epoch_ms = 2000
             turn_id: "turn-1".to_string(),
             started_at_epoch_ms: 100,
             ended_at_epoch_ms: 200,
+            first_assistant_response_at_epoch_ms: None,
             client_turn_total_tokens: 94,
             client_turn_input_tokens: 12,
             client_turn_cached_input_tokens: 0,
@@ -26168,6 +23946,12 @@ effective_to_epoch_ms = 2000
             latest_model_context_window: 258400,
             latest_primary_limit_used_percent: 10,
             latest_secondary_limit_used_percent: 20,
+            latest_primary_window_duration_mins: None,
+            latest_primary_resets_at_epoch_seconds: None,
+            latest_secondary_window_duration_mins: None,
+            latest_secondary_resets_at_epoch_seconds: None,
+            rollout_jsonl_tolerance_summary:
+                crate::codex_threads::RolloutJsonlToleranceSummary::default(),
             observation_source: "codex_rollout_client_meter_v2".to_string(),
         };
         let assistant_scope = super::current_live_turn_assistant_scope_from_client_meter(
@@ -26204,10 +23988,16 @@ effective_to_epoch_ms = 2000
 
     #[test]
     fn reusable_exact_thread_budget_live_surfaces_from_base_report_accepts_matching_thread() {
+        let observed_at_epoch_ms = super::current_epoch_ms().unwrap_or_default() as u64;
         let report = json!({
             "client_live_meter": {
                 "thread_id": "thread-current",
-                "current_thread_bound": true
+                "current_thread_bound": true,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": observed_at_epoch_ms,
+                    "primary_limit_used_percent": 12.5
+                }
             },
             "current_live_turn": {
                 "thread_id": "thread-current",
@@ -26218,11 +24008,16 @@ effective_to_epoch_ms = 2000
         let reused = super::reusable_exact_thread_budget_live_surfaces_from_base_report(
             Some(&report),
             Some("thread-current"),
+            super::current_epoch_ms().unwrap_or_default() as u64,
+            super::DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS,
         )
         .expect("reusable live surfaces");
 
         assert_eq!(reused.0["thread_id"], json!("thread-current"));
-        assert_eq!(reused.1["status"], json!("no_amai_activity_in_current_live_turn"));
+        assert_eq!(
+            reused.1["status"],
+            json!("no_amai_activity_in_current_live_turn")
+        );
     }
 
     #[test]
@@ -26242,6 +24037,8 @@ effective_to_epoch_ms = 2000
             super::reusable_exact_thread_budget_live_surfaces_from_base_report(
                 Some(&report),
                 Some("thread-current"),
+                super::current_epoch_ms().unwrap_or_default() as u64,
+                super::DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS,
             )
             .is_none()
         );
@@ -26249,6 +24046,7 @@ effective_to_epoch_ms = 2000
 
     #[test]
     fn reusable_exact_thread_current_session_budget_report_from_base_report_keeps_minimal_shape() {
+        let observed_at_epoch_ms = super::current_epoch_ms().unwrap_or_default() as u64;
         let report = json!({
             "filters": {
                 "include_verify_events": false
@@ -26264,12 +24062,22 @@ effective_to_epoch_ms = 2000
                     }
                 }
             },
+            "personal_agent_kpi": {
+                "status": "observed",
+                "reply_prefix": "5ч KPI: 1:1"
+            },
             "client_limit_hourly_burn": {
-                "status": "observed"
+                "status": "observed",
+                "latest_observed_at_epoch_ms": observed_at_epoch_ms
             },
             "client_live_meter": {
                 "thread_id": "thread-current",
-                "current_thread_bound": true
+                "current_thread_bound": true,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": observed_at_epoch_ms,
+                    "primary_limit_used_percent": 12.5
+                }
             },
             "current_live_turn": {
                 "thread_id": "thread-current",
@@ -26300,8 +24108,247 @@ effective_to_epoch_ms = 2000
             json!("no_amai_activity_in_current_live_turn")
         );
         assert_eq!(
-            reused["token_budget_report"]["statement_previews"]["current_session"]["client_limit_meter_alignment"]["equivalence_status"],
+            reused["token_budget_report"]["statement_previews"]["current_session"]["client_limit_meter_alignment"]
+                ["equivalence_status"],
             json!("same_meter_equivalent")
+        );
+    }
+
+    #[test]
+    fn reusable_exact_thread_current_session_budget_report_from_base_report_rejects_stale_hourly_burn()
+     {
+        let observed_at_epoch_ms = (super::current_epoch_ms().unwrap_or_default() as u64)
+            .saturating_sub(super::DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS + 1);
+        let report = json!({
+            "filters": {
+                "include_verify_events": false
+            },
+            "client_budget_target_percent": 50,
+            "current_session": {
+                "same_meter_saved_pct": 12.34
+            },
+            "statement_previews": {
+                "current_session": {
+                    "client_limit_meter_alignment": {
+                        "equivalence_status": "same_meter_equivalent"
+                    }
+                }
+            },
+            "personal_agent_kpi": {
+                "status": "observed",
+                "reply_prefix": "5ч KPI: 1:1"
+            },
+            "client_limit_hourly_burn": {
+                "status": "observed",
+                "latest_observed_at_epoch_ms": observed_at_epoch_ms
+            },
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": observed_at_epoch_ms,
+                    "primary_limit_used_percent": 12.5
+                }
+            },
+            "current_live_turn": {
+                "thread_id": "thread-current",
+                "status": "no_amai_activity_in_current_live_turn"
+            }
+        });
+
+        assert!(
+            super::reusable_exact_thread_current_session_budget_report_from_base_report(
+                Some(&report),
+                Some("thread-current"),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn reusable_exact_thread_budget_live_surfaces_reject_stale_exact_status_bar_limits() {
+        let stale_observed_at_epoch_ms = (super::current_epoch_ms().unwrap_or_default() as u64)
+            .saturating_sub(super::DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS + 1);
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": stale_observed_at_epoch_ms
+                }
+            },
+            "current_live_turn": {
+                "thread_id": "thread-current",
+                "status": "no_amai_activity_in_current_live_turn"
+            }
+        });
+
+        assert!(
+            super::reusable_exact_thread_budget_live_surfaces_from_base_report(
+                Some(&report),
+                Some("thread-current"),
+                super::current_epoch_ms().unwrap_or_default() as u64,
+                super::DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn reusable_exact_thread_budget_live_surfaces_from_thread_bound_snapshot_accepts_fresh_cache() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "amai-thread-bound-live-surfaces-{}",
+            Uuid::new_v4()
+        ));
+        let thread_id = "thread-current";
+        let observed_at_epoch_ms = super::current_epoch_ms().unwrap_or_default() as u64;
+        let path = super::thread_bound_budget_snapshot_shared_cache_path(&temp_root, thread_id);
+        fs::create_dir_all(path.parent().expect("snapshot parent"))
+            .expect("create snapshot parent");
+        let persisted = json!({
+            "cache_version": super::THREAD_BOUND_BUDGET_SNAPSHOT_SHARED_CACHE_VERSION,
+            "fetched_at_epoch_ms": observed_at_epoch_ms,
+            "thread_id": thread_id,
+            "snapshot": {
+                "token_budget_report": {
+                    "token_budget_report": {
+                        "client_live_meter": {
+                            "thread_id": thread_id,
+                            "current_thread_bound": true,
+                            "status_bar_rate_limits": {
+                                "status": "observed",
+                                "observed_at_epoch_ms": observed_at_epoch_ms,
+                                "primary_limit_used_percent": 7.0,
+                                "primary_limit_remaining_percent": 93.0
+                            }
+                        },
+                        "current_live_turn": {
+                            "thread_id": thread_id,
+                            "status": "no_amai_activity_in_current_live_turn"
+                        }
+                    }
+                }
+            }
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec(&persisted).expect("serialize snapshot"),
+        )
+        .expect("write snapshot");
+
+        let reused = super::reusable_exact_thread_budget_live_surfaces_from_thread_bound_snapshot(
+            &temp_root,
+            thread_id,
+            observed_at_epoch_ms,
+        )
+        .expect("reused thread-bound live surfaces");
+
+        assert_eq!(reused.0["thread_id"], json!(thread_id));
+        assert_eq!(
+            reused.0["status_bar_rate_limits"]["primary_limit_remaining_percent"],
+            json!(93.0)
+        );
+        assert_eq!(
+            reused.1["status"],
+            json!("no_amai_activity_in_current_live_turn")
+        );
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn reusable_exact_thread_budget_live_surfaces_from_thread_bound_snapshot_respects_invalidation()
+    {
+        let temp_root = std::env::temp_dir().join(format!(
+            "amai-thread-bound-live-surfaces-invalid-{}",
+            Uuid::new_v4()
+        ));
+        let thread_id = "thread-current";
+        let observed_at_epoch_ms = super::current_epoch_ms().unwrap_or_default() as u64;
+        let path = super::thread_bound_budget_snapshot_shared_cache_path(&temp_root, thread_id);
+        fs::create_dir_all(path.parent().expect("snapshot parent"))
+            .expect("create snapshot parent");
+        let persisted = json!({
+            "cache_version": super::THREAD_BOUND_BUDGET_SNAPSHOT_SHARED_CACHE_VERSION,
+            "fetched_at_epoch_ms": observed_at_epoch_ms,
+            "thread_id": thread_id,
+            "snapshot": {
+                "token_budget_report": {
+                    "token_budget_report": {
+                        "client_live_meter": {
+                            "thread_id": thread_id,
+                            "current_thread_bound": true,
+                            "status_bar_rate_limits": {
+                                "status": "observed",
+                                "observed_at_epoch_ms": observed_at_epoch_ms,
+                                "primary_limit_used_percent": 7.0
+                            }
+                        },
+                        "current_live_turn": {
+                            "thread_id": thread_id,
+                            "status": "no_amai_activity_in_current_live_turn"
+                        }
+                    }
+                }
+            }
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec(&persisted).expect("serialize snapshot"),
+        )
+        .expect("write snapshot");
+        let invalidation_path =
+            super::thread_bound_snapshot_invalidation_shared_cache_path(&temp_root, thread_id);
+        fs::write(
+            &invalidation_path,
+            serde_json::to_vec(&json!({
+                "cache_version": super::THREAD_BOUND_SNAPSHOT_INVALIDATION_SHARED_CACHE_VERSION,
+                "invalidated_at_epoch_ms": observed_at_epoch_ms,
+                "thread_id": thread_id
+            }))
+            .expect("serialize invalidation"),
+        )
+        .expect("write invalidation");
+
+        assert!(
+            super::reusable_exact_thread_budget_live_surfaces_from_thread_bound_snapshot(
+                &temp_root,
+                thread_id,
+                observed_at_epoch_ms,
+            )
+            .is_none()
+        );
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn restore_context_thread_id_hint_prefers_working_state_restore_thread_id() {
+        let restore = json!({
+            "thread_id": "thread-fallback",
+            "working_state_restore": {
+                "thread_id": "thread-current"
+            }
+        });
+
+        assert_eq!(
+            super::restore_context_thread_id_hint(Some(&restore)),
+            Some("thread-current")
+        );
+    }
+
+    #[test]
+    fn restore_context_thread_id_hint_falls_back_to_root_thread_id() {
+        let restore = json!({
+            "thread_id": "thread-fallback",
+            "working_state_restore": {}
+        });
+
+        assert_eq!(
+            super::restore_context_thread_id_hint(Some(&restore)),
+            Some("thread-fallback")
         );
     }
 
@@ -26409,6 +24456,53 @@ effective_to_epoch_ms = 2000
         )]);
 
         let merged = super::merged_context_pack_thread_ids(&metadata, &rows, &context_pack_ids);
+
+        assert_eq!(
+            merged,
+            BTreeMap::from([("cp-live".to_string(), "thread-working-state".to_string())])
+        );
+    }
+
+    #[test]
+    fn merged_context_pack_thread_ids_with_repo_fallback_uses_repo_hint_when_missing() {
+        let metadata = BTreeMap::new();
+        let rows = BTreeMap::new();
+        let context_pack_ids = ["cp-live".to_string()].into_iter().collect::<BTreeSet<_>>();
+        let repo_thread_ids = BTreeMap::from([("cp-live".to_string(), "thread-repo".to_string())]);
+
+        let merged = super::merged_context_pack_thread_ids_with_repo_fallback(
+            &metadata,
+            &rows,
+            &repo_thread_ids,
+            &context_pack_ids,
+        );
+
+        assert_eq!(
+            merged,
+            BTreeMap::from([("cp-live".to_string(), "thread-repo".to_string())])
+        );
+    }
+
+    #[test]
+    fn merged_context_pack_thread_ids_with_repo_fallback_preserves_existing_thread_binding() {
+        let metadata = BTreeMap::from([(
+            "cp-live".to_string(),
+            super::WorkingStateContextPackMeta {
+                thread_id: "thread-working-state".to_string(),
+                captured_at_epoch_ms: 100,
+                turn_id: String::new(),
+            },
+        )]);
+        let rows = BTreeMap::new();
+        let context_pack_ids = ["cp-live".to_string()].into_iter().collect::<BTreeSet<_>>();
+        let repo_thread_ids = BTreeMap::from([("cp-live".to_string(), "thread-repo".to_string())]);
+
+        let merged = super::merged_context_pack_thread_ids_with_repo_fallback(
+            &metadata,
+            &rows,
+            &repo_thread_ids,
+            &context_pack_ids,
+        );
 
         assert_eq!(
             merged,
@@ -27265,7 +25359,15 @@ effective_to_epoch_ms = 2000
             source_kind: "live_context_pack".to_string(),
         }];
 
-        let session_id = resolve_session_id(&events, 20, 60_000, "live_continuity_startup");
+        let session_id = resolve_session_id(
+            &events,
+            20,
+            60_000,
+            "live_continuity_startup",
+            "art",
+            "continuity",
+            "art::continuity::default",
+        );
         assert_ne!(session_id, "session-1");
         assert!(!session_id.is_empty());
     }
@@ -27280,8 +25382,47 @@ effective_to_epoch_ms = 2000
             source_kind: "live_context_pack".to_string(),
         }];
 
-        let session_id = resolve_session_id(&events, 20, 60_000, "live_context_pack");
+        let session_id = resolve_session_id(
+            &events,
+            20,
+            60_000,
+            "live_context_pack",
+            "art",
+            "continuity",
+            "art::continuity::default",
+        );
         assert_eq!(session_id, "session-1");
+    }
+
+    #[test]
+    fn resolve_session_id_reuses_only_same_agent_scope() {
+        let events = vec![
+            token_event! {
+                created_at_epoch_ms: 10,
+                event_id: "event-exact".to_string(),
+                session_id: "session-exact".to_string(),
+                timestamp_utc: 10,
+                agent_scope: "art::continuity::default".to_string(),
+            },
+            token_event! {
+                created_at_epoch_ms: 19,
+                event_id: "event-foreign".to_string(),
+                session_id: "session-foreign".to_string(),
+                timestamp_utc: 19,
+                agent_scope: "art::continuity::secondary".to_string(),
+            },
+        ];
+
+        let session_id = resolve_session_id(
+            &events,
+            20,
+            60_000,
+            "live_context_pack",
+            "art",
+            "continuity",
+            "art::continuity::default",
+        );
+        assert_eq!(session_id, "session-exact");
     }
 
     #[test]
@@ -27353,6 +25494,7 @@ effective_to_epoch_ms = 2000
             context_pack_id: None,
             thread_id: None,
             turn_id: None,
+            agent_scope: "amai::continuity::default".to_string(),
             payload_origin: "context_pack_token_budget".to_string(),
             session_id: "session-1".to_string(),
             rolling_window_profile: "codex_5h".to_string(),
@@ -27407,6 +25549,7 @@ effective_to_epoch_ms = 2000
             cold_warm_state: "warm".to_string(),
             baseline_strategy: "semantic_top_k".to_string(),
             retrieval_mode: Some("local_plus_related".to_string()),
+            retrieval_scope_signature: None,
             tokenizer: "o200k_base".to_string(),
             latency_ms: 12.0,
             saved_tokens: 50,
@@ -28217,6 +26360,764 @@ effective_to_epoch_ms = 2000
     }
 
     #[test]
+    fn latency_slice_breakdown_ignores_unconfirmed_live_events() {
+        let events = vec![
+            token_event! {
+                created_at_epoch_ms: 10,
+                event_id: "excluded-live".to_string(),
+                correlation_id: "excluded-live".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 10,
+                occurred_at_epoch_ms: 10,
+                ingested_at_epoch_ms: 10,
+                payload_origin: "context_pack_token_budget_v13".to_string(),
+                query: "excluded".to_string(),
+                query_hash: "hash-excluded".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 87.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: false,
+                quality_score: 0.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: true,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+            token_event! {
+                created_at_epoch_ms: 20,
+                event_id: "confirmed-live".to_string(),
+                correlation_id: "confirmed-live".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 20,
+                occurred_at_epoch_ms: 20,
+                ingested_at_epoch_ms: 20,
+                payload_origin: "context_pack_token_budget_v13".to_string(),
+                query: "confirmed".to_string(),
+                query_hash: "hash-confirmed".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 5.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+        ];
+
+        let breakdown = latency_slice_breakdown(&events);
+        let slices = breakdown.as_array().expect("array");
+        let cold = slices
+            .iter()
+            .find(|slice| slice["state"].as_str() == Some("cold"))
+            .expect("cold");
+
+        assert_eq!(cold["sample_count"], 1);
+        assert_eq!(cold["p50_latency_ms"], 5.0);
+        assert_eq!(cold["max_latency_ms"], 5.0);
+        assert_eq!(cold["current_latency_ms"], 5.0);
+    }
+
+    #[test]
+    fn latency_slice_breakdown_prefers_v2_live_measurement_when_present() {
+        let events = vec![
+            token_event! {
+                created_at_epoch_ms: 10,
+                event_id: "legacy-v1".to_string(),
+                correlation_id: "legacy-v1".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 10,
+                occurred_at_epoch_ms: 10,
+                ingested_at_epoch_ms: 10,
+                payload_origin: "context_pack_token_budget".to_string(),
+                query: "legacy".to_string(),
+                query_hash: "hash-legacy".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 55.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+            token_event! {
+                created_at_epoch_ms: 20,
+                event_id: "live-v2".to_string(),
+                correlation_id: "live-v2".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 20,
+                occurred_at_epoch_ms: 20,
+                ingested_at_epoch_ms: 20,
+                payload_origin: "context_pack_token_budget_v2".to_string(),
+                query: "fresh".to_string(),
+                query_hash: "hash-fresh".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 7.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+        ];
+
+        let breakdown = latency_slice_breakdown(&events);
+        let slices = breakdown.as_array().expect("array");
+        let cold = slices
+            .iter()
+            .find(|slice| slice["state"].as_str() == Some("cold"))
+            .expect("cold");
+
+        assert_eq!(cold["sample_count"], 1);
+        assert_eq!(cold["p50_latency_ms"], 7.0);
+        assert_eq!(cold["max_latency_ms"], 7.0);
+    }
+
+    #[test]
+    fn latency_slice_breakdown_prefers_v3_live_measurement_when_present() {
+        let events = vec![
+            token_event! {
+                created_at_epoch_ms: 10,
+                event_id: "legacy-v2".to_string(),
+                correlation_id: "legacy-v2".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 10,
+                occurred_at_epoch_ms: 10,
+                ingested_at_epoch_ms: 10,
+                payload_origin: "context_pack_token_budget_v2".to_string(),
+                query: "legacy".to_string(),
+                query_hash: "hash-legacy".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 55.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+            token_event! {
+                created_at_epoch_ms: 20,
+                event_id: "live-v3".to_string(),
+                correlation_id: "live-v3".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 20,
+                occurred_at_epoch_ms: 20,
+                ingested_at_epoch_ms: 20,
+                payload_origin: "context_pack_token_budget_v3".to_string(),
+                query: "fresh".to_string(),
+                query_hash: "hash-fresh".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 7.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+        ];
+
+        let breakdown = latency_slice_breakdown(&events);
+        let slices = breakdown.as_array().expect("array");
+        let cold = slices
+            .iter()
+            .find(|slice| slice["state"].as_str() == Some("cold"))
+            .expect("cold");
+
+        assert_eq!(cold["sample_count"], 1);
+        assert_eq!(cold["p50_latency_ms"], 7.0);
+        assert_eq!(cold["max_latency_ms"], 7.0);
+    }
+
+    #[test]
+    fn latency_slice_breakdown_prefers_v4_live_measurement_when_present() {
+        let events = vec![
+            token_event! {
+                created_at_epoch_ms: 10,
+                event_id: "legacy-v3".to_string(),
+                correlation_id: "legacy-v3".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 10,
+                occurred_at_epoch_ms: 10,
+                ingested_at_epoch_ms: 10,
+                payload_origin: "context_pack_token_budget_v3".to_string(),
+                query: "legacy".to_string(),
+                query_hash: "hash-legacy".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 55.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+            token_event! {
+                created_at_epoch_ms: 20,
+                event_id: "live-v4".to_string(),
+                correlation_id: "live-v4".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 20,
+                occurred_at_epoch_ms: 20,
+                ingested_at_epoch_ms: 20,
+                payload_origin: "context_pack_token_budget_v4".to_string(),
+                query: "fresh".to_string(),
+                query_hash: "hash-fresh".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 7.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+        ];
+
+        let breakdown = latency_slice_breakdown(&events);
+        let slices = breakdown.as_array().expect("array");
+        let cold = slices
+            .iter()
+            .find(|slice| slice["state"].as_str() == Some("cold"))
+            .expect("cold");
+
+        assert_eq!(cold["sample_count"], 1);
+        assert_eq!(cold["p50_latency_ms"], 7.0);
+        assert_eq!(cold["max_latency_ms"], 7.0);
+    }
+
+    #[test]
+    fn latency_slice_breakdown_prefers_v9_live_measurement_when_present() {
+        let events = vec![
+            token_event! {
+                created_at_epoch_ms: 10,
+                event_id: "legacy-v4".to_string(),
+                correlation_id: "legacy-v4".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 10,
+                occurred_at_epoch_ms: 10,
+                ingested_at_epoch_ms: 10,
+                payload_origin: "context_pack_token_budget_v4".to_string(),
+                query: "legacy".to_string(),
+                query_hash: "hash-legacy".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 55.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+            token_event! {
+                created_at_epoch_ms: 20,
+                event_id: "live-v5".to_string(),
+                correlation_id: "live-v5".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 20,
+                occurred_at_epoch_ms: 20,
+                ingested_at_epoch_ms: 20,
+                payload_origin: "context_pack_token_budget_v5".to_string(),
+                query: "fresh".to_string(),
+                query_hash: "hash-fresh".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 7.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+            token_event! {
+                created_at_epoch_ms: 30,
+                event_id: "live-v6".to_string(),
+                correlation_id: "live-v6".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 30,
+                occurred_at_epoch_ms: 30,
+                ingested_at_epoch_ms: 30,
+                payload_origin: "context_pack_token_budget_v6".to_string(),
+                query: "fresher".to_string(),
+                query_hash: "hash-fresher".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 3.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+            token_event! {
+                created_at_epoch_ms: 40,
+                event_id: "live-v7".to_string(),
+                correlation_id: "live-v7".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 40,
+                occurred_at_epoch_ms: 40,
+                ingested_at_epoch_ms: 40,
+                payload_origin: "context_pack_token_budget_v7".to_string(),
+                query: "freshest".to_string(),
+                query_hash: "hash-freshest".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 2.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+            token_event! {
+                created_at_epoch_ms: 60,
+                event_id: "live-v10".to_string(),
+                correlation_id: "live-v10".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 60,
+                occurred_at_epoch_ms: 60,
+                ingested_at_epoch_ms: 60,
+                payload_origin: "context_pack_token_budget_v10".to_string(),
+                query: "latest-postfix".to_string(),
+                query_hash: "hash-latest-postfix".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 0.8,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+            token_event! {
+                created_at_epoch_ms: 50,
+                event_id: "live-v8".to_string(),
+                correlation_id: "live-v8".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 50,
+                occurred_at_epoch_ms: 50,
+                ingested_at_epoch_ms: 50,
+                payload_origin: "context_pack_token_budget_v8".to_string(),
+                query: "latest".to_string(),
+                query_hash: "hash-latest".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 1.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+        ];
+
+        let breakdown = latency_slice_breakdown(&events);
+        let slices = breakdown.as_array().expect("array");
+        let cold = slices
+            .iter()
+            .find(|slice| slice["state"].as_str() == Some("cold"))
+            .expect("cold");
+
+        assert_eq!(cold["sample_count"], 1);
+        assert_eq!(cold["p50_latency_ms"], 0.8);
+        assert_eq!(cold["max_latency_ms"], 0.8);
+    }
+
+    #[test]
     fn dashboard_same_meter_sync_signature_tracks_missing_whole_cycle_targets() {
         let events = vec![
             token_event! {
@@ -28448,24 +27349,30 @@ effective_to_epoch_ms = 2000
             &events,
             &events,
             &events,
+            None,
+            &events,
             &scope,
             Some(&scope),
             &scope,
             None,
             None,
             None,
+            &json!({}),
             90,
         ));
         let right = dashboard_report_signature(&dashboard_report_signature_components(
             &events,
             &events,
             &events,
+            None,
+            &events,
             &scope,
             Some(&scope),
             &scope,
             None,
             None,
             None,
+            &json!({}),
             90,
         ));
 
@@ -28531,17 +27438,22 @@ effective_to_epoch_ms = 2000
             &events,
             &events,
             &events,
+            None,
+            &events,
             &base_scope,
             Some(&base_scope),
             &base_scope,
             None,
             None,
             None,
+            &json!({}),
             90,
         ));
         let right = dashboard_report_signature(&dashboard_report_signature_components(
             &events,
             &events,
+            &events,
+            None,
             &events,
             &changed_scope,
             Some(&base_scope),
@@ -28549,6 +27461,7 @@ effective_to_epoch_ms = 2000
             None,
             None,
             None,
+            &json!({}),
             90,
         ));
 
@@ -28639,17 +27552,22 @@ effective_to_epoch_ms = 2000
             &events,
             &events,
             &events,
+            None,
+            &events,
             &scope,
             Some(&scope),
             &scope,
             None,
             None,
             Some(&baseline_limits),
+            &json!({}),
             90,
         ));
         let right = dashboard_report_signature(&dashboard_report_signature_components(
             &events,
             &events,
+            &events,
+            None,
             &events,
             &scope,
             Some(&scope),
@@ -28657,10 +27575,263 @@ effective_to_epoch_ms = 2000
             None,
             None,
             Some(&changed_limits),
+            &json!({}),
             90,
         ));
 
         assert_ne!(left, right);
+    }
+
+    #[test]
+    fn dashboard_report_signature_changes_when_live_response_latency_changes() {
+        let events = vec![token_event! {
+            created_at_epoch_ms: 10,
+            event_id: "event-a".to_string(),
+            correlation_id: "ctx-a".to_string(),
+            session_id: "session-1".to_string(),
+            rolling_window_profile: "codex_5h".to_string(),
+            timestamp_utc: 10,
+            occurred_at_epoch_ms: 10,
+            ingested_at_epoch_ms: 10,
+            query: "q-a".to_string(),
+            query_hash: "hash-a".to_string(),
+            query_type: "code_lookup".to_string(),
+            target_kind: "file".to_string(),
+            baseline_hit_target: true,
+            amai_hit_target: true,
+            cold_warm_state: "warm".to_string(),
+            baseline_strategy: "naive_top_files".to_string(),
+            retrieval_mode: Some("local_strict".to_string()),
+            tokenizer: "o200k_base".to_string(),
+            latency_ms: 1.0,
+            saved_tokens: 10,
+            naive_tokens: 20,
+            context_tokens: 10,
+            recovery_tokens: 0,
+            effective_saved_tokens: 10,
+            savings_factor: 2.0,
+            savings_percent: 50.0,
+            effective_savings_percent: 50.0,
+            quality_ok: true,
+            quality_score: 1.0,
+            quality_method: "retrieval_parity".to_string(),
+            quality_tier: "retrieval".to_string(),
+            head_hit_target: true,
+            needed_followup: false,
+            followup_count: 0,
+            followup_of_event_id: None,
+            resolved_by_event_id: None,
+            fallback_triggered: false,
+            fallback_count: 0,
+            document_hits: 1,
+            symbol_hits_count: 0,
+            file_hits: 1,
+            sources_count: 1,
+            chunks_count: 1,
+            pack_token_count: 10,
+            deduped_token_count: 10,
+        }];
+        let scope = AssistantGenerationScopeObservation::default();
+        let left = dashboard_report_signature(&dashboard_report_signature_components(
+            &events,
+            &events,
+            &events,
+            None,
+            &events,
+            &scope,
+            Some(&scope),
+            &scope,
+            None,
+            None,
+            None,
+            &json!({"rolling_window": {"latency_slices": []}}),
+            90,
+        ));
+        let right = dashboard_report_signature(&dashboard_report_signature_components(
+            &events,
+            &events,
+            &events,
+            None,
+            &events,
+            &scope,
+            Some(&scope),
+            &scope,
+            None,
+            None,
+            None,
+            &json!({"rolling_window": {"latency_slices": [{"state": "cold", "sample_count": 1, "p50_latency_ms": 5.0}]}}),
+            90,
+        ));
+
+        assert_ne!(left, right);
+    }
+
+    #[test]
+    fn current_session_live_response_turns_splits_thread_on_gap() {
+        let turns = vec![
+            super::LiveResponseTurnObservation {
+                thread_id: "thread-live".to_string(),
+                turn_id: "turn-1".to_string(),
+                state: "cold".to_string(),
+                started_at_epoch_ms: 1_000,
+                ended_at_epoch_ms: 2_000,
+                latency_ms: 1.0,
+            },
+            super::LiveResponseTurnObservation {
+                thread_id: "thread-live".to_string(),
+                turn_id: "turn-2".to_string(),
+                state: "hot".to_string(),
+                started_at_epoch_ms: 3_000,
+                ended_at_epoch_ms: 4_000,
+                latency_ms: 0.8,
+            },
+            super::LiveResponseTurnObservation {
+                thread_id: "thread-live".to_string(),
+                turn_id: "turn-3".to_string(),
+                state: "cold".to_string(),
+                started_at_epoch_ms: 800_000,
+                ended_at_epoch_ms: 801_000,
+                latency_ms: 2.2,
+            },
+        ];
+
+        let current = super::current_session_live_response_turns(&turns, Some("thread-live"), 5);
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].turn_id, "turn-3");
+    }
+
+    #[test]
+    fn annotate_live_response_latency_surface_marks_previous_turn_series_when_new_turn_is_empty() {
+        let mut surface = json!({
+            "current_thread_id": "thread-live",
+            "current_session": {
+                "sample_count": 3,
+                "latest_turn": {
+                    "ended_at_epoch_ms": 2_000
+                }
+            }
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn",
+            "thread_id": "thread-live",
+            "started_at_epoch_ms": 3_000
+        });
+
+        super::annotate_live_response_latency_surface(&mut surface, &current_live_turn);
+
+        assert_eq!(
+            surface["current_session_relation"]["status"],
+            json!("recent_same_chat_series_previous_turn")
+        );
+        assert!(
+            surface["current_session_relation"]["note"]
+                .as_str()
+                .is_some_and(|note| note.contains("из предыдущего turn"))
+        );
+    }
+
+    #[test]
+    fn current_thread_live_file_hints_use_latest_same_thread_file_events() {
+        let events = vec![
+            token_event! {
+                thread_id: Some("thread-live".to_string()),
+                traffic_class: "live".to_string(),
+                target_kind: "file".to_string(),
+                measurement_scope: "retrieval_lower_bound".to_string(),
+                quality_ok: true,
+                query: "./src/dashboard.rs".to_string(),
+                occurred_at_epoch_ms: 1_000,
+            },
+            token_event! {
+                thread_id: Some("thread-live".to_string()),
+                traffic_class: "live".to_string(),
+                target_kind: "file".to_string(),
+                measurement_scope: "retrieval_lower_bound".to_string(),
+                quality_ok: true,
+                query: "./src/token_budget.rs".to_string(),
+                occurred_at_epoch_ms: 2_000,
+            },
+            token_event! {
+                thread_id: Some("thread-other".to_string()),
+                traffic_class: "live".to_string(),
+                target_kind: "file".to_string(),
+                measurement_scope: "retrieval_lower_bound".to_string(),
+                quality_ok: true,
+                query: "./src/ignore.rs".to_string(),
+                occurred_at_epoch_ms: 3_000,
+            },
+        ];
+
+        let hints = super::build_current_thread_live_file_hints(
+            &events,
+            Some("art"),
+            Some("continuity"),
+            Some("thread-live"),
+            5,
+        );
+        assert_eq!(hints["sample_count"], json!(2));
+        assert_eq!(
+            hints["hints"],
+            json!([
+                { "label": "dashboard.rs", "query": "./src/dashboard.rs" },
+                { "label": "token_budget.rs", "query": "./src/token_budget.rs" }
+            ])
+        );
+    }
+
+    #[test]
+    fn live_response_latency_rolling_window_is_project_scoped_not_thread_scoped() {
+        let repo_root = Path::new("/home/art/agent-memory-index");
+        let events = vec![
+            token_event! {
+                project: "amai".to_string(),
+                namespace: "continuity".to_string(),
+                thread_id: Some("thread-current".to_string()),
+                turn_id: Some("turn-1".to_string()),
+                cold_warm_state: "warm".to_string(),
+                latency_ms: 1.0,
+                occurred_at_epoch_ms: 1_000,
+                created_at_epoch_ms: 1_000,
+            },
+            token_event! {
+                project: "amai".to_string(),
+                namespace: "continuity".to_string(),
+                thread_id: Some("thread-other".to_string()),
+                turn_id: Some("turn-2".to_string()),
+                cold_warm_state: "cold".to_string(),
+                latency_ms: 4.0,
+                occurred_at_epoch_ms: 2_000,
+                created_at_epoch_ms: 2_000,
+            },
+            token_event! {
+                project: "other".to_string(),
+                namespace: "continuity".to_string(),
+                thread_id: Some("thread-foreign".to_string()),
+                turn_id: Some("turn-3".to_string()),
+                cold_warm_state: "warm".to_string(),
+                latency_ms: 9.0,
+                occurred_at_epoch_ms: 3_000,
+                created_at_epoch_ms: 3_000,
+            },
+        ];
+
+        let surface = super::build_live_response_latency_surface(
+            repo_root,
+            Some("amai"),
+            Some("continuity"),
+            &events,
+            Some(24),
+            5,
+            60,
+            60_000,
+        )
+        .expect("surface");
+
+        assert_eq!(surface["rolling_window"]["sample_count"], json!(2));
+        assert_eq!(
+            surface["rolling_window"]["latency_slices"][0]["sample_count"],
+            json!(2)
+        );
     }
 
     #[test]
@@ -28681,7 +27852,8 @@ effective_to_epoch_ms = 2000
             latest_created_at_epoch_ms: Some(101),
         }];
 
-        let base_sig = dashboard_token_events_signature_from_summary(&["token_budget_event"], &base);
+        let base_sig =
+            dashboard_token_events_signature_from_summary(&["token_budget_event"], &base);
         assert_ne!(
             base_sig,
             dashboard_token_events_signature_from_summary(&["token_budget_event"], &changed_count)
@@ -28711,6 +27883,20 @@ effective_to_epoch_ms = 2000
                 &summary,
             )
         );
+    }
+
+    #[test]
+    fn dashboard_token_events_signature_changes_with_invalidation_epoch() {
+        let summary = vec![ObservabilitySnapshotKindSummary {
+            snapshot_kind: "token_budget_event".to_string(),
+            snapshots_count: 10,
+            latest_created_at_epoch_ms: Some(100),
+        }];
+
+        let left = super::dashboard_token_events_signature(&["token_budget_event"], &summary, 0);
+        let right = super::dashboard_token_events_signature(&["token_budget_event"], &summary, 1);
+
+        assert_ne!(left, right);
     }
 
     #[test]
@@ -29083,12 +28269,12 @@ effective_to_epoch_ms = 2000
         }
         let repo_root = unique_test_repo_root("provider-usage-default-missing");
         fs::create_dir_all(&repo_root).expect("create repo root");
-        let source = configured_provider_usage_source(&repo_root);
+        let source = external_truth::configured_provider_usage_source(&repo_root);
         assert_eq!(source["status"], "default_path_missing");
         assert_eq!(source["binding_status"], "not_configured");
         assert_eq!(
             source["resolved_path"],
-            provider_usage_default_path(&repo_root)
+            external_truth::provider_usage_default_path(&repo_root)
                 .display()
                 .to_string()
         );
@@ -29101,7 +28287,7 @@ effective_to_epoch_ms = 2000
             std::env::remove_var("AMAI_PROVIDER_RATE_CARD_PATH");
         }
         let repo_root = unique_test_repo_root("provider-rate-card-default-existing");
-        let default_path = provider_rate_card_default_path(&repo_root);
+        let default_path = external_truth::provider_rate_card_default_path(&repo_root);
         fs::create_dir_all(default_path.parent().expect("parent")).expect("create state dir");
         fs::write(
             &default_path,
@@ -29115,7 +28301,7 @@ effective_to_epoch_ms = 2000
 }"#,
         )
         .expect("write rate card");
-        let source = configured_provider_rate_card_source(&repo_root);
+        let source = external_truth::configured_provider_rate_card_source(&repo_root);
         assert_eq!(source["status"], "default_existing_path");
         assert_eq!(source["binding_status"], "default_but_unbound");
         assert_eq!(source["resolved_path"], default_path.display().to_string());
@@ -29145,6 +28331,61 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(state, "current_thread_mismatch");
         assert!(!bound);
+    }
+
+    #[test]
+    fn build_client_live_meter_json_surfaces_rollout_jsonl_tolerance_summary() {
+        let observation = crate::codex_threads::RolloutClientMeterObservation {
+            thread_id: "thread-current".to_string(),
+            rollout_path: "/tmp/rollout.jsonl".to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_epoch_ms: 100,
+            ended_at_epoch_ms: 200,
+            first_assistant_response_at_epoch_ms: None,
+            client_turn_total_tokens: 500,
+            client_turn_input_tokens: 400,
+            client_turn_cached_input_tokens: 100,
+            client_turn_output_tokens: 50,
+            client_turn_reasoning_output_tokens: 25,
+            latest_cumulative_total_tokens: 1500,
+            latest_model_context_window: 258400,
+            latest_primary_limit_used_percent: 33,
+            latest_secondary_limit_used_percent: 44,
+            latest_primary_window_duration_mins: None,
+            latest_primary_resets_at_epoch_seconds: None,
+            latest_secondary_window_duration_mins: None,
+            latest_secondary_resets_at_epoch_seconds: None,
+            rollout_jsonl_tolerance_summary: crate::codex_threads::RolloutJsonlToleranceSummary {
+                skipped_empty_or_nul_lines: 12,
+                skipped_non_json_prefix_lines: 3,
+                sanitized_nul_json_lines: 1,
+            },
+            observation_source: "codex_rollout_client_meter_v2".to_string(),
+        };
+
+        let live_meter =
+            super::build_client_live_meter_json(Some(&observation), Some("thread-current"), None);
+
+        assert_eq!(
+            live_meter["rollout_jsonl_tolerance_summary"]["skipped_empty_or_nul_lines"],
+            json!(12)
+        );
+        assert_eq!(
+            live_meter["rollout_jsonl_tolerance_summary"]["skipped_non_json_prefix_lines"],
+            json!(3)
+        );
+        assert_eq!(
+            live_meter["rollout_jsonl_tolerance_summary"]["sanitized_nul_json_lines"],
+            json!(1)
+        );
+        assert_eq!(
+            live_meter["rollout_jsonl_tolerated_skips_present"],
+            json!(true)
+        );
+        assert_eq!(
+            live_meter["rollout_jsonl_malformed_objects_fail_closed"],
+            json!(true)
+        );
     }
 
     #[test]
@@ -29257,6 +28498,7 @@ effective_to_epoch_ms = 2000
             turn_id: "turn-1".to_string(),
             started_at_epoch_ms: 10,
             ended_at_epoch_ms: 11,
+            first_assistant_response_at_epoch_ms: None,
             client_turn_total_tokens: 100,
             client_turn_input_tokens: 80,
             client_turn_cached_input_tokens: 0,
@@ -29266,11 +28508,19 @@ effective_to_epoch_ms = 2000
             latest_model_context_window: 258400,
             latest_primary_limit_used_percent: 10,
             latest_secondary_limit_used_percent: 20,
+            latest_primary_window_duration_mins: None,
+            latest_primary_resets_at_epoch_seconds: None,
+            latest_secondary_window_duration_mins: None,
+            latest_secondary_resets_at_epoch_seconds: None,
+            rollout_jsonl_tolerance_summary:
+                crate::codex_threads::RolloutJsonlToleranceSummary::default(),
             observation_source: "codex_rollout_client_meter_v2".to_string(),
         };
         let left = dashboard_report_signature(&dashboard_report_signature_components(
             &events,
             &events,
+            &events,
+            None,
             &events,
             &scope,
             Some(&scope),
@@ -29278,11 +28528,14 @@ effective_to_epoch_ms = 2000
             Some(&meter),
             Some("thread-live"),
             None,
+            &json!({}),
             90,
         ));
         let right = dashboard_report_signature(&dashboard_report_signature_components(
             &events,
             &events,
+            &events,
+            None,
             &events,
             &scope,
             Some(&scope),
@@ -29290,6 +28543,7 @@ effective_to_epoch_ms = 2000
             Some(&meter),
             None,
             None,
+            &json!({}),
             90,
         ));
         assert_ne!(left, right);
@@ -29349,24 +28603,30 @@ effective_to_epoch_ms = 2000
             &events,
             &events,
             &events,
+            None,
+            &events,
             &scope,
             Some(&scope),
             &scope,
             None,
             None,
             None,
+            &json!({}),
             90,
         ));
         let right = dashboard_report_signature(&dashboard_report_signature_components(
             &events,
             &events,
             &events,
+            None,
+            &events,
             &scope,
             Some(&scope),
             &scope,
             None,
             None,
             None,
+            &json!({}),
             50,
         ));
         assert_ne!(left, right);
@@ -29474,6 +28734,32 @@ effective_to_epoch_ms = 2000
     }
 
     #[test]
+    fn open_turn_pending_activity_surface_overrides_no_activity_state() {
+        let mut surface = json!({
+            "status": "no_amai_activity_in_current_live_turn",
+            "matched_context_pack_ids_count": 0,
+            "retrieval_context_pack_count": 0
+        });
+
+        assert!(super::apply_open_turn_pending_activity_surface(
+            &mut surface,
+            2,
+            3
+        ));
+        assert_eq!(
+            surface["status"],
+            json!("thread_activity_observed_turn_open")
+        );
+        assert_eq!(surface["matched_context_pack_ids_count"], json!(2));
+        assert_eq!(surface["retrieval_context_pack_count"], json!(3));
+        assert!(
+            surface["note"].as_str().is_some_and(
+                |note| note.contains("после последнего завершённого client-meter turn")
+            )
+        );
+    }
+
+    #[test]
     fn exact_client_limit_hourly_burn_value_classifies_saving() {
         let samples = vec![super::ExactClientLimitSample {
             observed_at_epoch_ms: 1_800_000,
@@ -29482,7 +28768,7 @@ effective_to_epoch_ms = 2000
             primary_resets_at_epoch_seconds: Some(3_600),
             source: "codex_app_server_account_rate_limits_read_v1".to_string(),
         }];
-        let value = super::exact_client_limit_hourly_burn_value(&samples, 1_800_000, 60, 10, 55);
+        let value = super::exact_client_limit_hourly_burn_value(&samples, 1_800_000, 60, 10, 0);
         assert_eq!(value["status"].as_str(), Some("observed"));
         assert_eq!(value["classification"].as_str(), Some("saving"));
         assert_eq!(
@@ -29500,7 +28786,7 @@ effective_to_epoch_ms = 2000
             primary_resets_at_epoch_seconds: Some(3_600),
             source: "codex_app_server_account_rate_limits_read_v1".to_string(),
         }];
-        let value = super::exact_client_limit_hourly_burn_value(&samples, 1_800_000, 60, 10, 55);
+        let value = super::exact_client_limit_hourly_burn_value(&samples, 1_800_000, 60, 10, 0);
         assert_eq!(value["status"].as_str(), Some("observed"));
         assert_eq!(value["classification"].as_str(), Some("one_to_one"));
         assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: 1:1"));
@@ -29515,13 +28801,874 @@ effective_to_epoch_ms = 2000
             primary_resets_at_epoch_seconds: Some(3_600),
             source: "codex_app_server_account_rate_limits_read_v1".to_string(),
         }];
-        let value = super::exact_client_limit_hourly_burn_value(&samples, 1_800_000, 60, 10, 55);
+        let value = super::exact_client_limit_hourly_burn_value(&samples, 1_800_000, 60, 10, 0);
         assert_eq!(value["status"].as_str(), Some("observed"));
         assert_eq!(value["classification"].as_str(), Some("overspend"));
         assert_eq!(
             value["reply_prefix"].as_str(),
             Some("5ч KPI: переплата 50.00%")
         );
+    }
+
+    #[test]
+    fn exact_client_limit_hourly_burn_value_damps_before_min_history_span() {
+        let samples = vec![super::ExactClientLimitSample {
+            observed_at_epoch_ms: 300_000,
+            primary_used_percent: 11.0,
+            primary_window_duration_mins: Some(300),
+            primary_resets_at_epoch_seconds: Some(18_000),
+            source: "codex_app_server_account_rate_limits_read_v1".to_string(),
+        }];
+        let value = super::exact_client_limit_hourly_burn_value(&samples, 300_000, 60, 10, 55);
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(value["window_progress_state"].as_str(), Some("preliminary"));
+        assert_eq!(
+            value["reply_prefix"].as_str(),
+            Some("5ч KPI: переплата 50.91%")
+        );
+        assert_eq!(value["minimum_elapsed_window_minutes"].as_u64(), Some(55));
+        assert!(
+            value["raw_kpi_percent"]
+                .as_f64()
+                .is_some_and(|value| (value - 560.0).abs() < 0.001)
+        );
+    }
+
+    #[test]
+    fn personal_agent_kpi_from_summary_uses_verified_scope_savings() {
+        let selector = super::PersonalKpiSelector {
+            project_code: "amai".to_string(),
+            namespace_code: "continuity".to_string(),
+            agent_scope: "amai::continuity::default".to_string(),
+            thread_id: None,
+        };
+        let value = super::personal_agent_kpi_from_summary(
+            &json!({
+                "events_total": 3,
+                "counted_events": 2,
+                "verified_effective_savings_pct": 61.25,
+                "effective_savings_pct": 44.0
+            }),
+            Some(&selector),
+        );
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(value["confidence"].as_str(), Some("verified"));
+        assert_eq!(value["classification"].as_str(), Some("saving"));
+        assert_eq!(
+            value["reply_prefix"].as_str(),
+            Some("5ч KPI: экономия 61.25%")
+        );
+    }
+
+    #[test]
+    fn personal_agent_kpi_from_summary_prefers_thread_scope_label_when_bound() {
+        let selector = super::PersonalKpiSelector {
+            project_code: "amai".to_string(),
+            namespace_code: "continuity".to_string(),
+            agent_scope: "amai::continuity::default".to_string(),
+            thread_id: Some("thread-123".to_string()),
+        };
+        let value = super::personal_agent_kpi_from_summary(
+            &json!({
+                "events_total": 0,
+                "counted_events": 0
+            }),
+            Some(&selector),
+        );
+        assert_eq!(value["scope_kind"].as_str(), Some("personal_thread_scope"));
+        assert_eq!(value["scope_label"].as_str(), Some("thread-123"));
+        assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: н/д"));
+    }
+
+    #[test]
+    fn personal_agent_online_kpi_from_client_live_meter_uses_raw_thread_limit_contour() {
+        let value = super::personal_agent_online_kpi_from_client_live_meter(
+            &json!({
+                "status": "observed",
+                "current_thread_bound": true,
+                "ended_at_epoch_ms": 1775056740000u64,
+                "primary_limit_used_percent": 14.0,
+                "primary_window_duration_mins": 300,
+                "primary_resets_at_epoch_seconds": 1775063220u64,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": 1775056740000u64,
+                    "primary_limit_used_percent": 14.0,
+                    "primary_window_duration_mins": 300,
+                    "primary_resets_at_epoch_seconds": 1775063220u64
+                }
+            }),
+            "personal_thread_scope",
+            "thread-bounty",
+        )
+        .expect("online kpi");
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(value["confidence"].as_str(), Some("online_limit_contour"));
+        assert_eq!(value["scope_kind"].as_str(), Some("personal_thread_scope"));
+        assert_eq!(value["scope_label"].as_str(), Some("thread-bounty"));
+        assert_eq!(
+            value["reply_prefix"].as_str(),
+            Some("5ч KPI: экономия 78.12%")
+        );
+        assert!(
+            value["summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains("thread-local"))
+        );
+    }
+
+    #[test]
+    fn personal_agent_online_kpi_from_client_live_meter_prefers_thread_local_contour_over_status_bar()
+     {
+        let value = super::personal_agent_online_kpi_from_client_live_meter(
+            &json!({
+                "status": "observed",
+                "current_thread_bound": true,
+                "ended_at_epoch_ms": 1775056740000u64,
+                "primary_limit_used_percent": 93.0,
+                "primary_limit_remaining_percent": 7.0,
+                "secondary_limit_used_percent": 40.0,
+                "secondary_limit_remaining_percent": 60.0,
+                "primary_window_duration_mins": 300,
+                "primary_resets_at_epoch_seconds": 1775063220u64,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": 1775056740000u64,
+                    "primary_limit_used_percent": 7.0,
+                    "primary_limit_remaining_percent": 93.0,
+                    "secondary_limit_used_percent": 2.0,
+                    "secondary_limit_remaining_percent": 98.0,
+                    "primary_window_duration_mins": 300,
+                    "primary_resets_at_epoch_seconds": 1775063220u64
+                }
+            }),
+            "personal_thread_scope",
+            "thread-amai",
+        )
+        .expect("online kpi");
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(value["confidence"].as_str(), Some("online_limit_contour"));
+        assert_eq!(
+            value["reply_prefix"].as_str(),
+            Some("5ч KPI: переплата 45.31%")
+        );
+        assert!(
+            value["summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains("thread-local"))
+        );
+    }
+
+    #[test]
+    fn personal_agent_online_kpi_from_client_live_meter_damps_before_min_history_span() {
+        let value = super::personal_agent_online_kpi_from_client_live_meter(
+            &json!({
+                "status": "observed",
+                "current_thread_bound": true,
+                "ended_at_epoch_ms": 300_000u64,
+                "primary_limit_used_percent": 11.0,
+                "primary_window_duration_mins": 300,
+                "primary_resets_at_epoch_seconds": 18_000u64,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": 300_000u64,
+                    "primary_limit_used_percent": 11.0,
+                    "primary_window_duration_mins": 300,
+                    "primary_resets_at_epoch_seconds": 18_000u64
+                }
+            }),
+            "personal_thread_scope",
+            "thread-amai",
+        )
+        .expect("online kpi");
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(value["confidence"].as_str(), Some("online_limit_contour"));
+        assert_eq!(value["window_progress_state"].as_str(), Some("preliminary"));
+        assert_eq!(
+            value["reply_prefix"].as_str(),
+            Some("5ч KPI: переплата 50.91%")
+        );
+        assert_eq!(value["minimum_elapsed_window_minutes"].as_u64(), Some(55));
+    }
+
+    #[test]
+    fn preferred_personal_agent_kpi_prefers_online_limit_contour_over_measured_summary() {
+        let selector = super::PersonalKpiSelector {
+            project_code: "amai".to_string(),
+            namespace_code: "continuity".to_string(),
+            agent_scope: "amai::continuity::default".to_string(),
+            thread_id: Some("thread-amai".to_string()),
+        };
+        let value = super::preferred_personal_agent_kpi(
+            &json!({
+                "events_total": 3,
+                "counted_events": 2,
+                "verified_effective_savings_pct": 61.25,
+                "effective_savings_pct": 44.0
+            }),
+            Some(&selector),
+            Some(&json!({
+                "status": "observed",
+                "current_thread_bound": true,
+                "ended_at_epoch_ms": 1775056740000u64,
+                "primary_limit_used_percent": 14.0,
+                "primary_window_duration_mins": 300,
+                "primary_resets_at_epoch_seconds": 1775063220u64,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": 1775056740000u64,
+                    "primary_limit_used_percent": 14.0,
+                    "primary_window_duration_mins": 300,
+                    "primary_resets_at_epoch_seconds": 1775063220u64
+                }
+            })),
+        );
+        assert_eq!(value["confidence"].as_str(), Some("online_limit_contour"));
+        assert_eq!(
+            value["reply_prefix"].as_str(),
+            Some("5ч KPI: экономия 78.12%")
+        );
+    }
+
+    #[test]
+    fn preferred_personal_agent_kpi_fails_closed_without_online_limit_contour() {
+        let selector = super::PersonalKpiSelector {
+            project_code: "amai".to_string(),
+            namespace_code: "continuity".to_string(),
+            agent_scope: "amai::continuity::default".to_string(),
+            thread_id: Some("thread-amai".to_string()),
+        };
+        let value = super::preferred_personal_agent_kpi(
+            &json!({
+                "events_total": 3,
+                "counted_events": 2,
+                "verified_effective_savings_pct": 61.25,
+                "effective_savings_pct": 44.0
+            }),
+            Some(&selector),
+            Some(&json!({
+                "ended_at_epoch_ms": 1775056740000u64,
+                "status_bar_rate_limits": {
+                    "status": "missing"
+                }
+            })),
+        );
+        assert_eq!(value["status"].as_str(), Some("missing"));
+        assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: н/д"));
+        assert!(
+            value["summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains("запрещён"))
+        );
+    }
+
+    #[test]
+    fn attach_active_agent_personal_limit_surfaces_prefers_exact_status_bar_limits() {
+        let mut agents = vec![json!({
+            "client_live_meter": {
+                "status": "observed",
+                "current_thread_bound": true,
+                "ended_at_epoch_ms": 1775056740000u64,
+                "primary_limit_used_percent": 39,
+                "primary_limit_remaining_percent": 61,
+                "primary_window_duration_mins": 300,
+                "primary_resets_at_epoch_seconds": 1775063220u64,
+                "secondary_limit_used_percent": 72,
+                "secondary_limit_remaining_percent": 28,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": 1775056740000u64,
+                    "primary_limit_used_percent": 7.0,
+                    "primary_limit_remaining_percent": 93.0,
+                    "secondary_limit_used_percent": 2.0,
+                    "secondary_limit_remaining_percent": 98.0,
+                    "primary_window_duration_mins": 300,
+                    "primary_resets_at_epoch_seconds": 1775063220u64
+                }
+            }
+        })];
+
+        super::attach_active_agent_personal_limit_surfaces(&mut agents);
+
+        assert_eq!(
+            agents[0]["personal_client_limit"]["value_text"].as_str(),
+            Some("5ч остаётся 93.00%, 7д остаётся 98.00%")
+        );
+        assert_eq!(
+            agents[0]["personal_client_limit"]["primary_used_percent"].as_f64(),
+            Some(7.0)
+        );
+        assert_eq!(
+            agents[0]["personal_client_limit"]["label_text"].as_str(),
+            Some("Лимит клиента сейчас:")
+        );
+        assert!(
+            agents[0]["personal_client_limit"]["tooltip"]
+                .as_str()
+                .is_some_and(|tooltip| tooltip.contains("status-bar"))
+        );
+    }
+
+    #[test]
+    fn attach_active_agent_personal_limit_surfaces_uses_thread_local_limits_without_status_bar() {
+        let mut agents = vec![json!({
+            "client_live_meter": {
+                "status": "observed",
+                "thread_id": "thread-amai",
+                "current_thread_bound": true,
+                "ended_at_epoch_ms": 1775056740000u64,
+                "primary_limit_used_percent": 7.0,
+                "primary_limit_remaining_percent": 93.0,
+                "primary_window_duration_mins": 300,
+                "primary_resets_at_epoch_seconds": 1775063220u64,
+                "secondary_limit_used_percent": 2.0,
+                "secondary_limit_remaining_percent": 98.0,
+                "status_bar_rate_limits": {
+                    "status": "missing"
+                }
+            }
+        })];
+
+        super::attach_active_agent_personal_limit_surfaces(&mut agents);
+
+        assert_eq!(
+            agents[0]["personal_client_limit"]["status"].as_str(),
+            Some("observed")
+        );
+        assert_eq!(
+            agents[0]["personal_client_limit"]["label_text"].as_str(),
+            Some("Личный thread-limit агента:")
+        );
+        assert_eq!(
+            agents[0]["personal_client_limit"]["value_text"].as_str(),
+            Some("5ч остаётся 93.00%, 7д остаётся 98.00%")
+        );
+    }
+
+    #[test]
+    fn attach_active_agent_personal_limit_surfaces_fail_closed_without_any_online_limit_source() {
+        let mut agents = vec![json!({
+            "client_live_meter": {
+                "status": "observed",
+                "thread_id": "thread-amai",
+                "current_thread_bound": true,
+                "status_bar_rate_limits": {
+                    "status": "missing"
+                }
+            }
+        })];
+
+        super::attach_active_agent_personal_limit_surfaces(&mut agents);
+
+        assert_eq!(
+            agents[0]["personal_client_limit"]["status"].as_str(),
+            Some("missing")
+        );
+        assert_eq!(
+            agents[0]["personal_client_limit"]["label_text"].as_str(),
+            Some("Лимит клиента сейчас:")
+        );
+        assert_eq!(
+            agents[0]["personal_client_limit"]["value_text"].as_str(),
+            Some("н/д")
+        );
+        assert!(
+            agents[0]["personal_client_limit"]["tooltip"]
+                .as_str()
+                .is_some_and(|tooltip| tooltip.contains("Другие источники"))
+        );
+    }
+
+    #[test]
+    fn active_agent_personal_kpi_window_falls_back_to_agent_scope_when_thread_slice_missing() {
+        let selector = super::PersonalKpiSelector {
+            project_code: "bug_bounty".to_string(),
+            namespace_code: "continuity".to_string(),
+            agent_scope: "bug_bounty::continuity::default".to_string(),
+            thread_id: Some("thread-live".to_string()),
+        };
+        let events = vec![
+            token_event! {
+                created_at_epoch_ms: 1_000,
+                project: "bug_bounty".to_string(),
+                namespace: "continuity".to_string(),
+                agent_scope: "bug_bounty::continuity::default".to_string(),
+                event_id: "bug-scope".to_string(),
+                correlation_id: "bug-scope".to_string(),
+                effective_savings_percent: 72.0,
+                quality_ok: true,
+            },
+            token_event! {
+                created_at_epoch_ms: 1_000,
+                project: "bug_bounty".to_string(),
+                namespace: "continuity".to_string(),
+                agent_scope: "bug_bounty::continuity::other".to_string(),
+                event_id: "foreign-scope".to_string(),
+                correlation_id: "foreign-scope".to_string(),
+                effective_savings_percent: 10.0,
+                quality_ok: true,
+            },
+        ];
+
+        let (window, resolved_selector, used_fallback) =
+            super::active_agent_personal_kpi_window(&events, &selector, 2_000);
+
+        assert!(used_fallback);
+        assert_eq!(resolved_selector.thread_id, None);
+        assert_eq!(
+            resolved_selector.agent_scope,
+            "bug_bounty::continuity::default"
+        );
+        assert_eq!(window.len(), 1);
+        assert_eq!(window[0].event_id, "bug-scope");
+    }
+
+    #[test]
+    fn active_agent_activity_entries_adds_recent_thread_fallback_when_lease_missing() {
+        let activity = json!({
+            "active_now_scopes": [
+                {
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/home/art/agent-memory-index",
+                    "agent_scope": "amai::continuity::default",
+                    "owner_thread_id": "thread-amai",
+                    "heartbeat_at_epoch_ms": 9_900,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "live"
+                }
+            ],
+            "client_recent_threads": [
+                {
+                    "thread_id": "thread-amai",
+                    "cwd": "/home/art/agent-memory-index",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_900
+                },
+                {
+                    "thread_id": "thread-bounty",
+                    "cwd": "/home/art/Bug-Bounty",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_800
+                }
+            ],
+            "recent_scopes": [
+                {
+                    "project_code": "bug_bounty",
+                    "namespace_code": "continuity",
+                    "agent_scope": "bug_bounty::continuity::default",
+                    "thread_id": "thread-bounty",
+                    "current_goal": "recent fallback"
+                }
+            ]
+        });
+
+        let entries = super::active_agent_activity_entries(&activity, 10_000);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[1]["agent_scope"],
+            json!("bug_bounty::continuity::default")
+        );
+        assert_eq!(entries[1]["owner_thread_id"], json!("thread-bounty"));
+        assert_eq!(
+            entries[1]["activity_source"],
+            json!("recent_thread_binding_fallback")
+        );
+        assert_eq!(
+            entries[1]["project_repo_root"],
+            json!("/home/art/Bug-Bounty")
+        );
+    }
+
+    #[test]
+    fn active_agent_activity_entries_adds_unbound_recent_thread_fallback_when_binding_missing() {
+        let activity = json!({
+            "active_now_scopes": [
+                {
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/home/art/agent-memory-index",
+                    "agent_scope": "amai::continuity::default",
+                    "owner_thread_id": "thread-amai",
+                    "heartbeat_at_epoch_ms": 9_900,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "live"
+                }
+            ],
+            "client_recent_threads": [
+                {
+                    "thread_id": "thread-amai",
+                    "cwd": "/home/art/agent-memory-index",
+                    "title": "дальше работай",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_900
+                },
+                {
+                    "thread_id": "thread-bounty",
+                    "cwd": "/home/art/Bug-Bounty",
+                    "title": "Авито продолжаем. Проверь возможность записи в Амаи",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_800
+                }
+            ],
+            "recent_scopes": []
+        });
+
+        let entries = super::active_agent_activity_entries(&activity, 10_000);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1]["project_code"], json!("bug_bounty"));
+        assert_eq!(
+            entries[1]["agent_scope"],
+            json!("bug_bounty::continuity::default")
+        );
+        assert_eq!(entries[1]["owner_thread_id"], json!("thread-bounty"));
+        assert_eq!(
+            entries[1]["activity_source"],
+            json!("recent_thread_unbound_fallback")
+        );
+        assert_eq!(
+            entries[1]["project_repo_root"],
+            json!("/home/art/Bug-Bounty")
+        );
+    }
+
+    #[test]
+    fn active_agent_activity_entries_skip_proof_runtime_entries() {
+        let activity = json!({
+            "active_now_scopes": [
+                {
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/home/art/agent-memory-index",
+                    "agent_scope": "proof_execctl_restore_primary_123",
+                    "owner_thread_id": "proof-execctl-restore-primary-123",
+                    "heartbeat_at_epoch_ms": 9_900,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "proof live"
+                },
+                {
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/home/art/agent-memory-index",
+                    "agent_scope": "amai::continuity::default",
+                    "owner_thread_id": "thread-amai",
+                    "heartbeat_at_epoch_ms": 9_950,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "real live"
+                },
+                {
+                    "project_code": "execctl_restore_stress_123",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/tmp/proof",
+                    "agent_scope": "shared",
+                    "owner_thread_id": "thread-proofish",
+                    "heartbeat_at_epoch_ms": 9_960,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "Execctl Restore Stress 123"
+                }
+            ],
+            "client_recent_threads": [
+                {
+                    "thread_id": "thread-amai",
+                    "cwd": "/home/art/agent-memory-index",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_800
+                },
+                {
+                    "thread_id": "proof-execctl-restore-foreign-123",
+                    "cwd": "/tmp/proof",
+                    "model": null,
+                    "updated_at_epoch_ms": 9_800
+                },
+                {
+                    "thread_id": "thread-bounty",
+                    "cwd": "/home/art/Bug-Bounty",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_800
+                }
+            ],
+            "recent_scopes": [
+                {
+                    "project_code": "execctl_restore_stress",
+                    "namespace_code": "continuity",
+                    "agent_scope": "proof_execctl_restore_foreign_123",
+                    "thread_id": "proof-execctl-restore-foreign-123",
+                    "current_goal": "proof fallback"
+                },
+                {
+                    "project_code": "bug_bounty",
+                    "namespace_code": "continuity",
+                    "agent_scope": "bug_bounty::continuity::default",
+                    "thread_id": "thread-bounty",
+                    "current_goal": "recent fallback"
+                }
+            ]
+        });
+
+        let entries = super::active_agent_activity_entries(&activity, 10_000);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0]["agent_scope"],
+            json!("amai::continuity::default")
+        );
+        assert_eq!(
+            entries[1]["agent_scope"],
+            json!("bug_bounty::continuity::default")
+        );
+    }
+
+    #[test]
+    fn active_agent_activity_entries_skip_threads_without_connected_model() {
+        let activity = json!({
+            "active_now_scopes": [
+                {
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/home/art/agent-memory-index",
+                    "agent_scope": "amai::continuity::default",
+                    "owner_thread_id": "thread-amai",
+                    "heartbeat_at_epoch_ms": 9_950,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "real live"
+                },
+                {
+                    "project_code": "execctl_restore_stress_123",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/tmp/proof",
+                    "agent_scope": "execctl_restore_stress_123::continuity::default",
+                    "owner_thread_id": "thread-stress",
+                    "heartbeat_at_epoch_ms": 9_960,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "Execctl Restore Stress 123"
+                }
+            ],
+            "client_recent_threads": [
+                {
+                    "thread_id": "thread-amai",
+                    "cwd": "/home/art/agent-memory-index",
+                    "title": "дальше работай",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_900
+                },
+                {
+                    "thread_id": "thread-stress",
+                    "cwd": "/tmp/proof",
+                    "title": "Execctl Restore Stress 123",
+                    "model": null,
+                    "updated_at_epoch_ms": 9_900
+                }
+            ],
+            "recent_scopes": [
+                {
+                    "project_code": "execctl_restore_stress_123",
+                    "namespace_code": "continuity",
+                    "agent_scope": "execctl_restore_stress_123::continuity::default",
+                    "thread_id": "thread-stress",
+                    "current_goal": "Execctl Restore Stress 123"
+                }
+            ]
+        });
+
+        let entries = super::active_agent_activity_entries(&activity, 10_000);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0]["agent_scope"],
+            json!("amai::continuity::default")
+        );
+    }
+
+    #[test]
+    fn active_agent_thread_ids_from_activity_returns_only_connected_active_threads() {
+        let activity = json!({
+            "active_now_scopes": [
+                {
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/home/art/agent-memory-index",
+                    "agent_scope": "amai::continuity::default",
+                    "owner_thread_id": "thread-amai",
+                    "heartbeat_at_epoch_ms": 9_950,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "real live"
+                },
+                {
+                    "project_code": "proof_execctl_restore",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/tmp/proof",
+                    "agent_scope": "proof_execctl_restore::continuity::default",
+                    "owner_thread_id": "thread-proof",
+                    "heartbeat_at_epoch_ms": 9_960,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "proof live"
+                }
+            ],
+            "client_recent_threads": [
+                {
+                    "thread_id": "thread-amai",
+                    "cwd": "/home/art/agent-memory-index",
+                    "title": "дальше работай",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_900
+                },
+                {
+                    "thread_id": "thread-proof",
+                    "cwd": "/tmp/proof",
+                    "title": "Execctl Restore Stress 123",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_900
+                },
+                {
+                    "thread_id": "thread-bounty",
+                    "cwd": "/home/art/Bug-Bounty",
+                    "title": "Авито",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_800
+                }
+            ],
+            "recent_scopes": [
+                {
+                    "project_code": "bug_bounty",
+                    "namespace_code": "continuity",
+                    "agent_scope": "bug_bounty::continuity::default",
+                    "thread_id": "thread-bounty",
+                    "current_goal": "recent fallback"
+                }
+            ]
+        });
+
+        let thread_ids = super::active_agent_thread_ids_from_activity(&activity, 10_000);
+
+        assert_eq!(
+            thread_ids,
+            vec!["thread-amai".to_string(), "thread-bounty".to_string()]
+        );
+    }
+
+    #[test]
+    fn dedup_active_agents_by_identity_prefers_thread_bound_observed_entry() {
+        let deduped = super::dedup_active_agents_by_identity(vec![
+            json!({
+                "project_code": "amai",
+                "namespace_code": "continuity",
+                "agent_scope": "amai::continuity::default",
+                "thread_id": null,
+                "heartbeat_at_epoch_ms": 100,
+                "client_live_meter": {
+                    "status": "missing",
+                    "current_thread_bound": false
+                },
+                "personal_agent_kpi": {
+                    "reply_prefix": "5ч KPI: экономия 64.81%"
+                }
+            }),
+            json!({
+                "project_code": "amai",
+                "namespace_code": "continuity",
+                "agent_scope": "amai::continuity::default",
+                "thread_id": "thread-live",
+                "heartbeat_at_epoch_ms": 200,
+                "client_live_meter": {
+                    "status": "observed",
+                    "current_thread_bound": true
+                },
+                "personal_agent_kpi": {
+                    "reply_prefix": "5ч KPI: экономия 66.15%"
+                }
+            }),
+            json!({
+                "project_code": "bug_bounty",
+                "namespace_code": "continuity",
+                "agent_scope": "bug_bounty::continuity::default",
+                "thread_id": "thread-bounty",
+                "heartbeat_at_epoch_ms": 150,
+                "client_live_meter": {
+                    "status": "observed",
+                    "current_thread_bound": true
+                },
+                "personal_agent_kpi": {
+                    "reply_prefix": "5ч KPI: переплата 72.23%"
+                }
+            }),
+        ]);
+
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0]["thread_id"], json!("thread-live"));
+        assert_eq!(
+            deduped[0]["personal_agent_kpi"]["reply_prefix"],
+            json!("5ч KPI: экономия 66.15%")
+        );
+        assert_eq!(deduped[1]["thread_id"], json!("thread-bounty"));
+    }
+
+    #[test]
+    fn active_agent_kpi_aggregate_averages_only_when_all_active_agents_are_observed() {
+        let value = super::active_agent_kpi_aggregate(&[
+            json!({
+                "personal_agent_kpi": {
+                    "signed_kpi_percent": 60.0
+                }
+            }),
+            json!({
+                "personal_agent_kpi": {
+                    "signed_kpi_percent": 20.0
+                }
+            }),
+        ]);
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(
+            value["reply_prefix"].as_str(),
+            Some("5ч KPI: экономия 40.00%")
+        );
+        assert_eq!(value["active_count"].as_u64(), Some(2));
+        assert_eq!(value["missing_count"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn active_agent_kpi_aggregate_averages_mixed_saving_and_overspend_by_sign() {
+        let value = super::active_agent_kpi_aggregate(&[
+            json!({
+                "personal_agent_kpi": {
+                    "signed_kpi_percent": 66.15
+                }
+            }),
+            json!({
+                "personal_agent_kpi": {
+                    "signed_kpi_percent": -44.0
+                }
+            }),
+        ]);
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(value["classification"].as_str(), Some("saving"));
+        assert_eq!(
+            value["reply_prefix"].as_str(),
+            Some("5ч KPI: экономия 11.08%")
+        );
+        assert_eq!(value["active_count"].as_u64(), Some(2));
+        assert_eq!(value["missing_count"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn active_agent_kpi_aggregate_fails_closed_when_any_active_agent_is_missing() {
+        let value = super::active_agent_kpi_aggregate(&[
+            json!({
+                "personal_agent_kpi": {
+                    "signed_kpi_percent": 60.0
+                }
+            }),
+            json!({
+                "personal_agent_kpi": {
+                    "reply_prefix": "5ч KPI: н/д"
+                }
+            }),
+        ]);
+        assert_eq!(value["status"].as_str(), Some("partial"));
+        assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: н/д"));
+        assert_eq!(value["active_count"].as_u64(), Some(2));
+        assert_eq!(value["missing_count"].as_u64(), Some(1));
     }
 
     #[test]
@@ -29723,12 +29870,9 @@ effective_to_epoch_ms = 2000
         };
         super::write_shared_dashboard_current_session_events(&entry)
             .expect("write current-session cache");
-        let loaded = super::load_shared_dashboard_current_session_events(
-            &temp_root,
-            "sig-a",
-            60_000,
-        )
-        .expect("load current-session cache");
+        let loaded =
+            super::load_shared_dashboard_current_session_events(&temp_root, "sig-a", 60_000)
+                .expect("load current-session cache");
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].event_id, "event-a");
         let _ = fs::remove_dir_all(&temp_root);
@@ -29767,10 +29911,8 @@ effective_to_epoch_ms = 2000
 
     #[test]
     fn shared_dashboard_live_turn_retrieval_cache_roundtrips() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "amai-live-turn-retrieval-cache-{}",
-            Uuid::new_v4()
-        ));
+        let temp_root =
+            std::env::temp_dir().join(format!("amai-live-turn-retrieval-cache-{}", Uuid::new_v4()));
         let context_pack_ids = BTreeSet::from(["ctx-a".to_string(), "ctx-b".to_string()]);
         super::write_shared_dashboard_live_turn_retrieval_invalidation(&temp_root, 321)
             .expect("write invalidation");
@@ -29783,14 +29925,9 @@ effective_to_epoch_ms = 2000
             &context_pack_ids,
             2,
         );
-        let loaded = super::cached_dashboard_live_turn_retrieval(
-            &temp_root,
-            "thread-a",
-            100,
-            200,
-            321,
-        )
-        .expect("load live-turn retrieval cache");
+        let loaded =
+            super::cached_dashboard_live_turn_retrieval(&temp_root, "thread-a", 100, 200, 321)
+                .expect("load live-turn retrieval cache");
         assert_eq!(loaded.0, context_pack_ids);
         assert_eq!(loaded.1, 2);
         let _ = fs::remove_dir_all(&temp_root);
@@ -29841,14 +29978,9 @@ effective_to_epoch_ms = 2000
             &context_pack_ids,
             2,
         );
-        let loaded = super::cached_dashboard_live_turn_retrieval(
-            &temp_root,
-            "thread-a",
-            100,
-            260,
-            321,
-        )
-        .expect("load expanded live-turn retrieval cache");
+        let loaded =
+            super::cached_dashboard_live_turn_retrieval(&temp_root, "thread-a", 100, 260, 321)
+                .expect("load expanded live-turn retrieval cache");
         assert_eq!(loaded.0, context_pack_ids);
         assert_eq!(loaded.1, 2);
         let persisted = super::load_shared_dashboard_live_turn_retrieval_cache(&temp_root)
@@ -29888,8 +30020,11 @@ effective_to_epoch_ms = 2000
             updated_at_epoch_ms: 5_000,
             thread_id: "thread-current".to_string(),
         };
-        fs::write(&path, serde_json::to_vec(&payload).expect("serialize active-thread-hint"))
-            .expect("write active-thread-hint");
+        fs::write(
+            &path,
+            serde_json::to_vec(&payload).expect("serialize active-thread-hint"),
+        )
+        .expect("write active-thread-hint");
         assert_eq!(
             super::load_shared_active_thread_hint(&temp_root, 5_001).as_deref(),
             Some("thread-current")
@@ -29899,10 +30034,8 @@ effective_to_epoch_ms = 2000
 
     #[test]
     fn shared_active_thread_hint_fails_closed_when_stale() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "amai-active-thread-hint-stale-{}",
-            Uuid::new_v4()
-        ));
+        let temp_root =
+            std::env::temp_dir().join(format!("amai-active-thread-hint-stale-{}", Uuid::new_v4()));
         let path = super::active_thread_hint_shared_cache_path(&temp_root);
         fs::create_dir_all(path.parent().expect("active-thread-hint parent"))
             .expect("create active-thread-hint parent");
@@ -29911,8 +30044,11 @@ effective_to_epoch_ms = 2000
             updated_at_epoch_ms: 5_000,
             thread_id: "thread-current".to_string(),
         };
-        fs::write(&path, serde_json::to_vec(&payload).expect("serialize active-thread-hint"))
-            .expect("write active-thread-hint");
+        fs::write(
+            &path,
+            serde_json::to_vec(&payload).expect("serialize active-thread-hint"),
+        )
+        .expect("write active-thread-hint");
         assert!(
             super::load_shared_active_thread_hint(
                 &temp_root,
@@ -29920,6 +30056,30 @@ effective_to_epoch_ms = 2000
             )
             .is_none()
         );
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn continuity_restore_observed_dedupe_roundtrips_while_fresh() {
+        let temp_root =
+            std::env::temp_dir().join(format!("amai-continuity-restore-dedupe-{}", Uuid::new_v4()));
+        super::write_continuity_restore_observed_dedupe_cache(
+            &temp_root,
+            "amai",
+            "continuity",
+            "restore_observed",
+            "prompt-hash-1",
+            5_000,
+        )
+        .expect("write continuity restore dedupe cache");
+        assert!(super::continuity_restore_observed_event_recently_recorded(
+            &temp_root,
+            "amai",
+            "continuity",
+            "restore_observed",
+            "prompt-hash-1",
+            5_100,
+        ));
         let _ = fs::remove_dir_all(&temp_root);
     }
 

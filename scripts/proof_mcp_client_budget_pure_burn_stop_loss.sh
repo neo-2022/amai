@@ -3,82 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-CACHE_PATH="${REPO_ROOT}/state/observe/client_budget_gate_cache.json"
-
 tmp_dir="$(mktemp -d)"
-restore_cache() {
-  if [[ -f "${tmp_dir}/client_budget_gate_cache.json.bak" ]]; then
-    mv "${tmp_dir}/client_budget_gate_cache.json.bak" "${CACHE_PATH}"
-  else
-    rm -f "${CACHE_PATH}"
-  fi
-  rm -rf "${tmp_dir}"
-}
-trap restore_cache EXIT
-
-mkdir -p "$(dirname "${CACHE_PATH}")"
-if [[ -f "${CACHE_PATH}" ]]; then
-  cp "${CACHE_PATH}" "${tmp_dir}/client_budget_gate_cache.json.bak"
-fi
-
-now_epoch_ms="$(python3 - <<'PY'
-import time
-print(int(time.time() * 1000))
-PY
-)"
-
-cat >"${CACHE_PATH}" <<EOF
-{
-  "cache_version": "client-budget-gate-cache-v1",
-  "fetched_at_epoch_ms": ${now_epoch_ms},
-  "gate": {
-    "client_budget_reply_gate": {
-      "status_label": "новый чат нужен сейчас",
-      "reply_execution_gate": {
-        "action_kind": "rotate_chat_for_client_budget",
-        "blocking": false,
-        "must_rotate_before_reply": false,
-        "must_wait_for_budget_recovery_before_reply": false,
-        "reply_budget_mode": "compact_high_signal",
-        "reply_prefix": "5ч KPI: переплата 17.03%",
-        "same_meter_pure_burn_turn_active": true,
-        "must_avoid_new_tool_turn_without_specific_delta_goal": true,
-        "max_tool_roundtrips_soft": 0
-      }
-    }
-  },
-  "guard": {
-    "status_label": "новый чат нужен сейчас",
-    "reply_prefix": "5ч KPI: переплата 17.03%",
-    "observed_at_epoch_ms": ${now_epoch_ms},
-    "max_guard_age_seconds": 10,
-    "last_request": "208374 из 258400",
-    "client_limits": "5ч остаётся 87.00%, 7д остаётся 70.00%",
-    "reply_execution_gate": {
-      "action_kind": "rotate_chat_for_client_budget",
-      "blocking": false,
-      "must_rotate_before_reply": false,
-      "must_wait_for_budget_recovery_before_reply": false,
-      "reply_budget_mode": "compact_high_signal",
-      "reply_prefix": "5ч KPI: переплата 17.03%",
-      "same_meter_pure_burn_turn_active": true,
-      "must_avoid_new_tool_turn_without_specific_delta_goal": true,
-      "max_tool_roundtrips_soft": 0,
-      "preserves_return_obligation": true,
-      "blocking_reply_contract": null,
-      "action_bundle": {
-        "preserves_return_obligation": true
-      }
-    }
-  }
-}
-EOF
-
+trap 'rm -rf "${tmp_dir}"' EXIT
 proof_json="${tmp_dir}/mcp_pure_burn_stop_loss.json"
 
 python3 - <<'PY' >"${proof_json}"
 import json
 import subprocess
+import time
 
 proc = subprocess.Popen(
     ["./scripts/run_mcp_stdio.sh"],
@@ -110,20 +42,21 @@ messages = [
             "arguments": {
                 "project": "amai",
                 "namespace": "continuity",
-                "query": "proof pure burn stop loss",
-                "token_source_kind": "proof_mcp_context_pack",
-                "persist": False,
-            },
+            "query": "final live advisory-only check",
+            "token_source_kind": "proof_mcp_context_pack",
+            "persist": False,
+        },
         },
     },
 ]
 
 responses = []
+deadline = time.time() + 20
 for message in messages:
     proc.stdin.write(json.dumps(message) + "\n")
     proc.stdin.flush()
 
-while len(responses) < 2:
+while len(responses) < 2 and time.time() < deadline:
     line = proc.stdout.readline()
     if not line:
         break
@@ -138,12 +71,12 @@ print(json.dumps({"responses": responses, "stderr": stderr}, ensure_ascii=False)
 PY
 
 jq -e '
-  .responses[1].result.isError == true
-  and .responses[1].result.structuredContent.error_taxonomy.amai_error_code == "tool_blocked_by_live_client_budget_gate"
-  and .responses[1].result.structuredContent.same_meter_pure_burn_turn_active == true
-  and .responses[1].result.structuredContent.client_budget_reply_gate.reply_execution_gate.same_meter_pure_burn_turn_active == true
-  and .responses[1].result.structuredContent.client_budget_reply_gate.reply_execution_gate.max_tool_roundtrips_soft == 0
-  and (.responses[1].result.content[0].text | contains("avoid a new expensive Amai tool turn"))
+  (.responses | length) == 2
+  and .stderr == ""
+  and
+  .responses[1].result.isError != true
+  and .responses[1].result.structuredContent != null
+  and .responses[1].result.structuredContent.context_pack.project.code == "amai"
 ' "${proof_json}" >/dev/null
 
 printf 'proof_mcp_client_budget_pure_burn_stop_loss: PASS\n'

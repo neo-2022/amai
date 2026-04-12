@@ -164,6 +164,7 @@ pub fn collect_machine_summary(repo_root: &Path) -> Result<MachineSummary> {
 fn collect_machine_summary_uncached(repo_root: &Path) -> Result<MachineSummary> {
     let platform = HostPlatform::current();
     let mut system = System::new();
+    system.refresh_cpu_all();
     system.refresh_memory_specifics(MemoryRefreshKind::everything());
 
     let cpu_model = system
@@ -172,7 +173,11 @@ fn collect_machine_summary_uncached(repo_root: &Path) -> Result<MachineSummary> 
         .map(|cpu| cpu.brand().trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "модель CPU не определена".to_string());
-    let logical_cpus = system.cpus().len();
+    let logical_cpus = system.cpus().len().max(
+        std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(0),
+    );
     let physical_cpus = System::physical_core_count();
     let cpu_usage_percent = read_cpu_usage_percent();
     let (cpu_temperature_celsius, cpu_temp_provider) = detect_cpu_temperature(platform);

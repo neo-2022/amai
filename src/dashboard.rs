@@ -1,30 +1,29 @@
 use crate::codex_threads;
 use crate::config::{self, AppConfig};
 use crate::continuity;
+use crate::dashboard_format::*;
 use crate::hardware_telemetry::{AcceleratorSummary, MachineSummary, collect_machine_summary};
+use crate::onboarding;
 use crate::working_state;
 use anyhow::{Context, Result};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::fs;
-use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-use time::macros::format_description;
-use time::{OffsetDateTime, UtcOffset};
+use time::OffsetDateTime;
 
-#[derive(Debug, Clone, Deserialize)]
-struct InstallState {
-    package_version: String,
-    repo_revision: String,
-    client_key: String,
-    client_config: String,
-    stack_profile: String,
-    installed_at_epoch_seconds: u64,
-}
+mod dashboard_card_support;
+mod dashboard_context;
+mod dashboard_payload;
+mod dashboard_renderer;
+pub use self::dashboard_card_support::monitoring_url;
+use self::dashboard_card_support::{
+    card, tcp_port_is_open, with_extra_class, with_status, with_status_label, with_status_tooltip,
+    with_table_orientation,
+};
+pub use self::dashboard_context::browser_base_url;
+pub use self::dashboard_payload::{build_live_summary_payload, build_payload};
+pub use self::dashboard_renderer::render_html;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct HistoricalStartupDrag {
@@ -69,22 +68,11 @@ const HOST_CURRENT_THREAD_EFFECT_ROTATE_FALLBACK_PRIMARY_LIMIT_OVERRUN_PERCENT_P
 const HOST_CURRENT_THREAD_EFFECT_OVERLAY_TRIAL_TURN_TOKEN_DELTA: i64 = 5_000;
 const HOST_CURRENT_THREAD_EFFECT_OVERLAY_TRIAL_CONTEXT_PERCENT_POINTS: f64 = 2.5;
 const HOST_CURRENT_THREAD_EFFECT_OVERLAY_TRIAL_REGROWTH_TOKENS: i64 = 5_000;
-const HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_ELAPSED_MS: u64 = 120_000;
+const HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_ELAPSED_MS: u64 = 30_000;
 const HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_TURN_TOKEN_DELTA: u64 = 3_000;
 const HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_CONTEXT_PERCENT_POINTS: f64 = 1.0;
 const HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_REGROWTH_TOKENS: u64 = 3_000;
-const SAME_THREAD_COMPACTION_MAX_CURRENT_TURN_TOKENS: u64 = 180_000;
-const SAME_THREAD_COMPACTION_MAX_CONTEXT_USED_PERCENT: f64 = 80.0;
-const SAME_THREAD_COMPACTION_MAX_CRITICAL_REGROWTH_RATIO: f64 = 0.75;
 const CLIENT_PRIMARY_LIMIT_WINDOW_MS: f64 = 5.0 * 60.0 * 60.0 * 1000.0;
-
-#[derive(Debug, Default)]
-struct AgentHierarchyProjectBucket {
-    label: String,
-    project_code: Option<String>,
-    spaces: Vec<Value>,
-    pending_threads: Vec<Value>,
-}
 
 fn client_budget_target_percent_from_inputs(report: &Value, restore_context: &Value) -> u64 {
     restore_context["client_budget_target_percent"]
@@ -203,24 +191,6 @@ fn host_current_thread_control_surface_label(command_id: &str) -> &'static str {
         "compact window"
     } else {
         "thread overlay"
-    }
-}
-
-fn format_signed_token_delta(value: i64) -> String {
-    if value > 0 {
-        format!("+{}", format_u64(Some(value.unsigned_abs())))
-    } else if value < 0 {
-        format!("-{}", format_u64(Some(value.unsigned_abs())))
-    } else {
-        "0".to_string()
-    }
-}
-
-fn format_signed_percent_points(value: f64) -> String {
-    if value >= 0.0 {
-        format!("+{value:.2} п.п.")
-    } else {
-        format!("{value:.2} п.п.")
     }
 }
 
@@ -440,6 +410,14 @@ fn host_current_thread_control_effect_payload_for_command(
                 >= HOST_CURRENT_THREAD_EFFECT_OVERLAY_TRIAL_CONTEXT_PERCENT_POINTS
             || regrowth_since_feedback_tokens.unwrap_or_default()
                 >= HOST_CURRENT_THREAD_EFFECT_OVERLAY_TRIAL_REGROWTH_TOKENS);
+    let material_compaction_gain_observed = verified_host_compaction_observed_after_feedback
+        && (turn_token_delta.is_some_and(|value| {
+            value <= -(HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_TURN_TOKEN_DELTA as i64)
+        }) || context_used_percent_point_delta.is_some_and(|value| {
+            value <= -HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_CONTEXT_PERCENT_POINTS
+        }) || regrowth_since_feedback_tokens.is_some_and(|value| {
+            value <= -(HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_REGROWTH_TOKENS as i64)
+        }));
     let effect_verdict = if !same_thread {
         "other_thread"
     } else if measurement_pending {
@@ -529,7 +507,9 @@ fn host_current_thread_control_effect_payload_for_command(
         "measurement_min_turn_token_delta": HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_TURN_TOKEN_DELTA,
         "measurement_min_context_percent_points": HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_CONTEXT_PERCENT_POINTS,
         "measurement_min_regrowth_tokens": HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_REGROWTH_TOKENS,
-        "retry_allowed": !measurement_pending && !rotate_fallback_recommended,
+        "material_compaction_gain_observed": material_compaction_gain_observed,
+        "retry_allowed": !measurement_pending
+            && (!rotate_fallback_recommended || material_compaction_gain_observed),
         "effect_verdict": effect_verdict,
         "full_scale_client_burn_worsened": full_scale_client_burn_worsened,
         "rotate_fallback_recommended": rotate_fallback_recommended,
@@ -566,11 +546,38 @@ fn host_current_thread_control_effect_rotate_fallback_recommended(effect: &Value
     effect["rotate_fallback_recommended"].as_bool() == Some(true)
 }
 
+fn host_current_thread_control_effect_material_compaction_gain_observed(effect: &Value) -> bool {
+    if effect["verified_host_compaction_observed_after_feedback"].as_bool() != Some(true) {
+        return false;
+    }
+    effect["turn_token_delta"].as_i64().is_some_and(|value| {
+        value <= -(HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_TURN_TOKEN_DELTA as i64)
+    }) || effect["context_used_percent_point_delta"]
+        .as_f64()
+        .is_some_and(|value| {
+            value <= -HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_CONTEXT_PERCENT_POINTS
+        })
+        || effect["regrowth_since_feedback_tokens"]
+            .as_i64()
+            .is_some_and(|value| {
+                value <= -(HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_REGROWTH_TOKENS as i64)
+            })
+}
+
+fn host_current_thread_control_effect_surface_exhausted_after_verified_failure(
+    effect: &Value,
+) -> bool {
+    effect["verified_host_compaction_observed_after_feedback"].as_bool() == Some(true)
+        && host_current_thread_control_effect_rotate_fallback_recommended(effect)
+        && !host_current_thread_control_effect_material_compaction_gain_observed(effect)
+}
+
 fn host_current_thread_control_feedback_pending_from_effect(
     feedback_kind: Option<&str>,
     effect: &Value,
 ) -> bool {
     feedback_kind == Some(working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_REQUESTED)
+        && host_current_thread_control_effect_same_thread(effect)
         && effect["verified_host_compaction_observed_after_feedback"].as_bool() != Some(true)
 }
 
@@ -628,12 +635,13 @@ fn selected_host_current_thread_control_state(
         host_context_compaction,
         Some(overlay_command_id),
     );
-    let compact_failed =
-        host_current_thread_control_effect_rotate_fallback_recommended(&compact_effect)
-            || latest_host_current_thread_control_feedback_kind_for_command(
-                restore_context,
-                Some(compact_command_id),
-            ) == Some(working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_FAILED);
+    let compact_failed = host_current_thread_control_effect_surface_exhausted_after_verified_failure(
+        &compact_effect,
+    )
+        || latest_host_current_thread_control_feedback_kind_for_command(
+            restore_context,
+            Some(compact_command_id),
+        ) == Some(working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_FAILED);
     let compact_feedback_pending = host_current_thread_control_feedback_pending_from_effect(
         latest_host_current_thread_control_feedback_kind_for_command(
             restore_context,
@@ -645,12 +653,13 @@ fn selected_host_current_thread_control_state(
         compact_effect["overlay_trial_recommended"].as_bool() == Some(true);
     let compact_measurement_pending =
         compact_effect["measurement_pending"].as_bool() == Some(true) && !compact_failed;
-    let overlay_failed =
-        host_current_thread_control_effect_rotate_fallback_recommended(&overlay_effect)
-            || latest_host_current_thread_control_feedback_kind_for_command(
-                restore_context,
-                Some(overlay_command_id),
-            ) == Some(working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_FAILED);
+    let overlay_failed = host_current_thread_control_effect_surface_exhausted_after_verified_failure(
+        &overlay_effect,
+    )
+        || latest_host_current_thread_control_feedback_kind_for_command(
+            restore_context,
+            Some(overlay_command_id),
+        ) == Some(working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_FAILED);
     let overlay_feedback_pending = host_current_thread_control_feedback_pending_from_effect(
         latest_host_current_thread_control_feedback_kind_for_command(
             restore_context,
@@ -660,20 +669,6 @@ fn selected_host_current_thread_control_state(
     ) && !overlay_failed;
     let overlay_measurement_pending =
         overlay_effect["measurement_pending"].as_bool() == Some(true) && !overlay_failed;
-    let current_turn_total_tokens = client_live_meter["client_turn_total_tokens"]
-        .as_u64()
-        .unwrap_or_default();
-    let context_used_percent = client_live_meter["context_used_percent"]
-        .as_f64()
-        .unwrap_or_default();
-    let critical_regrowth_ratio = host_context_compaction["regrowth_of_recovered_surface_ratio"]
-        .as_f64()
-        .unwrap_or_default();
-    let oversized_critical_regrowth_same_thread_exhausted = host_context_compaction_stage
-        .critical_regrowth_active()
-        && (current_turn_total_tokens >= SAME_THREAD_COMPACTION_MAX_CURRENT_TURN_TOKENS
-            || context_used_percent >= SAME_THREAD_COMPACTION_MAX_CONTEXT_USED_PERCENT
-            || critical_regrowth_ratio >= SAME_THREAD_COMPACTION_MAX_CRITICAL_REGROWTH_RATIO);
     let rate_selected_command_id = if host_context_compaction_stage.critical_regrowth_active()
         && !compact_measurement_pending
         && !overlay_measurement_pending
@@ -684,33 +679,31 @@ fn selected_host_current_thread_control_state(
     } else {
         None
     };
-    let pending_feedback_selected_command_id = match (
-        compact_feedback_pending,
-        overlay_feedback_pending,
-    ) {
-        (true, false) => Some(compact_command_id),
-        (false, true) => Some(overlay_command_id),
-        (true, true) => {
-            let compact_recorded_at =
-                latest_host_current_thread_control_feedback_recorded_at_for_command(
-                    restore_context,
-                    Some(compact_command_id),
-                )
-                .unwrap_or_default();
-            let overlay_recorded_at =
-                latest_host_current_thread_control_feedback_recorded_at_for_command(
-                    restore_context,
-                    Some(overlay_command_id),
-                )
-                .unwrap_or_default();
-            if overlay_recorded_at > compact_recorded_at {
-                Some(overlay_command_id)
-            } else {
-                Some(compact_command_id)
+    let pending_feedback_selected_command_id =
+        match (compact_feedback_pending, overlay_feedback_pending) {
+            (true, false) => Some(compact_command_id),
+            (false, true) => Some(overlay_command_id),
+            (true, true) => {
+                let compact_recorded_at =
+                    latest_host_current_thread_control_feedback_recorded_at_for_command(
+                        restore_context,
+                        Some(compact_command_id),
+                    )
+                    .unwrap_or_default();
+                let overlay_recorded_at =
+                    latest_host_current_thread_control_feedback_recorded_at_for_command(
+                        restore_context,
+                        Some(overlay_command_id),
+                    )
+                    .unwrap_or_default();
+                if overlay_recorded_at > compact_recorded_at {
+                    Some(overlay_command_id)
+                } else {
+                    Some(compact_command_id)
+                }
             }
-        }
-        (false, false) => None,
-    };
+            (false, false) => None,
+        };
     let primary_command_id = if let Some(command_id) = pending_feedback_selected_command_id {
         command_id
     } else if let Some(command_id) = rate_selected_command_id {
@@ -739,9 +732,8 @@ fn selected_host_current_thread_control_state(
     } else {
         overlay_effect
     };
-    let same_thread_compaction_preferred = host_context_compaction_stage.preserve_active()
-        && !(compact_failed && overlay_failed)
-        && !oversized_critical_regrowth_same_thread_exhausted;
+    let same_thread_compaction_preferred =
+        surface["available"].as_bool() == Some(true) && !(compact_failed && overlay_failed);
     (surface, effect, same_thread_compaction_preferred)
 }
 
@@ -753,11 +745,8 @@ fn decorate_host_current_thread_control_surface(
 ) -> Value {
     let mut surface = surface.clone();
     let measurement_pending = effect["measurement_pending"].as_bool() == Some(true);
-    let verified_host_compaction_observed_after_feedback =
-        effect["verified_host_compaction_observed_after_feedback"].as_bool() == Some(true);
-    let rotate_fallback_recommended = effect["rotate_fallback_recommended"].as_bool() == Some(true);
     let surface_exhausted_after_verified_failure =
-        verified_host_compaction_observed_after_feedback && rotate_fallback_recommended;
+        host_current_thread_control_effect_surface_exhausted_after_verified_failure(effect);
     let retry_allowed = effect["retry_allowed"].as_bool().unwrap_or(true)
         && !feedback_pending
         && !surface_exhausted_after_verified_failure;
@@ -966,3774 +955,44 @@ fn client_budget_compact_chat_command() -> &'static str {
     continuity::CLIENT_BUDGET_COMPACT_CHAT_COMMAND
 }
 
-pub fn browser_base_url(bind: &str) -> String {
-    let Some((host, port)) = bind.rsplit_once(':') else {
-        return format!("http://{bind}");
-    };
-    let normalized_host = match host {
-        "0.0.0.0" => "127.0.0.1".to_string(),
-        "::" | "[::]" => "[::1]".to_string(),
-        _ => host.to_string(),
-    };
-    format!("http://{normalized_host}:{port}")
-}
-
-pub fn brand_mark_svg() -> &'static str {
-    include_str!("../brand/amai_mark.svg")
-}
-
-pub fn brand_lockup_svg() -> &'static str {
-    include_str!("../brand/amai_lockup.svg")
-}
-
-pub fn favicon_ico() -> &'static [u8] {
-    include_bytes!("../brand/favicon.ico")
-}
-
-pub fn render_html(refresh_ms: u64) -> String {
-    const TEMPLATE: &str = r#"<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Amai Human Dashboard</title>
-  <link rel="icon" type="image/svg+xml" href="/brand/amai_mark.svg?v=__ASSET_VERSION__">
-  <link rel="icon" href="/favicon.ico?v=__ASSET_VERSION__" sizes="any">
-  <link rel="shortcut icon" href="/favicon.ico?v=__ASSET_VERSION__">
-  <style>
-    :root {
-      color-scheme: light;
-      --bg: linear-gradient(180deg, #f5f1e7 0%, #f3f6ef 45%, #eef4f6 100%);
-      --paper: rgba(255, 252, 247, 0.92);
-      --ink: #1e2a2f;
-      --muted: #55666d;
-      --accent: #0d6b6f;
-      --accent-soft: rgba(13, 107, 111, 0.11);
-      --pass: #1d7c5b;
-      --pass-soft: rgba(29, 124, 91, 0.12);
-      --alert: #b96d10;
-      --alert-soft: rgba(185, 109, 16, 0.12);
-      --critical: #b6382b;
-      --critical-soft: rgba(182, 56, 43, 0.12);
-      --waiting: #3f6f93;
-      --waiting-soft: rgba(63, 111, 147, 0.12);
-      --unknown: #61717a;
-      --unknown-soft: rgba(97, 113, 122, 0.12);
-      --panel-outer-shadow:
-        0 0 2px rgba(17, 28, 33, 0.30),
-        0 0 12px rgba(17, 28, 33, 0.16),
-        0 0 28px rgba(17, 28, 33, 0.10),
-        0 22px 44px -30px rgba(17, 28, 33, 0.18);
-      --border: rgba(30, 42, 47, 0.10);
-      --surface: rgba(255, 255, 255, 0.72);
-      --surface-raised: rgba(255, 255, 255, 0.78);
-      --surface-solid: rgba(255, 255, 255, 0.82);
-      --surface-border: rgba(30, 42, 47, 0.08);
-      --table-scroll-track: rgba(23, 34, 39, 0.86);
-      --table-scroll-thumb: rgba(24, 108, 98, 0.82);
-      --table-scroll-thumb-strong: rgba(39, 146, 132, 0.92);
-      --hero-glow: rgba(13, 107, 111, 0.11);
-      --error-border: rgba(182, 56, 43, 0.18);
-      --card-outer-shadow:
-        0 0 1px rgba(18, 28, 33, 0.24),
-        0 0 8px rgba(18, 28, 33, 0.12),
-        0 0 18px rgba(18, 28, 33, 0.08),
-        0 16px 28px -24px rgba(18, 28, 33, 0.16);
-      --card-inner-shadow:
-        inset 0 0 0 1px rgba(8, 70, 61, 0.52),
-        inset 0 1px 0 rgba(255, 255, 255, 0.028),
-        inset 0 12px 16px -14px rgba(8, 63, 55, 0.20),
-        inset 0 -12px 16px -14px rgba(7, 52, 46, 0.16),
-        inset 12px 0 16px -14px rgba(8, 58, 51, 0.16),
-        inset -12px 0 16px -14px rgba(8, 58, 51, 0.16);
-    }
-
-    * { box-sizing: border-box; }
-    html {
-      scrollbar-gutter: stable both-edges;
-      scrollbar-width: thin;
-      scrollbar-color: transparent transparent;
-    }
-
-    html::-webkit-scrollbar {
-      width: 12px;
-      height: 12px;
-    }
-
-    html::-webkit-scrollbar-track {
-      background: transparent;
-      border-radius: 999px;
-    }
-
-    html::-webkit-scrollbar-thumb {
-      background: transparent;
-      border-radius: 999px;
-      border: 2px solid transparent;
-      transition: background 0.14s ease, border-width 0.14s ease, box-shadow 0.14s ease;
-    }
-
-    html:hover,
-    html:focus-within {
-      scrollbar-color: var(--table-scroll-thumb) var(--table-scroll-track);
-    }
-
-    html:hover::-webkit-scrollbar-track,
-    html:focus-within::-webkit-scrollbar-track {
-      background: var(--table-scroll-track);
-    }
-
-    html:hover::-webkit-scrollbar-thumb,
-    html:focus-within::-webkit-scrollbar-thumb {
-      background: linear-gradient(180deg, var(--table-scroll-thumb), var(--table-scroll-thumb-strong));
-      border: 2px solid var(--table-scroll-track);
-    }
-
-    html:hover::-webkit-scrollbar-thumb:hover,
-    html:focus-within::-webkit-scrollbar-thumb:hover {
-      border-width: 0;
-      box-shadow: 0 0 0 1px rgba(78, 189, 171, 0.28);
-    }
-
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background: var(--bg);
-      color: var(--ink);
-      font-family: "IBM Plex Sans", "Segoe UI", "Helvetica Neue", sans-serif;
-    }
-
-    a { color: var(--accent); }
-
-    .shell {
-      max-width: 1900px;
-      margin: 0 auto;
-      padding: 12px 20px 40px;
-    }
-
-    .hero {
-      display: grid;
-      grid-template-columns: minmax(0, 2.34fr) minmax(320px, 0.28fr);
-      gap: 8px;
-      align-items: start;
-      margin-bottom: 8px;
-    }
-
-    .panel {
-      background: var(--paper);
-      border: none;
-      border-radius: 12px;
-      box-shadow: var(--panel-outer-shadow);
-      position: relative;
-      backdrop-filter: blur(14px);
-    }
-
-    .hero-main {
-      padding: 10px 14px 12px;
-      position: relative;
-      overflow: visible;
-      display: flex;
-      flex-direction: column;
-      justify-content: flex-start;
-      gap: 8px;
-      min-height: 0;
-    }
-
-    .hero-top {
-      display: grid;
-      grid-template-columns: minmax(0, 1.54fr) minmax(360px, 430px);
-      gap: 8px;
-      align-items: start;
-    }
-
-    .brand-line {
-      display: flex;
-      align-items: flex-start;
-      width: 100%;
-      margin: -4px 0 0 -4px;
-    }
-
-    .brand-lockup {
-      width: min(100%, 860px);
-      height: auto;
-      display: block;
-      filter: drop-shadow(0 14px 28px rgba(11, 16, 32, 0.10));
-    }
-
-    .hero-cards {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 8px;
-      margin-top: 2px;
-      align-items: stretch;
-    }
-
-    .hero-metric-card {
-      padding: 14px 14px;
-      border-radius: 10px;
-    }
-
-    .hero-metric-card .card-top {
-      margin-bottom: 4px;
-      align-items: center;
-    }
-
-    .hero-metric-card .card-title {
-      font-size: 14px;
-    }
-
-    .hero-metric-card .card-value {
-      margin: 6px 0 4px;
-    }
-
-    .hero-metric-card .card-note {
-      font-size: 12px;
-      line-height: 1.34;
-    }
-
-    .hero-metric-card .metric-rows {
-      gap: 10px;
-      margin-top: 12px;
-    }
-
-    .hero-metric-card .metric-row {
-      grid-template-columns: minmax(0, 1fr);
-      gap: 4px;
-      padding-top: 10px;
-    }
-
-    .hero-metric-card .metric-label {
-      display: block;
-      font-size: 12px;
-      line-height: 1.4;
-    }
-
-    .hero-metric-card .metric-row-value {
-      font-size: 13px;
-      line-height: 1.45;
-      text-align: left;
-      white-space: normal;
-      overflow-wrap: anywhere;
-    }
-
-    .hero-side {
-      padding: 10px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      min-height: 0;
-      align-self: start;
-    }
-
-    .status-pill {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      padding: 7px 12px;
-      border-radius: 999px;
-      font-size: 13px;
-      font-weight: 700;
-      line-height: 1.1;
-      width: fit-content;
-      max-width: min(100%, 176px);
-      white-space: normal;
-      word-break: break-word;
-      flex-shrink: 0;
-      min-height: 32px;
-      text-align: center;
-      align-self: flex-start;
-    }
-
-    .status-pill.pass { background: var(--pass-soft); color: var(--pass); }
-    .status-pill.alert { background: var(--alert-soft); color: var(--alert); }
-    .status-pill.critical { background: var(--critical-soft); color: var(--critical); }
-    .status-pill.waiting { background: var(--waiting-soft); color: var(--waiting); }
-    .status-pill.unknown { background: var(--unknown-soft); color: var(--unknown); }
-
-    .side-block {
-      padding: 10px 12px;
-      border-radius: 10px;
-      background: var(--surface);
-      border: none;
-      box-shadow: none;
-      position: relative;
-      overflow: visible;
-      isolation: isolate;
-    }
-
-    .hero-summary-block #summary-status {
-      margin-bottom: 8px;
-    }
-
-    .summary-head-row {
-      display: grid;
-      grid-template-columns: auto auto 1fr auto;
-      align-items: center;
-      column-gap: 16px;
-    }
-
-    .summary-version-label,
-    .summary-version-inline {
-      color: var(--ink);
-      font-size: 14px;
-      font-weight: 800;
-      line-height: 1;
-      white-space: nowrap;
-    }
-
-    .summary-version-label {
-      color: var(--muted);
-    }
-
-    .summary-version-inline {
-      justify-self: end;
-      text-align: right;
-      padding-left: 20px;
-    }
-
-    .side-block h2,
-    .section h2 {
-      margin: 0 0 8px;
-      font-size: 18px;
-      letter-spacing: -0.02em;
-    }
-
-    .kv {
-      margin: 0;
-      display: grid;
-      gap: 8px;
-    }
-
-    .kv div {
-      display: flex;
-      justify-content: space-between;
-      gap: 14px;
-      font-size: 14px;
-      color: var(--muted);
-    }
-
-    .kv strong {
-      color: var(--ink);
-      font-weight: 700;
-      text-align: right;
-    }
-
-    .section {
-      padding: 14px;
-      margin-bottom: 8px;
-    }
-
-    .cards {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 8px;
-    }
-
-    .benchmark-cards-grid {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      align-items: stretch;
-    }
-
-    .benchmark-cards-grid > .compare-card {
-      height: 100%;
-    }
-
-    .benchmark-cards-grid > .compare-card:not(.benchmark-span-full) .compare-table-wrap {
-      margin-top: auto;
-    }
-
-    .machine-grid {
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      grid-auto-flow: dense;
-      grid-auto-rows: 6px;
-      align-items: start;
-    }
-
-    .machine-grid .machine-compact {
-      padding: 12px 14px;
-    }
-
-    .machine-grid .machine-compact .card-value {
-      margin: 6px 0 4px;
-    }
-
-    .machine-grid .machine-compact .card-note {
-      font-size: 13px;
-    }
-
-    .machine-grid .machine-compact .metric-row {
-      padding-top: 6px;
-    }
-
-    .metric-card,
-    .service-card,
-    .glossary-card,
-    .link-card {
-      padding: 14px;
-      border-radius: 10px;
-      border: none;
-      background: var(--surface-raised);
-      box-shadow: none;
-      position: relative;
-      overflow: visible;
-      isolation: isolate;
-      display: flex;
-      flex-direction: column;
-      justify-content: flex-start;
-      gap: 0;
-    }
-
-    .metric-card.pass,
-    .service-card.pass { background: linear-gradient(180deg, rgba(29, 124, 91, 0.04), var(--surface-solid)); }
-    .metric-card.alert,
-    .service-card.alert { background: linear-gradient(180deg, rgba(185, 109, 16, 0.04), var(--surface-solid)); }
-    .metric-card.critical,
-    .service-card.critical { background: linear-gradient(180deg, rgba(182, 56, 43, 0.04), var(--surface-solid)); }
-    .metric-card.waiting,
-    .service-card.waiting { background: linear-gradient(180deg, rgba(63, 111, 147, 0.04), var(--surface-solid)); }
-    .metric-card.unknown,
-    .service-card.unknown { background: linear-gradient(180deg, rgba(97, 113, 122, 0.04), var(--surface-solid)); }
-
-    .card-top {
-      display: flex;
-      justify-content: space-between;
-      align-items: start;
-      gap: 8px;
-      margin-bottom: 6px;
-    }
-
-    .card-title {
-      margin: 0;
-      font-size: 15px;
-      color: var(--muted);
-      font-weight: 700;
-    }
-
-    .card-value {
-      margin: 6px 0 6px;
-    }
-
-    .card-note {
-      margin: 0;
-      color: var(--muted);
-      font-size: 14px;
-      line-height: 1.5;
-    }
-
-    .card-source {
-      margin-top: 6px;
-      color: var(--accent);
-      font-size: 12px;
-      font-weight: 700;
-      letter-spacing: 0.02em;
-    }
-
-    .metric-rows {
-      margin: 10px 0 0;
-      padding: 0;
-      list-style: none;
-      display: grid;
-      gap: 6px;
-    }
-
-    .metric-row {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 8px;
-      align-items: start;
-      padding-top: 6px;
-      border-top: 1px solid var(--surface-border);
-    }
-
-    .metric-label {
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.35;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      flex-wrap: wrap;
-    }
-
-    .metric-row-value {
-      color: var(--ink);
-      font-size: 13px;
-      line-height: 1.35;
-      font-weight: 700;
-      text-align: right;
-    }
-
-    .metric-row-value.interactive-client-budget-value {
-      display: inline-flex;
-      align-items: center;
-      justify-content: flex-end;
-      flex-wrap: wrap;
-      gap: 0;
-      text-align: right;
-    }
-
-    .client-budget-target-trigger {
-      appearance: none;
-      border: none;
-      background: none;
-      margin: 0;
-      padding: 0;
-      color: var(--accent);
-      font: inherit;
-      font-weight: 800;
-      line-height: inherit;
-      cursor: pointer;
-      text-decoration: underline dotted rgba(13, 107, 111, 0.45);
-      text-underline-offset: 3px;
-    }
-
-    .client-budget-target-trigger:hover,
-    .client-budget-target-trigger:focus-visible {
-      color: var(--accent-strong);
-      outline: none;
-    }
-
-    .tooltip-target-picker {
-      display: grid;
-      gap: 10px;
-    }
-
-    .tooltip-target-picker-note {
-      color: rgba(247, 250, 252, 0.84);
-    }
-
-    .tooltip-target-picker-grid {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-    }
-
-    .tooltip-target-picker-option {
-      appearance: none;
-      border: 1px solid rgba(154, 231, 220, 0.26);
-      border-radius: 999px;
-      background: rgba(121, 210, 197, 0.08);
-      color: #dff8f4;
-      padding: 5px 10px;
-      font: inherit;
-      font-size: 12px;
-      font-weight: 700;
-      line-height: 1.1;
-      cursor: pointer;
-      transition: background 0.14s ease, border-color 0.14s ease, transform 0.14s ease;
-    }
-
-    .tooltip-target-picker-option:hover,
-    .tooltip-target-picker-option:focus-visible {
-      background: rgba(121, 210, 197, 0.18);
-      border-color: rgba(154, 231, 220, 0.42);
-      outline: none;
-      transform: translateY(-1px);
-    }
-
-    .tooltip-target-picker-option.active {
-      background: rgba(121, 210, 197, 0.28);
-      border-color: rgba(154, 231, 220, 0.68);
-      color: #ffffff;
-    }
-
-    .tooltip-target-picker-option:disabled {
-      opacity: 0.6;
-      cursor: progress;
-      transform: none;
-    }
-
-    .tooltip-target-picker-command {
-      color: #9ae7dc;
-      font-weight: 700;
-    }
-
-    .dashboard-toast {
-      position: fixed;
-      right: 16px;
-      bottom: 16px;
-      z-index: 10020;
-      max-width: min(420px, calc(100vw - 32px));
-      padding: 12px 14px;
-      border-radius: 12px;
-      background: rgba(8, 13, 17, 0.96);
-      color: #f7fafc;
-      font-size: 13px;
-      line-height: 1.45;
-      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.28);
-      opacity: 0;
-      transform: translateY(8px);
-      pointer-events: none;
-      transition: opacity 0.16s ease, transform 0.16s ease;
-    }
-
-    .dashboard-toast.visible {
-      opacity: 1;
-      transform: translateY(0);
-    }
-
-    .dashboard-toast.error {
-      background: rgba(103, 20, 16, 0.96);
-    }
-
-    .has-tooltip {
-      position: relative;
-      display: inline-flex;
-      align-items: center;
-      cursor: help;
-      text-decoration: underline dotted rgba(13, 107, 111, 0.45);
-      text-underline-offset: 3px;
-      z-index: 2;
-    }
-
-    .has-tooltip:hover,
-    .has-tooltip:focus-visible {
-      z-index: 30;
-    }
-
-    .tooltip-layer {
-      position: fixed;
-      top: 0;
-      left: 0;
-      min-width: 220px;
-      max-width: min(360px, calc(100vw - 24px));
-      padding: 12px 14px;
-      padding-right: 42px;
-      border-radius: 12px;
-      background: rgba(8, 13, 17, 0.96);
-      color: #f7fafc;
-      font-size: 12px;
-      line-height: 1.45;
-      text-transform: none;
-      letter-spacing: normal;
-      white-space: normal;
-      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.28);
-      pointer-events: none;
-      user-select: text;
-      -webkit-user-select: text;
-      opacity: 0;
-      transform: translateY(4px);
-      transition: opacity 0.14s ease, transform 0.14s ease;
-      z-index: 10000;
-    }
-
-    .tooltip-layer.visible {
-      opacity: 1;
-      transform: translateY(0);
-      pointer-events: auto;
-    }
-
-    .tooltip-layer-content {
-      display: block;
-    }
-
-    .tooltip-copy-btn {
-      appearance: none;
-      position: absolute;
-      top: 8px;
-      right: 8px;
-      border: none;
-      border-radius: 999px;
-      width: 24px;
-      height: 24px;
-      padding: 0;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      background: rgba(121, 210, 197, 0.10);
-      color: #9ae7dc;
-      font: inherit;
-      font-size: 13px;
-      font-weight: 700;
-      line-height: 1;
-      cursor: pointer;
-      opacity: 0;
-      transform: translateY(-2px);
-      pointer-events: none;
-      transition: opacity 0.14s ease, background 0.14s ease, transform 0.14s ease;
-    }
-
-    .tooltip-copy-btn.visible {
-      opacity: 1;
-      transform: translateY(0);
-      pointer-events: auto;
-    }
-
-    .tooltip-copy-btn:hover,
-    .tooltip-copy-btn:focus-visible {
-      background: rgba(121, 210, 197, 0.20);
-      outline: none;
-    }
-
-    .tooltip-layer .link-inline {
-      display: inline-flex;
-      flex-wrap: wrap;
-    }
-
-    .tooltip-layer .link-inline a,
-    .tooltip-layer .inline-path,
-    .tooltip-layer .inline-copyable {
-      color: #9ae7dc;
-    }
-
-    .compare-card {
-      padding: 14px;
-      border-radius: 10px;
-      border: none;
-      background: var(--surface-raised);
-      display: flex;
-      flex-direction: column;
-      justify-content: flex-start;
-      gap: 0;
-      box-shadow: none;
-      position: relative;
-      overflow: visible;
-      isolation: isolate;
-    }
-
-    .compare-card.pass { background: linear-gradient(180deg, rgba(29, 124, 91, 0.04), var(--surface-solid)); }
-    .compare-card.alert { background: linear-gradient(180deg, rgba(185, 109, 16, 0.04), var(--surface-solid)); }
-    .compare-card.critical { background: linear-gradient(180deg, rgba(182, 56, 43, 0.04), var(--surface-solid)); }
-    .compare-card.waiting { background: linear-gradient(180deg, rgba(63, 111, 147, 0.04), var(--surface-solid)); }
-    .compare-card.unknown { background: linear-gradient(180deg, rgba(97, 113, 122, 0.04), var(--surface-solid)); }
-
-    .benchmark-span-full {
-      grid-column: 1 / -1;
-    }
-
-    .compare-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: start;
-      gap: 8px;
-      margin-bottom: 6px;
-    }
-
-    .compare-headline {
-      margin: 0 0 8px;
-    }
-
-    .compare-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
-      margin-top: 4px;
-    }
-
-    .compare-metric {
-      border: none;
-      border-radius: 10px;
-      background: var(--surface);
-      padding: 12px;
-      display: grid;
-      gap: 6px;
-      box-shadow: none;
-      position: relative;
-      overflow: visible;
-      isolation: isolate;
-    }
-
-    .side-block:hover,
-    .side-block:focus-within,
-    .metric-card:hover,
-    .metric-card:focus-within,
-    .service-card:hover,
-    .service-card:focus-within,
-    .glossary-card:hover,
-    .glossary-card:focus-within,
-    .link-card:hover,
-    .link-card:focus-within,
-    .compare-card:hover,
-    .compare-card:focus-within,
-    .compare-metric:hover,
-    .compare-metric:focus-within {
-      z-index: 12;
-    }
-
-    .side-block::before,
-    .metric-card::before,
-    .service-card::before,
-    .glossary-card::before,
-    .link-card::before,
-    .compare-card::before,
-    .compare-metric::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      border-radius: inherit;
-      pointer-events: none;
-      box-shadow: var(--card-inner-shadow);
-    }
-
-    .compare-metric-label {
-      margin: 0;
-      color: var(--muted);
-      font-size: 14px;
-      font-weight: 700;
-    }
-
-    .compare-metric-value {
-      margin: 0;
-    }
-
-    .compare-metric-note {
-      margin: 0;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.45;
-    }
-
-    .card-shell {
-      perspective: 1600px;
-      transform-style: preserve-3d;
-      isolation: isolate;
-    }
-
-    .card-flip-stage {
-      display: grid;
-      min-height: 100%;
-      transform-style: preserve-3d;
-      transition: transform 0.2s ease;
-    }
-
-    .card-face {
-      grid-area: 1 / 1;
-      min-width: 0;
-      backface-visibility: hidden;
-      -webkit-backface-visibility: hidden;
-      display: flex;
-      flex-direction: column;
-      gap: 0;
-    }
-
-    .card-face-back {
-      transform: rotateY(180deg);
-    }
-
-    .card-shell:not(.card-back-visible) .card-face-back,
-    .card-shell.card-back-visible .card-face-front {
-      visibility: hidden;
-      pointer-events: none;
-    }
-
-    .card-shell.card-back-visible .card-flip-stage {
-      transform: rotateY(180deg);
-    }
-
-    body.card-fullscreen-open {
-      overflow: hidden;
-    }
-
-    .card-shell.card-fullscreen {
-      position: fixed;
-      inset: 14px;
-      z-index: 1100;
-      max-width: none;
-      width: auto;
-      height: auto;
-      margin: 0 !important;
-      overflow: auto;
-      backdrop-filter: blur(18px);
-      box-shadow:
-        0 0 1px rgba(18, 28, 33, 0.28),
-        0 0 16px rgba(18, 28, 33, 0.14),
-        0 0 40px rgba(18, 28, 33, 0.10),
-        0 28px 60px -26px rgba(18, 28, 33, 0.22);
-    }
-
-    .card-back-note {
-      margin: 0 0 10px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.45;
-    }
-
-    .card-back-source {
-      margin: 10px 0 0;
-      color: var(--accent);
-      font-size: 12px;
-      font-weight: 700;
-      line-height: 1.45;
-    }
-
-    .card-back-section-title {
-      margin: 12px 0 8px;
-      color: var(--ink);
-      font-size: 13px;
-      font-weight: 800;
-      letter-spacing: 0.01em;
-    }
-
-    .hierarchy-panel {
-      display: grid;
-      gap: 12px;
-    }
-
-    .hierarchy-legend {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin: 0;
-      padding: 0;
-      list-style: none;
-    }
-
-    .hierarchy-legend-item,
-    .hierarchy-source-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 6px 10px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: 700;
-      line-height: 1.2;
-      background: var(--surface);
-      color: var(--ink);
-    }
-
-    .hierarchy-legend-item.pass,
-    .hierarchy-source-badge.pass {
-      background: var(--pass-soft);
-      color: var(--pass);
-    }
-
-    .hierarchy-legend-item.alert,
-    .hierarchy-source-badge.alert {
-      background: var(--alert-soft);
-      color: var(--alert);
-    }
-
-    .hierarchy-legend-item.waiting,
-    .hierarchy-source-badge.waiting {
-      background: var(--waiting-soft);
-      color: var(--waiting);
-    }
-
-    .hierarchy-projects,
-    .hierarchy-node-children {
-      display: grid;
-      gap: 10px;
-    }
-
-    .hierarchy-node {
-      border-radius: 12px;
-      padding: 12px;
-      background: var(--surface);
-      border: 1px solid var(--surface-border);
-      position: relative;
-      overflow: hidden;
-    }
-
-    .hierarchy-node::before {
-      content: "";
-      position: absolute;
-      inset: 0 auto 0 0;
-      width: 4px;
-      background: rgba(97, 113, 122, 0.30);
-    }
-
-    .hierarchy-node.pass::before { background: var(--pass); }
-    .hierarchy-node.alert::before { background: var(--alert); }
-    .hierarchy-node.waiting::before { background: var(--waiting); }
-    .hierarchy-node.unknown::before { background: var(--unknown); }
-
-    .hierarchy-node-header {
-      display: grid;
-      gap: 4px;
-    }
-
-    .hierarchy-node-title {
-      margin: 0;
-      color: var(--ink);
-      font-size: 14px;
-      font-weight: 800;
-      line-height: 1.3;
-    }
-
-    .hierarchy-node-summary {
-      margin: 0;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.45;
-    }
-
-    .hierarchy-node-children {
-      margin-top: 10px;
-      margin-left: 10px;
-      padding-left: 14px;
-      border-left: 1px dashed rgba(30, 42, 47, 0.14);
-    }
-
-    .hierarchy-source-badges {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-top: 8px;
-    }
-
-    .hierarchy-thread-meta,
-    .hierarchy-pending-list {
-      margin: 10px 0 0;
-      padding: 0;
-      list-style: none;
-      display: grid;
-      gap: 8px;
-    }
-
-    .hierarchy-thread-meta li,
-    .hierarchy-pending-thread {
-      display: grid;
-      gap: 4px;
-      padding: 8px 10px;
-      border-radius: 10px;
-      background: rgba(255, 255, 255, 0.56);
-      border: 1px solid rgba(30, 42, 47, 0.06);
-    }
-
-    .hierarchy-thread-label {
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.35;
-    }
-
-    .hierarchy-thread-value {
-      color: var(--ink);
-      font-size: 13px;
-      line-height: 1.45;
-      font-weight: 700;
-      overflow-wrap: anywhere;
-    }
-
-    .compare-table-wrap {
-      margin-top: 8px;
-      overflow-x: auto;
-      scrollbar-gutter: stable both-edges;
-      scrollbar-width: thin;
-      scrollbar-color: transparent transparent;
-    }
-
-    .compare-table-wrap::-webkit-scrollbar {
-      height: 12px;
-    }
-
-    .compare-table-wrap::-webkit-scrollbar-track {
-      background: transparent;
-      border-radius: 999px;
-    }
-
-    .compare-table-wrap::-webkit-scrollbar-thumb {
-      background: transparent;
-      border-radius: 999px;
-      border: 2px solid transparent;
-      transition: background 0.14s ease, border-width 0.14s ease, box-shadow 0.14s ease;
-    }
-
-    .compare-table-wrap::-webkit-scrollbar-corner {
-      background: transparent;
-    }
-
-    .compare-card:hover .compare-table-wrap,
-    .compare-table-wrap:hover,
-    .compare-table-wrap:focus-within {
-      scrollbar-color: var(--table-scroll-thumb) var(--table-scroll-track);
-    }
-
-    .compare-card:hover .compare-table-wrap::-webkit-scrollbar-track,
-    .compare-table-wrap:hover::-webkit-scrollbar-track,
-    .compare-table-wrap:focus-within::-webkit-scrollbar-track {
-      background: var(--table-scroll-track);
-    }
-
-    .compare-card:hover .compare-table-wrap::-webkit-scrollbar-thumb,
-    .compare-table-wrap:hover::-webkit-scrollbar-thumb,
-    .compare-table-wrap:focus-within::-webkit-scrollbar-thumb {
-      background: linear-gradient(180deg, var(--table-scroll-thumb), var(--table-scroll-thumb-strong));
-      border: 2px solid var(--table-scroll-track);
-    }
-
-    .compare-card:hover .compare-table-wrap::-webkit-scrollbar-thumb:hover,
-    .compare-table-wrap:hover::-webkit-scrollbar-thumb:hover,
-    .compare-table-wrap:focus-within::-webkit-scrollbar-thumb:hover {
-      border-width: 0;
-      box-shadow: 0 0 0 1px rgba(78, 189, 171, 0.28);
-    }
-
-    .compare-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13px;
-      line-height: 1.35;
-    }
-
-    .compare-table th,
-    .compare-table td {
-      padding: 10px 12px;
-      border-top: 1px solid var(--surface-border);
-      text-align: right;
-      vertical-align: top;
-      white-space: nowrap;
-    }
-
-    .compare-table th:first-child,
-    .compare-table td:first-child {
-      text-align: left;
-      white-space: normal;
-    }
-
-    .compare-table thead th {
-      color: var(--muted);
-      font-weight: 700;
-    }
-
-    .compare-value-stack {
-      display: inline-grid;
-      justify-items: end;
-      gap: 2px;
-      line-height: 1.1;
-    }
-
-    .compare-value-stack-primary {
-      color: var(--ink);
-      font-weight: 700;
-    }
-
-    .compare-value-stack-secondary {
-      color: var(--muted);
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.02em;
-      text-transform: none;
-    }
-
-    .compare-card.table-transposed .compare-table {
-      table-layout: fixed;
-    }
-
-    .compare-card.table-transposed .compare-table th,
-    .compare-card.table-transposed .compare-table td {
-      white-space: normal;
-      text-align: center;
-    }
-
-    .compare-card.table-transposed .compare-table th:first-child,
-    .compare-card.table-transposed .compare-table td:first-child {
-      text-align: left;
-      min-width: 160px;
-      width: 20%;
-    }
-
-    .service-headline {
-      margin: 0 0 6px;
-    }
-
-    .card-value,
-    .service-headline,
-    .compare-headline,
-    .compare-metric-value,
-    .machine-grid .machine-compact .card-value {
-      font-size: clamp(20px, 2.2vw, 22px);
-      line-height: 1.04;
-      letter-spacing: -0.03em;
-      font-weight: 800;
-    }
-
-    .detail-list,
-    .warning-list,
-    .glossary-list,
-    .next-list,
-    .link-list {
-      margin: 0;
-      padding-left: 18px;
-      display: grid;
-      gap: 8px;
-      color: var(--muted);
-    }
-
-    .muted {
-      color: var(--muted);
-      font-size: 14px;
-      line-height: 1.6;
-    }
-
-    .error-banner {
-      display: none;
-      padding: 16px 18px;
-      border-radius: 10px;
-      background: var(--critical-soft);
-      color: var(--critical);
-      font-weight: 700;
-      margin-bottom: 10px;
-      border: 1px solid var(--error-border);
-    }
-
-    .link-disabled {
-      color: var(--muted);
-      font-weight: 700;
-      text-decoration: none;
-      cursor: default;
-    }
-
-    .hero-links-block {
-      display: flex;
-      flex-direction: column;
-      min-height: 0;
-    }
-
-    .hero-links-block .link-list {
-      align-content: start;
-      padding-left: 0;
-      list-style: none;
-      gap: 10px;
-    }
-
-    .hero-links-block .link-list li {
-      display: block;
-      padding: 10px 12px;
-      border-radius: 10px;
-      background: rgba(255, 255, 255, 0.02);
-    }
-
-    .link-item-main {
-      min-width: 0;
-      display: grid;
-      gap: 6px;
-    }
-
-    .link-item-main a,
-    .link-item-main .link-disabled {
-      font-weight: 700;
-      font-size: 14px;
-      line-height: 1.3;
-      text-decoration-thickness: 1px;
-    }
-
-    .link-item-note {
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.45;
-    }
-
-    .link-group-title {
-      display: block;
-      margin-bottom: 6px;
-      color: var(--muted);
-      font-size: 14px;
-      font-weight: 700;
-    }
-
-    .link-group-note {
-      display: block;
-      margin-bottom: 10px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.45;
-    }
-
-    .link-group-items {
-      display: grid;
-      gap: 10px;
-    }
-
-    .link-group-item {
-      padding-top: 10px;
-      border-top: 1px solid var(--surface-border);
-    }
-
-    .link-group-item:first-child {
-      padding-top: 0;
-      border-top: none;
-    }
-
-    .link-inline {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      max-width: 100%;
-      position: relative;
-    }
-
-    .copy-link-btn {
-      appearance: none;
-      border: none;
-      border-radius: 999px;
-      width: 24px;
-      height: 24px;
-      padding: 0;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      background: rgba(121, 210, 197, 0.10);
-      color: var(--accent);
-      font: inherit;
-      font-size: 13px;
-      font-weight: 700;
-      line-height: 1;
-      cursor: pointer;
-      white-space: nowrap;
-      opacity: 0;
-      transform: translateY(1px);
-      transition: opacity 0.14s ease, background 0.14s ease, transform 0.14s ease;
-    }
-
-    .hero-links-block .link-list li:hover .copy-link-btn,
-    .hero-links-block .link-list li:focus-within .copy-link-btn,
-    .link-inline:hover .copy-link-btn,
-    .link-inline:focus-within .copy-link-btn {
-      opacity: 1;
-      transform: translateY(0);
-    }
-
-    .copy-link-btn:hover,
-    .copy-link-btn:focus-visible {
-      background: rgba(121, 210, 197, 0.20);
-      outline: none;
-    }
-
-    .inline-path,
-    .inline-copyable {
-      color: var(--accent);
-      font-weight: 700;
-      text-decoration: underline;
-      text-decoration-color: rgba(121, 210, 197, 0.42);
-      text-decoration-thickness: 1px;
-      text-underline-offset: 3px;
-    }
-
-    .inline-path {
-      white-space: nowrap;
-    }
-
-    code {
-      font-family: "IBM Plex Mono", "JetBrains Mono", "SFMono-Regular", monospace;
-      font-size: 0.92em;
-    }
-
-    @media (prefers-color-scheme: dark) {
-      :root {
-        color-scheme: dark;
-        --bg: radial-gradient(circle at top, #1b454b 0%, #14262d 38%, #0e181d 100%);
-        --paper: rgba(14, 20, 24, 0.92);
-        --ink: #eef4f7;
-        --muted: #a5b7bf;
-        --accent: #79d2c5;
-        --accent-soft: rgba(121, 210, 197, 0.14);
-        --pass: #7fd8ae;
-        --pass-soft: rgba(79, 158, 122, 0.22);
-        --alert: #f4c06a;
-        --alert-soft: rgba(185, 109, 16, 0.24);
-        --critical: #ff8f82;
-        --critical-soft: rgba(182, 56, 43, 0.24);
-        --waiting: #8fb9e0;
-        --waiting-soft: rgba(76, 127, 173, 0.24);
-        --unknown: #b2bfca;
-        --unknown-soft: rgba(97, 113, 122, 0.24);
-        --panel-outer-shadow:
-          0 0 2px rgba(0, 0, 0, 0.82),
-          0 0 16px rgba(0, 0, 0, 0.44),
-          0 0 40px rgba(0, 0, 0, 0.28),
-          0 24px 48px -32px rgba(0, 0, 0, 0.34);
-        --border: rgba(238, 244, 247, 0.08);
-        --surface: rgba(17, 25, 30, 0.78);
-        --surface-raised: rgba(17, 25, 30, 0.88);
-        --surface-solid: rgba(20, 30, 36, 0.94);
-        --surface-border: rgba(238, 244, 247, 0.08);
-        --table-scroll-track: rgba(14, 22, 27, 0.96);
-        --table-scroll-thumb: rgba(18, 104, 93, 0.88);
-        --table-scroll-thumb-strong: rgba(37, 147, 131, 0.96);
-        --hero-glow: rgba(121, 210, 197, 0.18);
-        --error-border: rgba(255, 143, 130, 0.30);
-        --card-outer-shadow:
-          0 0 1px rgba(0, 0, 0, 0.60),
-          0 0 10px rgba(0, 0, 0, 0.28),
-          0 0 22px rgba(0, 0, 0, 0.16),
-          0 18px 34px -26px rgba(0, 0, 0, 0.28);
-        --card-inner-shadow:
-          inset 0 0 0 1px rgba(10, 104, 88, 0.58),
-          inset 0 1px 0 rgba(255, 255, 255, 0.030),
-          inset 0 12px 18px -15px rgba(7, 82, 69, 0.26),
-          inset 0 -12px 18px -15px rgba(6, 63, 54, 0.20),
-          inset 12px 0 18px -15px rgba(7, 71, 61, 0.20),
-          inset -12px 0 18px -15px rgba(7, 71, 61, 0.20);
-      }
-    }
-
-    @media (max-width: 900px) {
-      .hero {
-        grid-template-columns: 1fr;
-      }
-
-      .hero-top {
-        grid-template-columns: 1fr;
-      }
-
-      .hero-cards {
-        grid-template-columns: 1fr;
-      }
-
-      .compare-grid {
-        grid-template-columns: 1fr;
-      }
-
-      .machine-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-    }
-
-    @media (max-width: 1200px) {
-      .benchmark-cards-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-    }
-
-    @media (max-width: 640px) {
-      .benchmark-cards-grid {
-        grid-template-columns: 1fr;
-      }
-
-      .machine-grid {
-        grid-template-columns: 1fr;
-      }
-    }
-  </style>
-</head>
-<body>
-  <div class="shell">
-    <div id="error-banner" class="error-banner"></div>
-    <section class="hero">
-      <div class="panel hero-main">
-        <div class="hero-top">
-          <div class="brand-line">
-            <img class="brand-lockup" src="/brand/amai_lockup.svg" alt="Amai">
-          </div>
-          <div class="side-block hero-summary-block">
-            <div id="summary-status"></div>
-            <div class="kv" id="headline-kv"></div>
-          </div>
-        </div>
-        <div class="hero-cards" id="hero-cards"></div>
-      </div>
-      <aside class="panel hero-side">
-        <div class="side-block hero-links-block">
-          <ul class="link-list" id="quick-links"></ul>
-        </div>
-      </aside>
-    </section>
-
-    <section class="panel section">
-      <h2 class="has-tooltip" tabindex="0" data-tip="Это именно текущая живая сессия. Здесь нет старых benchmark-цифр: только потоковые метрики, которые меняются по мере новых запросов и автообновляются на странице.">Live</h2>
-      <div class="cards" id="top-cards"></div>
-    </section>
-
-    <section class="panel section">
-      <h2>Последние Честные Проверки</h2>
-      <p class="muted">
-        Эти цифры не потоковые. Здесь лежат последние сохранённые отдельные проверки:
-        нагрузка быстрого пути, полный холодный прогон и проверка точности с изоляцией.
-        Они нужны, чтобы сравнивать систему с её целями на повторяемых измерениях.
-      </p>
-      <div class="cards benchmark-cards-grid" id="benchmark-cards"></div>
-    </section>
-
-    <section class="panel section">
-      <h2>Сервисы Прямо Сейчас</h2>
-      <p class="muted">
-        Это живые системные показатели: база метаданных, векторный слой и очередь событий.
-        Если какая-то строка берётся не из live probe, а из последнего измеренного прогона,
-        это будет подписано явно.
-      </p>
-      <div class="cards" id="service-cards"></div>
-    </section>
-
-    <section class="panel section">
-      <h2>Машина И Установка</h2>
-      <p class="muted">
-        Здесь видно, на каком железе сейчас всё работает и к какому клиенту уже привязана установка.
-      </p>
-      <div class="cards machine-grid" id="machine-cards"></div>
-    </section>
-
-    <section class="panel section">
-      <h2>Если есть проблемы</h2>
-      <div id="warnings-wrap"></div>
-    </section>
-
-    <section class="panel section">
-      <h2>Что Означают Термины И Метрики</h2>
-      <div class="cards" id="glossary-cards"></div>
-    </section>
-  </div>
-  <div id="tooltip-layer" class="tooltip-layer" hidden>
-    <button
-      id="tooltip-copy-btn"
-      class="tooltip-copy-btn"
-      type="button"
-      hidden
-      aria-label="Скопировать выделение"
-      title="Скопировать выделение"
-    >⧉</button>
-    <div id="tooltip-layer-content" class="tooltip-layer-content"></div>
-  </div>
-  <div id="dashboard-toast" class="dashboard-toast" hidden></div>
-
-  <script>
-    const REFRESH_MS = __REFRESH_MS__;
-    const CLIENT_BUDGET_LIVE_REFRESH_MS = Math.min(Math.max(Math.floor(REFRESH_MS / 2), 3000), 10000);
-    const TOOLTIP_HIDE_GRACE_MS = 220;
-    const CLIENT_BUDGET_ROW_ALIASES = {
-      client_live_full_turn_savings: ["client_live_full_turn_savings", "Amai в полном live-turn"],
-      client_live_context: ["client_live_context", "Последний запрос клиента"],
-      client_live_limit: ["client_live_limit", "Лимит клиента сейчас", "Последний observed лимит клиента"],
-      client_limit_hourly_burn: ["client_limit_hourly_burn", "KPI 5ч лимита"],
-    };
-    const errorBanner = document.getElementById("error-banner");
-    const tooltipLayer = document.getElementById("tooltip-layer");
-    const tooltipLayerContent = document.getElementById("tooltip-layer-content");
-    const tooltipCopyBtn = document.getElementById("tooltip-copy-btn");
-    const dashboardToast = document.getElementById("dashboard-toast");
-    let refreshInFlight = false;
-    let interactionHoldUntil = 0;
-    let activeTooltipTarget = null;
-    let activeTooltipKind = null;
-    let tooltipSelectionValue = "";
-    let dashboardToastTimer = null;
-    let tooltipHideTimer = null;
-
-    function statusClass(status) {
-      return ["pass", "alert", "critical", "waiting", "unknown"].includes(status) ? status : "unknown";
-    }
-
-    function clearNode(node) {
-      while (node.firstChild) {
-        node.removeChild(node.firstChild);
-      }
-    }
-
-    function textNode(tag, className, text) {
-      const element = document.createElement(tag);
-      if (className) {
-        element.className = className;
-      }
-      element.textContent = text;
-      return element;
-    }
-
-    function metricRowKey(row) {
-      if (row && typeof row.key === "string" && row.key.trim()) {
-        return row.key.trim();
-      }
-      if (row && typeof row.label === "string" && row.label.trim()) {
-        return row.label.trim();
-      }
-      return "";
-    }
-
-    function safeJsonParse(value) {
-      if (typeof value !== "string" || !value.trim()) {
-        return null;
-      }
-      try {
-        return JSON.parse(value);
-      } catch (_) {
-        return null;
-      }
-    }
-
-    function buildMetricRowValue(row) {
-      const key = metricRowKey(row);
-      if (key === "client_limit_hourly_burn" && row && row.target_selector) {
-        return buildClientBudgetTargetMetricValue(row);
-      }
-      return textNode("span", "metric-row-value", row.value);
-    }
-
-    function buildClientBudgetTargetMetricValue(row) {
-      const selector = row && typeof row.target_selector === "object" ? row.target_selector : null;
-      if (!selector || typeof selector.kpi_value_text !== "string" || !selector.kpi_value_text.trim()) {
-        return textNode("span", "metric-row-value", row.value);
-      }
-      const wrap = document.createElement("span");
-      wrap.className = "metric-row-value interactive-client-budget-value";
-      if (selector.value_prefix) {
-        wrap.appendChild(textNode("span", "", selector.value_prefix));
-      }
-      const trigger = document.createElement("button");
-      trigger.type = "button";
-      trigger.className = "client-budget-target-trigger has-tooltip";
-      trigger.textContent = selector.kpi_value_text;
-      trigger.tabIndex = 0;
-      trigger.dataset.tooltipKind = "client-budget-target-selector";
-      trigger.dataset.clientBudgetTargetSelector = JSON.stringify(selector);
-      trigger.setAttribute("data-tip", selector.tooltip_intro || row.tooltip || "");
-      trigger.setAttribute("aria-haspopup", "dialog");
-      trigger.setAttribute("aria-expanded", "false");
-      trigger.setAttribute(
-        "aria-label",
-        `5ч KPI ${selector.kpi_value_text}. Нажмите, чтобы выбрать целевой режим экономии.`
-      );
-      trigger.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        extendInteractionHold(4);
-        if (activeTooltipTarget === trigger && tooltipLayer && !tooltipLayer.hidden) {
-          hideTooltip(trigger);
-          return;
-        }
-        showTooltip(trigger);
-      });
-      wrap.appendChild(trigger);
-      if (selector.value_suffix) {
-        wrap.appendChild(textNode("span", "", selector.value_suffix));
-      }
-      return wrap;
-    }
-
-    function createMetricRow(row) {
-      const item = document.createElement("li");
-      item.className = "metric-row";
-      const key = metricRowKey(row);
-      if (key) {
-        item.dataset.metricRowKey = key;
-      }
-      if (row && typeof row.label === "string" && row.label.trim()) {
-        item.dataset.metricRowLabel = row.label.trim();
-      }
-      item.appendChild(labelWithTooltip(row.label, row.tooltip));
-      item.appendChild(buildMetricRowValue(row));
-      return item;
-    }
-
-    function metricRowAliases(rowOrKey) {
-      const key = typeof rowOrKey === "string" ? rowOrKey : metricRowKey(rowOrKey);
-      const aliases = CLIENT_BUDGET_ROW_ALIASES[key];
-      if (Array.isArray(aliases) && aliases.length > 0) {
-        return aliases;
-      }
-      if (typeof rowOrKey === "object" && rowOrKey && typeof rowOrKey.label === "string" && rowOrKey.label.trim()) {
-        return [key, rowOrKey.label.trim()].filter(Boolean);
-      }
-      return [key].filter(Boolean);
-    }
-
-    function metricRowIdentityMatches(item, rowOrKey) {
-      const aliases = metricRowAliases(rowOrKey);
-      if (aliases.length === 0) {
-        return false;
-      }
-      const dataKey = (item.dataset.metricRowKey || "").trim();
-      const dataLabel = (item.dataset.metricRowLabel || "").trim();
-      const renderedLabel = (item.querySelector(".metric-label")?.textContent || "").trim();
-      return aliases.includes(dataKey) || aliases.includes(dataLabel) || aliases.includes(renderedLabel);
-    }
-
-    function findMetricRowMatches(rowOrKey) {
-      return Array.from(document.querySelectorAll(".metric-row")).filter((item) =>
-        metricRowIdentityMatches(item, rowOrKey)
-      );
-    }
-
-    function currentSessionMetricRowLists() {
-      return Array.from(document.querySelectorAll(".card-shell"))
-        .filter((shell) =>
-          Array.from(shell.querySelectorAll(".card-title")).some(
-            (title) => (title.textContent || "").trim() === "Экономия токенов за текущую сессию"
-          )
-        )
-        .flatMap((shell) => Array.from(shell.querySelectorAll(".metric-rows")));
-    }
-
-    function removeMetricRows(rowOrKey) {
-      findMetricRowMatches(rowOrKey).forEach((item) => item.remove());
-    }
-
-    function upsertMetricRows(row) {
-      const matches = findMetricRowMatches(row);
-      if (matches.length > 0) {
-        matches.forEach((item) => {
-          item.replaceWith(createMetricRow(row));
-        });
-        return;
-      }
-
-      currentSessionMetricRowLists().forEach((list) => {
-        list.appendChild(createMetricRow(row));
-      });
-    }
-
-    function applyClientBudgetLiveRows(payload) {
-      const rows = Array.isArray(payload?.rows) ? payload.rows : [];
-      const presentKeys = new Set(rows.map((row) => metricRowKey(row)).filter(Boolean));
-      Object.keys(CLIENT_BUDGET_ROW_ALIASES).forEach((key) => {
-        if (!presentKeys.has(key)) {
-          removeMetricRows(key);
-        }
-      });
-      rows.forEach((row) => upsertMetricRows(row));
-    }
-
-    let clientBudgetLiveRefreshPromise = null;
-    const dashboardThreadId = new URLSearchParams(window.location.search).get("thread_id");
-
-    function apiPathWithThreadHint(path) {
-      if (!dashboardThreadId) {
-        return path;
-      }
-      const separator = path.includes("?") ? "&" : "?";
-      return `${path}${separator}thread_id=${encodeURIComponent(dashboardThreadId)}`;
-    }
-
-    async function fetchClientBudgetLivePayload(force = false) {
-      if (clientBudgetLiveRefreshPromise) {
-        return clientBudgetLiveRefreshPromise;
-      }
-      clientBudgetLiveRefreshPromise = (async () => {
-        const response = await fetch(apiPathWithThreadHint("/api/client-budget-live"), {
-          cache: "no-store",
-        });
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-        return response.json();
-      })();
-      try {
-        return await clientBudgetLiveRefreshPromise;
-      } finally {
-        clientBudgetLiveRefreshPromise = null;
-      }
-    }
-
-    async function syncClientBudgetLiveRows(force = false, payload = null) {
-      try {
-        const livePayload = payload || await fetchClientBudgetLivePayload(force);
-        if (livePayload) {
-          applyClientBudgetLiveRows(livePayload);
-        }
-        return livePayload;
-      } catch (error) {
-        if (force) {
-          console.warn(`Не удалось обновить live client-budget rows: ${error.message}`);
-        }
-        return null;
-      }
-    }
-
-    function createCopyButton(valueToCopy) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "copy-link-btn";
-      button.textContent = "⧉";
-      button.setAttribute("aria-label", "Скопировать");
-      button.title = "Скопировать";
-      button.addEventListener("click", async (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        try {
-          await navigator.clipboard.writeText(valueToCopy);
-          button.textContent = "✓";
-          button.title = "Скопировано";
-          setTimeout(() => {
-            button.textContent = "⧉";
-            button.title = "Скопировать";
-          }, 1200);
-        } catch (_) {
-          button.textContent = "!";
-          button.title = "Не удалось скопировать";
-          setTimeout(() => {
-            button.textContent = "⧉";
-            button.title = "Скопировать";
-          }, 1200);
-        }
-      });
-      return button;
-    }
-
-    function createInlineCopyableText(label, copyValue, href = null, showCopyButton = true) {
-      const wrap = document.createElement("span");
-      wrap.className = "link-inline";
-      if (href) {
-        const link = document.createElement("a");
-        link.href = href;
-        link.textContent = label;
-        if (/^https?:\/\//.test(href)) {
-          link.target = "_blank";
-          link.rel = "noreferrer";
-        }
-        wrap.appendChild(link);
-      } else {
-        wrap.appendChild(textNode("span", "inline-copyable", label));
-        if (showCopyButton) {
-          wrap.appendChild(createCopyButton(copyValue));
-        }
-      }
-      return wrap;
-    }
-
-    function helpRouteForEnvVar(envVarName) {
-      if (envVarName === "AMI_GRAFANA_ADMIN_PASSWORD") {
-        return "/help/grafana-password";
-      }
-      return null;
-    }
-
-    function appendInlineNoteFragment(container, fragment, options = {}) {
-      const inlineCopyButtons = options.inlineCopyButtons !== false;
-      const urlMatch = fragment.match(/https?:\/\/[^\s]+/);
-      if (urlMatch) {
-        const [matched] = urlMatch;
-        const index = fragment.indexOf(matched);
-        if (index > 0) {
-          container.appendChild(document.createTextNode(fragment.slice(0, index)));
-        }
-        container.appendChild(createInlineCopyableText(matched, matched, matched, inlineCopyButtons));
-        const tail = fragment.slice(index + matched.length);
-        if (tail) {
-          appendInlineNoteFragment(container, tail, options);
-        }
-        return;
-      }
-
-      const envVarMatch = fragment.match(/\bAMI_[A-Z0-9_]+\b/);
-      if (envVarMatch) {
-        const [matched] = envVarMatch;
-        const index = fragment.indexOf(matched);
-        if (index > 0) {
-          container.appendChild(document.createTextNode(fragment.slice(0, index)));
-        }
-        const helpRoute = helpRouteForEnvVar(matched);
-        if (helpRoute) {
-          container.appendChild(createInlineCopyableText(matched, matched, helpRoute, inlineCopyButtons));
-        } else {
-          const envWrap = createInlineCopyableText(matched, matched, null, inlineCopyButtons);
-          const inlineEnv = envWrap.querySelector(".inline-copyable");
-          if (inlineEnv) {
-            inlineEnv.classList.add("inline-path");
-          }
-          container.appendChild(envWrap);
-        }
-        const tail = fragment.slice(index + matched.length);
-        if (tail) {
-          appendInlineNoteFragment(container, tail, options);
-        }
-        return;
-      }
-
-      const pathMatch = fragment.match(/(?:\.\.?\/[A-Za-z0-9_./-]+|\/[A-Za-z0-9_./-]+)/);
-      if (pathMatch) {
-        const [matched] = pathMatch;
-        const index = fragment.indexOf(matched);
-        if (index > 0) {
-          container.appendChild(document.createTextNode(fragment.slice(0, index)));
-        }
-        const pathWrap = createInlineCopyableText(matched, matched, null, inlineCopyButtons);
-        const inlinePath = pathWrap.querySelector(".inline-copyable");
-        if (inlinePath) {
-          inlinePath.classList.add("inline-path");
-        }
-        container.appendChild(pathWrap);
-        const tail = fragment.slice(index + matched.length);
-        if (tail) {
-          appendInlineNoteFragment(container, tail, options);
-        }
-        return;
-      }
-
-      container.appendChild(document.createTextNode(fragment));
-    }
-
-    function appendRichText(container, text, options = {}) {
-      const lines = String(text || "").split("\n");
-      lines.forEach((line, index) => {
-        if (index > 0) {
-          container.appendChild(document.createElement("br"));
-        }
-        if (line) {
-          appendInlineNoteFragment(container, line, options);
-        }
-      });
-    }
-
-    function labelWithTooltip(text, tooltip, className = "metric-label") {
-      const wrap = document.createElement("span");
-      wrap.className = tooltip ? `${className} has-tooltip` : className;
-      if (tooltip) {
-        wrap.tabIndex = 0;
-        wrap.setAttribute("data-tip", tooltip);
-      }
-      if (text.includes("\n")) {
-        wrap.style.whiteSpace = "pre-line";
-        wrap.style.lineHeight = "1.08";
-      }
-      wrap.textContent = text;
-      return wrap;
-    }
-
-    function mergeTooltipParts(...parts) {
-      return parts
-        .map((part) => (typeof part === "string" ? part.trim() : ""))
-        .filter(Boolean)
-        .join("\n\n");
-    }
-
-    function statusPill(status, label, tooltip = null) {
-      const pill = document.createElement("div");
-      pill.className = `status-pill ${statusClass(status)}${tooltip ? " has-tooltip" : ""}`;
-      pill.textContent = label;
-      if (tooltip) {
-        pill.tabIndex = 0;
-        pill.setAttribute("data-tip", tooltip);
-      }
-      return pill;
-    }
-
-    function tooltipContainsNode(node) {
-      return Boolean(tooltipLayer && node && tooltipLayer.contains(node));
-    }
-
-    function cancelTooltipHide() {
-      if (!tooltipHideTimer) {
-        return;
-      }
-      window.clearTimeout(tooltipHideTimer);
-      tooltipHideTimer = null;
-    }
-
-    function scheduleHideTooltip(target = null, delayMs = TOOLTIP_HIDE_GRACE_MS) {
-      if (!tooltipLayer) {
-        return;
-      }
-      if (target && activeTooltipTarget && target !== activeTooltipTarget) {
-        return;
-      }
-      cancelTooltipHide();
-      tooltipHideTimer = window.setTimeout(() => {
-        tooltipHideTimer = null;
-        hideTooltip(target);
-      }, Math.max(0, delayMs));
-    }
-
-    function selectionTextWithin(node) {
-      const selection = window.getSelection();
-      if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !node) {
-        return "";
-      }
-      const range = selection.getRangeAt(0);
-      const common = range.commonAncestorContainer;
-      if (
-        !common ||
-        !node.contains(common) ||
-        !node.contains(selection.anchorNode) ||
-        !node.contains(selection.focusNode)
-      ) {
-        return "";
-      }
-      return selection.toString().trim();
-    }
-
-    function looksLikeUrl(value) {
-      return /^(https?:\/\/|www\.)\S+$/i.test(value);
-    }
-
-    function resetTooltipCopyButton() {
-      tooltipSelectionValue = "";
-      if (!tooltipCopyBtn) {
-        return;
-      }
-      tooltipCopyBtn.hidden = true;
-      tooltipCopyBtn.classList.remove("visible");
-      tooltipCopyBtn.textContent = "⧉";
-      tooltipCopyBtn.title = "Скопировать выделение";
-      tooltipCopyBtn.setAttribute("aria-label", "Скопировать выделение");
-    }
-
-    function updateTooltipCopyButton() {
-      if (!tooltipCopyBtn) {
-        return;
-      }
-      const selected = selectionTextWithin(tooltipLayer);
-      tooltipSelectionValue = selected;
-      if (!selected) {
-        resetTooltipCopyButton();
-        return;
-      }
-      const copyTitle = looksLikeUrl(selected) ? "Скопировать ссылку" : "Скопировать выделение";
-      tooltipCopyBtn.hidden = false;
-      tooltipCopyBtn.classList.add("visible");
-      tooltipCopyBtn.textContent = "⧉";
-      tooltipCopyBtn.title = copyTitle;
-      tooltipCopyBtn.setAttribute("aria-label", copyTitle);
-      positionTooltip();
-    }
-
-    function showDashboardToast(message, isError = false) {
-      if (!dashboardToast || typeof message !== "string" || !message.trim()) {
-        return;
-      }
-      dashboardToast.hidden = false;
-      dashboardToast.textContent = message.trim();
-      dashboardToast.classList.toggle("error", Boolean(isError));
-      dashboardToast.classList.add("visible");
-      if (dashboardToastTimer) {
-        window.clearTimeout(dashboardToastTimer);
-      }
-      dashboardToastTimer = window.setTimeout(() => {
-        if (!dashboardToast) {
-          return;
-        }
-        dashboardToast.classList.remove("visible");
-        window.setTimeout(() => {
-          if (dashboardToast && !dashboardToast.classList.contains("visible")) {
-            dashboardToast.hidden = true;
-            dashboardToast.textContent = "";
-            dashboardToast.classList.remove("error");
-          }
-        }, 180);
-      }, isError ? 4200 : 3000);
-    }
-
-    function emitClientBudgetChatNotice(notice) {
-      if (!notice || typeof notice.message_text !== "string" || !notice.message_text.trim()) {
-        return;
-      }
-      const detail = {
-        ...notice,
-        source: "dashboard_client_budget_target",
-      };
-      window.dispatchEvent(new CustomEvent("amai:chat-notice", { detail }));
-      try {
-        if (window.parent && window.parent !== window) {
-          window.parent.postMessage({ type: "amai:chat-notice", detail }, "*");
-        }
-      } catch (_) {}
-      try {
-        if (window.opener && window.opener !== window && !window.opener.closed) {
-          window.opener.postMessage({ type: "amai:chat-notice", detail }, "*");
-        }
-      } catch (_) {}
-    }
-
-    function launchExternalUri(uri) {
-      if (typeof uri !== "string" || !uri.trim()) {
-        throw new Error("external launch uri unavailable");
-      }
-      const anchor = document.createElement("a");
-      anchor.href = uri.trim();
-      anchor.rel = "noreferrer";
-      anchor.style.display = "none";
-      document.body.appendChild(anchor);
-      try {
-        anchor.click();
-      } finally {
-        anchor.remove();
-      }
-    }
-
-    function tooltipIsInteractiveSelector(target = activeTooltipTarget) {
-      return Boolean(
-        target &&
-        target.dataset &&
-        target.dataset.tooltipKind === "client-budget-target-selector"
-      );
-    }
-
-    async function applyClientBudgetTargetSwitch(percent, selectorState, target) {
-      const parsedPercent = Number(percent);
-      if (!Number.isFinite(parsedPercent)) {
-        throw new Error("invalid target percent");
-      }
-      const response = await fetch(apiPathWithThreadHint("/api/client-budget-target"), {
-        method: "POST",
-        cache: "no-store",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          percent: parsedPercent,
-          namespace: selectorState?.namespace || "continuity",
-        }),
-      });
-      const payload = await response.json().catch(() => null);
-      if (!response.ok) {
-        const errorText =
-          payload && typeof payload.error === "string" && payload.error.trim()
-            ? payload.error.trim()
-            : `HTTP ${response.status}`;
-        throw new Error(errorText);
-      }
-      if (payload?.client_budget_live) {
-        applyClientBudgetLiveRows(payload.client_budget_live);
-      }
-      const notice = payload?.chat_notice || payload?.client_budget_target_update?.operator_notice;
-      if (notice) {
-        emitClientBudgetChatNotice(notice);
-        showDashboardToast(notice.message_text || `Целевая экономия переключена на ${parsedPercent}%.`);
-      } else {
-        showDashboardToast(`Целевая экономия переключена на ${parsedPercent}%.`);
-      }
-      hideTooltip(target);
-      await loadDashboard(true);
-      return payload;
-    }
-
-    async function applyClientBudgetCompactChat(selectorState, target) {
-      const response = await fetch(apiPathWithThreadHint("/api/client-budget-compact-chat"), {
-        method: "POST",
-        cache: "no-store",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          namespace: selectorState?.namespace || "continuity",
-        }),
-      });
-      const payload = await response.json().catch(() => null);
-      if (!response.ok) {
-        const errorText =
-          payload && typeof payload.error === "string" && payload.error.trim()
-            ? payload.error.trim()
-            : `HTTP ${response.status}`;
-        throw new Error(errorText);
-      }
-      if (payload?.client_budget_live) {
-        applyClientBudgetLiveRows(payload.client_budget_live);
-      }
-      const notice = payload?.chat_notice || payload?.continuity_compact_chat?.operator_notice;
-      if (notice) {
-        emitClientBudgetChatNotice(notice);
-        showDashboardToast(
-          notice.message_text || "Подготовлен fresh CHAT_START_RESTORE для compact chat."
-        );
-      } else {
-        showDashboardToast("Подготовлен fresh CHAT_START_RESTORE для compact chat.");
-      }
-      hideTooltip(target);
-      await loadDashboard(true);
-      return payload;
-    }
-
-    async function applyCurrentThreadHostControlFeedback(
-      feedbackKind,
-      selectorState,
-      target,
-      options = {}
-    ) {
-      const response = await fetch(
-        apiPathWithThreadHint("/api/client-budget-host-control-feedback"),
-        {
-          method: "POST",
-          cache: "no-store",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            feedback_kind: feedbackKind,
-            command_id:
-              options.commandId ||
-              selectorState?.host_current_thread_control_last_command_id ||
-              selectorState?.host_current_thread_control?.command_id ||
-              null,
-            namespace: selectorState?.namespace || "continuity",
-          }),
-        }
-      );
-      const payload = await response.json().catch(() => null);
-      if (!response.ok) {
-        const errorText =
-          payload && typeof payload.error === "string" && payload.error.trim()
-            ? payload.error.trim()
-            : `HTTP ${response.status}`;
-        throw new Error(errorText);
-      }
-      if (payload?.client_budget_live) {
-        applyClientBudgetLiveRows(payload.client_budget_live);
-      }
-      const notice =
-        payload?.chat_notice || payload?.client_budget_host_control_feedback?.operator_notice;
-      if (notice && options.emitNotice !== false) {
-        emitClientBudgetChatNotice(notice);
-      }
-      const subject =
-        options.subjectLabel ||
-        selectorState?.host_current_thread_control_last_button_label ||
-        "same-thread host control";
-      const defaultMessage =
-        feedbackKind === "requested"
-          ? `Попытка открыть ${subject} зафиксирована.`
-          : feedbackKind === "opened"
-            ? `Подтверждено: ${subject} открылся.`
-            : `Зафиксировано: ${subject} не открылся.`;
-      if (options.showToast !== false) {
-        showDashboardToast((notice && notice.message_text) || defaultMessage);
-      }
-      if (options.hideTooltip !== false) {
-        hideTooltip(target);
-      }
-      if (options.refresh !== false) {
-        await loadDashboard(true);
-      }
-      return payload;
-    }
-
-    async function requestCurrentThreadHostControlLaunch(selectorState, surface) {
-      const response = await fetch(
-        apiPathWithThreadHint("/api/client-budget-host-control-launch"),
-        {
-          method: "POST",
-          cache: "no-store",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            command_id: surface?.command_id || selectorState?.host_current_thread_control?.command_id || null,
-            namespace: selectorState?.namespace || "continuity",
-          }),
-        }
-      );
-      const payload = await response.json().catch(() => null);
-      if (!response.ok) {
-        const errorText =
-          payload && typeof payload.error === "string" && payload.error.trim()
-            ? payload.error.trim()
-            : `HTTP ${response.status}`;
-        throw new Error(errorText);
-      }
-      if (payload?.client_budget_live) {
-        applyClientBudgetLiveRows(payload.client_budget_live);
-      }
-      return payload;
-    }
-
-    async function applyCurrentThreadHostControl(selectorState, target, surfaceOverride = null) {
-      const surface =
-        surfaceOverride && typeof surfaceOverride === "object"
-          ? surfaceOverride
-          : selectorState && typeof selectorState.host_current_thread_control === "object"
-            ? selectorState.host_current_thread_control
-            : null;
-      if (!surface || typeof surface.command_id !== "string" || !surface.command_id.trim()) {
-        throw new Error("same-thread host control unavailable");
-      }
-      if (
-        selectorState?.host_current_thread_control_retry_allowed === false ||
-        surface?.retry_allowed === false
-      ) {
-        throw new Error(
-          (typeof surface?.retry_blocked_reason === "string" && surface.retry_blocked_reason.trim()
-            ? surface.retry_blocked_reason.trim()
-            : typeof selectorState?.host_current_thread_control_retry_blocked_reason === "string" &&
-                selectorState.host_current_thread_control_retry_blocked_reason.trim()
-              ? selectorState.host_current_thread_control_retry_blocked_reason.trim()
-              : "Same-thread control уже запущен; сначала дождись измеримого effect.")
-        );
-      }
-      const messageText =
-        typeof surface?.requested_message_text === "string" && surface.requested_message_text.trim()
-          ? surface.requested_message_text.trim()
-          : typeof selectorState?.host_current_thread_control_notice_message === "string" &&
-              selectorState.host_current_thread_control_notice_message.trim()
-            ? selectorState.host_current_thread_control_notice_message.trim()
-            : surface.summary || `Запрошен host current-thread control: ${surface.command_id}.`;
-      const externalLaunch =
-        surface && typeof surface.external_uri_launch === "object"
-          ? surface.external_uri_launch
-          : null;
-      const launchUri =
-        typeof externalLaunch?.uri === "string" && externalLaunch.uri.trim()
-          ? externalLaunch.uri.trim()
-          : null;
-      const observeApiLaunchAvailable = Boolean(externalLaunch?.observe_api_launch_available);
-      const requestedNotice = {
-        kind: launchUri
-          ? "host_current_thread_control_external_launch_requested"
-          : "host_current_thread_control_requested",
-        message_text: messageText,
-        reply_prefix: selectorState?.reply_prefix || null,
-        host_current_thread_control: surface,
-      };
-      if (launchUri) {
-        let launchSummary =
-          typeof surface.summary === "string" && surface.summary.trim()
-            ? `Requested: ${surface.summary.trim()}`
-            : `Requested host current-thread control: ${surface.command_id}.`;
-        if (observeApiLaunchAvailable) {
-          try {
-            const payload = await requestCurrentThreadHostControlLaunch(selectorState, surface);
-            const notice =
-              payload?.chat_notice || payload?.client_budget_host_control_launch?.operator_notice;
-            if (notice) {
-              emitClientBudgetChatNotice(notice);
-            }
-            launchSummary = (notice && notice.message_text) || messageText;
-            selectorState.host_current_thread_control_feedback_pending = true;
-            selectorState.host_current_thread_control_last_command_id = surface.command_id;
-            selectorState.host_current_thread_control_last_button_label =
-              surface.button_label || surface.command_id;
-            selectorState.host_current_thread_control_last_feedback_kind = "requested";
-            selectorState.host_current_thread_control_last_feedback_summary = launchSummary;
-            renderClientBudgetTargetSelectorTooltip(target, selectorState);
-            activeTooltipTarget = target;
-            activeTooltipKind = target.dataset.tooltipKind || null;
-            tooltipLayer.hidden = false;
-            tooltipLayer.classList.add("visible");
-            positionTooltip(target);
-            showDashboardToast(
-              `${(notice && notice.message_text) || messageText} Подтверди исход в tooltip.`
-            );
-            return surface;
-          } catch (_) {}
-        }
-        emitClientBudgetChatNotice(requestedNotice);
-        try {
-          await applyCurrentThreadHostControlFeedback("requested", selectorState, target, {
-            commandId: surface.command_id,
-            subjectLabel: surface.button_label || surface.command_id,
-            emitNotice: false,
-            hideTooltip: false,
-            refresh: false,
-            showToast: false,
-          });
-        } catch (_) {}
-        launchExternalUri(launchUri);
-        selectorState.host_current_thread_control_feedback_pending = true;
-        selectorState.host_current_thread_control_last_command_id = surface.command_id;
-        selectorState.host_current_thread_control_last_button_label =
-          surface.button_label || surface.command_id;
-        selectorState.host_current_thread_control_last_feedback_kind = "requested";
-        selectorState.host_current_thread_control_last_feedback_summary = launchSummary;
-        renderClientBudgetTargetSelectorTooltip(target, selectorState);
-        activeTooltipTarget = target;
-        activeTooltipKind = target.dataset.tooltipKind || null;
-        tooltipLayer.hidden = false;
-        tooltipLayer.classList.add("visible");
-        positionTooltip(target);
-        showDashboardToast(`${messageText} Подтверди исход в tooltip.`);
-        return surface;
-      }
-      emitClientBudgetChatNotice(requestedNotice);
-      showDashboardToast(messageText);
-      hideTooltip(target);
-      return surface;
-    }
-
-    function renderClientBudgetTargetSelectorTooltip(target, selectorState) {
-      if (!tooltipLayerContent) {
-        return false;
-      }
-      const allowedPercents = Array.isArray(selectorState?.allowed_target_percents)
-        ? selectorState.allowed_target_percents
-        : [];
-      if (allowedPercents.length === 0) {
-        return false;
-      }
-      const currentTargetPercent = Number(selectorState?.current_target_percent);
-      const shell = document.createElement("div");
-      shell.className = "tooltip-target-picker";
-      if (selectorState.tooltip_intro) {
-        shell.appendChild(textNode("div", "tooltip-target-picker-note", selectorState.tooltip_intro));
-      }
-      const grid = document.createElement("div");
-      grid.className = "tooltip-target-picker-grid";
-      allowedPercents.forEach((value) => {
-        const option = document.createElement("button");
-        option.type = "button";
-        option.className = "tooltip-target-picker-option";
-        option.textContent = `${value}%`;
-        if (Number(value) === currentTargetPercent) {
-          option.classList.add("active");
-          option.setAttribute("aria-pressed", "true");
-        } else {
-          option.setAttribute("aria-pressed", "false");
-        }
-        option.addEventListener("click", async (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          extendInteractionHold(4);
-          const optionButtons = Array.from(grid.querySelectorAll("button"));
-          optionButtons.forEach((button) => {
-            button.disabled = true;
-          });
-          try {
-            await applyClientBudgetTargetSwitch(value, selectorState, target);
-          } catch (error) {
-            optionButtons.forEach((button) => {
-              button.disabled = false;
-            });
-            showDashboardToast(
-              `Не удалось переключить режим экономии: ${error.message || "unknown error"}`,
-              true
-            );
-          }
-        });
-        grid.appendChild(option);
-      });
-      shell.appendChild(grid);
-      if (selectorState.selected_chat_command) {
-        const command = document.createElement("div");
-        command.className = "tooltip-target-picker-note";
-        command.appendChild(document.createTextNode("Exact chat-команда: "));
-        command.appendChild(
-          textNode("span", "tooltip-target-picker-command", selectorState.selected_chat_command)
-        );
-        shell.appendChild(command);
-      }
-      if (selectorState.compact_chat_command) {
-        if (selectorState.compact_chat_intro) {
-          shell.appendChild(
-            textNode("div", "tooltip-target-picker-note", selectorState.compact_chat_intro)
-          );
-        }
-        const compactButton = document.createElement("button");
-        compactButton.type = "button";
-        compactButton.className = "tooltip-target-picker-option";
-        compactButton.textContent = selectorState.compact_chat_button_label || "Compact chat";
-        compactButton.addEventListener("click", async (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          extendInteractionHold(4);
-          compactButton.disabled = true;
-          try {
-            await applyClientBudgetCompactChat(selectorState, target);
-          } catch (error) {
-            compactButton.disabled = false;
-            showDashboardToast(
-              `Не удалось подготовить compact chat: ${error.message || "unknown error"}`,
-              true
-            );
-          }
-        });
-        shell.appendChild(compactButton);
-        const compactCommand = document.createElement("div");
-        compactCommand.className = "tooltip-target-picker-note";
-        compactCommand.appendChild(document.createTextNode("Exact chat-команда: "));
-        compactCommand.appendChild(
-          textNode("span", "tooltip-target-picker-command", selectorState.compact_chat_command)
-        );
-        shell.appendChild(compactCommand);
-      }
-      if (
-        selectorState.host_current_thread_control &&
-        typeof selectorState.host_current_thread_control === "object"
-      ) {
-        const hostControlRetryAllowed =
-          selectorState.host_current_thread_control_retry_allowed !== false;
-        const hostControlSurfaces = [selectorState.host_current_thread_control];
-        const alternateHostControls = Array.isArray(
-          selectorState.host_current_thread_control.alternate_controls
-        )
-          ? selectorState.host_current_thread_control.alternate_controls
-          : [];
-        alternateHostControls.forEach((surface) => {
-          if (surface && typeof surface === "object") {
-            hostControlSurfaces.push(surface);
-          }
-        });
-        hostControlSurfaces.forEach((surface, index) => {
-          const introMessage =
-            typeof surface?.intro_message === "string" && surface.intro_message.trim()
-              ? surface.intro_message.trim()
-              : index === 0 &&
-                  typeof selectorState.host_current_thread_control_intro === "string" &&
-                  selectorState.host_current_thread_control_intro.trim()
-                ? selectorState.host_current_thread_control_intro.trim()
-                : null;
-          if (introMessage) {
-            shell.appendChild(textNode("div", "tooltip-target-picker-note", introMessage));
-          }
-          const hostControlButton = document.createElement("button");
-          hostControlButton.type = "button";
-          hostControlButton.className = "tooltip-target-picker-option";
-          hostControlButton.textContent =
-            surface.button_label ||
-            (index === 0
-              ? selectorState.host_current_thread_control_button_label || "Same-thread control"
-              : "Host control");
-          if (!hostControlRetryAllowed || surface.retry_allowed === false) {
-            hostControlButton.disabled = true;
-          }
-          hostControlButton.addEventListener("click", async (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            extendInteractionHold(2);
-            hostControlButton.disabled = true;
-            try {
-              await applyCurrentThreadHostControl(selectorState, target, surface);
-            } catch (error) {
-              hostControlButton.disabled = false;
-              showDashboardToast(
-                `Не удалось запросить same-thread host control: ${error.message || "unknown error"}`,
-                true
-              );
-              return;
-            }
-            hostControlButton.disabled = false;
-          });
-          shell.appendChild(hostControlButton);
-          if (surface.command_id) {
-            const hostControlCommand = document.createElement("div");
-            hostControlCommand.className = "tooltip-target-picker-note";
-            hostControlCommand.appendChild(document.createTextNode("Host internal command id: "));
-            hostControlCommand.appendChild(
-              textNode("span", "tooltip-target-picker-command", surface.command_id)
-            );
-            shell.appendChild(hostControlCommand);
-          }
-          const externalLaunch =
-            typeof surface.external_uri_launch === "object" ? surface.external_uri_launch : null;
-          if (externalLaunch && typeof externalLaunch.uri === "string" && externalLaunch.uri.trim()) {
-            const hostControlUri = document.createElement("div");
-            hostControlUri.className = "tooltip-target-picker-note";
-            hostControlUri.appendChild(document.createTextNode("VS Code URI launch: "));
-            hostControlUri.appendChild(
-              textNode("span", "tooltip-target-picker-command", externalLaunch.uri)
-            );
-            shell.appendChild(hostControlUri);
-          }
-          if (
-            externalLaunch &&
-            typeof externalLaunch.platform_launch_command === "string" &&
-            externalLaunch.platform_launch_command.trim()
-          ) {
-            const hostControlLaunch = document.createElement("div");
-            hostControlLaunch.className = "tooltip-target-picker-note";
-            hostControlLaunch.appendChild(document.createTextNode("Shell launch: "));
-            hostControlLaunch.appendChild(
-              textNode(
-                "span",
-                "tooltip-target-picker-command",
-                externalLaunch.platform_launch_command
-              )
-            );
-            shell.appendChild(hostControlLaunch);
-          }
-        });
-        if (
-          typeof selectorState.host_current_thread_control_retry_blocked_reason === "string" &&
-          selectorState.host_current_thread_control_retry_blocked_reason.trim()
-        ) {
-          shell.appendChild(
-            textNode(
-              "div",
-              "tooltip-target-picker-note",
-              selectorState.host_current_thread_control_retry_blocked_reason.trim()
-            )
-          );
-        }
-        if (selectorState.host_current_thread_control_last_feedback_summary) {
-          shell.appendChild(
-            textNode(
-              "div",
-              "tooltip-target-picker-note",
-              `Последний feedback: ${selectorState.host_current_thread_control_last_feedback_summary}`
-            )
-          );
-        }
-        if (
-          typeof selectorState.host_current_thread_control_effect_summary === "string" &&
-          selectorState.host_current_thread_control_effect_summary.trim()
-        ) {
-          shell.appendChild(
-            textNode(
-              "div",
-              "tooltip-target-picker-note",
-              selectorState.host_current_thread_control_effect_summary.trim()
-            )
-          );
-        }
-        if (
-          typeof selectorState.host_current_thread_control_effect_note === "string" &&
-          selectorState.host_current_thread_control_effect_note.trim()
-        ) {
-          shell.appendChild(
-            textNode(
-              "div",
-              "tooltip-target-picker-note",
-              selectorState.host_current_thread_control_effect_note.trim()
-            )
-          );
-        }
-        if (selectorState.host_current_thread_control_feedback_pending) {
-          shell.appendChild(
-            textNode(
-              "div",
-              "tooltip-target-picker-note",
-              selectorState.host_current_thread_control_ack_intro ||
-                selectorState.host_current_thread_control?.feedback_ack_intro ||
-                "После попытки запуска отметь исход same-thread host control."
-            )
-          );
-          const feedbackGrid = document.createElement("div");
-          feedbackGrid.className = "tooltip-target-picker-grid";
-          [
-            { kind: "opened", label: "Открылся" },
-            { kind: "failed", label: "Не открылся" },
-          ].forEach(({ kind, label }) => {
-            const feedbackButton = document.createElement("button");
-            feedbackButton.type = "button";
-            feedbackButton.className = "tooltip-target-picker-option";
-            feedbackButton.textContent = label;
-            feedbackButton.addEventListener("click", async (event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              extendInteractionHold(4);
-              const buttons = Array.from(feedbackGrid.querySelectorAll("button"));
-              buttons.forEach((button) => {
-                button.disabled = true;
-              });
-              try {
-                await applyCurrentThreadHostControlFeedback(kind, selectorState, target, {
-                  commandId: selectorState.host_current_thread_control_last_command_id,
-                  subjectLabel:
-                    selectorState.host_current_thread_control_last_button_label ||
-                    selectorState.host_current_thread_control?.button_label ||
-                    "same-thread host control",
-                });
-              } catch (error) {
-                buttons.forEach((button) => {
-                  button.disabled = false;
-                });
-                showDashboardToast(
-                  `Не удалось записать feedback по same-thread host control: ${error.message || "unknown error"}`,
-                  true
-                );
-              }
-            });
-            feedbackGrid.appendChild(feedbackButton);
-          });
-          shell.appendChild(feedbackGrid);
-        }
-      }
-      if (selectorState.reply_prefix) {
-        shell.appendChild(
-          textNode("div", "tooltip-target-picker-note", `Текущий reply prefix: ${selectorState.reply_prefix}`)
-        );
-      }
-      clearNode(tooltipLayerContent);
-      tooltipLayerContent.appendChild(shell);
-      return true;
-    }
-
-    function showTooltip(target) {
-      if (!tooltipLayer || !tooltipLayerContent || !target) {
-        return;
-      }
-      cancelTooltipHide();
-      extendInteractionHold(2);
-      if (target.dataset.tooltipKind === "client-budget-target-selector") {
-        const selectorState = safeJsonParse(target.dataset.clientBudgetTargetSelector);
-        if (selectorState && renderClientBudgetTargetSelectorTooltip(target, selectorState)) {
-          activeTooltipTarget = target;
-          activeTooltipKind = target.dataset.tooltipKind || null;
-          resetTooltipCopyButton();
-          tooltipLayer.hidden = false;
-          tooltipLayer.classList.add("visible");
-          target.setAttribute("aria-describedby", "tooltip-layer");
-          target.setAttribute("aria-expanded", "true");
-          positionTooltip(target);
-          return;
-        }
-      }
-      const tip = target.getAttribute("data-tip");
-      if (!tip) {
-        hideTooltip();
-        return;
-      }
-      activeTooltipTarget = target;
-      activeTooltipKind = target.dataset.tooltipKind || null;
-      clearNode(tooltipLayerContent);
-      appendRichText(tooltipLayerContent, tip, { inlineCopyButtons: false });
-      resetTooltipCopyButton();
-      tooltipLayer.hidden = false;
-      tooltipLayer.classList.add("visible");
-      target.setAttribute("aria-describedby", "tooltip-layer");
-      target.setAttribute("aria-expanded", "true");
-      positionTooltip(target);
-    }
-
-    function hideTooltip(target = null) {
-      if (!tooltipLayer) {
-        return;
-      }
-      cancelTooltipHide();
-      if (target && activeTooltipTarget && target !== activeTooltipTarget) {
-        return;
-      }
-      if (activeTooltipTarget) {
-        activeTooltipTarget.removeAttribute("aria-describedby");
-        if (activeTooltipTarget.hasAttribute("aria-expanded")) {
-          activeTooltipTarget.setAttribute("aria-expanded", "false");
-        }
-      }
-      activeTooltipTarget = null;
-      activeTooltipKind = null;
-      tooltipLayer.classList.remove("visible");
-      tooltipLayer.hidden = true;
-      if (tooltipLayerContent) {
-        clearNode(tooltipLayerContent);
-      }
-      resetTooltipCopyButton();
-    }
-
-    function positionTooltip(target = activeTooltipTarget) {
-      if (!tooltipLayer || !target || tooltipLayer.hidden) {
-        return;
-      }
-
-      const margin = 12;
-      const targetRect = target.getBoundingClientRect();
-      tooltipLayer.style.left = "0px";
-      tooltipLayer.style.top = "0px";
-      tooltipLayer.style.maxWidth = `${Math.max(220, Math.min(360, window.innerWidth - margin * 2))}px`;
-      const tooltipRect = tooltipLayer.getBoundingClientRect();
-
-      let left = targetRect.left + targetRect.width / 2 - tooltipRect.width / 2;
-      left = Math.max(margin, Math.min(left, window.innerWidth - tooltipRect.width - margin));
-
-      let top = targetRect.top - tooltipRect.height - 12;
-      if (top < margin) {
-        top = Math.min(
-          window.innerHeight - tooltipRect.height - margin,
-          targetRect.bottom + 12
-        );
-      }
-
-      tooltipLayer.style.left = `${left}px`;
-      tooltipLayer.style.top = `${Math.max(margin, top)}px`;
-    }
-
-    function extendInteractionHold(multiplier = 4) {
-      interactionHoldUntil = Math.max(
-        interactionHoldUntil,
-        Date.now() + Math.max(REFRESH_MS * multiplier, 1500)
-      );
-    }
-
-    function hasActiveSelection() {
-      const selection = window.getSelection();
-      return Boolean(
-        selection &&
-        !selection.isCollapsed &&
-        selection.toString().trim().length > 0
-      );
-    }
-
-    function isRefreshPaused() {
-      if (Date.now() < interactionHoldUntil) {
-        return true;
-      }
-      if (hasActiveSelection()) {
-        return true;
-      }
-      return false;
-    }
-
-    const cardInteractionState = new Map();
-    let activeFullscreenCardKey = null;
-    let lastSecondaryGesture = { key: null, at: 0 };
-    let lastTouchGesture = { key: null, fingers: 0, at: 0 };
-
-    function cardStateKey(containerId, card) {
-      return `${containerId}::${card.kind || "metric"}::${card.title || "card"}`;
-    }
-
-    function readCardState(key) {
-      return cardInteractionState.get(key) || { flipped: false, fullscreen: false };
-    }
-
-    function writeCardState(key, patch) {
-      const next = { ...readCardState(key), ...patch };
-      if (!next.flipped && !next.fullscreen) {
-        cardInteractionState.delete(key);
-      } else {
-        cardInteractionState.set(key, next);
-      }
-    }
-
-    function syncBodyFullscreenState() {
-      document.body.classList.toggle(
-        "card-fullscreen-open",
-        Boolean(document.querySelector(".card-shell.card-fullscreen"))
-      );
-    }
-
-    function isInteractiveCardTarget(target) {
-      return Boolean(
-        target &&
-        target.closest &&
-        target.closest(".has-tooltip, a, button, .copy-link-btn, .compare-table-wrap, .tooltip-layer")
-      );
-    }
-
-    function applyStoredCardState(shell) {
-      const key = shell.dataset.cardKey;
-      const state = readCardState(key);
-      shell.classList.toggle("card-back-visible", Boolean(state.flipped));
-      shell.classList.toggle("card-fullscreen", Boolean(state.fullscreen));
-      if (state.fullscreen) {
-        activeFullscreenCardKey = key;
-      }
-      syncBodyFullscreenState();
-    }
-
-    function setCardBackVisible(shell, visible) {
-      shell.classList.toggle("card-back-visible", visible);
-      writeCardState(shell.dataset.cardKey, { flipped: visible });
-    }
-
-    function setCardFullscreenVisible(shell, visible) {
-      const key = shell.dataset.cardKey;
-      if (visible && activeFullscreenCardKey && activeFullscreenCardKey !== key) {
-        const previous = document.querySelector(`[data-card-key="${CSS.escape(activeFullscreenCardKey)}"]`);
-        if (previous) {
-          previous.classList.remove("card-fullscreen");
-        }
-        writeCardState(activeFullscreenCardKey, { fullscreen: false });
-      }
-      shell.classList.toggle("card-fullscreen", visible);
-      activeFullscreenCardKey = visible ? key : null;
-      writeCardState(key, { fullscreen: visible });
-      syncBodyFullscreenState();
-    }
-
-    function toggleCardBack(shell) {
-      setCardBackVisible(shell, !shell.classList.contains("card-back-visible"));
-      extendInteractionHold(8);
-    }
-
-    function toggleCardFullscreen(shell) {
-      setCardFullscreenVisible(shell, !shell.classList.contains("card-fullscreen"));
-      extendInteractionHold(10);
-    }
-
-    function wireCardShellInteractions(shell) {
-      shell.addEventListener("dblclick", (event) => {
-        if (event.button !== 0 || isInteractiveCardTarget(event.target) || hasActiveSelection()) {
-          return;
-        }
-        event.preventDefault();
-        toggleCardBack(shell);
-      });
-
-      shell.addEventListener("contextmenu", (event) => {
-        event.preventDefault();
-      });
-
-      shell.addEventListener("pointerup", (event) => {
-        if (event.button !== 2 || isInteractiveCardTarget(event.target) || hasActiveSelection()) {
-          return;
-        }
-        const key = shell.dataset.cardKey;
-        const now = Date.now();
-        if (lastSecondaryGesture.key === key && now - lastSecondaryGesture.at <= 420) {
-          event.preventDefault();
-          toggleCardFullscreen(shell);
-          lastSecondaryGesture = { key: null, at: 0 };
-          return;
-        }
-        lastSecondaryGesture = { key, at: now };
-      });
-
-      shell.addEventListener("touchstart", (event) => {
-        shell.dataset.touchFingers = String(event.touches.length);
-      }, { passive: true });
-
-      shell.addEventListener("touchend", (event) => {
-        const target = event.target;
-        if (isInteractiveCardTarget(target) || hasActiveSelection()) {
-          return;
-        }
-        const fingers = Number(shell.dataset.touchFingers || "1");
-        const key = shell.dataset.cardKey;
-        const now = Date.now();
-        const sameGesture =
-          lastTouchGesture.key === key &&
-          lastTouchGesture.fingers === fingers &&
-          now - lastTouchGesture.at <= 420;
-        if (sameGesture) {
-          event.preventDefault();
-          if (fingers >= 2) {
-            toggleCardFullscreen(shell);
-          } else {
-            toggleCardBack(shell);
-          }
-          lastTouchGesture = { key: null, fingers: 0, at: 0 };
-          return;
-        }
-        lastTouchGesture = { key, fingers, at: now };
-      }, { passive: false });
-    }
-
-    function createCardShell(containerId, card, baseClassName, populateFront, populateBack) {
-      const shell = document.createElement("article");
-      shell.className = `${baseClassName} card-shell`;
-      shell.dataset.cardKey = cardStateKey(containerId, card);
-      addExtraClasses(shell, card.extra_class);
-      if (card.table_orientation === "transposed") {
-        shell.classList.add("table-transposed");
-      }
-
-      const stage = document.createElement("div");
-      stage.className = "card-flip-stage";
-      const front = document.createElement("div");
-      front.className = "card-face card-face-front";
-      populateFront(front);
-      const back = document.createElement("div");
-      back.className = "card-face card-face-back";
-      populateBack(back);
-      stage.appendChild(front);
-      stage.appendChild(back);
-      shell.appendChild(stage);
-      wireCardShellInteractions(shell);
-      applyStoredCardState(shell);
-      return shell;
-    }
-
-    function renderCompareHeader(target, card) {
-      const head = document.createElement("div");
-      head.className = "compare-head";
-      const titleTooltip = mergeTooltipParts(card.title_tooltip, card.source_label);
-      head.appendChild(labelWithTooltip(card.title, titleTooltip, "card-title"));
-      head.appendChild(statusPill(card.status, card.status_label, card.status_tooltip));
-      target.appendChild(head);
-    }
-
-    function renderCompareMetrics(target, card) {
-      if (!card.metrics || card.metrics.length === 0) {
-        return;
-      }
-      const compareGrid = document.createElement("div");
-      compareGrid.className = "compare-grid";
-      card.metrics.forEach((metric) => {
-        const metricCard = document.createElement("section");
-        metricCard.className = "compare-metric";
-        metricCard.appendChild(labelWithTooltip(metric.label, metric.tooltip, "compare-metric-label"));
-        metricCard.appendChild(textNode("p", "compare-metric-value", metric.value));
-        metricCard.appendChild(textNode("p", "compare-metric-note", metric.note));
-        compareGrid.appendChild(metricCard);
-      });
-      target.appendChild(compareGrid);
-    }
-
-    function renderCompareTableWrap(target, card) {
-      const tableWrap = document.createElement("div");
-      tableWrap.className = "compare-table-wrap";
-      const table = document.createElement("table");
-      table.className = "compare-table";
-      renderCompareTable(table, card.table, card.table_orientation);
-      tableWrap.appendChild(table);
-      target.appendChild(tableWrap);
-    }
-
-    function renderCompareFront(target, card) {
-      renderCompareHeader(target, card);
-      if (card.headline_value) {
-        const headline = document.createElement("p");
-        headline.className = "service-headline compare-headline";
-        appendCompareCellValue(headline, card.headline_value);
-        target.appendChild(headline);
-      }
-      if (card.note) {
-        target.appendChild(textNode("p", "card-note", card.note));
-      }
-      renderCompareMetrics(target, card);
-      renderCompareTableWrap(target, card);
-    }
-
-    function renderGenericBackHeader(target, card) {
-      const head = document.createElement("div");
-      head.className = "card-top";
-      const titleTooltip = mergeTooltipParts(card.title_tooltip, card.source_label);
-      head.appendChild(labelWithTooltip(card.title, titleTooltip, "card-title"));
-      head.appendChild(statusPill(card.status, card.status_label, card.status_tooltip));
-      target.appendChild(head);
-    }
-
-    function renderMetricRows(target, card) {
-      if (!card.rows || card.rows.length === 0) {
-        return;
-      }
-      const list = document.createElement("ul");
-      list.className = "metric-rows";
-      card.rows.forEach((row) => {
-        list.appendChild(createMetricRow(row));
-      });
-      target.appendChild(list);
-    }
-
-    function renderCardDetails(target, card) {
-      if (!card.details || card.details.length === 0) {
-        return;
-      }
-      target.appendChild(textNode("p", "card-back-section-title", "Дополнительные детали"));
-      const list = document.createElement("ul");
-      list.className = "detail-list";
-      card.details.forEach((detail) => {
-        list.appendChild(textNode("li", "", detail));
-      });
-      target.appendChild(list);
-    }
-
-    function createHierarchyNode(levelClass, node) {
-      const element = document.createElement("section");
-      element.className = `hierarchy-node hierarchy-${levelClass} ${statusClass(node.status)}`;
-      const header = document.createElement("div");
-      header.className = "hierarchy-node-header";
-      header.appendChild(textNode("h4", "hierarchy-node-title", node.label || "ещё нет данных"));
-      if (node.summary) {
-        header.appendChild(textNode("p", "hierarchy-node-summary", node.summary));
-      }
-      element.appendChild(header);
-      return element;
-    }
-
-    function renderHierarchyThreadMeta(target, thread) {
-      const list = document.createElement("ul");
-      list.className = "hierarchy-thread-meta";
-      const rows = [
-        ["Thread", thread.thread_id || "ещё нет данных"],
-        ["Заголовок", thread.title || "ещё нет данных"],
-        ["CWD", thread.cwd || "ещё нет данных"],
-        ["Последнее обновление", thread.updated_at || "ещё нет данных"],
-      ];
-      rows.forEach(([label, value]) => {
-        const item = document.createElement("li");
-        item.appendChild(textNode("span", "hierarchy-thread-label", label));
-        if (label === "Thread" && value && value !== "ещё нет данных") {
-          item.appendChild(createInlineCopyableText(value, value, null, true));
-        } else {
-          item.appendChild(textNode("span", "hierarchy-thread-value", value));
-        }
-        list.appendChild(item);
-      });
-      target.appendChild(list);
-    }
-
-    function renderHierarchyBackPanel(target, panel, card) {
-      renderGenericBackHeader(target, card);
-      target.appendChild(textNode("p", "card-back-note", panel.title || "Иерархия живых сущностей"));
-      if (panel.note) {
-        target.appendChild(textNode("p", "card-back-note", panel.note));
-      }
-
-      if (Array.isArray(panel.legend) && panel.legend.length > 0) {
-        const legend = document.createElement("ul");
-        legend.className = "hierarchy-legend";
-        panel.legend.forEach((entry) => {
-          const item = document.createElement("li");
-          item.className = `hierarchy-legend-item ${statusClass(entry.status)}`;
-          item.appendChild(textNode("span", "", entry.label || "ещё нет данных"));
-          if (entry.note) {
-            item.setAttribute("data-tip", entry.note);
-            item.classList.add("has-tooltip");
-          }
-          legend.appendChild(item);
-        });
-        target.appendChild(legend);
-      }
-
-      const projectsWrap = document.createElement("div");
-      projectsWrap.className = "hierarchy-projects";
-      (panel.projects || []).forEach((project) => {
-        const projectNode = createHierarchyNode("project", project);
-        const projectChildren = document.createElement("div");
-        projectChildren.className = "hierarchy-node-children";
-
-        (project.spaces || []).forEach((space) => {
-          const spaceNode = createHierarchyNode("space", space);
-          const spaceChildren = document.createElement("div");
-          spaceChildren.className = "hierarchy-node-children";
-
-          (space.agents || []).forEach((agent) => {
-            const agentNode = createHierarchyNode("agent", agent);
-            if (Array.isArray(agent.source_badges) && agent.source_badges.length > 0) {
-              const badges = document.createElement("div");
-              badges.className = "hierarchy-source-badges";
-              agent.source_badges.forEach((badge) => {
-                const chip = document.createElement("span");
-                chip.className = `hierarchy-source-badge ${statusClass(badge.status)}`;
-                chip.textContent = badge.label || "ещё нет данных";
-                badges.appendChild(chip);
-              });
-              agentNode.appendChild(badges);
-            }
-
-            if (agent.session) {
-              const sessionNode = createHierarchyNode("session", agent.session);
-              const sessionChildren = document.createElement("div");
-              sessionChildren.className = "hierarchy-node-children";
-
-              if (agent.session.thread) {
-                const threadNode = createHierarchyNode("thread", {
-                  label: "Thread / turn",
-                  status: agent.session.thread.thread_id ? "pass" : "unknown",
-                  summary: agent.session.thread.title || "ещё нет данных",
-                });
-                renderHierarchyThreadMeta(threadNode, agent.session.thread);
-                sessionChildren.appendChild(threadNode);
-              }
-
-              if (agent.session.model) {
-                const modelNode = createHierarchyNode("model", {
-                  label: "Модель",
-                  status: agent.session.model.status || "unknown",
-                  summary: agent.session.model.label || "ещё нет данных",
-                });
-                sessionChildren.appendChild(modelNode);
-              }
-
-              sessionNode.appendChild(sessionChildren);
-              agentNode.appendChild(sessionNode);
-            }
-
-            spaceChildren.appendChild(agentNode);
-          });
-
-          spaceNode.appendChild(spaceChildren);
-          projectChildren.appendChild(spaceNode);
-        });
-
-        if (Array.isArray(project.pending_threads) && project.pending_threads.length > 0) {
-          const pendingWrap = document.createElement("div");
-          pendingWrap.className = "hierarchy-node-children";
-          const pendingNode = createHierarchyNode("pending", {
-            label: "Raw client threads без Amai binding",
-            status: "alert",
-            summary: "Эти thread реально активны, но Amai ещё не связала их с пространством и сессией."
-          });
-          const pendingList = document.createElement("div");
-          pendingList.className = "hierarchy-pending-list";
-          project.pending_threads.forEach((thread) => {
-            const item = document.createElement("section");
-            item.className = "hierarchy-pending-thread";
-            item.appendChild(textNode("span", "hierarchy-thread-label", thread.label || "ещё нет данных"));
-            item.appendChild(textNode("span", "hierarchy-thread-value", thread.summary || "ещё нет данных"));
-            if (thread.thread_id) {
-              item.appendChild(createInlineCopyableText(thread.thread_id, thread.thread_id, null, true));
-            }
-            if (thread.updated_at) {
-              item.appendChild(textNode("span", "hierarchy-thread-label", `Обновлён: ${thread.updated_at}`));
-            }
-            pendingList.appendChild(item);
-          });
-          pendingNode.appendChild(pendingList);
-          pendingWrap.appendChild(pendingNode);
-          projectChildren.appendChild(pendingWrap);
-        }
-
-        projectNode.appendChild(projectChildren);
-        projectsWrap.appendChild(projectNode);
-      });
-      target.appendChild(projectsWrap);
-    }
-
-    function renderMetricBack(target, card) {
-      if (card.back_panel && card.back_panel.kind === "hierarchy_tree") {
-        renderHierarchyBackPanel(target, card.back_panel, card);
-        return;
-      }
-
-      renderGenericBackHeader(target, card);
-      const valueClass = card.kind === "service_card" ? "service-headline" : "card-value";
-      target.appendChild(textNode("p", valueClass, card.value || "ещё нет данных"));
-      const backNote = card.note
-        ? `${card.note} Оборотная сторона не добавляет новых источников, а разворачивает только уже materialized truth.`
-        : "Оборотная сторона не добавляет новых источников, а разворачивает только уже materialized truth.";
-      target.appendChild(textNode("p", "card-back-note", backNote));
-      renderMetricRows(target, card);
-      renderCardDetails(target, card);
-      if (card.source_label) {
-        target.appendChild(textNode("p", "card-back-source", card.source_label));
-      }
-    }
-
-    function renderCompareBack(target, card) {
-      renderGenericBackHeader(target, card);
-      const note = card.note
-        ? `${card.note} Оборотная сторона использует тот же materialized compare surface без скрытых линий и guessed overlays.`
-        : "Оборотная сторона использует тот же materialized compare surface без скрытых линий и guessed overlays.";
-      target.appendChild(textNode("p", "card-back-note", note));
-      if (card.headline_value) {
-        const headline = document.createElement("p");
-        headline.className = "service-headline compare-headline";
-        appendCompareCellValue(headline, card.headline_value);
-        target.appendChild(headline);
-      }
-      renderCompareMetrics(target, card);
-      renderCompareTableWrap(target, card);
-      if (card.source_label) {
-        target.appendChild(textNode("p", "card-back-source", card.source_label));
-      }
-    }
-
-    function renderCompareCard(containerId, container, card) {
-      const shell = createCardShell(
-        containerId,
-        card,
-        `compare-card ${statusClass(card.status)}`,
-        (front) => renderCompareFront(front, card),
-        (back) => renderCompareBack(back, card),
-      );
-      container.appendChild(shell);
-    }
-
-    function renderCompareTable(table, tableData, orientation) {
-      if (orientation === "transposed") {
-        renderTransposedCompareTable(table, tableData);
-        return;
-      }
-
-      renderStandardCompareTable(table, tableData);
-    }
-
-    function renderStandardCompareTable(table, tableData) {
-      const thead = document.createElement("thead");
-      const headRow = document.createElement("tr");
-      tableData.columns.forEach((column) => {
-        const th = document.createElement("th");
-        th.appendChild(labelWithTooltip(column.label, column.tooltip, ""));
-        headRow.appendChild(th);
-      });
-      thead.appendChild(headRow);
-      table.appendChild(thead);
-
-      const tbody = document.createElement("tbody");
-      tableData.rows.forEach((row) => {
-        const tr = document.createElement("tr");
-        const labelCell = document.createElement("td");
-        labelCell.appendChild(labelWithTooltip(row.label, row.tooltip, ""));
-        tr.appendChild(labelCell);
-        row.values.forEach((value) => {
-          const valueCell = document.createElement("td");
-          appendCompareCellValue(valueCell, value);
-          tr.appendChild(valueCell);
-        });
-        tbody.appendChild(tr);
-      });
-      table.appendChild(tbody);
-    }
-
-    function renderTransposedCompareTable(table, tableData) {
-      const valueColumns = tableData.columns.slice(1);
-      const metrics = tableData.rows;
-
-      const thead = document.createElement("thead");
-      const headRow = document.createElement("tr");
-      const scopeHeader = document.createElement("th");
-      scopeHeader.appendChild(labelWithTooltip("Срез", "Какой слой сравнения показан в строке: эталон или тестовые данные.", ""));
-      headRow.appendChild(scopeHeader);
-      metrics.forEach((metric) => {
-        const th = document.createElement("th");
-        th.appendChild(labelWithTooltip(metric.label, metric.tooltip, ""));
-        headRow.appendChild(th);
-      });
-      thead.appendChild(headRow);
-      table.appendChild(thead);
-
-      const tbody = document.createElement("tbody");
-      valueColumns.forEach((column, columnIndex) => {
-        const tr = document.createElement("tr");
-        const labelCell = document.createElement("td");
-        labelCell.appendChild(labelWithTooltip(column.label, column.tooltip, ""));
-        tr.appendChild(labelCell);
-
-        metrics.forEach((metric) => {
-          const valueCell = document.createElement("td");
-          appendCompareCellValue(valueCell, metric.values[columnIndex] || "ещё нет данных");
-          tr.appendChild(valueCell);
-        });
-        tbody.appendChild(tr);
-      });
-      table.appendChild(tbody);
-    }
-
-    function appendCompareCellValue(cell, value) {
-      if (typeof value === "string" && value.includes("\n")) {
-        const [primary, ...secondaryParts] = value.split("\n");
-        const stack = document.createElement("span");
-        stack.className = "compare-value-stack";
-        stack.appendChild(textNode("span", "compare-value-stack-primary", primary));
-        stack.appendChild(
-          textNode(
-            "span",
-            "compare-value-stack-secondary",
-            secondaryParts.join(" ").trim() || ""
-          )
-        );
-        cell.appendChild(stack);
-        return;
-      }
-      cell.textContent = value;
-    }
-
-    function addExtraClasses(element, extraClass) {
-      if (!extraClass) {
-        return;
-      }
-      extraClass
-        .split(/\s+/)
-        .filter(Boolean)
-        .forEach((className) => element.classList.add(className));
-    }
-
-    function renderSummary(meta, headline) {
-      const summary = document.getElementById("summary-status");
-      clearNode(summary);
-      const pill = statusPill(headline.status, headline.status_label, headline.status_tooltip);
-      const headRow = document.createElement("div");
-      headRow.className = "summary-head-row";
-      headRow.appendChild(pill);
-      headRow.appendChild(textNode("div", "summary-version-label", "Версия"));
-      headRow.appendChild(textNode("div", "summary-version-inline", meta.package_version || "ещё нет данных"));
-      summary.appendChild(headRow);
-
-      const kv = document.getElementById("headline-kv");
-      clearNode(kv);
-      const rows = [
-        ["Почему такой статус", headline.status_reason],
-        ["Сейчас", `${headline.token_value} (${headline.token_scope})`],
-      ];
-      const cacheBits = [];
-      if (typeof meta.cache_refresh_duration_ms === "number") {
-        cacheBits.push(`refresh ${Math.round(meta.cache_refresh_duration_ms)} ms`);
-      }
-      if (typeof meta.cache_snapshot_age_ms === "number") {
-        cacheBits.push(`возраст ${Math.round(meta.cache_snapshot_age_ms)} ms`);
-      }
-      if (meta.cache_refresh_completed_at_label) {
-        cacheBits.push(`обновлён ${meta.cache_refresh_completed_at_label}`);
-      }
-      if (typeof meta.cache_stale === "boolean") {
-        cacheBits.push(meta.cache_stale ? "кэш устарел" : "кэш актуален");
-      }
-      if (cacheBits.length > 0) {
-        rows.push(["Снимок панели", cacheBits.join(" • ")]);
-      }
-      const refreshBits = [];
-      if (typeof meta.observe_refresh_total_ms === "number") {
-        refreshBits.push(`полный refresh ${Math.round(meta.observe_refresh_total_ms)} ms`);
-      }
-      if (meta.observe_refresh_slowest_stage && typeof meta.observe_refresh_slowest_stage_ms === "number") {
-        refreshBits.push(`узкое место ${meta.observe_refresh_slowest_stage} = ${Math.round(meta.observe_refresh_slowest_stage_ms)} ms`);
-      }
-      if (refreshBits.length > 0) {
-        rows.push(["Сборка снимка", refreshBits.join(" • ")]);
-      }
-      rows.forEach(([label, value]) => {
-        const row = document.createElement("div");
-        row.appendChild(textNode("span", "", label));
-        row.appendChild(textNode("strong", "", value || "ещё нет данных"));
-        kv.appendChild(row);
-      });
-    }
-
-    function renderLinks(links) {
-      const list = document.getElementById("quick-links");
-      clearNode(list);
-      links.forEach((entry) => {
-        const li = document.createElement("li");
-        const items = Array.isArray(entry.items) ? entry.items : null;
-        if (items && items.length > 0) {
-          if (entry.label) {
-            li.appendChild(textNode("div", "link-group-title", entry.label));
-          }
-          if (entry.note) {
-            const note = document.createElement("span");
-            note.className = "link-group-note";
-            appendInlineNoteFragment(note, entry.note);
-            li.appendChild(note);
-          }
-          const group = document.createElement("div");
-          group.className = "link-group-items";
-          items.forEach((item) => {
-            const row = document.createElement("div");
-            row.className = "link-group-item";
-            const main = document.createElement("div");
-            main.className = "link-item-main";
-            if (item.url) {
-              main.appendChild(createInlineCopyableText(item.label, item.url, item.url));
-            } else {
-              main.appendChild(textNode("span", "link-disabled", item.label));
-            }
-            if (item.note) {
-              const note = document.createElement("span");
-              note.className = "link-item-note";
-              appendInlineNoteFragment(note, item.note);
-              main.appendChild(note);
-            }
-            row.appendChild(main);
-            group.appendChild(row);
-          });
-          li.appendChild(group);
-        } else {
-          const main = document.createElement("div");
-          main.className = "link-item-main";
-          if (entry.url) {
-            main.appendChild(createInlineCopyableText(entry.label, entry.url, entry.url));
-          } else {
-            main.appendChild(textNode("span", "link-disabled", entry.label));
-          }
-          if (entry.note) {
-            const note = document.createElement("span");
-            note.className = "link-item-note";
-            appendInlineNoteFragment(note, entry.note);
-            main.appendChild(note);
-          }
-          li.appendChild(main);
-        }
-        list.appendChild(li);
-      });
-    }
-
-    function renderCards(containerId, cards, kind) {
-      const container = document.getElementById(containerId);
-      clearNode(container);
-      cards.forEach((card) => {
-        if (card.kind === "live_compare" || card.kind === "compare_table") {
-          renderCompareCard(containerId, container, card);
-          return;
-        }
-        const shell = createCardShell(
-          containerId,
-          card,
-          `${kind} ${statusClass(card.status)}`,
-          (front) => {
-            const top = document.createElement("div");
-            top.className = "card-top";
-            const titleTooltip = mergeTooltipParts(card.title_tooltip, card.source_label);
-            top.appendChild(labelWithTooltip(card.title, titleTooltip));
-            top.appendChild(statusPill(card.status, card.status_label, card.status_tooltip));
-            front.appendChild(top);
-
-            const valueClass = kind.includes("service-card") ? "service-headline" : "card-value";
-            front.appendChild(textNode("p", valueClass, card.value));
-            if (card.note) {
-              front.appendChild(textNode("p", "card-note", card.note));
-            }
-            renderMetricRows(front, card);
-            if (card.details && card.details.length > 0) {
-              const list = document.createElement("ul");
-              list.className = "detail-list";
-              card.details.forEach((detail) => {
-                list.appendChild(textNode("li", "", detail));
-              });
-              front.appendChild(list);
-            }
-          },
-          (back) => renderMetricBack(back, card),
-        );
-        container.appendChild(shell);
-      });
-
-      if (containerId === "machine-cards") {
-        applyMasonryGrid(container);
-      }
-      syncBodyFullscreenState();
-    }
-
-    function applyMasonryGrid(container) {
-      if (!container || !container.classList.contains("machine-grid")) {
-        return;
-      }
-
-      const styles = window.getComputedStyle(container);
-      const rowGap = Number.parseFloat(styles.rowGap || "0");
-      const rowHeight = Number.parseFloat(styles.gridAutoRows || "0");
-      if (!rowHeight || Number.isNaN(rowHeight)) {
-        return;
-      }
-
-      const children = Array.from(container.children);
-      children.forEach((child) => {
-        child.style.gridRowEnd = "span 1";
-      });
-
-      requestAnimationFrame(() => {
-        children.forEach((child) => {
-          const height = child.getBoundingClientRect().height;
-          const span = Math.max(1, Math.ceil((height + rowGap) / (rowHeight + rowGap)));
-          child.style.gridRowEnd = `span ${span}`;
-        });
-      });
-    }
-
-    function renderWarnings(warnings) {
-      const wrap = document.getElementById("warnings-wrap");
-      clearNode(wrap);
-
-      if (!warnings || warnings.length === 0) {
-        wrap.appendChild(textNode("p", "muted", "Сейчас явных проблем не видно. Если ниже появится alert или critical, он окажется здесь простым русским текстом."));
-        return;
-      }
-
-      const list = document.createElement("ul");
-      list.className = "warning-list";
-      warnings.forEach((warning) => {
-        list.appendChild(textNode("li", "", warning));
-      });
-      wrap.appendChild(list);
-    }
-
-    function renderGlossary(glossary) {
-      const container = document.getElementById("glossary-cards");
-      clearNode(container);
-      glossary.forEach((entry) => {
-        const card = document.createElement("article");
-        card.className = "glossary-card";
-        card.appendChild(textNode("h3", "card-title", entry.term));
-        card.appendChild(textNode("p", "card-note", entry.meaning));
-        container.appendChild(card);
-      });
-    }
-
-    function showError(message) {
-      errorBanner.style.display = "block";
-      errorBanner.textContent = message;
-    }
-
-    function hideError() {
-      errorBanner.style.display = "none";
-      errorBanner.textContent = "";
-    }
-
-    async function loadDashboard(force = false) {
-      if (!force && isRefreshPaused()) {
-        return;
-      }
-      if (refreshInFlight) {
-        return;
-      }
-      refreshInFlight = true;
-      const clientBudgetLivePayloadPromise = fetchClientBudgetLivePayload(force).catch(() => null);
-      try {
-        const response = await fetch(apiPathWithThreadHint("/api/dashboard"), {
-          cache: "no-store",
-        });
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-        const payload = await response.json();
-        hideError();
-        hideTooltip();
-        renderSummary(payload.meta, payload.headline);
-        renderLinks(payload.links);
-        renderCards("hero-cards", payload.hero_cards, "metric-card hero-metric-card");
-        renderCards("top-cards", payload.top_cards, "metric-card");
-        renderCards("benchmark-cards", payload.benchmark_cards, "metric-card");
-        renderCards("service-cards", payload.service_cards, "service-card");
-        renderCards("machine-cards", payload.machine_cards, "metric-card");
-        renderWarnings(payload.warnings);
-        renderGlossary(payload.glossary);
-        const livePayload = await clientBudgetLivePayloadPromise;
-        if (livePayload) {
-          applyClientBudgetLiveRows(livePayload);
-        }
-      } catch (error) {
-        showError(`Не удалось обновить панель Amai: ${error.message}`);
-      } finally {
-        refreshInFlight = false;
-      }
-    }
-
-    document.addEventListener("pointerdown", (event) => {
-      extendInteractionHold(2);
-      if (!activeTooltipTarget || !tooltipIsInteractiveSelector()) {
-        return;
-      }
-      const insideTooltip = tooltipContainsNode(event.target);
-      const insideActiveTrigger =
-        activeTooltipTarget &&
-        event.target &&
-        activeTooltipTarget.contains &&
-        activeTooltipTarget.contains(event.target);
-      if (!insideTooltip && !insideActiveTrigger) {
-        hideTooltip();
-      }
-    }, true);
-    document.addEventListener("selectionchange", () => {
-      updateTooltipCopyButton();
-      if (hasActiveSelection()) {
-        extendInteractionHold(8);
-      }
-    });
-    document.addEventListener("focusin", (event) => {
-      const tooltipTarget =
-        event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
-      if (tooltipTarget) {
-        showTooltip(tooltipTarget);
-      }
-    }, true);
-    document.addEventListener("focusout", (event) => {
-      const tooltipTarget =
-        event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
-      const relatedInsideTooltip = tooltipContainsNode(event.relatedTarget);
-      if (tooltipTarget && activeTooltipTarget === tooltipTarget && tooltipIsInteractiveSelector()) {
-        return;
-      }
-      if (tooltipTarget && !relatedInsideTooltip) {
-        scheduleHideTooltip(tooltipTarget);
-      }
-    }, true);
-    document.addEventListener("mouseover", (event) => {
-      const tooltipTarget =
-        event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
-      if (tooltipTarget) {
-        showTooltip(tooltipTarget);
-      }
-    }, true);
-    document.addEventListener("mouseout", (event) => {
-      if (tooltipContainsNode(event.target)) {
-        return;
-      }
-      const tooltipTarget =
-        event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
-      const relatedTooltip =
-        event.relatedTarget && event.relatedTarget.closest
-          ? event.relatedTarget.closest(".has-tooltip")
-          : null;
-      const relatedInsideTooltip = tooltipContainsNode(event.relatedTarget);
-      if (tooltipTarget && activeTooltipTarget === tooltipTarget && tooltipIsInteractiveSelector()) {
-        return;
-      }
-      if (tooltipTarget && relatedTooltip !== tooltipTarget && !relatedInsideTooltip) {
-        scheduleHideTooltip(tooltipTarget);
-      }
-    }, true);
-    document.addEventListener("scroll", () => positionTooltip(), true);
-    document.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape" || !activeTooltipTarget || !tooltipIsInteractiveSelector()) {
-        return;
-      }
-      const target = activeTooltipTarget;
-      hideTooltip();
-      if (target && typeof target.focus === "function") {
-        target.focus();
-      }
-    }, true);
-
-    if (tooltipLayer) {
-      tooltipLayer.addEventListener("mouseenter", () => {
-        cancelTooltipHide();
-        extendInteractionHold(2);
-      }, true);
-      tooltipLayer.addEventListener("focusin", () => {
-        cancelTooltipHide();
-        extendInteractionHold(2);
-      }, true);
-      tooltipLayer.addEventListener("mouseleave", (event) => {
-        if (tooltipIsInteractiveSelector()) {
-          return;
-        }
-        if (
-          tooltipContainsNode(event.relatedTarget) ||
-          (activeTooltipTarget &&
-            event.relatedTarget &&
-            activeTooltipTarget.contains(event.relatedTarget))
-        ) {
-          return;
-        }
-        scheduleHideTooltip();
-      }, true);
-    }
-
-    if (tooltipCopyBtn) {
-      tooltipCopyBtn.addEventListener("mousedown", (event) => {
-        event.preventDefault();
-      });
-      tooltipCopyBtn.addEventListener("click", async (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const valueToCopy = selectionTextWithin(tooltipLayer) || tooltipSelectionValue;
-        if (!valueToCopy) {
-          return;
-        }
-        try {
-          await navigator.clipboard.writeText(valueToCopy);
-          tooltipCopyBtn.textContent = "✓";
-          tooltipCopyBtn.title = "Скопировано";
-          setTimeout(() => updateTooltipCopyButton(), 1200);
-        } catch (_) {
-          tooltipCopyBtn.textContent = "!";
-          tooltipCopyBtn.title = "Не удалось скопировать";
-          setTimeout(() => updateTooltipCopyButton(), 1200);
-        }
-      });
-    }
-
-    window.addEventListener("resize", () => {
-      positionTooltip();
-      const machineCards = document.getElementById("machine-cards");
-      if (machineCards && machineCards.children.length > 0) {
-        applyMasonryGrid(machineCards);
-      }
-    });
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") {
-        loadDashboard(true);
-      }
-    });
-    window.addEventListener("focus", () => loadDashboard(true));
-    window.addEventListener("pageshow", () => loadDashboard(true));
-
-    loadDashboard(true);
-    setInterval(() => syncClientBudgetLiveRows(false), CLIENT_BUDGET_LIVE_REFRESH_MS);
-  </script>
-</body>
-</html>
-"#;
-
-    TEMPLATE
-        .replace("__REFRESH_MS__", &refresh_ms.to_string())
-        .replace("__ASSET_VERSION__", env!("CARGO_PKG_VERSION"))
-}
-
-pub fn build_payload(
-    cfg: &AppConfig,
-    snapshot: &Value,
-    bind: &str,
-    refresh_ms: u64,
-) -> Result<Value> {
-    let repo_root = config::discover_repo_root(None)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    let install_state = load_install_state(&repo_root).unwrap_or(None);
-    let machine = collect_machine_summary(&repo_root).ok();
-    let base_url = browser_base_url(bind);
-    let captured_at_epoch_ms = snapshot["captured_at_epoch_ms"]
-        .as_u64()
-        .unwrap_or_default();
-    let observe_refresh_total_ms = snapshot["observe_refresh"]["total_ms"].as_u64();
-    let (observe_refresh_slowest_stage, observe_refresh_slowest_stage_ms) =
-        slowest_observe_refresh_stage(snapshot);
-
-    Ok(json!({
-        "meta": {
-            "stack_name": cfg.stack_name,
-            "package_version": env!("CARGO_PKG_VERSION"),
-            "captured_at_epoch_ms": captured_at_epoch_ms,
-            "captured_at_label": human_timestamp(captured_at_epoch_ms),
-            "refresh_ms": refresh_ms,
-            "refresh_seconds": refresh_ms / 1000,
-            "base_url": base_url,
-            "observe_refresh_total_ms": observe_refresh_total_ms,
-            "observe_refresh_slowest_stage": observe_refresh_slowest_stage,
-            "observe_refresh_slowest_stage_ms": observe_refresh_slowest_stage_ms,
-        },
-        "headline": build_headline(snapshot, captured_at_epoch_ms),
-        "hero_cards": build_hero_cards(snapshot),
-        "top_cards": build_top_cards(snapshot),
-        "benchmark_cards": build_benchmark_cards(snapshot),
-        "machine_cards": build_machine_cards(snapshot, machine.as_ref(), install_state.as_ref()),
-        "service_cards": build_service_cards(snapshot),
-        "warnings": build_warnings(snapshot, machine.as_ref()),
-        "glossary": build_glossary(),
-        "links": build_links(&base_url),
-    }))
-}
+pub use crate::dashboard_assets::{brand_lockup_svg, brand_mark_svg, favicon_ico};
 
 pub fn current_session_budget_guard(snapshot: &Value) -> Value {
     current_session_budget_guard_with_restore_context(
+        snapshot,
         &snapshot["token_budget_report"]["token_budget_report"],
         &snapshot["latest_repo_working_state_restore"]["working_state_restore"],
     )
 }
 
+fn current_agent_reply_prefix_fields<'a>(
+    snapshot: &'a Value,
+    report: &'a Value,
+) -> (Option<&'a str>, Option<&'a str>, &'static str) {
+    let global_reply_prefix = report["client_limit_hourly_burn"]["reply_prefix"].as_str();
+    let personal_reply_prefix = report["personal_agent_kpi"]["reply_prefix"].as_str();
+    let personal_confidence = report["personal_agent_kpi"]["confidence"].as_str();
+    let aggregate_reply_prefix =
+        snapshot["active_agent_budget"]["aggregate"]["reply_prefix"].as_str();
+    let personal_reply_prefix = personal_reply_prefix.or(aggregate_reply_prefix);
+
+    if personal_confidence == Some("online_limit_contour") {
+        (
+            personal_reply_prefix.or(global_reply_prefix),
+            global_reply_prefix,
+            "personal_agent_online_limit_contour",
+        )
+    } else {
+        (
+            global_reply_prefix,
+            global_reply_prefix,
+            "global_client_limit_hourly_burn",
+        )
+    }
+}
+
 fn current_session_budget_guard_with_restore_context(
+    snapshot: &Value,
     report: &Value,
     restore_context: &Value,
 ) -> Value {
@@ -4749,8 +1008,12 @@ fn current_session_budget_guard_with_restore_context(
     let current_session_alignment = &current_session_statement["client_limit_meter_alignment"];
     let current_session_exact_pair =
         exact_model_token_pair(current_session_summary, current_session_alignment);
-    let session_events_total = current_session_summary["events_total"].as_u64().unwrap_or(0);
-    let session_events = current_session_summary["counted_events"].as_u64().unwrap_or(0);
+    let session_events_total = current_session_summary["events_total"]
+        .as_u64()
+        .unwrap_or(0);
+    let session_events = current_session_summary["counted_events"]
+        .as_u64()
+        .unwrap_or(0);
     let session_saved = current_session_exact_pair
         .as_ref()
         .map(|(_, _, saved, _)| *saved)
@@ -4774,7 +1037,8 @@ fn current_session_budget_guard_with_restore_context(
         .and_then(|row| row["value"].as_str().map(str::to_string));
     let global_limit_source = global_client_limit_source(client_live_meter);
     let global_limit_guard = global_client_limit_guard(client_live_meter);
-    let reply_prefix = report["client_limit_hourly_burn"]["reply_prefix"].as_str();
+    let (reply_prefix, global_reply_prefix, reply_prefix_source) =
+        current_agent_reply_prefix_fields(snapshot, report);
     let observed_at_epoch_ms = if current_session_client_live_meter_available(client_live_meter)
         || global_limit_guard.is_some()
     {
@@ -4797,6 +1061,8 @@ fn current_session_budget_guard_with_restore_context(
         client_live_meter,
         &host_context_compaction,
     );
+    let current_live_turn_no_amai_activity = report["current_live_turn"]["status"].as_str()
+        == Some("no_amai_activity_in_current_live_turn");
     let selected_host_current_thread_control_command_id =
         host_current_thread_control["command_id"].as_str();
     let selected_host_current_thread_control_feedback_kind =
@@ -4864,9 +1130,12 @@ fn current_session_budget_guard_with_restore_context(
     let tracked_slice = tracked_slice_row["value"]
         .as_str()
         .map(humanize_tracked_slice_savings_value);
-    let tracked_slice_truth = exact_pair_status_metric_row(current_session_alignment).and_then(
-        |row| row["value"].as_str().map(humanize_tracked_slice_exactness_value),
-    );
+    let tracked_slice_truth =
+        exact_pair_status_metric_row(current_session_alignment).and_then(|row| {
+            row["value"]
+                .as_str()
+                .map(humanize_tracked_slice_exactness_value)
+        });
     let tracked_slice_tooltip = tracked_slice_row["tooltip"].as_str().map(str::to_string);
     let next_action = client_turn_pressure_metric_row(
         session_client_turn_pressure,
@@ -4894,10 +1163,12 @@ fn current_session_budget_guard_with_restore_context(
         && current_session_client_live_meter_available(client_live_meter)
     {
         Some("реальная экономия не доказана".to_string())
-    } else if session_full_turn_savings_pct
-        .is_some_and(|value| client_budget_target_active && value < client_budget_target_percent_f64)
-    {
-        Some(client_budget_target_alert_label(client_budget_target_percent))
+    } else if session_full_turn_savings_pct.is_some_and(|value| {
+        client_budget_target_active && value < client_budget_target_percent_f64
+    }) {
+        Some(client_budget_target_alert_label(
+            client_budget_target_percent,
+        ))
     } else if session_boundary_pressure.is_some_and(|(boundary_tokens, strict_tokens)| {
         continuity_boundary_pressure_is_alert(session_saved, boundary_tokens, strict_tokens)
     }) {
@@ -4915,14 +1186,14 @@ fn current_session_budget_guard_with_restore_context(
         && current_session_client_live_meter_available(client_live_meter)
     {
         Some(
-            "Статус требует внимания по следующим причинам:\n- Для текущего живого turn ещё нет доказанной same-turn пары `без Amai / с Amai`.\n- Значит реальную экономию на полной шкале клиента пока нельзя честно показать числом.\n- Пока эта пара не materialized, нижняя строка про учтённую часть остаётся внутренним Amai-срезом, а не полным client spend.\n- Чтобы получить реальную экономию, нужно раньше переводить работу в свежий чат и собирать exact pair именно на коротком live turn."
+            "Статус требует внимания по следующим причинам:\n- Для текущего живого turn ещё нет доказанной same-turn пары `без Amai / с Amai`.\n- Значит реальную экономию на полной шкале клиента пока нельзя честно показать числом.\n- Пока эта пара не materialized, нижняя строка про учтённую часть остаётся внутренним Amai-срезом, а не полным client spend.\n- Чтобы получить реальную экономию, нужно быстрее фиксировать exact pair на коротком live turn и для этого сначала сжать текущий giant thread через same-thread compact window, а не расширять его новыми ходами."
                 .to_string(),
         )
     } else if let Some(full_turn_savings_pct) = session_full_turn_savings_pct
         .filter(|value| client_budget_target_active && *value < client_budget_target_percent_f64)
     {
         Some(format!(
-            "Статус требует внимания по следующим причинам:\n- Реальная экономия на полной шкале клиента сейчас всего {}.\n- {}\n- Значит текущий thread пока жжёт почти весь полный client turn/context, а Amai экономит только малую долю.\n- Чтобы реально улучшить картину без потери точности, нужно дальше уменьшать полный размер turn и раньше переводить работу в новый чат через continuity startup.",
+            "Статус требует внимания по следующим причинам:\n- Реальная экономия на полной шкале клиента сейчас всего {}.\n- {}\n- Значит текущий thread пока жжёт почти весь полный client turn/context, а Amai экономит только малую долю.\n- Чтобы реально улучшить картину без потери точности, нужно дальше уменьшать полный размер turn и жёстко удерживать same-thread compact surface, чтобы следующий exact pair materialized на коротком live turn.",
             format_percent(Some(full_turn_savings_pct)),
             client_budget_target_sentence(client_budget_target_percent)
         ))
@@ -4998,15 +1269,10 @@ fn current_session_budget_guard_with_restore_context(
     let status_label = global_limit_guard
         .map(|guard| guard.status_label)
         .unwrap_or_else(|| {
-            if same_thread_compaction_advisory {
-                if compact_status_label == "новый чат нужен сейчас" {
-                    "сожми текущий чат сейчас"
-                } else {
-                    "сожми текущий чат"
-                }
-            } else {
-                compact_status_label.as_str()
-            }
+            client_turn_pressure_display_status_label(
+                compact_status_label.as_str(),
+                same_thread_compaction_advisory,
+            )
         });
     let global_limit_note = global_limit_guard.map(|guard| {
         global_client_limit_guard_note(
@@ -5015,9 +1281,7 @@ fn current_session_budget_guard_with_restore_context(
             preferred_client_limit_meter_is_exact(client_live_meter),
         )
     });
-    let status_tooltip = global_limit_note
-        .clone()
-        .or(compact_status_tooltip.clone());
+    let status_tooltip = global_limit_note.clone().or(compact_status_tooltip.clone());
     let note = global_limit_note
         .clone()
         .unwrap_or_else(|| compact_note.clone());
@@ -5025,6 +1289,8 @@ fn current_session_budget_guard_with_restore_context(
         status,
         status_label,
         reply_prefix,
+        global_reply_prefix,
+        reply_prefix_source,
         observed_at_epoch_ms,
         max_guard_age_seconds,
         should_rotate_chat_now,
@@ -5041,8 +1307,7 @@ fn current_session_budget_guard_with_restore_context(
         host_context_compaction_stage,
         same_thread_compaction_preferred,
         target_pressure_active,
-        report["current_live_turn"]["status"].as_str()
-            == Some("no_amai_activity_in_current_live_turn"),
+        current_live_turn_no_amai_activity,
         host_current_thread_control["thread_id"].as_str(),
         selected_host_current_thread_control_command_id,
         &host_current_thread_control_effect,
@@ -5054,6 +1319,8 @@ fn current_session_budget_guard_with_restore_context(
         "status": status,
         "status_label": status_label,
         "reply_prefix": reply_prefix,
+        "global_reply_prefix": global_reply_prefix,
+        "reply_prefix_source": reply_prefix_source,
         "status_tooltip": status_tooltip,
         "full_turn_savings_proven": session_full_turn_savings_pct.is_some(),
         "full_turn_savings_percent": full_turn_savings_percent,
@@ -5102,6 +1369,8 @@ fn build_client_budget_reply_execution_gate_with_primary_command(
     status: &str,
     status_label: &str,
     reply_prefix: Option<&str>,
+    global_reply_prefix: Option<&str>,
+    reply_prefix_source: &str,
     observed_at_epoch_ms: Option<u64>,
     max_guard_age_seconds: u64,
     should_rotate_chat_now: bool,
@@ -5132,10 +1401,12 @@ fn build_client_budget_reply_execution_gate_with_primary_command(
         && !same_thread_compaction_advisory
         && host_context_compaction_stage.critical_regrowth_active()
         && current_live_turn_no_amai_activity;
-    let blocking = requires_global_budget_recovery_before_reply || pure_burn_rotate_hard_block;
-    let reply_budget_mode = if blocking {
-        working_state::ClientReplyBudgetMode::CompactHighSignal
-    } else if compact_reply_required || rotate_advisory {
+    let blocking = false;
+    let reply_budget_mode = if requires_global_budget_recovery_before_reply
+        || pure_burn_rotate_hard_block
+        || compact_reply_required
+        || rotate_advisory
+    {
         working_state::ClientReplyBudgetMode::CompactHighSignal
     } else {
         working_state::ClientReplyBudgetMode::Normal
@@ -5156,7 +1427,7 @@ fn build_client_budget_reply_execution_gate_with_primary_command(
             false,
             false,
             false,
-            working_state::ClientBudgetBlockingReplyMode::WaitForGlobalBudgetRecovery,
+            working_state::ClientBudgetBlockingReplyMode::Inactive,
             working_state::build_wait_for_global_client_budget_action_bundle(
                 project_code,
                 namespace_code,
@@ -5171,10 +1442,10 @@ fn build_client_budget_reply_execution_gate_with_primary_command(
         (
             "rotate_chat_for_client_budget",
             "client_budget_guard_pure_burn_rotate_now",
+            false,
             true,
             true,
-            true,
-            working_state::ClientBudgetBlockingReplyMode::RotateChatOnly,
+            working_state::ClientBudgetBlockingReplyMode::Inactive,
             working_state::build_rotate_chat_action_bundle_for_stage_with_preference_and_primary_command(
                 project_code,
                 namespace_code,
@@ -5250,16 +1521,21 @@ fn build_client_budget_reply_execution_gate_with_primary_command(
     let reply_prefix = reply_prefix
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let global_reply_prefix = global_reply_prefix
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let mut gate = json!({
         "gate_version": "client-reply-budget-gate-v1",
         "status": status,
         "status_label": status_label,
         "reply_prefix": reply_prefix,
+        "global_reply_prefix": global_reply_prefix,
+        "reply_prefix_source": reply_prefix_source,
         "action_kind": action_kind,
         "reason": reason,
         "blocking": blocking,
         "must_rotate_before_reply": must_rotate_before_reply,
-        "must_wait_for_budget_recovery_before_reply": requires_global_budget_recovery_before_reply,
+        "must_wait_for_budget_recovery_before_reply": false,
         "unrelated_reply_allowed": !blocking,
         "reply_budget_mode": match reply_budget_mode {
             working_state::ClientReplyBudgetMode::Normal => working_state::CLIENT_REPLY_BUDGET_MODE_NORMAL,
@@ -5414,8 +1690,7 @@ fn build_client_budget_reply_execution_gate_with_primary_command(
                 && let Some(operator_flow) = action_bundle
                     .get_mut("operator_flow")
                     .and_then(Value::as_object_mut)
-                && operator_flow["primary_command_kind"].as_str()
-                    == Some("rotate_helper_command")
+                && operator_flow["primary_command_kind"].as_str() == Some("rotate_helper_command")
             {
                 gate_action_kind_override = Some("confirm_same_thread_host_control_feedback");
                 gate_reason_override = Some("same_thread_host_control_feedback_pending");
@@ -5504,6 +1779,7 @@ fn build_headline(snapshot: &Value, captured_at_epoch_ms: u64) -> Value {
     let critical = snapshot["sla"]["summary"]["critical"].as_u64().unwrap_or(0);
     let unknown = snapshot["sla"]["summary"]["unknown"].as_u64().unwrap_or(0);
     let token_headline = &snapshot["token_budget_report"]["token_budget_report"]["headline"];
+    let active_agent_headline = &snapshot["active_agent_budget"]["headline"];
     let sla_status = if critical > 0 {
         "critical"
     } else if alert > 0 {
@@ -5521,16 +1797,295 @@ fn build_headline(snapshot: &Value, captured_at_epoch_ms: u64) -> Value {
         "status_reason": headline_status_reason(pass, alert, critical, unknown, live_status),
         "captured_at": human_timestamp(captured_at_epoch_ms),
         "summary": format!("SLA сейчас: pass={pass}, alert={alert}, critical={critical}, unknown={unknown}"),
-        "token_title": token_headline["title"].as_str().unwrap_or("ещё нет данных"),
-        "token_value": format_percent(token_headline["value_percent"].as_f64()),
-        "token_scope": token_headline["scope_label"].as_str().unwrap_or("ещё нет данных"),
+        "token_title": active_agent_headline["title"]
+            .as_str()
+            .or_else(|| token_headline["title"].as_str())
+            .unwrap_or("ещё нет данных"),
+        "token_value": active_agent_headline["value_text"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| format_percent(token_headline["value_percent"].as_f64())),
+        "token_scope": if active_agent_headline.is_object() { "" } else { token_headline["scope_label"].as_str().unwrap_or("") },
     })
+}
+
+fn active_agent_budget_card_status(surface: &Value) -> (&'static str, &'static str, String) {
+    let aggregate = &surface["aggregate"];
+    let status = aggregate["status"].as_str().unwrap_or("missing");
+    let classification = aggregate["classification"].as_str().unwrap_or("missing");
+    match (status, classification) {
+        ("observed", "overspend") => (
+            "alert",
+            "активные агенты жгут лимит",
+            "Среднее по активным агентам сейчас в переплате, поэтому карточка требует внимания."
+                .to_string(),
+        ),
+        ("observed", _) => (
+            "pass",
+            "только активные агенты",
+            "Карточка показывает только личный 5ч KPI и текущий лимит клиента для реально активных агентов."
+                .to_string(),
+        ),
+        ("partial", _) => (
+            "waiting",
+            "не у всех KPI materialized",
+            "Не у каждого активного агента уже есть measured личный 5ч KPI, поэтому среднее fail-closed не посчитано."
+                .to_string(),
+        ),
+        _ => (
+            "waiting",
+            "активных агентов сейчас нет",
+            "Сейчас нет active lease, поэтому карточка не показывает персональные KPI."
+                .to_string(),
+        ),
+    }
+}
+
+pub(crate) fn build_active_agent_budget_session_card_from_surface(
+    surface: &Value,
+) -> Option<Value> {
+    let agents = surface["agents"].as_array()?;
+    let (status, _status_label, _status_tooltip) = active_agent_budget_card_status(surface);
+    let aggregate_value = surface["aggregate"]["reply_prefix"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("5ч KPI: н/д")
+        .to_string();
+    let mut agent_blocks = Vec::new();
+    for agent in agents {
+        let agent_label =
+            compact_dashboard_text(agent["agent_label"].as_str(), 72, "Активный агент");
+        let kpi_prefix = agent["personal_agent_kpi"]["reply_prefix"]
+            .as_str()
+            .unwrap_or("5ч KPI: н/д");
+        let agent_tooltip = agent["thread_title"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(|thread_title| {
+                format!(
+                    "{}\n- {}\n- {}",
+                    agent["agent_scope"]
+                        .as_str()
+                        .unwrap_or("scope ещё нет данных"),
+                    compact_dashboard_text(Some(thread_title), 88, thread_title),
+                    agent["cwd"].as_str().unwrap_or("cwd ещё нет данных"),
+                )
+            })
+            .unwrap_or_else(|| {
+                agent["agent_scope"]
+                    .as_str()
+                    .unwrap_or("scope ещё нет данных")
+                    .to_string()
+            });
+        let limit_label = active_agent_online_limit_label(agent);
+        let (limit_value, limit_tooltip) = active_agent_online_limit_field(agent);
+        let (pressure_value, pressure_tooltip) = active_agent_live_pressure_field(agent)
+            .map(|(value, tooltip)| (Some(value), Some(tooltip)))
+            .unwrap_or((None, None));
+        let kpi_tooltip = agent["personal_agent_kpi"]["summary"]
+            .as_str()
+            .map(str::to_string);
+        agent_blocks.push(json!({
+            "agent_scope": agent["agent_scope"].clone(),
+            "agent_label": agent_label,
+            "agent_tooltip": agent_tooltip,
+            "limit_label": limit_label,
+            "limit_value": limit_value,
+            "limit_tooltip": limit_tooltip,
+            "pressure_label": pressure_value
+                .as_ref()
+                .map(|_| "Последний запрос:"),
+            "pressure_value": pressure_value,
+            "pressure_tooltip": pressure_tooltip,
+            "kpi_value": kpi_prefix,
+            "kpi_tooltip": kpi_tooltip,
+        }));
+    }
+    let shared_limit = shared_active_agent_limit(&agent_blocks);
+    if shared_limit.is_some() {
+        for block in agent_blocks.iter_mut() {
+            if let Some(root) = block.as_object_mut() {
+                root.remove("limit_label");
+                root.remove("limit_value");
+                root.remove("limit_tooltip");
+            }
+        }
+    }
+    let mut legacy_rows = Vec::new();
+    if let Some((label, value, tooltip)) = shared_limit.as_ref() {
+        legacy_rows.push(metric_row(label, value.to_string(), tooltip.as_deref()));
+    }
+    for block in &agent_blocks {
+        legacy_rows.push(metric_row(
+            "Агент:",
+            block["agent_label"]
+                .as_str()
+                .unwrap_or("Активный агент")
+                .to_string(),
+            block["agent_tooltip"].as_str(),
+        ));
+        if let Some(limit_value) = block["limit_value"].as_str() {
+            legacy_rows.push(metric_row(
+                block["limit_label"]
+                    .as_str()
+                    .unwrap_or("Лимит клиента сейчас:"),
+                limit_value.to_string(),
+                block["limit_tooltip"].as_str(),
+            ));
+        }
+        legacy_rows.push(metric_row(
+            "KPI:",
+            block["kpi_value"]
+                .as_str()
+                .unwrap_or("5ч KPI: н/д")
+                .to_string(),
+            block["kpi_tooltip"].as_str(),
+        ));
+        if let Some(pressure_value) = block["pressure_value"].as_str() {
+            legacy_rows.push(metric_row(
+                block["pressure_label"]
+                    .as_str()
+                    .unwrap_or("Последний запрос:"),
+                pressure_value.to_string(),
+                block["pressure_tooltip"].as_str(),
+            ));
+        }
+    }
+    let mut card = card_with_rows(
+        "Экономия токенов за текущую сессию",
+        aggregate_value,
+        String::new(),
+        status,
+        None,
+        None,
+        legacy_rows,
+    );
+    if let Some(root) = card.as_object_mut() {
+        root.insert(
+            "presentation_variant".to_string(),
+            Value::from("active_agent_budget_grouped_v3"),
+        );
+        root.insert("status_label".to_string(), Value::from(String::new()));
+        root.insert("status_tooltip".to_string(), Value::Null);
+        root.insert("agent_blocks".to_string(), Value::from(agent_blocks));
+        if let Some((label, value, tooltip)) = shared_limit {
+            root.insert("shared_limit_label".to_string(), Value::from(label));
+            root.insert("shared_limit_value".to_string(), Value::from(value));
+            root.insert(
+                "shared_limit_tooltip".to_string(),
+                tooltip.map(Value::from).unwrap_or(Value::Null),
+            );
+        }
+    }
+    Some(card)
+}
+
+fn build_active_agent_budget_session_card(snapshot: &Value) -> Option<Value> {
+    build_active_agent_budget_session_card_from_surface(&snapshot["active_agent_budget"])
+}
+
+fn active_agent_online_limit_field(agent: &Value) -> (String, Option<String>) {
+    let value = agent["personal_client_limit"]["value_text"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("н/д")
+        .to_string();
+    let tooltip = agent["personal_client_limit"]["tooltip"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| {
+            Some("Личный online limit surface для этого агента ещё не materialized.".to_string())
+        });
+    (value, tooltip)
+}
+
+fn active_agent_online_limit_label(agent: &Value) -> &str {
+    agent["personal_client_limit"]["label_text"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Лимит клиента сейчас:")
+}
+
+fn active_agent_live_pressure_field(agent: &Value) -> Option<(String, String)> {
+    let client_live_meter = &agent["client_live_meter"];
+    if !current_session_client_live_meter_available(client_live_meter) {
+        return None;
+    }
+    let turn_total_tokens = client_live_meter["client_turn_total_tokens"]
+        .as_u64()
+        .filter(|value| *value > 0)?;
+    let model_context_window = client_live_meter["latest_model_context_window"]
+        .as_u64()
+        .filter(|value| *value > 0)?;
+    let context_used_percent = client_live_meter["context_used_percent"]
+        .as_f64()
+        .unwrap_or_else(|| (turn_total_tokens as f64 * 100.0) / model_context_window as f64);
+    let observed_at = client_live_meter["ended_at_epoch_ms"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .map(human_timestamp);
+    let observed_at_short = client_live_meter["ended_at_epoch_ms"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .map(human_timestamp_clock);
+    let pressure_note = if context_used_percent >= 70.0 {
+        "Это giant-thread pressure: почти всё окно клиента уже занято одним live-turn, поэтому 5ч burn сейчас идёт главным образом размером самого запроса."
+    } else if context_used_percent >= 50.0 {
+        "Это тяжёлый live-turn: заметная часть burn сейчас приходит от размера текущего клиентского запроса, а не только от Amai-side delta."
+    } else {
+        "Это текущий observed client turn этого агента. Он помогает отличить реальный burn от UI/агрегационного drift."
+    };
+    let tooltip = format!(
+        "Этот ряд показывает последний observed client turn именно этого active agent из rollout token_count.\n- Последний запрос: {} из {}\n- Окно занято: {}\n- Источник: rollout token_count.last_token_usage.total_tokens / model_context_window{}\n- {}\n- Снято из raw token_count: {}",
+        format_u64(Some(turn_total_tokens)),
+        format_u64(Some(model_context_window)),
+        format_percent(Some(context_used_percent)),
+        observed_at_short
+            .as_ref()
+            .map(|stamp| format!(" ({stamp})"))
+            .unwrap_or_default(),
+        pressure_note,
+        observed_at.unwrap_or_else(|| "ещё нет данных".to_string()),
+    );
+    Some((
+        format!(
+            "{} из {} · окно занято {}",
+            format_u64(Some(turn_total_tokens)),
+            format_u64(Some(model_context_window)),
+            format_percent(Some(context_used_percent)),
+        ),
+        tooltip,
+    ))
+}
+
+fn shared_active_agent_limit(agent_blocks: &[Value]) -> Option<(String, String, Option<String>)> {
+    let first = agent_blocks.first()?;
+    let label = first["limit_label"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let value = first["limit_value"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if label != "Лимит клиента сейчас:" {
+        return None;
+    }
+    let tooltip = first["limit_tooltip"].as_str().map(str::to_string);
+    let same_across_blocks = agent_blocks.iter().all(|block| {
+        block["limit_label"].as_str().map(str::trim) == Some(label)
+            && block["limit_value"].as_str().map(str::trim) == Some(value)
+            && block["limit_tooltip"].as_str().map(str::to_string) == tooltip
+    });
+    if !same_across_blocks {
+        return None;
+    }
+    Some((label.to_string(), value.to_string(), tooltip))
 }
 
 fn build_top_cards(snapshot: &Value) -> Vec<Value> {
     vec![
         live_latency_compare_card(snapshot),
-        agent_scope_activity_card(snapshot),
         working_state_live_card(snapshot),
     ]
 }
@@ -5585,7 +2140,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
 
     let hot_load_status = hot_load_benchmark_status(hot_load, thresholds);
     let mut hot_load_card = compare_table_card(
-            "Hot Load Benchmark / latest_retrieval_load_hot",
+            "Нагрузка после прогрева",
             format!(
                 "Контур данных: latest_retrieval_load_hot.load_verification. Scope snapshot: {hot_load_scope}. Это отдельный hot-load прогон по прогретому быстрому пути. Он не равен retrieval.hot_p95_ms и не является живой телеметрией текущей сессии. Burst QPS здесь считается как success_count / wall_clock, а не как целый счётчик за полную секунду. В последнем прогоне это {} запросов за {}.",
                 format_u64(hot_load_sample_count),
@@ -5700,7 +2255,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
 
     let hot_retrieval_status = hot_retrieval_benchmark_status(hot_retrieval, thresholds);
     let mut hot_retrieval_card = compare_table_card(
-            "Hot Retrieval Benchmark / latest_retrieval_hot",
+            "Повторный запрос",
             format!(
                 "Контур данных: latest_retrieval_hot.benchmark. Scope snapshot: {hot_retrieval_scope}. Это именно источник SLA-метрики retrieval.hot_p95_ms. Это не hot-load benchmark и не живая телеметрия текущей сессии."
             ),
@@ -6075,7 +2630,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                 ),
     ]);
     let mut cold_card = compare_table_card(
-        "Cold End-to-End Benchmark / latest_cold_path_benchmark",
+        "Новый запрос без прогрева",
         if cold_live_running {
             "Контур данных: cold_path_benchmark_progress.cold_benchmark_progress. Сейчас реально идёт живой cold benchmark: цифры ниже частичные, обновляются по мере прогона и не подменяют финальный сохранённый snapshot.".to_string()
         } else {
@@ -6128,7 +2683,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
         ),
     );
     let mut accuracy_card = compare_table_card(
-                    "Accuracy / Isolation Verification / latest_retrieval_accuracy",
+                    "Точность и изоляция",
                     "Контур данных: latest_retrieval_accuracy.accuracy_verification. Этот блок не потоковый: он показывает последний сохранённый accuracy/isolation verification contour. Карточка развернута по ширине, чтобы accuracy и isolation читались рядом и не сжимали остальные benchmark-блоки."
                         .to_string(),
                     accuracy_status,
@@ -6137,7 +2692,12 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                         accuracy["captured_at_epoch_ms"].as_u64(),
                     )),
                     Some("Проверка точности и изоляции показывает, не течёт ли один проект в другой и насколько точно Amai попадает в нужные символы и семантику.".to_string()),
-                    Some(format_f64_count(accuracy["cross_project_leakage"].as_f64())),
+                    Some(format!(
+                        "утечки {} • symbol {} • semantic {}",
+                        format_f64_count(accuracy["cross_project_leakage"].as_f64()),
+                        format_ratio_percent(accuracy["symbol_precision"].as_f64()),
+                        format_ratio_percent(accuracy["semantic_precision"].as_f64())
+                    )),
                     vec![
                         compare_table_row(
                             "Leakage",
@@ -6177,6 +2737,417 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
         accuracy_card = with_status_tooltip(accuracy_card, &tooltip);
     }
 
+    let memory_benchmark = &snapshot["latest_memory_benchmark_score"]["memory_benchmark_score"];
+    let memory_total_cases = memory_benchmark["summary"]["total"].as_u64().unwrap_or(0);
+    let memory_missing_predictions = memory_benchmark["summary"]["missing_prediction"]
+        .as_u64()
+        .unwrap_or(0);
+    let memory_overall_accuracy =
+        memory_benchmark["capability_breakdown"]["longmemeval_overall_accuracy"].as_f64();
+    let memory_abstention_accuracy =
+        memory_benchmark["capability_breakdown"]["longmemeval_abstention_accuracy"].as_f64();
+    let memory_false_answer_rate =
+        memory_benchmark["capability_breakdown"]["longmemeval_false_answer_rate_on_abstention"]
+            .as_f64();
+    let memory_status = if memory_total_cases == 0 {
+        "waiting"
+    } else if memory_missing_predictions == 0
+        && memory_overall_accuracy.unwrap_or(0.0) >= 0.95
+        && memory_abstention_accuracy.unwrap_or(0.0) >= 0.95
+        && memory_false_answer_rate.unwrap_or(1.0) <= 0.05
+    {
+        "pass"
+    } else {
+        "critical"
+    };
+    let mut memory_card = compare_table_card(
+        "Память и изоляция",
+        format!(
+            "Контур данных: latest_memory_benchmark_score.memory_benchmark_score. Это отдельный benchmark score-lane для долговременной памяти и честного abstention-поведения. Online текущей сессии сюда не подмешивается. LongMemEval не имеет права исчезать из benchmark-раздела даже если результат плохой. {}",
+            memory_benchmark["note"]
+                .as_str()
+                .unwrap_or("Подробный scorer note пока не materialized.")
+        ),
+        memory_status,
+        Some(source_label(
+            "Источник: benchmark snapshot latest_memory_benchmark_score.memory_benchmark_score. Live-данные страницы сюда не подмешиваются",
+            snapshot["latest_memory_benchmark_score"]["_observability"]["captured_at_epoch_ms"]
+                .as_u64(),
+        )),
+        Some("Показывает честный внешний benchmark памяти. Эта карточка должна surface-ить провал memory contour, а не скрывать его из benchmark plane.".to_string()),
+        Some(if memory_total_cases == 0 {
+            "ещё нет данных".to_string()
+        } else {
+            format!(
+                "{} кейсов • overall {} • abstention {}",
+                format_u64(Some(memory_total_cases)),
+                format_ratio_percent(memory_overall_accuracy),
+                format_ratio_percent(memory_abstention_accuracy),
+            )
+        }),
+        vec![
+            compare_table_row(
+                "Bench",
+                "Какой именно benchmark memory contour дал этот score snapshot.",
+                compare_pair(
+                    "LongMemEval".to_string(),
+                    memory_benchmark["bench"]
+                        .as_str()
+                        .unwrap_or("ещё нет данных")
+                        .to_string(),
+                ),
+            ),
+            compare_table_row(
+                "Dataset",
+                "На каком benchmark dataset посчитан этот memory score.",
+                compare_pair(
+                    "memory benchmark dataset".to_string(),
+                    memory_benchmark["dataset"]
+                        .as_str()
+                        .unwrap_or("ещё нет данных")
+                        .to_string(),
+                ),
+            ),
+            compare_table_row(
+                "Кейсов",
+                "Сколько benchmark-case реально должно было попасть в score. Именно это число обычно и видно как размер memory benchmark прогона.",
+                compare_pair("полный набор".to_string(), format_u64(Some(memory_total_cases))),
+            ),
+            compare_table_row(
+                "Overall accuracy",
+                "Общая точность memory benchmark. Для сильной памяти это не может оставаться около нуля.",
+                compare_pair("чем выше, тем лучше".to_string(), format_ratio_percent(memory_overall_accuracy)),
+            ),
+            compare_table_row(
+                "Abstention accuracy",
+                "Насколько честно система воздерживается там, где должна сказать \"не знаю\" вместо выдумки.",
+                compare_pair("100.00%".to_string(), format_ratio_percent(memory_abstention_accuracy)),
+            ),
+            compare_table_row(
+                "False answer on abstention",
+                "Как часто вместо честного abstain система всё равно даёт ложный ответ.",
+                compare_pair("0.00%".to_string(), format_ratio_percent(memory_false_answer_rate)),
+            ),
+            compare_table_row(
+                "Missing predictions",
+                "Сколько кейсов вообще не получили валидного предсказания в последнем memory benchmark прогоне.",
+                compare_pair("= 0".to_string(), format_u64(memory_benchmark["summary"]["missing_prediction"].as_u64())),
+            ),
+            compare_table_row(
+                "Expected abstentions",
+                "Сколько кейсов в этом наборе специально проверяют честное воздержание.",
+                compare_pair(
+                    "контрольный набор".to_string(),
+                    format_u64(memory_benchmark["summary"]["abstention_expected"].as_u64()),
+                ),
+            ),
+        ],
+    );
+    if let Some(tooltip) = status_reason_tooltip(
+        memory_status,
+        vec![
+            if memory_missing_predictions > 0 {
+                Some(format!(
+                    "Missing predictions слишком велики: {} из {} кейсов остались без валидного ответа.",
+                    format_u64(Some(memory_missing_predictions)),
+                    format_u64(Some(memory_total_cases))
+                ))
+            } else {
+                None
+            },
+            memory_overall_accuracy.map(|value| {
+                format!(
+                    "Overall accuracy memory benchmark слишком низкая: сейчас {}.",
+                    format_ratio_percent(Some(value))
+                )
+            }),
+            memory_abstention_accuracy.map(|value| {
+                format!(
+                    "Abstention accuracy провалена: сейчас {}.",
+                    format_ratio_percent(Some(value))
+                )
+            }),
+            memory_false_answer_rate.map(|value| {
+                format!(
+                    "False answer rate на abstention-case слишком высок: сейчас {}.",
+                    format_ratio_percent(Some(value))
+                )
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        "Memory benchmark вышел из своей нормы, но детальные причины пока не удалось собрать.",
+    ) {
+        memory_card = with_status_tooltip(memory_card, &tooltip);
+    }
+
+    let procedural = &snapshot["latest_procedural_benchmark"]["procedural_benchmark"];
+    let procedural_total = procedural["summary"]["total_metrics"].as_u64().unwrap_or(0);
+    let procedural_passed = procedural["summary"]["passed_metrics"]
+        .as_u64()
+        .unwrap_or(0);
+    let procedural_percent = procedural["summary"]["pass_percent"].as_f64();
+    let procedural_without_available = procedural["summary"]["without_amai_series_available"]
+        .as_bool()
+        .unwrap_or(false);
+    let procedural_run_state = procedural["benchmark_run_state"]
+        .as_str()
+        .unwrap_or("ещё нет данных");
+    let procedural_run_state_ru = procedural["benchmark_run_state_ru"]
+        .as_str()
+        .unwrap_or("ещё нет данных");
+    let procedural_metric_kind = procedural["benchmark_metric_kind"]
+        .as_str()
+        .unwrap_or("ещё нет данных");
+    let procedural_runtime_contract =
+        procedural["benchmark_run_passport"]["multi_platform_runtime_contract"]
+            .as_str()
+            .unwrap_or("ещё нет данных");
+    let procedural_history = &snapshot["procedural_benchmark_history"];
+    let procedural_history_count = procedural_history["history_count"].as_u64().unwrap_or(0);
+    let procedural_with_history_count = procedural_history["with_amai_history_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let procedural_without_history_count = procedural_history["without_amai_history_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let procedural_with_series_count = procedural["benchmark_with_amai_series"]
+        .as_array()
+        .map(|items| items.len())
+        .unwrap_or(0);
+    let procedural_without_series_count = procedural["benchmark_without_amai_series"]
+        .as_array()
+        .map(|items| items.len())
+        .unwrap_or(0);
+    let procedural_with_summary = &procedural["benchmark_line_summaries"]["with_amai"];
+    let procedural_without_summary =
+        &procedural["benchmark_line_summaries"]["without_amai_but_measuring"];
+    let procedural_status = if procedural_total == 0 {
+        "waiting"
+    } else if !procedural_without_available {
+        "waiting"
+    } else if procedural_passed == procedural_total {
+        "pass"
+    } else {
+        "critical"
+    };
+    let mut procedural_rows = vec![
+        compare_table_row(
+            "Metric kind",
+            "Какой именно тип benchmark-метрик показывает карточка. Для procedural contour здесь не может быть generic score.",
+            compare_pair(
+                "procedural_skill_metrics".to_string(),
+                procedural_metric_kind.to_string(),
+            ),
+        ),
+        compare_table_row(
+            "Run state",
+            "Какой именно benchmark-state сейчас materialized. Если вторая линия ещё не готова, карточка обязана показывать partial compare-state, а не притворяться completed compare.",
+            compare_pair(
+                "honest compare state".to_string(),
+                format!("{procedural_run_state} ({procedural_run_state_ru})"),
+            ),
+        ),
+        compare_table_row(
+            "Линия с Amai",
+            "Сколько точек уже materialized в benchmark_with_amai_series. Это benchmark lane, а не online series текущего чата.",
+            compare_pair(
+                ">= 1".to_string(),
+                format_u64(Some(procedural_with_series_count as u64)),
+            ),
+        ),
+        compare_table_row(
+            "Статус линии с Amai",
+            "Сверяет benchmark_line_summaries.with_amai со series count. Это fail-closed слой для честного compare payload.",
+            compare_pair(
+                "materialized".to_string(),
+                procedural_with_summary["state"]
+                    .as_str()
+                    .unwrap_or("ещё нет данных")
+                    .to_string(),
+            ),
+        ),
+        compare_table_row(
+            "Линия без Amai",
+            "Если честная линия без Amai ещё не materialized, карточка обязана сказать это прямо и не рисовать guessed compare.",
+            compare_pair(
+                if procedural_without_available {
+                    ">= 1".to_string()
+                } else {
+                    "ещё не materialized".to_string()
+                },
+                if procedural_without_available {
+                    format_u64(Some(procedural_without_series_count as u64))
+                } else {
+                    "не рисуется честно".to_string()
+                },
+            ),
+        ),
+        compare_table_row(
+            "Статус линии без Amai",
+            "Сверяет benchmark_line_summaries.without_amai_but_measuring с наличием второй линии. Пока bypass contour не materialized, здесь должен быть not_materialized.",
+            compare_pair(
+                if procedural_without_available {
+                    "materialized".to_string()
+                } else {
+                    "not_materialized".to_string()
+                },
+                procedural_without_summary["state"]
+                    .as_str()
+                    .unwrap_or("ещё нет данных")
+                    .to_string(),
+            ),
+        ),
+        compare_table_row(
+            "Runtime contract",
+            "Показывает, что benchmark payload сохраняет platform-neutral runtime contract и не завязан смыслом на одну host-платформу.",
+            compare_pair(
+                "platform-neutral benchmark snapshot".to_string(),
+                procedural_runtime_contract.to_string(),
+            ),
+        ),
+        compare_table_row(
+            "История benchmark",
+            "Сколько immutable benchmark snapshots уже накоплено для procedural compare-plane. Это persisted history, а не live online lane.",
+            compare_pair(
+                ">= 1".to_string(),
+                format_u64(Some(procedural_history_count)),
+            ),
+        ),
+        compare_table_row(
+            "История с Amai",
+            "Сколько history-points уже есть в persisted time-series для линии с Amai.",
+            compare_pair(
+                ">= 1".to_string(),
+                format_u64(Some(procedural_with_history_count)),
+            ),
+        ),
+        compare_table_row(
+            "История без Amai",
+            "Сколько history-points уже есть в persisted time-series для линии without_amai_but_measuring.",
+            compare_pair(
+                if procedural_without_available {
+                    ">= 1".to_string()
+                } else {
+                    "0".to_string()
+                },
+                format_u64(Some(procedural_without_history_count)),
+            ),
+        ),
+    ];
+    procedural_rows.extend(
+        procedural["procedural_metrics"]
+        .as_array()
+        .map(|items| {
+            items.iter()
+                .map(|item| {
+                    compare_table_row(
+                        item["label_ru"].as_str().unwrap_or("ещё нет данных"),
+                        item["tooltip_ru"].as_str().unwrap_or(
+                            "Какая именно procedural skill-метрика проверялась в benchmark contour.",
+                        ),
+                        compare_pair(
+                            "должно пройти".to_string(),
+                            if item["passed"].as_bool() == Some(true) {
+                                "pass".to_string()
+                            } else {
+                                "fail".to_string()
+                            },
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default(),
+    );
+    let mut procedural_card = compare_table_card(
+        "Навыки и память действий",
+        format!(
+            "Контур данных: latest_procedural_benchmark.procedural_benchmark. Это отдельный benchmark quality-lane для procedural memory. Online текущей сессии сюда не подмешивается, а generic memory score запрещён: карточка показывает именно skill-метрики reuse/suppression/uplift/evaluator. {}",
+            if procedural_without_available {
+                "Линия без Amai materialized отдельно и не смешивается с online lane."
+            } else {
+                "Линия без Amai ещё не materialized, поэтому карточка честно не рисует guessed second line."
+            }
+        ),
+        procedural_status,
+        Some(source_label(
+            "Источник: benchmark snapshot latest_procedural_benchmark.procedural_benchmark. Live-данные страницы сюда не подмешиваются",
+            snapshot["latest_procedural_benchmark"]["captured_at_epoch_ms"].as_u64(),
+        )),
+        Some(
+            "Показывает procedural benchmark как набор отдельных skill-метрик. Эта карточка не имеет права схлопывать reuse/suppression/uplift в безликий общий memory score.".to_string(),
+        ),
+        Some(if procedural_total == 0 {
+            "ещё нет данных".to_string()
+        } else if !procedural_without_available {
+            format!(
+                "{} из {} метрик подтверждены с Amai ({}); линия без Amai ещё не materialized",
+                format_u64(Some(procedural_passed)),
+                format_u64(Some(procedural_total)),
+                format_percent(procedural_percent)
+            )
+        } else {
+            format!(
+                "{} из {} skill-метрик подтверждены с Amai ({}); линия без Amai materialized отдельно",
+                format_u64(Some(procedural_passed)),
+                format_u64(Some(procedural_total)),
+                format_percent(procedural_percent)
+            )
+        }),
+        procedural_rows,
+    );
+    if procedural_total == 0 {
+        procedural_card = with_status_label(procedural_card, "ждём procedural benchmark");
+    }
+    if let Some(object) = procedural_card.as_object_mut() {
+        object.insert(
+            "benchmark_metric_kind".to_string(),
+            Value::from(procedural_metric_kind),
+        );
+        object.insert(
+            "benchmark_run_state".to_string(),
+            Value::from(procedural_run_state),
+        );
+        object.insert(
+            "benchmark_run_state_ru".to_string(),
+            Value::from(procedural_run_state_ru),
+        );
+        object.insert(
+            "benchmark_with_amai_series".to_string(),
+            procedural["benchmark_with_amai_series"].clone(),
+        );
+        object.insert(
+            "benchmark_without_amai_series".to_string(),
+            procedural["benchmark_without_amai_series"].clone(),
+        );
+        object.insert(
+            "without_amai_series_available".to_string(),
+            Value::Bool(procedural_without_available),
+        );
+        object.insert(
+            "benchmark_line_summaries".to_string(),
+            procedural["benchmark_line_summaries"].clone(),
+        );
+        object.insert(
+            "multi_platform_runtime_contract".to_string(),
+            Value::from(procedural_runtime_contract),
+        );
+        object.insert(
+            "procedural_benchmark_history".to_string(),
+            procedural_history.clone(),
+        );
+        object.insert(
+            "benchmark_with_amai_history_series".to_string(),
+            procedural_history["with_amai_pass_percent_series"].clone(),
+        );
+        object.insert(
+            "benchmark_without_amai_history_series".to_string(),
+            procedural_history["without_amai_pass_percent_series"].clone(),
+        );
+    }
+
     vec![
         hot_load_card,
         hot_retrieval_card,
@@ -6185,562 +3156,9 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
             with_extra_class(accuracy_card, "benchmark-span-full"),
             "transposed",
         ),
+        memory_card,
+        procedural_card,
     ]
-}
-
-fn agent_scope_activity_card(snapshot: &Value) -> Value {
-    let activity = &snapshot["agent_scope_activity"];
-    if !activity.is_object() {
-        return card_with_rows(
-            "Агенты сейчас",
-            "ещё нет данных".to_string(),
-            "Панель ещё не подняла truth-source по активным agent scopes.".to_string(),
-            "unknown",
-            Some("Источник: agent_scope_activity".to_string()),
-            Some("Показывает не только последний scope, а все активные lease и недавние working-state scopes, чтобы статистика не теряла параллельных агентов.".to_string()),
-            vec![],
-        );
-    }
-
-    let active_now_scopes = activity["active_now_scopes"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    let client_recent_threads = activity["client_recent_threads"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    let recent_scopes = activity["recent_scopes"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    let active_now_count = activity["active_now_count"].as_u64().unwrap_or(0);
-    let client_recent_thread_count = activity["client_recent_thread_count"].as_u64().unwrap_or(0);
-    let client_recent_window_minutes = activity["client_recent_window_minutes"]
-        .as_u64()
-        .unwrap_or(30);
-    let recent_scope_count = activity["recent_scope_count"].as_u64().unwrap_or(0);
-    let recent_scope_window_hours = activity["recent_scope_window_hours"].as_u64().unwrap_or(24);
-
-    let client_preview = client_recent_threads
-        .iter()
-        .filter_map(|item| item["cwd"].as_str())
-        .map(|cwd| {
-            Path::new(cwd)
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or(cwd)
-                .to_string()
-        })
-        .take(4)
-        .collect::<Vec<_>>();
-    let active_preview = active_now_scopes
-        .iter()
-        .filter_map(|item| item["agent_scope"].as_str())
-        .take(3)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let recent_preview = recent_scopes
-        .iter()
-        .filter_map(|item| item["agent_scope"].as_str())
-        .take(4)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let latest_active_heartbeat = active_now_scopes
-        .first()
-        .and_then(|item| item["heartbeat_at_epoch_ms"].as_i64())
-        .filter(|value| *value > 0)
-        .map(|value| human_timestamp(value as u64));
-    let latest_recent_scope = recent_scopes
-        .first()
-        .and_then(|item| item["captured_at_epoch_ms"].as_i64())
-        .filter(|value| *value > 0)
-        .map(|value| human_timestamp(value as u64));
-    let latest_client_thread = client_recent_threads
-        .first()
-        .and_then(|item| item["updated_at_epoch_ms"].as_i64())
-        .filter(|value| *value > 0)
-        .map(|value| human_timestamp(value as u64));
-
-    let status = if client_recent_thread_count > active_now_count {
-        "alert"
-    } else if active_now_count > 0 {
-        "pass"
-    } else if recent_scope_count > 0 {
-        "waiting"
-    } else {
-        "unknown"
-    };
-    let note = format!(
-        "Эта карточка считает три разных truth-source: raw client thread registry за последние {} мин, active ExecCtl leases для `работают прямо сейчас` и distinct working-state scopes за последние {}ч для `работали недавно`. Поэтому один последний handoff больше не подменяет всю картину.",
-        client_recent_window_minutes, recent_scope_window_hours
-    );
-    let hierarchy_back_panel = build_agent_scope_hierarchy_back_panel(
-        &client_recent_threads,
-        &active_now_scopes,
-        &recent_scopes,
-    );
-    let mut card = with_back_panel(
-        card_with_rows(
-        "Агенты сейчас",
-        format!(
-            "{} за {}м • {} сейчас в Amai",
-            format_count_with_word(client_recent_thread_count, "чат", "чата", "чатов"),
-            client_recent_window_minutes,
-            format_count_with_word(active_now_count, "живой агент", "живых агента", "живых агентов"),
-        ),
-        note,
-        status,
-        Some("Источник: /home/art/.codex/state_5.sqlite + ami.execctl_task_leases + ami.observability_snapshots/working_state_restore".to_string()),
-        Some("Показывает, сколько клиентских thread действительно шевелилось недавно, сколько Amai держит живых lease прямо сейчас и сколько distinct рабочих контуров уже materialized в durable working-state слое. Эти числа не взаимозаменяемы.".to_string()),
-        vec![
-            metric_row(
-                &format!("Клиентские чаты за {}м", client_recent_window_minutes),
-                if client_preview.is_empty() {
-                    format_u64(Some(client_recent_thread_count))
-                } else {
-                    format!(
-                        "{} • {}",
-                        format_u64(Some(client_recent_thread_count)),
-                        client_preview.join(", ")
-                    )
-                },
-                Some("Самый широкий live-source: сырые клиентские thread из state_5.sqlite. Именно они показывают, сколько чатов реально шевелилось недавно, даже если Amai ещё не успела поднять их в lease/snapshot."),
-            ),
-            metric_row(
-                "Работают прямо сейчас",
-                if active_preview.is_empty() {
-                    format_u64(Some(active_now_count))
-                } else {
-                    format!("{} • {}", format_u64(Some(active_now_count)), active_preview.join(", "))
-                },
-                Some("Считается только по незавершённым active lease. Это самый строгий ответ на вопрос, сколько агентов реально живо сейчас."),
-            ),
-            metric_row(
-                &format!("Работали за {}ч", recent_scope_window_hours),
-                if recent_preview.is_empty() {
-                    format_u64(Some(recent_scope_count))
-                } else {
-                    format!("{} • {}", format_u64(Some(recent_scope_count)), recent_preview.join(", "))
-                },
-                Some("Distinct working-state scopes за последнее окно. Это шире, чем active lease: сюда попадают и недавние, уже завершённые контуры."),
-            ),
-            metric_row(
-                "Последний client thread",
-                latest_client_thread.unwrap_or_else(|| "ещё нет данных".to_string()),
-                Some("Когда raw client registry последний раз видел обновление любого живого thread."),
-            ),
-            metric_row(
-                "Последний lease heartbeat",
-                latest_active_heartbeat.unwrap_or_else(|| "ещё нет данных".to_string()),
-                Some("Когда в последний раз heartbeat подтвердил реально живой active lease."),
-            ),
-            metric_row(
-                "Последний working-state scope",
-                latest_recent_scope.unwrap_or_else(|| "ещё нет данных".to_string()),
-                Some("Когда последний раз любой distinct agent scope оставил свежий working-state restore."),
-            ),
-        ],
-        ),
-        hierarchy_back_panel,
-    );
-    if status == "alert" {
-        card = with_status_label(card, "Amai видит не всех");
-    } else if status == "waiting" {
-        card = with_status_label(card, "сейчас без active lease");
-    }
-    card
-}
-
-fn build_agent_scope_hierarchy_back_panel(
-    client_recent_threads: &[Value],
-    active_now_scopes: &[Value],
-    recent_scopes: &[Value],
-) -> Value {
-    let mut threads_by_id: BTreeMap<String, &Value> = BTreeMap::new();
-    for thread in client_recent_threads {
-        if let Some(thread_id) = thread["thread_id"].as_str() {
-            threads_by_id.insert(thread_id.to_string(), thread);
-        }
-    }
-
-    let mut active_by_thread: BTreeMap<String, &Value> = BTreeMap::new();
-    let mut active_by_scope: BTreeMap<String, &Value> = BTreeMap::new();
-    for active in active_now_scopes {
-        if let Some(thread_id) = active["owner_thread_id"].as_str() {
-            active_by_thread.insert(thread_id.to_string(), active);
-        }
-        if let Some(agent_scope) = active["agent_scope"].as_str() {
-            active_by_scope.insert(agent_scope.to_string(), active);
-        }
-    }
-
-    let mut project_buckets: BTreeMap<String, AgentHierarchyProjectBucket> = BTreeMap::new();
-    let mut represented_scope_keys = BTreeSet::new();
-    let mut bound_thread_ids = BTreeSet::new();
-
-    for recent in recent_scopes {
-        let agent_scope = recent["agent_scope"].as_str();
-        let thread_id = recent["thread_id"].as_str();
-        represented_scope_keys.insert(format!(
-            "{}::{}",
-            agent_scope.unwrap_or(""),
-            thread_id.unwrap_or("")
-        ));
-        let active = thread_id
-            .and_then(|value| active_by_thread.get(value).copied())
-            .or_else(|| agent_scope.and_then(|value| active_by_scope.get(value).copied()));
-        let thread = thread_id.and_then(|value| threads_by_id.get(value).copied());
-        if let Some(thread_id) = thread_id.filter(|_| thread.is_some()) {
-            bound_thread_ids.insert(thread_id.to_string());
-        }
-        push_agent_hierarchy_space(&mut project_buckets, recent, active, thread);
-    }
-
-    for active in active_now_scopes {
-        let agent_scope = active["agent_scope"].as_str();
-        let thread_id = active["owner_thread_id"].as_str();
-        let entry_key = format!("{}::{}", agent_scope.unwrap_or(""), thread_id.unwrap_or(""));
-        if represented_scope_keys.contains(&entry_key) {
-            continue;
-        }
-        let thread = thread_id.and_then(|value| threads_by_id.get(value).copied());
-        if let Some(thread_id) = thread_id.filter(|_| thread.is_some()) {
-            bound_thread_ids.insert(thread_id.to_string());
-        }
-        push_agent_hierarchy_space(&mut project_buckets, &Value::Null, Some(active), thread);
-    }
-
-    for thread in client_recent_threads {
-        let Some(thread_id) = thread["thread_id"].as_str() else {
-            continue;
-        };
-        if bound_thread_ids.contains(thread_id) {
-            continue;
-        }
-        let project_label = project_display_label(None, thread["cwd"].as_str());
-        let project_key = project_bucket_key(None, &project_label);
-        let bucket =
-            project_buckets
-                .entry(project_key)
-                .or_insert_with(|| AgentHierarchyProjectBucket {
-                    label: project_label.clone(),
-                    project_code: None,
-                    spaces: Vec::new(),
-                    pending_threads: Vec::new(),
-                });
-        if bucket.label.is_empty() {
-            bucket.label = project_label.clone();
-        }
-        bucket
-            .pending_threads
-            .push(build_unbound_client_thread_node(thread));
-    }
-
-    let projects = project_buckets
-        .into_values()
-        .map(|bucket| {
-            let spaces_count = bucket.spaces.len();
-            let pending_count = bucket.pending_threads.len();
-            let status = if pending_count > 0 {
-                "alert"
-            } else if spaces_count > 0 {
-                "pass"
-            } else {
-                "unknown"
-            };
-            let summary = format!(
-                "{} • {}",
-                format_count_with_word(
-                    spaces_count as u64,
-                    "пространство",
-                    "пространства",
-                    "пространств"
-                ),
-                format_count_with_word(
-                    pending_count as u64,
-                    "raw thread без Amai binding",
-                    "raw thread без Amai binding",
-                    "raw threads без Amai binding"
-                )
-            );
-            json!({
-                "label": bucket.label,
-                "project_code": bucket.project_code,
-                "status": status,
-                "summary": summary,
-                "spaces": bucket.spaces,
-                "pending_threads": bucket.pending_threads,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    json!({
-        "kind": "hierarchy_tree",
-        "title": "Проект → Пространства → Инстансы агентов → Сессии → Thread/turn → Модель",
-        "note": "Оборотная сторона показывает только уже materialized сущности. Где raw client thread виден, но Amai ещё не связала его с пространством/сессией, он вынесен отдельно как pending binding, а не встраивается в иерархию guessed-способом.",
-        "legend": [
-            {
-                "label": "raw client thread",
-                "status": "alert",
-                "note": "Сущность видна в /home/art/.codex/state_5.sqlite и реально шевелилась недавно."
-            },
-            {
-                "label": "Amai live lease",
-                "status": "pass",
-                "note": "Amai держит активный lease и считает этот агентский инстанс реально живым сейчас."
-            },
-            {
-                "label": "working-state session",
-                "status": "waiting",
-                "note": "Есть свежий durable working_state_restore, поэтому пространство и сессия уже materialized в Amai."
-            }
-        ],
-        "projects": projects,
-    })
-}
-
-fn push_agent_hierarchy_space(
-    project_buckets: &mut BTreeMap<String, AgentHierarchyProjectBucket>,
-    recent_scope: &Value,
-    active_scope: Option<&Value>,
-    thread: Option<&Value>,
-) {
-    let recent_project_code = recent_scope["project_code"].as_str();
-    let recent_namespace_code = recent_scope["namespace_code"].as_str();
-    let recent_agent_scope = recent_scope["agent_scope"].as_str();
-    let recent_thread_id = recent_scope["thread_id"].as_str();
-    let scope_source =
-        recent_agent_scope.or_else(|| active_scope.and_then(|value| value["agent_scope"].as_str()));
-    let (parsed_project_code, parsed_namespace_code, parsed_agent_leaf) =
-        parse_agent_scope_parts(scope_source);
-    let project_code = recent_project_code.or(parsed_project_code.as_deref());
-    let namespace_code = recent_namespace_code.or(parsed_namespace_code.as_deref());
-    let project_label =
-        project_display_label(project_code, thread.and_then(|value| value["cwd"].as_str()));
-    let project_key = project_bucket_key(project_code, &project_label);
-    let bucket =
-        project_buckets
-            .entry(project_key)
-            .or_insert_with(|| AgentHierarchyProjectBucket {
-                label: project_label.clone(),
-                project_code: project_code.map(str::to_string),
-                spaces: Vec::new(),
-                pending_threads: Vec::new(),
-            });
-    if bucket.label.is_empty() {
-        bucket.label = project_label;
-    }
-    if bucket.project_code.is_none() {
-        bucket.project_code = project_code.map(str::to_string);
-    }
-
-    let agent_label = thread_agent_label(thread, parsed_agent_leaf.as_deref());
-    let runtime_label = thread_runtime_label(thread);
-    let current_goal = compact_dashboard_text(
-        recent_scope["current_goal"].as_str(),
-        84,
-        "ещё нет materialized current goal",
-    );
-    let thread_id = recent_thread_id
-        .or_else(|| active_scope.and_then(|value| value["owner_thread_id"].as_str()))
-        .or_else(|| thread.and_then(|value| value["thread_id"].as_str()));
-    let thread_summary = thread
-        .map(|value| {
-            json!({
-                "thread_id": value["thread_id"].as_str(),
-                "title": compact_dashboard_text(value["title"].as_str(), 88, "ещё нет названия"),
-                "cwd": value["cwd"].as_str(),
-                "updated_at": value["updated_at_epoch_ms"].as_u64().map(human_timestamp),
-            })
-        })
-        .unwrap_or_else(|| {
-            json!({
-                "thread_id": thread_id,
-                "title": "raw thread ещё не materialized",
-                "cwd": Value::Null,
-                "updated_at": Value::Null,
-            })
-        });
-
-    let mut source_badges = vec![json!({
-        "label": "working-state session",
-        "status": "waiting"
-    })];
-    if thread.is_some() {
-        source_badges.push(json!({
-            "label": "raw client thread",
-            "status": "alert"
-        }));
-    }
-    if active_scope.is_some() {
-        source_badges.push(json!({
-            "label": "Amai live lease",
-            "status": "pass"
-        }));
-    }
-
-    let space_status = if active_scope.is_some() && thread.is_some() {
-        "pass"
-    } else if thread.is_some() {
-        "alert"
-    } else {
-        "waiting"
-    };
-    let namespace_label = namespace_code
-        .map(humanize_identifier)
-        .unwrap_or_else(|| "Пространство ещё не materialized".to_string());
-    let session_summary = if recent_scope.is_object() && !recent_scope.is_null() {
-        let mut parts = Vec::new();
-        if let Some(captured_at_epoch_ms) = recent_scope["captured_at_epoch_ms"].as_u64() {
-            parts.push(format!("restore {}", human_timestamp(captured_at_epoch_ms)));
-        }
-        if !current_goal.is_empty() && current_goal != "ещё нет materialized current goal" {
-            parts.push(current_goal.clone());
-        }
-        if parts.is_empty() {
-            "есть working-state session".to_string()
-        } else {
-            compact_dashboard_text(Some(&parts.join(" • ")), 112, "есть working-state session")
-        }
-    } else {
-        "живой lease есть, durable working-state session ещё не materialized".to_string()
-    };
-
-    bucket.spaces.push(json!({
-        "label": namespace_label,
-        "agent_scope": scope_source,
-        "status": space_status,
-        "summary": compact_dashboard_text(
-            Some(
-                &[
-                    scope_source.unwrap_or("scope ещё нет данных"),
-                    if active_scope.is_some() { "lease active" } else { "lease ещё нет" },
-                ]
-                .join(" • ")
-            ),
-            112,
-            "scope ещё нет данных"
-        ),
-        "agents": [
-            {
-                "label": agent_label,
-                "status": space_status,
-                "summary": runtime_label,
-                "source_badges": source_badges,
-                "session": {
-                    "label": "Текущая Amai-сессия",
-                    "status": if recent_scope.is_null() { "unknown" } else { "waiting" },
-                    "summary": session_summary,
-                    "thread": thread_summary,
-                    "model": {
-                        "label": runtime_label,
-                        "status": if thread.is_some() { "pass" } else { "unknown" },
-                    }
-                }
-            }
-        ]
-    }));
-}
-
-fn build_unbound_client_thread_node(thread: &Value) -> Value {
-    json!({
-        "label": compact_dashboard_text(thread["title"].as_str(), 72, "ещё нет названия"),
-        "status": "alert",
-        "summary": compact_dashboard_text(
-            Some(
-                &[
-                    path_leaf_label(thread["cwd"].as_str().unwrap_or("ещё нет cwd")),
-                    thread_runtime_label(Some(thread)),
-                ]
-                .join(" • ")
-            ),
-            112,
-            "raw client thread ещё не связан с Amai"
-        ),
-        "thread_id": thread["thread_id"].as_str(),
-        "updated_at": thread["updated_at_epoch_ms"].as_u64().map(human_timestamp),
-        "cwd": thread["cwd"].as_str(),
-    })
-}
-
-fn parse_agent_scope_parts(
-    scope: Option<&str>,
-) -> (Option<String>, Option<String>, Option<String>) {
-    let Some(scope) = scope.map(str::trim).filter(|value| !value.is_empty()) else {
-        return (None, None, None);
-    };
-    let mut parts = scope
-        .split("::")
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let project = parts.next().map(str::to_string);
-    let namespace = parts.next().map(str::to_string);
-    let leaf = parts.next().map(str::to_string);
-    (project, namespace, leaf)
-}
-
-fn project_bucket_key(project_code: Option<&str>, project_label: &str) -> String {
-    project_code
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| project_label.to_lowercase())
-}
-
-fn project_display_label(project_code: Option<&str>, cwd: Option<&str>) -> String {
-    if let Some(cwd) =
-        cwd.and_then(|value| Path::new(value).file_name().and_then(|part| part.to_str()))
-    {
-        return humanize_identifier(cwd);
-    }
-    project_code
-        .map(humanize_identifier)
-        .unwrap_or_else(|| "Неизвестный проект".to_string())
-}
-
-fn thread_agent_label(thread: Option<&Value>, fallback_leaf: Option<&str>) -> String {
-    thread
-        .and_then(|value| value["agent_nickname"].as_str())
-        .or_else(|| thread.and_then(|value| value["agent_role"].as_str()))
-        .or(fallback_leaf)
-        .map(humanize_identifier)
-        .unwrap_or_else(|| "Инстанс агента ещё не назван".to_string())
-}
-
-fn thread_runtime_label(thread: Option<&Value>) -> String {
-    let model = thread
-        .and_then(|value| value["model"].as_str())
-        .filter(|value| !value.trim().is_empty());
-    let reasoning = thread
-        .and_then(|value| value["reasoning_effort"].as_str())
-        .filter(|value| !value.trim().is_empty());
-    let provider = thread
-        .and_then(|value| value["model_provider"].as_str())
-        .filter(|value| !value.trim().is_empty());
-    let mut parts = Vec::new();
-    if let Some(model) = model {
-        parts.push(model.to_string());
-    }
-    if let Some(reasoning) = reasoning {
-        parts.push(reasoning.to_string());
-    }
-    if let Some(provider) = provider {
-        parts.push(provider.to_string());
-    }
-    if parts.is_empty() {
-        "Модель ещё не materialized".to_string()
-    } else {
-        parts.join(" • ")
-    }
-}
-
-fn path_leaf_label(path: &str) -> String {
-    Path::new(path)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .map(humanize_identifier)
-        .unwrap_or_else(|| humanize_identifier(path))
 }
 
 fn humanize_identifier(value: &str) -> String {
@@ -7137,12 +3555,12 @@ fn live_latency_compare_status_tooltip(
         reasons.push(format!("Повторный запрос: {}", hot_assessment.note));
     }
     if cold_assessment.status != "pass" {
-        reasons.push(format!("Первый запрос: {}", cold_assessment.note));
+        reasons.push(format!("Новый запрос: {}", cold_assessment.note));
     }
     status_reason_tooltip(
         overall_status,
         reasons,
-        "Живой срез ещё не даёт устойчивой картины по обоим пользовательским режимам.",
+        "Живой срез ещё не даёт устойчивой картины по обоим пользовательским режимам. Строгие проверочные прогоны показываются отдельно.",
     )
 }
 
@@ -7373,7 +3791,13 @@ fn build_current_session_hero_card(snapshot: &Value) -> Value {
         session_rows,
     );
     if let Some(guard) = session_client_turn_pressure {
-        session_card = with_status_label(session_card, guard.status_label);
+        session_card = with_status_label(
+            session_card,
+            client_turn_pressure_display_status_label(
+                guard.status_label,
+                same_thread_compaction_preferred,
+            ),
+        );
         session_card = with_status_tooltip(
             session_card,
             &client_turn_pressure_tooltip(
@@ -7389,7 +3813,7 @@ fn build_current_session_hero_card(snapshot: &Value) -> Value {
         session_card = with_status_label(session_card, "реальная экономия не доказана");
         session_card = with_status_tooltip(
             session_card,
-            "Статус требует внимания по следующим причинам:\n- Для текущего живого turn ещё нет доказанной same-turn пары `без Amai / с Amai`.\n- Значит реальную экономию на полной шкале клиента пока нельзя честно показать числом.\n- Пока эта пара не materialized, нижняя строка про учтённую часть остаётся внутренним Amai-срезом, а не полным client spend.\n- Чтобы получить реальную экономию, нужно раньше переводить работу в свежий чат и собирать exact pair именно на коротком live turn.",
+            "Статус требует внимания по следующим причинам:\n- Для текущего живого turn ещё нет доказанной same-turn пары `без Amai / с Amai`.\n- Значит реальную экономию на полной шкале клиента пока нельзя честно показать числом.\n- Пока эта пара не materialized, нижняя строка про учтённую часть остаётся внутренним Amai-срезом, а не полным client spend.\n- Чтобы получить реальную экономию, нужно быстрее фиксировать exact pair на коротком live turn и для этого сначала сжать текущий giant thread через same-thread compact window, а не расширять его новыми ходами.",
         );
     } else if let Some(full_turn_savings_pct) = session_full_turn_savings_pct
         .filter(|value| client_budget_target_active && *value < client_budget_target_percent_f64)
@@ -7401,7 +3825,7 @@ fn build_current_session_hero_card(snapshot: &Value) -> Value {
         session_card = with_status_tooltip(
             session_card,
             &format!(
-                "Статус требует внимания по следующим причинам:\n- Реальная экономия на полной шкале клиента сейчас всего {}.\n- {}\n- Значит текущий thread пока жжёт почти весь полный client turn/context, а Amai экономит только малую долю.\n- Чтобы реально улучшить картину без потери точности, нужно дальше уменьшать полный размер turn и раньше переводить работу в новый чат через continuity startup.",
+                "Статус требует внимания по следующим причинам:\n- Реальная экономия на полной шкале клиента сейчас всего {}.\n- {}\n- Значит текущий thread пока жжёт почти весь полный client turn/context, а Amai экономит только малую долю.\n- Чтобы реально улучшить картину без потери точности, нужно дальше уменьшать полный размер turn и жёстко удерживать same-thread compact surface, чтобы следующий exact pair materialized на коротком live turn.",
                 format_percent(Some(full_turn_savings_pct)),
                 client_budget_target_sentence(client_budget_target_percent)
             ),
@@ -7719,7 +4143,13 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         session_rows,
     );
     if let Some(guard) = session_client_turn_pressure {
-        session_card = with_status_label(session_card, guard.status_label);
+        session_card = with_status_label(
+            session_card,
+            client_turn_pressure_display_status_label(
+                guard.status_label,
+                same_thread_compaction_preferred,
+            ),
+        );
         session_card = with_status_tooltip(
             session_card,
             &client_turn_pressure_tooltip(
@@ -7735,7 +4165,7 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         session_card = with_status_label(session_card, "реальная экономия не доказана");
         session_card = with_status_tooltip(
             session_card,
-            "Статус требует внимания по следующим причинам:\n- Для текущего живого turn ещё нет доказанной same-turn пары `без Amai / с Amai`.\n- Значит реальную экономию на полной шкале клиента пока нельзя честно показать числом.\n- Пока эта пара не materialized, нижняя строка про учтённую часть остаётся внутренним Amai-срезом, а не полным client spend.\n- Чтобы получить реальную экономию, нужно раньше переводить работу в свежий чат и собирать exact pair именно на коротком live turn.",
+            "Статус требует внимания по следующим причинам:\n- Для текущего живого turn ещё нет доказанной same-turn пары `без Amai / с Amai`.\n- Значит реальную экономию на полной шкале клиента пока нельзя честно показать числом.\n- Пока эта пара не materialized, нижняя строка про учтённую часть остаётся внутренним Amai-срезом, а не полным client spend.\n- Чтобы получить реальную экономию, нужно быстрее фиксировать exact pair на коротком live turn и для этого сначала сжать текущий giant thread через same-thread compact window, а не расширять его новыми ходами.",
         );
     } else if let Some(full_turn_savings_pct) = session_full_turn_savings_pct
         .filter(|value| client_budget_target_active && *value < client_budget_target_percent_f64)
@@ -7747,7 +4177,7 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         session_card = with_status_tooltip(
             session_card,
             &format!(
-                "Статус требует внимания по следующим причинам:\n- Реальная экономия на полной шкале клиента сейчас всего {}.\n- {}\n- Значит текущий thread пока жжёт почти весь полный client turn/context, а Amai экономит только малую долю.\n- Чтобы реально улучшить картину без потери точности, нужно дальше уменьшать полный размер turn и раньше переводить работу в новый чат через continuity startup.",
+                "Статус требует внимания по следующим причинам:\n- Реальная экономия на полной шкале клиента сейчас всего {}.\n- {}\n- Значит текущий thread пока жжёт почти весь полный client turn/context, а Amai экономит только малую долю.\n- Чтобы реально улучшить картину без потери точности, нужно дальше уменьшать полный размер turn и жёстко удерживать same-thread compact surface, чтобы следующий exact pair materialized на коротком live turn.",
                 format_percent(Some(full_turn_savings_pct)),
                 client_budget_target_sentence(client_budget_target_percent)
             ),
@@ -8062,6 +4492,10 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         }
     }
 
+    if let Some(active_agent_budget_card) = build_active_agent_budget_session_card(snapshot) {
+        session_card = active_agent_budget_card;
+    }
+
     vec![
         compact_token_hero_card(session_card),
         compact_token_hero_card(rolling_card),
@@ -8070,6 +4504,16 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
 }
 
 fn compact_token_hero_card(mut card: Value) -> Value {
+    if matches!(
+        card["presentation_variant"].as_str(),
+        Some(
+            "active_agent_budget_v1"
+                | "active_agent_budget_minimal_v2"
+                | "active_agent_budget_grouped_v3"
+        )
+    ) {
+        return card;
+    }
     let title = card["title"].as_str().unwrap_or_default().to_string();
     if let Some(rows) = card["rows"].as_array_mut() {
         let allowed = truth_only_token_card_labels(&title);
@@ -8310,7 +4754,7 @@ fn truth_only_token_card_note(card: &Value) -> String {
 fn build_machine_cards(
     snapshot: &Value,
     machine: Option<&MachineSummary>,
-    install_state: Option<&InstallState>,
+    install_state: Option<&dashboard_context::InstallState>,
 ) -> Vec<Value> {
     let mut cards = Vec::new();
     if let Some(machine) = machine {
@@ -9211,203 +5655,235 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
         nats_card = with_status_tooltip(nats_card, &tooltip);
     }
 
-    let degradation_card = build_degradation_model_card(snapshot);
-    let continuity_card = build_continuity_correctness_card(snapshot);
-
     vec![
         postgres_card,
         qdrant_live_card,
         benchmark_qdrant_card,
         nats_card,
-        degradation_card,
-        continuity_card,
+        build_governance_card(snapshot),
     ]
 }
 
-fn build_continuity_correctness_card(snapshot: &Value) -> Value {
-    let model = &snapshot["continuity_correctness_model"];
-    if !model.is_object() {
-        return with_status_tooltip(
-            card_with_rows(
-                "Правильное продолжение",
-                "ещё нет данных".to_string(),
-                "Пока панель не видит отдельную проверку того, что Amai правильно продолжает работу между чатами и не подменяет отсутствующие данные похожим ответом.".to_string(),
-                "unknown",
-                Some("Источник: latest continuity_verification snapshot".to_string()),
-                Some("Показывает, что Amai действительно умеет поднимать правильную рабочую линию, не подменяет прошлый чат чужим и честно говорит, когда точного совпадения по времени нет.".to_string()),
-                vec![],
+fn build_governance_card(snapshot: &Value) -> Value {
+    let governance = &snapshot["governance_surface"];
+    if !governance.is_object() {
+        return card_with_rows(
+            "Жизненный цикл памяти",
+            "ещё нет данных".to_string(),
+            "Пока панель не собрала machine-readable surface по forgetting, quarantine и memory governance."
+                .to_string(),
+            "unknown",
+            Some(
+                "Источник: governance_surface из live snapshot. Пока этот слой не surfaced.".to_string(),
             ),
-            "Статус пока не может считаться нормальным по следующим причинам:\n- Свежий continuity proof ещё не попал в system snapshot.",
+            Some(
+                "Показывает, как Amai чистит, архивирует и пересматривает память, не теряя protected truth и explainability."
+                    .to_string(),
+            ),
+            vec![],
         );
     }
 
-    let summary = &model["summary"];
-    let status = summary["status"].as_str().unwrap_or("unknown");
-    let probe_count = summary["probe_count"].as_u64().unwrap_or(0);
-    let verified_probes = summary["verified_probes"].as_u64().unwrap_or(0);
-    let failed_probes = summary["failed_probes"].as_u64().unwrap_or(0);
-    let recovered_useful = summary["recovered_useful"].as_u64().unwrap_or(0);
-    let fail_closed = summary["fail_closed"].as_u64().unwrap_or(0);
-    let value = if probe_count > 0 {
-        format!("{verified_probes} из {probe_count} проверок подтверждены")
+    let open_conflicts = governance["wrong_link_rate"]["open_conflict_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let active_quarantine = governance["poisoning_alert_count"]["active_quarantine_items"]
+        .as_u64()
+        .unwrap_or(0);
+    let disputed_items = governance["trust_state_distribution"]["disputed_memory_items"]
+        .as_u64()
+        .unwrap_or(0);
+    let forgetting_total = governance["human_override_audit"]["forgetting_audit_log_entries_total"]
+        .as_u64()
+        .unwrap_or(0);
+    let status = if open_conflicts > 0 || active_quarantine > 0 || disputed_items > 0 {
+        "alert"
+    } else if forgetting_total > 0 {
+        "pass"
     } else {
-        "ещё нет данных".to_string()
+        "unknown"
     };
-    let last_evidence = model["last_evidence_at_epoch_ms"].as_u64();
-    let note = if probe_count > 0 {
+    let pruning_job_total = governance["forgetting_job_breakdown"]["pruning_job"]
+        .as_u64()
+        .unwrap_or(0);
+    let cold_archive_job_total = governance["forgetting_job_breakdown"]["cold_archive_job"]
+        .as_u64()
+        .unwrap_or(0);
+    let revalidation_job_total = governance["forgetting_job_breakdown"]["revalidation_job"]
+        .as_u64()
+        .unwrap_or(0);
+    let dedup_job_total = governance["forgetting_job_breakdown"]["de_duplication_job"]
+        .as_u64()
+        .unwrap_or(0);
+    let summarize_job_total = governance["forgetting_job_breakdown"]["summarization_job"]
+        .as_u64()
+        .unwrap_or(0);
+    let stale_rate = governance["stale_memory_error_rate"]["rate"].as_f64();
+    let top_quarantine = governance["poisoning_alert_count"]["active_quarantine_breakdown"]
+        .as_array()
+        .and_then(|items| items.first());
+    let top_conflict = governance["open_conflict_breakdown"]
+        .as_array()
+        .and_then(|items| items.first());
+    let headline_value = if status == "alert" {
+        let mut parts = Vec::new();
+        if active_quarantine > 0 {
+            parts.push(format!(
+                "{} в quarantine",
+                format_u64(Some(active_quarantine))
+            ));
+        }
+        if open_conflicts > 0 {
+            parts.push(format!(
+                "{} {}",
+                format_u64(Some(open_conflicts)),
+                format_ru_count_noun(open_conflicts, "конфликт", "конфликта", "конфликтов")
+            ));
+        }
+        if disputed_items > 0 {
+            parts.push(format!(
+                "{} {}",
+                format_u64(Some(disputed_items)),
+                format_ru_count_noun(disputed_items, "спорный", "спорных", "спорных")
+            ));
+        }
+        if parts.is_empty() {
+            "требует внимания".to_string()
+        } else {
+            parts.join(" • ")
+        }
+    } else if forgetting_total > 0 {
         format!(
-            "Это отдельная проверка продолжения работы: старт нового чата, восстановление рабочего состояния, handoff и точный поиск по времени. Сейчас подтверждены {verified_probes} из {probe_count} проверок; полезное восстановление сработало в {recovered_useful} случаях, а границы без подмены подтверждены в {fail_closed} случаях."
+            "{} forgetting-действий зафиксировано",
+            format_u64(Some(forgetting_total))
         )
     } else {
-        "Пока нет свежей отдельной проверки того, что Amai правильно продолжает работу между чатами.".to_string()
+        "ещё нет действий".to_string()
     };
-    let mut card = card_with_rows(
-        "Правильное продолжение",
-        value,
-        note,
+    let alert_note = format_governance_alert_note(top_quarantine, top_conflict);
+
+    card_with_rows(
+        "Жизненный цикл памяти",
+        headline_value,
+        if status == "alert" {
+            alert_note.unwrap_or_else(|| {
+                "Карточка требует внимания, потому что в live memory governance сейчас есть quarantine или открытые truth-конфликты."
+                    .to_string()
+            })
+        } else {
+            "Здесь видно, как Amai реально чистит и пересматривает память: pruning, archive, revalidation и dedup surfaced отдельно, а protected truth не должен исчезать тихо."
+                .to_string()
+        },
         status,
-        Some(source_label(
-            "Источник: latest continuity_verification snapshot. Карточка показывает только последний explicit continuity proof, а не косвенные признаки из working-state.",
-            last_evidence,
-        )),
-        Some("Показывает, что Amai действительно умеет поднимать правильную рабочую линию, не подменяет прошлый чат чужим и честно говорит, когда точного совпадения по времени нет.".to_string()),
+        Some(
+            "Источник: live governance_surface. Карточка показывает не policy-обещание, а фактический audit contour forgetting и trust."
+                .to_string(),
+        ),
+        Some(
+            "Stage 9 surface: explainable forgetting, quarantine/trust pressure и реальный объём lifecycle-действий."
+                .to_string(),
+        ),
         vec![
             metric_row(
-                "Полезно восстановлено",
-                format_u64(Some(recovered_useful)),
-                Some("Сколько проверок подтвердили полезное восстановление handoff, рабочего состояния или стартовой подсказки нового чата."),
+                "Pruning",
+                format_u64(Some(pruning_job_total)),
+                Some("Сколько pruning-действий уже записано через TTL или low-utility cleanup."),
             ),
             metric_row(
-                "Границы не нарушены",
-                format_u64(Some(fail_closed)),
-                Some("Сколько проверок подтвердили, что Amai не подменяет отсутствующий прошлый чат или точное время ближайшим похожим результатом."),
+                "Archive",
+                format_u64(Some(cold_archive_job_total)),
+                Some("Сколько stale derivative items уже переведено в cold archive."),
             ),
             metric_row(
-                "Провалено",
-                format_u64(Some(failed_probes)),
-                Some("Сколько проверок продолжения работы провалились в последнем явном прогоне."),
+                "Revalidation",
+                format_u64(Some(revalidation_job_total)),
+                Some("Сколько stale current items уже отправлено в pending_review."),
             ),
             metric_row(
-                "Всего проверок",
-                format_u64(Some(probe_count)),
-                Some("Сколько отдельных проверок вошло в последний прогон корректности продолжения."),
+                "Dedup / compaction",
+                format_u64(Some(dedup_job_total)),
+                Some("Сколько duplicate branches уже схлопнуто через de-duplication / compaction contour."),
             ),
             metric_row(
-                "Последняя проверка",
-                last_evidence
-                    .map(human_timestamp)
-                    .unwrap_or_else(|| "ещё нет данных".to_string()),
-                Some("Когда был сделан последний явный прогон этой проверки."),
+                "Summarization",
+                format_u64(Some(summarize_job_total)),
+                Some("Пока это explicit no-op contract. Здесь не должно быть тихой псевдо-активности."),
+            ),
+            metric_row(
+                "Stale rate",
+                format_ratio_percent(stale_rate),
+                Some("Доля archived/pruned items от всей памяти. Это не KPI успеха, а честный pressure indicator cleanup-контура."),
+            ),
+            metric_row(
+                "Quarantine",
+                format_u64(Some(active_quarantine)),
+                Some("Сколько memory items сейчас ещё удерживаются в quarantine и требуют ручного разбора."),
+            ),
+            metric_row(
+                "Спорные",
+                format_u64(Some(disputed_items)),
+                Some("Сколько memory items сейчас имеют disputed trust-state."),
+            ),
+            metric_row(
+                "Открытые конфликты",
+                format_u64(Some(open_conflicts)),
+                Some("Сколько wrong-link / truth конфликтов сейчас ещё не закрыто."),
             ),
         ],
-    );
-    if let Some(tooltip) = continuity_correctness_status_tooltip(model) {
-        card = with_status_tooltip(card, &tooltip);
-    }
-    card
+    )
 }
 
-fn build_degradation_model_card(snapshot: &Value) -> Value {
-    let model = &snapshot["degradation_model"];
-    if !model.is_object() {
-        return with_status_tooltip(
-            card_with_rows(
-                "Поведение при сбоях",
-                "ещё нет данных".to_string(),
-                "Пока панель не собрала machine-readable карту того, как Amai должен вести себя при частичных поломках и устаревании данных.".to_string(),
-                "unknown",
-                Some("Источник: retrieval science policy + latest verification snapshots".to_string()),
-                Some("Показывает, что Amai должен делать, если часть системы сломалась, устарела или вернула неполные данные. Здесь видны не только обещания policy, но и последние доказательства по каждому классу сбоя.".to_string()),
-                vec![],
-            ),
-            "Статус пока не может считаться нормальным по следующим причинам:\n- Degradation model ещё не попал в системный snapshot.\n- Пока панель не видит, какие классы уже подтверждены свежим proof, а какие остаются только policy.",
-        );
+fn format_governance_alert_note(
+    top_quarantine: Option<&Value>,
+    top_conflict: Option<&Value>,
+) -> Option<String> {
+    let mut reasons = Vec::new();
+    if let Some(item) = top_quarantine {
+        let count = item["item_count"].as_u64().unwrap_or(0);
+        let reason = item["quarantine_reason"].as_str().unwrap_or("unknown");
+        let entity_kind = item["entity_kind"].as_str().unwrap_or("unknown");
+        let source_kind = item["source_kind"].as_str().unwrap_or("unknown");
+        reasons.push(format!(
+            "главный quarantine-класс: {} ({}, {}, {})",
+            format_u64(Some(count)),
+            humanize_identifier(reason),
+            humanize_identifier(entity_kind),
+            humanize_identifier(source_kind)
+        ));
     }
-
-    let summary = &model["summary"];
-    let pass = summary["pass"].as_u64().unwrap_or(0);
-    let critical = summary["critical"].as_u64().unwrap_or(0);
-    let unknown = summary["unknown"].as_u64().unwrap_or(0);
-    let fail_closed_total = summary["fail_closed_total"].as_u64().unwrap_or(0);
-    let graceful_total = summary["graceful_fallback_total"].as_u64().unwrap_or(0);
-    let fail_closed_verified = degradation_status_count(model, Some("fail_closed"), "pass");
-    let graceful_verified = degradation_status_count(model, Some("graceful_fallback"), "pass");
-    let evidence_gaps = summary["evidence_gaps"].as_u64().unwrap_or(0);
-    let status = summary["status"].as_str().unwrap_or("unknown");
-    let headline = format!(
-        "{} из {} классов подтверждены",
-        pass,
-        fail_closed_total + graceful_total
-    );
-    let truth_ranking = compact_truth_ranking(model["truth_ranking"].as_array());
-    let mut card = card_with_rows(
-        "Поведение при сбоях",
-        headline,
-        format!(
-            "Это честная карта поведения Amai при частичных поломках, устаревании и неполных данных. Сейчас свежим machine-readable proof подтверждены {} из {} классов; без свежего доказательства пока остаются {}.",
-            pass,
-            fail_closed_total + graceful_total,
-            evidence_gaps
-        ),
-        status,
-        Some(source_label(
-            "Источник: retrieval science policy + последние accuracy / working-state snapshots. Карточка показывает не только policy, но и последний известный proof или gap по каждому классу.",
-            newest_degradation_evidence_epoch_ms(model),
-        )),
-        Some("Показывает, что Amai должен делать, если часть системы сломалась, устарела или вернула неполные данные. Здесь видно, какие классы уже подтверждены свежим доказательством, а какие пока описаны только как policy.".to_string()),
-        vec![
-            metric_row(
-                "Жёсткая защита",
-                format!("{fail_closed_verified} из {fail_closed_total} подтверждены"),
-                Some("Классы, где Amai обязан fail-closed: не угадывать и не подмешивать чужой контур."),
-            ),
-            metric_row(
-                "Мягкий откат",
-                format!("{graceful_verified} из {graceful_total} подтверждены"),
-                Some("Классы, где Amai должен сохранить безопасный ответный путь даже при частичной поломке."),
-            ),
-            metric_row(
-                "Без свежего доказательства",
-                format_u64(Some(evidence_gaps)),
-                Some("Сколько классов уже описаны в policy, но ещё не подтверждены свежим machine-readable proof."),
-            ),
-            metric_row(
-                "Сломано сейчас",
-                format_u64(Some(critical)),
-                Some("Сколько классов сейчас провалили последний известный proof."),
-            ),
-            metric_row(
-                "Порядок истины",
-                truth_ranking,
-                Some("Какой слой Amai считает более надёжным, если несколько источников спорят друг с другом."),
-            ),
-            metric_row(
-                "Неизвестно сейчас",
-                format_u64(Some(unknown)),
-                Some("Сколько классов сейчас остаются в неизвестном состоянии, потому что свежего доказательства ещё нет."),
-            ),
-        ],
-    );
-    if let Some(tooltip) = degradation_model_status_tooltip(model) {
-        card = with_status_tooltip(card, &tooltip);
+    if let Some(item) = top_conflict {
+        let count = item["item_count"].as_u64().unwrap_or(0);
+        let summary = compact_dashboard_text(item["summary"].as_str(), 56, "unknown");
+        let source_kind = item["source_kind"].as_str().unwrap_or("unknown");
+        reasons.push(format!(
+            "главный конфликт: {} ({}, {})",
+            format_u64(Some(count)),
+            summary,
+            humanize_identifier(source_kind)
+        ));
     }
-    card
+    if reasons.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Карточка требует внимания: {}.",
+            reasons.join("; ")
+        ))
+    }
 }
 
 fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
     let benchmark = &snapshot["benchmark_qdrant"];
+    let run_summary = &benchmark["run_summary"];
     let configured = benchmark["configured"].as_bool().unwrap_or(false);
     let available = benchmark["available"].as_bool().unwrap_or(false);
     let active = benchmark["active"].as_bool().unwrap_or(false);
     let from_last_success = benchmark["from_last_success"].as_bool().unwrap_or(false);
+    let run_state = run_summary["run_state"].as_str().unwrap_or("not_started");
     let status = if !configured {
         "unknown"
-    } else if !active {
-        "unknown"
-    } else if !available {
-        "alert"
-    } else {
-        combine_statuses(&[
+    } else if active && available {
+        let live_probe_status = combine_statuses(&[
             status_at_most_or_equal(
                 benchmark["index_optimize_queue"].as_f64(),
                 snapshot["thresholds"]["qdrant"]["optimize_queue"]["target"].as_f64(),
@@ -9416,196 +5892,353 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
                 benchmark["update_queue_length"].as_f64(),
                 snapshot["thresholds"]["qdrant"]["update_queue_length"]["target"].as_f64(),
             ),
-        ])
+        ]);
+        if live_probe_status == "pass" {
+            "waiting"
+        } else {
+            live_probe_status
+        }
+    } else if run_state == "finished_error" || run_state == "finished_benchmark_failed" {
+        "alert"
+    } else if !active {
+        "unknown"
+    } else if !available {
+        "alert"
+    } else {
+        "unknown"
     };
-    let value = if available || from_last_success {
-        format_optional(benchmark["memory_resident_bytes"].as_f64(), human_bytes)
+    let dataset_size = run_summary["dataset_size"].as_u64();
+    let points_count = benchmark["points_count"].as_u64().or_else(|| {
+        benchmark["points_count"]
+            .as_f64()
+            .map(|value| value.max(0.0) as u64)
+    });
+    let progress_label = match (points_count, dataset_size) {
+        (Some(points), Some(total)) if total > 0 => {
+            let percent = (points as f64 * 100.0 / total as f64).clamp(0.0, 100.0);
+            if points >= total {
+                format!(
+                    "{} из {} точек",
+                    format_u64(Some(points)),
+                    format_u64(Some(total))
+                )
+            } else {
+                format!(
+                    "{} из {} точек ({percent:.0}%)",
+                    format_u64(Some(points)),
+                    format_u64(Some(total))
+                )
+            }
+        }
+        (Some(points), _) => format!("{} точек", format_u64(Some(points))),
+        _ => "ещё нет данных".to_string(),
+    };
+    let elapsed_label = run_summary["started_at_epoch_s"].as_u64().map(|started| {
+        let end_ms = run_summary["finished_at_epoch_s"]
+            .as_u64()
+            .unwrap_or_else(|| OffsetDateTime::now_utc().unix_timestamp().max(0) as u64)
+            * 1000;
+        human_elapsed_ms(end_ms.saturating_sub(started.saturating_mul(1000)))
+    });
+    let aggregate_result = &run_summary["aggregate_result"];
+    let last_result = &run_summary["latest_result"];
+    let system_evaluation_label = if aggregate_result.is_object() {
+        format!(
+            "recall {} • p95 {} • p99 {}",
+            format_ratio_percent(aggregate_result["recall"].as_f64()),
+            format_ms(snapshot, aggregate_result["p95_ms"].as_f64()),
+            format_ms(snapshot, aggregate_result["p99_ms"].as_f64())
+        )
+    } else if last_result.is_object() {
+        format!(
+            "recall {} • p95 {} • p99 {}",
+            format_ratio_percent(last_result["recall"].as_f64()),
+            format_ms(snapshot, last_result["p95_ms"].as_f64()),
+            format_ms(snapshot, last_result["p99_ms"].as_f64())
+        )
+    } else {
+        "ещё нет данных".to_string()
+    };
+    let live_progress = &run_summary["live_progress"];
+    let current_definition_label = live_progress["definition_label"]
+        .as_str()
+        .map(humanize_ann_definition_label);
+    let live_stage_label = match (
+        &current_definition_label,
+        live_progress["group_current"].as_u64(),
+        live_progress["group_total"].as_u64(),
+        live_progress["processed_current"].as_u64(),
+        live_progress["processed_total"].as_u64(),
+    ) {
+        (
+            Some(definition),
+            Some(group_current),
+            Some(group_total),
+            Some(processed_current),
+            Some(processed_total),
+        ) => format!(
+            "{definition}; группа {} из {}; {} из {} запросов",
+            group_current,
+            group_total,
+            format_u64(Some(processed_current)),
+            format_u64(Some(processed_total))
+        ),
+        (Some(definition), Some(group_current), Some(group_total), _, _) => {
+            format!("{definition}; группа {} из {}", group_current, group_total)
+        }
+        (Some(definition), _, _, Some(processed_current), Some(processed_total)) => format!(
+            "{definition}; {} из {} запросов",
+            format_u64(Some(processed_current)),
+            format_u64(Some(processed_total))
+        ),
+        (
+            None,
+            Some(group_current),
+            Some(group_total),
+            Some(processed_current),
+            Some(processed_total),
+        ) => format!(
+            "группа {} из {}; {} из {} запросов",
+            group_current,
+            group_total,
+            format_u64(Some(processed_current)),
+            format_u64(Some(processed_total))
+        ),
+        (Some(definition), None, None, None, None) => definition.clone(),
+        (None, Some(group_current), Some(group_total), _, _) => {
+            format!("группа {} из {}", group_current, group_total)
+        }
+        (None, _, _, Some(processed_current), Some(processed_total)) => format!(
+            "{} из {} запросов",
+            format_u64(Some(processed_current)),
+            format_u64(Some(processed_total))
+        ),
+        _ => "ещё нет данных".to_string(),
+    };
+    let remaining_progress_label = live_progress["group_current"]
+        .as_u64()
+        .zip(live_progress["group_total"].as_u64())
+        .zip(
+            live_progress["processed_current"]
+                .as_u64()
+                .zip(live_progress["processed_total"].as_u64()),
+        )
+        .map(
+            |((group_current, group_total), (processed_current, processed_total))| {
+                let remaining_groups = group_total.saturating_sub(group_current);
+                let remaining_queries = processed_total.saturating_sub(processed_current);
+                if remaining_groups == 0 && remaining_queries == 0 {
+                    "текущий шаг завершается".to_string()
+                } else if remaining_queries == 0 {
+                    format!(
+                        "после смены шага останется {} групп",
+                        format_u64(Some(remaining_groups))
+                    )
+                } else if remaining_groups == 0 {
+                    format!(
+                        "{} запросов до конца текущего шага",
+                        format_u64(Some(remaining_queries))
+                    )
+                } else {
+                    format!(
+                        "{} групп после текущей; {} запросов до конца шага",
+                        format_u64(Some(remaining_groups)),
+                        format_u64(Some(remaining_queries))
+                    )
+                }
+            },
+        )
+        .or_else(|| {
+            live_progress["processed_current"]
+                .as_u64()
+                .zip(live_progress["processed_total"].as_u64())
+                .map(|(processed_current, processed_total)| {
+                    format!(
+                        "{} запросов до конца текущего шага",
+                        format_u64(Some(processed_total.saturating_sub(processed_current)))
+                    )
+                })
+        })
+        .unwrap_or_else(|| "ещё нет данных".to_string());
+    let benchmark_memory_label = benchmark["memory_resident_bytes"].as_f64().map(human_bytes);
+    let value = if active {
+        "идёт прогон".to_string()
+    } else if run_state == "finished_ok" {
+        "последний прогон успешен".to_string()
+    } else if run_state == "finished_error" || run_state == "finished_benchmark_failed" {
+        "последний прогон с ошибкой".to_string()
+    } else if available || from_last_success {
+        "тест не запущен".to_string()
     } else if configured {
         "ещё нет данных".to_string()
     } else {
         "не настроено".to_string()
     };
-    let snapshot_mode = !active;
-    let live_or_snapshot_label = if snapshot_mode {
-        "Последний срез"
+    let status_label_override = if !configured {
+        None
+    } else if active {
+        Some("идёт прогон".to_string())
+    } else if run_state == "finished_ok" {
+        Some("последний прогон успешен".to_string())
+    } else if run_state == "finished_error" || run_state == "finished_benchmark_failed" {
+        Some("последний прогон с ошибкой".to_string())
     } else {
-        ""
+        Some("тест не запущен".to_string())
     };
     let note = if active && available {
-        "Живые системные показатели отдельного Qdrant, который сейчас занят внешним benchmark-прогоном. Эти числа не смешиваются с Amai live.".to_string()
-    } else if !active && available {
-        "Тест сейчас не запущен. Показан последний измеренный срез отдельного benchmark-Qdrant, чтобы вы не теряли картину после остановки прогона.".to_string()
+        "Отдельный Qdrant для внешнего бенча. Здесь видно, что сейчас считается, сколько уже загружено и сколько ещё осталось.".to_string()
+    } else if run_state == "finished_ok" {
+        "Тест сейчас не идёт. Здесь оставлен итог последнего успешного прогона.".to_string()
+    } else if run_state == "finished_error" || run_state == "finished_benchmark_failed" {
+        "Последний внешний прогон завершился с ошибкой. Здесь виден последний сохранённый срез."
+            .to_string()
     } else if from_last_success {
-        "Показан последний сохранённый срез внешнего benchmark-Qdrant. Новый тест сейчас не запущен, но последние успешные числа сохранены для сравнения.".to_string()
+        "Тест сейчас не идёт. Показан последний сохранённый результат и последний известный срез."
+            .to_string()
     } else if configured {
-        "Отдельный benchmark-Qdrant настроен, но тест сейчас не запущен. Значения появятся после первого успешного прогона.".to_string()
+        "Отдельный benchmark-Qdrant настроен, но внешний прогон ещё не дал полезного результата."
+            .to_string()
     } else {
-        "Отдельный benchmark-Qdrant ещё не настроен. Когда внешний прогон будет идти через выделенный инстанс, здесь появятся его живые системные числа.".to_string()
+        "Отдельный benchmark-Qdrant ещё не настроен.".to_string()
     };
     let source_label = if active && available {
         Some(format!(
-            "Источник: live Qdrant /metrics внешнего бенча ({}), обновляется на каждом refresh dashboard",
+            "Источник: live Qdrant /metrics + workspace последнего внешнего прогона ({}). Карточка обновляется при refresh dashboard.",
             benchmark["http_url"].as_str().unwrap_or("unknown")
         ))
-    } else if !active && available {
+    } else if run_state == "finished_ok"
+        || run_state == "finished_error"
+        || run_state == "finished_benchmark_failed"
+    {
         Some(format!(
-            "Источник: последний измеренный срез Qdrant /metrics внешнего бенча ({}). Тест сейчас не запущен.",
+            "Источник: workspace последнего внешнего прогона + последний известный срез benchmark-Qdrant ({}).",
             benchmark["http_url"].as_str().unwrap_or("unknown")
         ))
     } else if from_last_success {
         Some(format!(
-            "Источник: последний сохранённый срез Qdrant /metrics внешнего бенча ({}). Тест сейчас не запущен.",
+            "Источник: последний сохранённый результат и срез benchmark-Qdrant ({}).",
             benchmark["http_url"].as_str().unwrap_or("unknown")
         ))
     } else {
         Some(
-            "Источник: отдельный benchmark-Qdrant. Эта карточка никогда не берёт данные из Amai live."
+            "Источник: отдельный benchmark-Qdrant и workspace внешнего benchmark-прогона. Эта карточка не берёт данные из Amai live."
                 .to_string(),
         )
     };
     let rows = vec![
         metric_row(
-            "Эталон optimize queue",
-            format_f64_count(snapshot["thresholds"]["qdrant"]["optimize_queue"]["target"].as_f64()),
-            Some("Целевой максимум очереди оптимизации индекса для внешнего benchmark-Qdrant."),
-        ),
-        metric_row(
-            &prefixed_metric_label(live_or_snapshot_label, "optimize queue"),
-            format_f64_count(benchmark["index_optimize_queue"].as_f64()),
-            Some(if snapshot_mode {
-                "Последняя измеренная очередь оптимизации индекса у внешнего benchmark-Qdrant перед остановкой теста."
-            } else {
-                "Текущая очередь оптимизации индекса у внешнего benchmark-Qdrant."
-            }),
-        ),
-        metric_row(
-            "Эталон update queue",
-            format_f64_count(
-                snapshot["thresholds"]["qdrant"]["update_queue_length"]["target"].as_f64(),
+            "Тест",
+            format!(
+                "{} / {}",
+                run_summary["benchmark_display_name"]
+                    .as_str()
+                    .unwrap_or("ещё нет данных"),
+                run_summary["dataset_display_name"]
+                    .as_str()
+                    .unwrap_or("ещё нет данных")
             ),
-            Some("Желаемая длина очереди обновлений у внешнего benchmark-Qdrant."),
+            Some(
+                "Какой внешний benchmark и какой набор данных сейчас выбран для этого отдельного Qdrant.",
+            ),
         ),
         metric_row(
-            &prefixed_metric_label(live_or_snapshot_label, "update queue"),
-            format_f64_count(benchmark["update_queue_length"].as_f64()),
-            Some(if snapshot_mode {
-                "Последняя измеренная длина очереди обновлений у внешнего benchmark-Qdrant перед остановкой теста."
-            } else {
-                "Текущая длина очереди обновлений у внешнего benchmark-Qdrant."
-            }),
+            "Данные",
+            progress_label,
+            Some(
+                "Сколько точек уже загружено во внешний benchmark-Qdrant. Если известен полный размер набора данных, показан и процент.",
+            ),
         ),
         metric_row(
-            &prefixed_metric_label(live_or_snapshot_label, "resident memory"),
-            format_optional(benchmark["memory_resident_bytes"].as_f64(), human_bytes),
-            Some(if snapshot_mode {
-                "Объём памяти в последнем измеренном срезе внешнего benchmark-Qdrant."
-            } else {
-                "Объём памяти, который отдельный benchmark-Qdrant держит прямо сейчас."
-            }),
+            "Время",
+            elapsed_label.unwrap_or_else(|| "ещё нет данных".to_string()),
+            Some(
+                "Сколько времени идёт текущий прогон или сколько длился последний завершённый прогон.",
+            ),
         ),
         metric_row(
-            &prefixed_metric_label(live_or_snapshot_label, "points"),
-            format_f64_count(benchmark["points_count"].as_f64()),
-            Some(if snapshot_mode {
-                "Сколько точек было загружено во внешний benchmark-Qdrant в последнем измеренном срезе."
-            } else {
-                "Сколько точек сейчас загружено во внешний benchmark-Qdrant."
-            }),
+            "Сейчас",
+            live_stage_label,
+            Some(
+                "Какой definition-run сейчас активен и какой query group/сколько запросов уже обработано в текущем замере.",
+            ),
         ),
         metric_row(
-            &prefixed_metric_label(live_or_snapshot_label, "segments"),
-            format_f64_count(benchmark["segments_count"].as_f64()),
-            Some(if snapshot_mode {
-                "Сколько сегментов держал внешний benchmark-Qdrant в последнем измеренном срезе."
+            "До конца",
+            remaining_progress_label,
+            Some(
+                "Сколько ещё осталось до конца текущей query group и сколько групп останется после неё в текущем definition-run.",
+            ),
+        ),
+        metric_row(
+            "Оценка системы",
+            if aggregate_result.is_object() || last_result.is_object() {
+                system_evaluation_label
+            } else if active {
+                "ещё не сохранён".to_string()
             } else {
-                "Сколько сегментов сейчас держит внешний benchmark-Qdrant."
-            }),
+                system_evaluation_label
+            },
+            Some(
+                "Честная сводная оценка системы по уже завершённым замерам этого прогона. По умолчанию это медиана completed results, а не лучший и не последний шумный файл.",
+            ),
         ),
     ];
-    let status_label_override = if configured && !active {
-        Some("тест не запущен".to_string())
-    } else {
-        None
-    };
-    json!({
-        "title": "Qdrant внешнего бенча",
-        "value": value,
-        "note": note,
-        "status": status,
-        "status_label": status_label_override.unwrap_or_else(|| status_label(status).to_string()),
-        "source_label": source_label,
-        "title_tooltip": Some("Это отдельный инстанс Qdrant для внешнего benchmark-прогона. Он не должен смешиваться с основным Qdrant Amai.".to_string()),
-        "rows": rows,
-    })
-}
-
-fn degradation_status_count(model: &Value, mode: Option<&str>, status: &str) -> u64 {
-    model["classes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|item| item["status"].as_str() == Some(status))
-        .filter(|item| mode.map_or(true, |value| item["mode"].as_str() == Some(value)))
-        .count() as u64
-}
-
-fn continuity_correctness_status_tooltip(model: &Value) -> Option<String> {
-    let summary = &model["summary"];
-    let status = summary["status"].as_str().unwrap_or("unknown");
-    let reasons = model["failed_probe_names"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.as_str())
-        .map(|item| format!("Проверка продолжения работы провалилась: {item}."))
-        .collect::<Vec<_>>();
-    let fallback = if summary["evidence_gap"].as_bool() == Some(true) {
-        "Свежая проверка продолжения работы ещё не найдена."
-    } else {
-        "Корректность продолжения ещё не подтверждена свежим явным прогоном."
-    };
-    status_reason_tooltip(status, reasons, fallback)
-}
-
-fn newest_degradation_evidence_epoch_ms(model: &Value) -> Option<u64> {
-    model["classes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item["last_evidence_at_epoch_ms"].as_u64())
-        .max()
-}
-
-fn compact_truth_ranking(ranking: Option<&Vec<Value>>) -> String {
-    let items = ranking
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(|item| item.replace('_', " "))
-        .collect::<Vec<_>>();
-    if items.is_empty() {
-        return "ещё нет данных".to_string();
+    let mut rows = rows;
+    if let Some(memory_label) = benchmark_memory_label {
+        rows.push(metric_row(
+            "Память",
+            memory_label,
+            Some("Сколько памяти сейчас занимает отдельный Qdrant для внешнего benchmark-прогона."),
+        ));
     }
-    items.into_iter().take(3).collect::<Vec<_>>().join(" -> ")
+    if let Some(queue) = benchmark["index_optimize_queue"].as_f64() {
+        rows.push(metric_row(
+            "Очередь optimize",
+            format_f64_count(Some(queue)),
+            Some("Есть ли сейчас хвост фоновой оптимизации в benchmark-Qdrant."),
+        ));
+    }
+    let mut card = with_extra_class(
+        json!({
+            "title": "Qdrant внешнего бенча",
+            "value": value,
+            "note": note,
+            "status": status,
+            "status_label": status_label_override.unwrap_or_else(|| status_label(status).to_string()),
+            "source_label": source_label,
+            "title_tooltip": Some("Это отдельный Qdrant для внешних benchmark-прогонов. Карточка показывает состояние самого прогона и его последний результат, а не просто сырую телеметрию памяти.".to_string()),
+            "rows": rows,
+        }),
+        "stack-metric-card",
+    );
+    if status == "waiting" && active {
+        card = with_status_tooltip(
+            card,
+            "Прогон ещё идёт. Итоговый статус и финальный verdict появятся после завершения.",
+        );
+    }
+    card
 }
 
-fn degradation_model_status_tooltip(model: &Value) -> Option<String> {
-    let status = model["summary"]["status"].as_str().unwrap_or("unknown");
-    let mut reasons = Vec::new();
-    for class in model["classes"].as_array().into_iter().flatten() {
-        let class_status = class["status"].as_str().unwrap_or("unknown");
-        if class_status == "pass" {
-            continue;
-        }
-        let title = class["title"].as_str().unwrap_or("Без названия");
-        let reason = class["reason"].as_str().unwrap_or("ещё нет деталей");
-        reasons.push(format!("{title}: {reason}"));
+fn humanize_ann_definition_label(raw: &str) -> String {
+    let parts = raw
+        .trim_matches(|ch| ch == '[' || ch == ']')
+        .split(',')
+        .map(|value| value.trim().trim_matches('\''))
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() < 4 {
+        return raw
+            .trim_matches(|ch| ch == '[' || ch == ']')
+            .replace('\'', "");
     }
-    status_reason_tooltip(
-        status,
-        reasons,
-        "Часть классов деградации пока не подтверждена свежим proof или уже вышла из безопасной нормы.",
-    )
+    let quantization = match parts[1] {
+        "none" => "без квантования".to_string(),
+        "binary" => "binary".to_string(),
+        "scalar" => "scalar".to_string(),
+        other => other.to_string(),
+    };
+    format!("{quantization}, m={}, ef={}", parts[2], parts[3])
 }
 
 fn benchmark_qdrant_status_tooltip(snapshot: &Value) -> Option<String> {
@@ -9822,315 +6455,736 @@ fn build_links(base_url: &str) -> Vec<Value> {
     links
 }
 
-fn monitoring_url(base_url: &str, port: &str) -> String {
-    let (scheme, host) = parse_base_url_host(base_url);
-    format!("{scheme}://{host}:{port}")
-}
-
-fn parse_base_url_host(base_url: &str) -> (&str, &str) {
-    let (scheme, rest) = base_url.split_once("://").unwrap_or(("http", base_url));
-    let host = rest
-        .rsplit_once(':')
-        .map(|(host, _)| host)
-        .unwrap_or(rest)
-        .trim_end_matches('/');
-    (scheme, host)
-}
-
-fn tcp_port_is_open(host: &str, port: &str) -> bool {
-    let Ok(addrs) = format!("{host}:{port}").to_socket_addrs() else {
-        return false;
-    };
-    addrs
-        .into_iter()
-        .any(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok())
-}
-
-fn load_install_state(repo_root: &Path) -> Result<Option<InstallState>> {
-    let path = repo_root.join("state/install_state.json");
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let content =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let state =
-        serde_json::from_str(&content).context("failed to parse dashboard install state")?;
-    Ok(Some(state))
-}
-
-fn card(title: &str, value: String, note: String, status: &str) -> Value {
-    card_with_rows(title, value, note, status, None, None, Vec::new())
-}
-
-fn with_extra_class(mut card: Value, extra_class: &str) -> Value {
-    if let Some(object) = card.as_object_mut() {
-        object.insert("extra_class".to_string(), Value::from(extra_class));
-    }
-    card
-}
-
-fn with_table_orientation(mut card: Value, table_orientation: &str) -> Value {
-    if let Some(object) = card.as_object_mut() {
-        object.insert(
-            "table_orientation".to_string(),
-            Value::from(table_orientation),
-        );
-    }
-    card
-}
-
-fn with_status_tooltip(mut card: Value, status_tooltip: &str) -> Value {
-    if let Some(object) = card.as_object_mut() {
-        object.insert(
-            "status_tooltip".to_string(),
-            Value::from(status_tooltip.to_string()),
-        );
-    }
-    card
-}
-
-fn with_status(mut card: Value, status: &str) -> Value {
-    if let Some(object) = card.as_object_mut() {
-        object.insert("status".to_string(), Value::from(status.to_string()));
-    }
-    card
-}
-
-fn with_status_label(mut card: Value, status_label: &str) -> Value {
-    if let Some(object) = card.as_object_mut() {
-        object.insert(
-            "status_label".to_string(),
-            Value::from(status_label.to_string()),
-        );
-    }
-    card
-}
-
-fn with_back_panel(mut card: Value, back_panel: Value) -> Value {
-    if let Some(object) = card.as_object_mut() {
-        object.insert("back_panel".to_string(), back_panel);
-    }
-    card
-}
-
 fn live_latency_compare_card(snapshot: &Value) -> Value {
-    let hot = latency_slice(snapshot, "hot");
-    let cold = latency_slice(snapshot, "cold");
-    let mixed = latency_slice(snapshot, "mixed");
+    let hot = rolling_window_live_response_latency_slice(snapshot, "hot");
+    let cold = rolling_window_live_response_latency_slice(snapshot, "cold");
+    let current_hot = current_series_live_response_latency_slice(snapshot, "hot");
+    let current_cold = current_series_live_response_latency_slice(snapshot, "cold");
     let hot_sample_count = hot
         .and_then(|slice| slice["sample_count"].as_u64())
         .unwrap_or_default();
     let cold_sample_count = cold
         .and_then(|slice| slice["sample_count"].as_u64())
         .unwrap_or_default();
-    let mixed_sample_count = mixed
+    let current_hot_sample_count = current_hot
+        .and_then(|slice| slice["sample_count"].as_u64())
+        .unwrap_or_default();
+    let current_cold_sample_count = current_cold
         .and_then(|slice| slice["sample_count"].as_u64())
         .unwrap_or_default();
     let hot_has_data = hot_sample_count > 0;
     let cold_has_data = cold_sample_count > 0;
-    let mixed_has_data = mixed_sample_count > 0;
-    if !hot_has_data && !cold_has_data && mixed_has_data {
-        return mixed_live_latency_card(snapshot, mixed, mixed_sample_count);
-    }
+    let current_hot_has_data = current_hot_sample_count > 0;
+    let current_cold_has_data = current_cold_sample_count > 0;
+    let current_series_has_data = current_hot_has_data || current_cold_has_data;
+    let current_series_relation_note =
+        live_response_latency_current_session_relation_note(snapshot);
+    let current_series_exclusions_note =
+        live_response_latency_current_session_exclusions_note(snapshot);
+    let current_series_minutes = live_response_latency_root(snapshot)
+        .and_then(|root| root["current_session_exclusions"]["current_series_minutes"].as_u64())
+        .unwrap_or(60);
+    let rolling_window_label = latency_window_label(snapshot);
+    let rolling_window_label_short = rolling_window_label.trim_end_matches('.');
+    let current_live_turn_no_amai_activity =
+        token_budget_report_root(snapshot)["current_live_turn"]["status"].as_str()
+            == Some("no_amai_activity_in_current_live_turn");
     let hot_targets = live_latency_table_targets(snapshot, "hot");
     let cold_targets = live_latency_table_targets(snapshot, "cold");
+    let current_hot_assessment = assess_live_latency_slice(current_hot, &hot_targets);
+    let current_cold_assessment = assess_live_latency_slice(current_cold, &cold_targets);
     let hot_assessment = assess_live_latency_slice(hot, &hot_targets);
     let cold_assessment = assess_live_latency_slice(cold, &cold_targets);
-    let overall_status =
-        combine_live_compare_status(&[hot_assessment.status, cold_assessment.status]);
-
+    let mut overall_status = if current_series_has_data {
+        combine_live_compare_status(&[
+            current_hot_assessment.status,
+            current_cold_assessment.status,
+        ])
+    } else {
+        combine_live_compare_status(&[hot_assessment.status, cold_assessment.status])
+    };
+    if overall_status == "unknown" && (hot_has_data || cold_has_data || current_series_has_data) {
+        overall_status = "waiting";
+    }
+    let mut status_tooltip = if current_series_has_data {
+        live_latency_compare_status_tooltip(
+            overall_status,
+            &current_hot_assessment,
+            &current_cold_assessment,
+        )
+    } else {
+        live_latency_compare_status_tooltip(overall_status, &hot_assessment, &cold_assessment)
+    };
+    if current_live_turn_no_amai_activity {
+        let inactivity_note = current_series_relation_note.as_deref().unwrap_or(
+            "В текущем live-turn нет новых Amai-событий, поэтому живое окно может не расти до нового Amai-запроса.",
+        );
+        status_tooltip = Some(match status_tooltip {
+            Some(existing) if !existing.trim().is_empty() => {
+                format!("{existing} {inactivity_note}")
+            }
+            _ => inactivity_note.to_string(),
+        });
+    }
+    let card_note = {
+        let base_note = format!(
+            "{} {} {}",
+            if current_series_has_data {
+                format!(
+                    "Главный сигнал теперь строится по текущей серии ответов Amai в этом чате (последние {} минут).",
+                    current_series_minutes
+                )
+            } else {
+                format!(
+                    "В текущей серии этого чата за последние {} минут ещё мало данных, поэтому главным fallback остаётся накопительное окно 24 часов.",
+                    current_series_minutes
+                )
+            },
+            format!(
+                "Ниже рядом показаны и текущая серия, и {} по задержке Amai, чтобы сразу видеть и мгновенный сбой, и устойчивый тренд.",
+                rolling_window_label_short
+            ),
+            if current_live_turn_no_amai_activity {
+                current_series_relation_note.as_deref().unwrap_or(
+                    "В текущем live-turn пока нет новых Amai-событий, поэтому окно обновится после следующего Amai-запроса.",
+                )
+            } else {
+                "Эталоны не меняются; меняются только свежая серия и накопительная выборка."
+            }
+        );
+        if let Some(exclusions_note) = current_series_exclusions_note {
+            format!("{base_note} {exclusions_note}")
+        } else {
+            base_note
+        }
+    };
+    let table_rows = vec![
+        json!({
+            "label": "Повторный запрос — эталон",
+            "tooltip": format!(
+                "Фиксированный эталон для этого режима. Строгая проверочная выборка отдельно: > {}.",
+                format_u64(Some(hot_targets.benchmark_sample_count))
+            ),
+            "values": target_values(snapshot, &hot_targets)
+        }),
+        json!({
+            "label": "Повторный запрос — текущая серия",
+            "tooltip": "Свежая серия ответов Amai в текущем чате. Именно она определяет мгновенный operator signal.",
+            "values": compare_values(snapshot, current_hot, current_hot_sample_count)
+        }),
+        json!({
+            "label": "Повторный запрос — окно 24ч",
+            "tooltip": "Накопительное живое окно задержки Amai за последние 24 часа. Оно не сбрасывается на новый чат и нужно для тренда.",
+            "values": compare_values(snapshot, hot, hot_sample_count)
+        }),
+        json!({
+            "label": "Новый запрос — эталон",
+            "tooltip": format!(
+                "Фиксированный эталон для этого режима. Строгая проверочная выборка отдельно: > {}.",
+                format_u64(Some(cold_targets.benchmark_sample_count))
+            ),
+            "values": target_values(snapshot, &cold_targets)
+        }),
+        json!({
+            "label": "Новый запрос — текущая серия",
+            "tooltip": "Свежая серия ответов Amai в текущем чате. Именно она определяет мгновенный operator signal.",
+            "values": compare_values(snapshot, current_cold, current_cold_sample_count)
+        }),
+        json!({
+            "label": "Новый запрос — окно 24ч",
+            "tooltip": "Накопительное живое окно задержки Amai за последние 24 часа. Оно не сбрасывается на новый чат и нужно для тренда.",
+            "values": compare_values(snapshot, cold, cold_sample_count)
+        }),
+    ];
     let mut card = json!({
         "kind": "live_compare",
         "title": "Скорость ответа",
-        "title_tooltip": "Показывает, как быстро Amai отвечает прямо сейчас в двух обычных ситуациях: когда похожий запрос уже был и когда запрос идёт впервые. Верхние числа — это обычное время ответа в этих двух случаях. Это session-scoped live-срез, а не историческая сводка по всей работе Amai: сюда не входят сохранённые проверки, служебные прогоны и другие отдельные рабочие линии.",
+        "title_tooltip": "Показывает два слоя сразу: свежую серию ответов Amai в текущем чате для мгновенного operator signal и накопительное окно 24 часов для тренда. Эталоны для обоих режимов всегда фиксированы в таблице.",
         "status": overall_status,
         "status_label": status_label(overall_status),
-        "status_tooltip": live_latency_compare_status_tooltip(
-            overall_status,
-            &hot_assessment,
-            &cold_assessment,
-        ),
-        "source_label": "Источник: живая retrieval-выборка текущей сессии из token_budget live lane, обновляется при новых context-pack запросах. Benchmark-данные сюда не подмешиваются. При новом live session/window выборка для этой карточки начинается заново.",
-        "note": "Это live-срез текущей сессии. Отдельный historical contour для этой карточки пока не materialized.",
+        "status_tooltip": status_tooltip,
+        "source_label": "Источник: текущая серия и окно 24 часов берутся из live_response_latency по реальным ответам Amai до первого видимого ответа. Retrieval-only срезы и строгие benchmark-прогоны показываются отдельно ниже.",
+        "note": card_note,
         "metrics": [
             {
                 "label": "Повторный запрос",
-                "tooltip": "Это уже прогретый путь: пользователь повторяет похожий запрос, а Amai не стартует с пустого места.",
-                "value": if hot_has_data {
+                "tooltip": "Сверху показывается P50 по текущей серии ответов этого чата. В note рядом видно, сколько уже накоплено в текущей серии и в окне 24 часов.",
+                "value": if current_hot_has_data {
+                    format_ms(snapshot, current_hot.and_then(|slice| slice["p50_latency_ms"].as_f64()))
+                } else if hot_has_data {
                     format_ms(snapshot, hot.and_then(|slice| slice["p50_latency_ms"].as_f64()))
                 } else {
                     "ещё нет данных".to_string()
                 },
-                "note": hot_assessment.note
+                "note": format!(
+                    "Текущая серия: {}. {}: {}. {}",
+                    if current_hot_has_data {
+                        format_u64(Some(current_hot_sample_count))
+                    } else {
+                        "ещё нет данных".to_string()
+                    },
+                    rolling_window_label_short,
+                    format_u64(Some(hot_sample_count)),
+                    if current_hot_has_data {
+                        current_hot_assessment.note.clone()
+                    } else if hot_has_data {
+                        format!(
+                            "Онлайн-серия ещё не накопилась, поэтому временно ориентируемся на {}.",
+                            hot_assessment.note
+                        )
+                    } else {
+                        "По этому режиму пока нет ни текущей серии, ни накопленного окна.".to_string()
+                    }
+                )
             },
             {
-                "label": "Первый запрос",
-                "tooltip": "Это первый запрос без fast-cache и без прогрева. Он всегда тяжелее и лучше показывает реальную цену холодного старта.",
-                "value": if cold_has_data {
+                "label": "Новый запрос",
+                "tooltip": "Сверху показывается P50 по текущей серии новых запросов этого чата. В note рядом видно, сколько уже накоплено в текущей серии и в окне 24 часов.",
+                "value": if current_cold_has_data {
+                    format_ms(snapshot, current_cold.and_then(|slice| slice["p50_latency_ms"].as_f64()))
+                } else if cold_has_data {
                     format_ms(snapshot, cold.and_then(|slice| slice["p50_latency_ms"].as_f64()))
                 } else {
                     "ещё нет данных".to_string()
                 },
-                "note": cold_assessment.note
+                "note": format!(
+                    "Текущая серия: {}. {}: {}. {}",
+                    if current_cold_has_data {
+                        format_u64(Some(current_cold_sample_count))
+                    } else {
+                        "ещё нет данных".to_string()
+                    },
+                    rolling_window_label_short,
+                    format_u64(Some(cold_sample_count)),
+                    if current_cold_has_data {
+                        current_cold_assessment.note.clone()
+                    } else if cold_has_data {
+                        format!(
+                            "Онлайн-серия ещё не накопилась, поэтому временно ориентируемся на {}.",
+                            cold_assessment.note
+                        )
+                    } else {
+                        "По этому режиму пока нет ни текущей серии, ни накопленного окна.".to_string()
+                    }
+                )
             }
         ],
         "table": {
             "columns": [
-                { "label": "Режим", "tooltip": "Какой путь сейчас сравниваем: прогретый повторный запрос или первый холодный запрос." },
-                { "label": "P50", "tooltip": "Медиана. Это обычный уровень ответа, который пользователь видит чаще всего." },
-                { "label": "P95", "tooltip": "Тяжёлый хвост. Почти все запросы должны укладываться в эту границу." },
-                { "label": "P99", "tooltip": "Ещё более строгий хвост. Показывает редкие тяжёлые выбросы." },
-                { "label": "Max", "tooltip": "Самый тяжёлый одиночный запрос в текущей живой выборке." },
-                { "label": "Выборка", "tooltip": "Сколько живых запросов уже вошло в расчёт." }
+                { "label": "Сценарий", "tooltip": "Какой случай мы сейчас смотрим: повторный запрос или новый запрос." },
+                { "label": "P50", "tooltip": "Обычная задержка Amai до первого видимого ответа. Примерно такую скорость пользователь видит чаще всего." },
+                { "label": "P95", "tooltip": "Почти вся задержка Amai по ответам должна укладываться в это время." },
+                { "label": "P99", "tooltip": "Редкие медленные ответы Amai. Чем меньше, тем лучше." },
+                { "label": "Max", "tooltip": "Самая медленная задержка Amai в текущей выборке." },
+                { "label": "Запросов", "tooltip": "Сколько ответов уже вошло в расчёт для этой строки." }
             ],
-            "rows": [
-                {
-                    "label": "Повторный запрос — эталон",
-                    "tooltip": "Это фиксированные цели для прогретого повторного запроса. Они не зависят от текущей сессии и всегда должны быть заполнены.",
-                    "values": target_values(snapshot, &hot_targets)
-                },
-                {
-                    "label": "Повторный запрос — сейчас",
-                    "tooltip": "Текущая живая hot-выборка этой сессии.",
-                    "values": compare_values(snapshot, hot, hot_sample_count)
-                },
-                {
-                    "label": "Первый запрос — эталон",
-                    "tooltip": "Это фиксированные цели для первого запроса без прогрева. Они не зависят от текущей сессии и всегда должны быть заполнены.",
-                    "values": target_values(snapshot, &cold_targets)
-                },
-                {
-                    "label": "Первый запрос — сейчас",
-                    "tooltip": "Текущая живая cold-выборка этой сессии.",
-                    "values": compare_values(snapshot, cold, cold_sample_count)
-                }
-            ]
+            "rows": table_rows
         }
     });
     if overall_status == "waiting" {
-        card = with_status_label(card, "идёт накопление выборки");
+        let label = if current_series_has_data {
+            "текущая серия ещё набирается"
+        } else {
+            "онлайн-серия ещё набирается"
+        };
+        card = with_status_label(card, label);
     }
     card
 }
 
-fn mixed_live_latency_card(snapshot: &Value, slice: Option<&Value>, sample_count: u64) -> Value {
-    let current_latency_ms = slice.and_then(|value| value["current_latency_ms"].as_f64());
-    with_status_tooltip(
-        with_status_label(
-            json!({
-                "kind": "live_compare",
-                "title": "Скорость ответа",
-                "title_tooltip": "Показывает, как быстро Amai отвечает прямо сейчас. Если runtime ещё не разделил live поток на первый и повторный запрос, карточка честно показывает общий поток текущей сессии вместо пустых hot/cold-заглушек.",
-                "status": "waiting",
-                "status_label": "live без разделения режимов",
-                "source_label": "Источник: живая retrieval-выборка текущей сессии из token_budget live lane. Сейчас runtime дал только общий mixed live поток, поэтому карточка показывает его напрямую.",
-                "note": "Сейчас у этой сессии есть только общий live поток без честного разделения на первый и повторный запрос. Поэтому карточка показывает реальную mixed-выборку здесь и сейчас.",
-                "metrics": [
-                    {
-                        "label": "Текущий live поток",
-                        "tooltip": "Общая медиана живой retrieval-выборки этой сессии, пока runtime ещё не разделил её на hot/cold.",
-                        "value": format_ms(snapshot, slice.and_then(|value| value["p50_latency_ms"].as_f64())),
-                        "note": format!("Живая mixed-выборка: {}.", format_u64(Some(sample_count)))
-                    },
-                    {
-                        "label": "Последний запрос",
-                        "tooltip": "Последний зафиксированный live latency в текущей сессии.",
-                        "value": format_ms(snapshot, current_latency_ms),
-                        "note": "Это последний live запрос этой сессии, а не историческая сводка."
-                    }
-                ],
-                "table": {
-                    "columns": [
-                        { "label": "Режим", "tooltip": "Какой live contour сейчас реально доступен в этой сессии." },
-                        { "label": "P50", "tooltip": "Медиана. Это обычный уровень ответа, который пользователь видит чаще всего." },
-                        { "label": "P95", "tooltip": "Тяжёлый хвост. Почти все запросы должны укладываться в эту границу." },
-                        { "label": "P99", "tooltip": "Ещё более строгий хвост. Показывает редкие тяжёлые выбросы." },
-                        { "label": "Max", "tooltip": "Самый тяжёлый одиночный запрос в текущей живой выборке." },
-                        { "label": "Выборка", "tooltip": "Сколько живых mixed-запросов уже вошло в расчёт." }
-                    ],
-                    "rows": [
-                        {
-                            "label": "Общий live поток — сейчас",
-                            "tooltip": "Живая retrieval-выборка текущей сессии без разделения на hot/cold.",
-                            "values": compare_values(snapshot, slice, sample_count)
-                        }
-                    ]
-                }
-            }),
-            "live без разделения режимов",
-        ),
-        "Статус пока не переводится в normal/pass или problem-status, потому что runtime ещё не разделил текущую live-выборку на hot/cold режимы. Панель честно показывает общий live поток этой сессии вместо пустого состояния.",
+fn latency_window_label(snapshot: &Value) -> String {
+    let root = token_budget_report_root(snapshot);
+    match root["profile"]["rolling_window_hours"].as_u64() {
+        Some(hours) if hours > 0 => format!("скользящее окно {} ч.", format_u64(Some(hours))),
+        _ => "накопительное живое окно".to_string(),
+    }
+}
+
+fn token_budget_report_root<'a>(snapshot: &'a Value) -> &'a Value {
+    if snapshot["token_budget_report"]["token_budget_report"].is_object() {
+        &snapshot["token_budget_report"]["token_budget_report"]
+    } else {
+        &snapshot["token_budget_report"]
+    }
+}
+
+fn live_response_latency_root<'a>(snapshot: &'a Value) -> Option<&'a Value> {
+    let root = token_budget_report_root(snapshot);
+    root["live_response_latency"]
+        .is_object()
+        .then_some(&root["live_response_latency"])
+}
+
+fn live_response_latency_slice_in_scope<'a>(
+    snapshot: &'a Value,
+    scope: &str,
+    state: &str,
+) -> Option<&'a Value> {
+    live_response_latency_root(snapshot)?[scope]["latency_slices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|slice| slice["state"].as_str() == Some(state))
+}
+
+fn current_series_live_response_latency_slice<'a>(
+    snapshot: &'a Value,
+    state: &str,
+) -> Option<&'a Value> {
+    live_response_latency_slice_in_scope(snapshot, "current_session", state)
+}
+
+fn rolling_window_live_response_latency_slice<'a>(
+    snapshot: &'a Value,
+    state: &str,
+) -> Option<&'a Value> {
+    live_response_latency_slice_in_scope(snapshot, "rolling_window", state)
+}
+
+fn live_response_latency_current_session_relation<'a>(snapshot: &'a Value) -> Option<&'a Value> {
+    let root = live_response_latency_root(snapshot)?;
+    root["current_session_relation"]
+        .is_object()
+        .then_some(&root["current_session_relation"])
+}
+
+fn live_response_latency_current_session_relation_note(snapshot: &Value) -> Option<String> {
+    live_response_latency_current_session_relation(snapshot)?["note"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn live_response_latency_current_session_exclusions_note(snapshot: &Value) -> Option<String> {
+    let root = live_response_latency_root(snapshot)?;
+    let exclusions = &root["current_session_exclusions"];
+    let total = exclusions["total"].as_u64().unwrap_or_default();
+    if total == 0 {
+        return None;
+    }
+    let missing_thread_id = exclusions["missing_thread_id"].as_u64().unwrap_or_default();
+    let quality_rejected = exclusions["quality_rejected"].as_u64().unwrap_or_default();
+    let invalid_latency = exclusions["invalid_latency"].as_u64().unwrap_or_default();
+    let outside_gap = exclusions["outside_current_series_window"]
+        .as_u64()
+        .unwrap_or_default();
+    let current_series_minutes = exclusions["current_series_minutes"].as_u64().unwrap_or(60);
+    Some(format!(
+        "Из текущей серии ({} мин) исключено: {total} (нет thread_id: {missing_thread_id}, quality_rejected: {quality_rejected}, invalid_latency: {invalid_latency}, вне окна серии: {outside_gap}).",
+        current_series_minutes
+    ))
+}
+
+fn live_response_latency_current_thread_file_hints(snapshot: &Value) -> Vec<String> {
+    live_response_latency_root(snapshot)
+        .and_then(|root| root["current_thread_live_file_hints"]["hints"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["label"].as_str().map(str::trim))
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn live_latency_compare_status(snapshot: &Value) -> &'static str {
+    let hot_targets = live_latency_table_targets(snapshot, "hot");
+    let cold_targets = live_latency_table_targets(snapshot, "cold");
+    let hot_status = assess_live_latency_slice(
+        rolling_window_live_response_latency_slice(snapshot, "hot"),
+        &hot_targets,
     )
+    .status;
+    let cold_status = assess_live_latency_slice(
+        rolling_window_live_response_latency_slice(snapshot, "cold"),
+        &cold_targets,
+    )
+    .status;
+    combine_live_compare_status(&[hot_status, cold_status])
+}
+
+fn plain_working_state_scope(restore: &Value) -> String {
+    let project = restore["project"]["display_name"]
+        .as_str()
+        .or_else(|| restore["project"]["code"].as_str())
+        .unwrap_or("этот проект");
+    let namespace = match restore["namespace"]["display_name"]
+        .as_str()
+        .or_else(|| restore["namespace"]["code"].as_str())
+    {
+        Some("default") | None => None,
+        Some("continuity") => Some("continuity"),
+        Some(value) => Some(value),
+    };
+    match namespace {
+        Some(namespace) => format!("{project} / {namespace}"),
+        None => project.to_string(),
+    }
+}
+
+fn summarize_working_state_command(value: Option<&str>) -> String {
+    let raw = value.map(str::trim).filter(|value| !value.is_empty());
+    let Some(raw) = raw else {
+        return "ещё нет данных".to_string();
+    };
+    let lowered = raw.to_ascii_lowercase();
+    if lowered.contains("dashboard client-budget-host-control-feedback") {
+        return "подтверждено действие в окне чата".to_string();
+    }
+    if lowered.contains("continuity handoff") {
+        return "сохранена рабочая сводка".to_string();
+    }
+    if lowered.contains("context pack") {
+        return "собран пакет контекста".to_string();
+    }
+    if lowered.contains("observe snapshot") {
+        return "обновлён снимок состояния".to_string();
+    }
+    if lowered.contains("proof_") {
+        return "запущена проверка".to_string();
+    }
+    compact_dashboard_text(Some(&humanize_identifier(raw)), 72, "ещё нет данных")
+}
+
+fn summarize_working_state_result(value: Option<&str>) -> String {
+    let raw = value.map(str::trim).filter(|value| !value.is_empty());
+    let Some(raw) = raw else {
+        return "ещё нет данных".to_string();
+    };
+    if raw.contains("Operator confirmed same-thread compact window opened.") {
+        return "подтверждён переход в компактный режим".to_string();
+    }
+    if raw.contains("Operator confirmed same-thread overlay opened.") {
+        return "подтверждено открытие панели текущего чата".to_string();
+    }
+    compact_dashboard_text(Some(raw), 108, "ещё нет данных")
+}
+
+fn summarize_working_state_goal(value: Option<&str>, last_command: Option<&str>) -> String {
+    let raw = value.map(str::trim).filter(|value| !value.is_empty());
+    if let Some(raw) = raw {
+        if raw.contains("continue the same simplification pass on other dashboard cards") {
+            return "упрощение следующих карточек панели".to_string();
+        }
+        if raw.contains("refine operator-facing copy")
+            || raw.contains("other live cards")
+            || raw.contains("same reconciliation pattern")
+            || raw.contains("enrich current-work card")
+            || raw.contains("live-thread active files")
+        {
+            return "доработка live-карточек панели".to_string();
+        }
+        if raw.is_ascii() {
+            let lowered = raw.to_ascii_lowercase();
+            if lowered.contains("card")
+                || lowered.contains("dashboard")
+                || lowered.contains("panel")
+            {
+                return "обновление панели".to_string();
+            }
+            if lowered.contains("dashboard") {
+                return "обновление панели".to_string();
+            }
+            if lowered.contains("benchmark") {
+                return "прогон benchmark".to_string();
+            }
+            if lowered.contains("proof") {
+                return "запуск проверки".to_string();
+            }
+        }
+        return compact_dashboard_text(Some(raw), 72, "ещё нет данных");
+    }
+    summarize_working_state_command(last_command)
+}
+
+fn summarize_working_state_next_step(value: Option<&str>) -> String {
+    let raw = value.map(str::trim).filter(|value| !value.is_empty());
+    let Some(raw) = raw else {
+        return "ещё нет данных".to_string();
+    };
+    if raw.contains("continue the same simplification pass on other dashboard cards") {
+        return "упростить ещё несколько карточек панели".to_string();
+    }
+    if raw.contains("keep the same release-rebuild-restart loop") {
+        return "продолжить цикл: правка, сборка, перезапуск панели".to_string();
+    }
+    if raw.contains("If user continues, refine operator-facing copy") {
+        return "уточнить операторский текст в live-карточках".to_string();
+    }
+    if raw.contains("expand the same reconciliation pattern to other live cards") {
+        return "распространить ту же логику согласования на остальные live-карточки".to_string();
+    }
+    if raw.contains("If user continues, enrich current-work card") {
+        return "добавить в карточку текущей работы живые подсказки по активным файлам".to_string();
+    }
+    if raw.contains("Optionally continue by filling last-command placeholder") {
+        return "заполнить в карточке текущей работы последнюю команду из живого Amai-turn"
+            .to_string();
+    }
+    if raw.contains("humanizing the remaining English next-step fallback") {
+        return "дочистить английский fallback в карточке текущей работы".to_string();
+    }
+    compact_dashboard_text(Some(raw), 108, "ещё нет данных")
+}
+
+fn working_state_live_turn_activity_surface(snapshot: &Value) -> Option<(Value, String)> {
+    let current_live_turn = &token_budget_report_root(snapshot)["current_live_turn"];
+    let status = current_live_turn["status"].as_str()?;
+    let current_thread_bound = current_live_turn["current_thread_bound"].as_bool() == Some(true);
+    let retrieval_context_pack_count = current_live_turn["retrieval_context_pack_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let matched_context_pack_ids_count = current_live_turn["matched_context_pack_ids_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let observed_context_pack_count =
+        retrieval_context_pack_count.max(matched_context_pack_ids_count);
+    let current_live_turn_note = current_live_turn["note"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Свежая активность текущего thread/turn Amai уже наблюдается.");
+
+    let (value, note_sentence) = match status {
+        "exact_pair_materialized" => {
+            let saved_pct = current_live_turn["exact_pair"]["saved_pct"].as_f64();
+            let value = if observed_context_pack_count > 0 {
+                format!(
+                    "{} context-pack • {} exact-pair",
+                    format_u64(Some(observed_context_pack_count)),
+                    format_percent(saved_pct)
+                )
+            } else {
+                format!("exact-pair готов • {}", format_percent(saved_pct))
+            };
+            (
+                value,
+                "В текущем thread уже есть свежий живой ответ Amai, и same-turn exact-pair уже materialized."
+                    .to_string(),
+            )
+        }
+        "thread_activity_observed_turn_open" => {
+            let value = if observed_context_pack_count > 0 {
+                format!(
+                    "{} context-pack • turn ещё открыт",
+                    format_u64(Some(observed_context_pack_count))
+                )
+            } else {
+                "turn ещё открыт".to_string()
+            };
+            (
+                value,
+                "В текущем thread уже есть свежая активность Amai, но текущий turn ещё не закрыт."
+                    .to_string(),
+            )
+        }
+        "activity_observed_exact_pair_unavailable" => {
+            let value = if observed_context_pack_count > 0 {
+                format!(
+                    "{} context-pack • exact-pair ещё materialize-ится",
+                    format_u64(Some(observed_context_pack_count))
+                )
+            } else {
+                "exact-pair ещё materialize-ится".to_string()
+            };
+            (
+                value,
+                "В текущем thread уже observed активность Amai, но same-turn exact-pair ещё не готов."
+                    .to_string(),
+            )
+        }
+        "no_amai_activity_in_current_live_turn" if current_thread_bound => (
+            "turn открыт • ответов Amai ещё нет".to_string(),
+            "Новый live-turn этого чата уже открыт, но Amai в нём пока ещё не ответила."
+                .to_string(),
+        ),
+        _ => return None,
+    };
+
+    Some((
+        metric_row("Живой turn Amai", value, Some(current_live_turn_note)),
+        note_sentence,
+    ))
+}
+
+fn working_state_live_turn_last_command_fallback(snapshot: &Value) -> Option<String> {
+    let current_live_turn = &token_budget_report_root(snapshot)["current_live_turn"];
+    let status = current_live_turn["status"].as_str()?;
+    let observed_context_pack_count = current_live_turn["retrieval_context_pack_count"]
+        .as_u64()
+        .unwrap_or(0)
+        .max(
+            current_live_turn["matched_context_pack_ids_count"]
+                .as_u64()
+                .unwrap_or(0),
+        );
+    match status {
+        "exact_pair_materialized"
+        | "thread_activity_observed_turn_open"
+        | "activity_observed_exact_pair_unavailable"
+            if observed_context_pack_count > 0 =>
+        {
+            Some("Amai context pack".to_string())
+        }
+        _ => {
+            let live_file_hints = live_response_latency_current_thread_file_hints(snapshot);
+            if !live_file_hints.is_empty() {
+                Some("Amai context pack".to_string())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn should_override_last_command_with_live_turn(
+    summarized_last_command: &str,
+    restore_confidence: &str,
+    recent_queries: u64,
+) -> bool {
+    if summarized_last_command == "ещё нет данных" {
+        return true;
+    }
+    restore_confidence == "preliminary"
+        && recent_queries == 0
+        && summarized_last_command == "сохранена рабочая сводка"
+}
+
+fn working_state_live_turn_last_result_fallback(snapshot: &Value) -> Option<String> {
+    let current_live_turn = &token_budget_report_root(snapshot)["current_live_turn"];
+    let status = current_live_turn["status"].as_str()?;
+    match status {
+        "exact_pair_materialized"
+        | "thread_activity_observed_turn_open"
+        | "activity_observed_exact_pair_unavailable" => {}
+        _ => return None,
+    }
+    current_live_turn["note"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| compact_dashboard_text(Some(value), 108, "ещё нет данных"))
 }
 
 fn working_state_live_card(snapshot: &Value) -> Value {
+    let live_turn_activity = working_state_live_turn_activity_surface(snapshot);
     let restore_root = &snapshot["latest_repo_working_state_restore"]["working_state_restore"];
     if !restore_root.is_object() {
-        return with_status_tooltip(
-            card_with_rows(
-                "Текущая работа",
-                "ещё нет данных".to_string(),
-                "Для текущего репозитория локальный рабочий снимок пока не materialized. Панель специально не подмешивает сюда более свежую рабочую линию другого проекта.".to_string(),
-                "unknown",
-                Some(
-                    "Источник: latest_repo_working_state_restore.working_state_restore".to_string(),
-                ),
-                Some("Показывает, чем Amai действительно занят сейчас именно в текущем репозитории: какая цель активна, какой следующий шаг он держит, какая команда была последней и какие файлы остаются в работе. Если локального рабочего снимка нет, карточка честно остаётся пустой и не подмешивает чужой проект.".to_string()),
-                vec![],
+        let mut rows = Vec::new();
+        let mut note =
+            "Для этого репозитория пока нет свежего локального снимка работы.".to_string();
+        let status = if let Some((row, note_sentence)) = live_turn_activity.as_ref() {
+            rows.push(row.clone());
+            note = format!(
+                "Локальный рабочий снимок ещё не materialized, но текущий chat turn уже видит свежую активность Amai. {}",
+                note_sentence
+            );
+            "waiting"
+        } else {
+            "unknown"
+        };
+        let mut card = card_with_rows(
+            "Текущая работа",
+            "ещё нет данных".to_string(),
+            note,
+            status,
+            Some(
+                "Источник: latest_repo_working_state_restore.working_state_restore + current_live_turn"
+                    .to_string(),
             ),
+            Some("Показывает простую сводку по текущей работе в этом репозитории: что сейчас делаем, что дальше и когда это обновлялось.".to_string()),
+            rows,
+        );
+        if status == "waiting" {
+            card = with_status_label(card, "живой turn уже виден");
+            card = with_status_tooltip(
+                card,
+                "Статус пока не может считаться полностью нормальным по следующим причинам:\n- Локальный working-state snapshot для этого репозитория ещё не materialized.\n- Но текущий thread уже observed свежую активность Amai, поэтому панель показывает live-turn отдельно.",
+            );
+            return card;
+        }
+        return with_status_tooltip(
+            card,
             "Статус пока не может считаться нормальным по следующим причинам:\n- Для текущего репозитория ещё нет локального рабочего снимка.\n- Панель специально не подмешивает сюда более свежую рабочую линию другого проекта.",
         );
     }
     let restore = restore_root;
     if !restore.is_object() {
+        let mut rows = Vec::new();
+        let mut note = "Пока ещё нет последнего рабочего снимка.".to_string();
+        let status = if let Some((row, note_sentence)) = live_turn_activity.as_ref() {
+            rows.push(row.clone());
+            note = format!(
+                "Последний рабочий снимок ещё не появился, но текущий chat turn уже показывает активность Amai. {}",
+                note_sentence
+            );
+            "waiting"
+        } else {
+            "unknown"
+        };
+        let mut card = card_with_rows(
+            "Текущая работа",
+            "ещё нет данных".to_string(),
+            note,
+            status,
+            Some("Источник: latest_working_state_restore.working_state_restore + current_live_turn".to_string()),
+            Some("Показывает простую сводку по текущей работе: что сейчас делаем, что дальше и когда это обновлялось.".to_string()),
+            rows,
+        );
+        if status == "waiting" {
+            card = with_status_label(card, "живой turn уже виден");
+            card = with_status_tooltip(
+                card,
+                "Статус пока не может считаться полностью нормальным по следующим причинам:\n- Последний рабочий снимок ещё не появился.\n- Но текущий thread уже observed свежую активность Amai, поэтому панель показывает live-turn отдельно.",
+            );
+            return card;
+        }
         return with_status_tooltip(
-            card_with_rows(
-                "Текущая работа",
-                "ещё нет данных".to_string(),
-                "Пока ещё нет последнего рабочего снимка, поэтому панель не может показать текущую линию работы Amai.".to_string(),
-                "unknown",
-                Some("Источник: latest_working_state_restore.working_state_restore".to_string()),
-                Some("Показывает, чем Amai действительно занят сейчас: какая цель активна, какой следующий шаг он держит, какая команда была последней и какие файлы остаются в работе. Это не замер скорости ответа, а снимок текущей рабочей линии.".to_string()),
-                vec![],
-            ),
+            card,
             "Статус пока не может считаться нормальным по следующим причинам:\n- Последний рабочий снимок ещё не появился.\n- Без этого снимка панель не видит текущую рабочую линию Amai.",
         );
     }
 
-    let current_goal =
-        compact_dashboard_text(restore["current_goal"].as_str(), 72, "ещё нет данных");
-    let next_step = compact_dashboard_text(restore["next_step"].as_str(), 108, "ещё нет данных");
-    let scope = format!(
-        "{} / {} / {}",
-        restore["project"]["code"]
-            .as_str()
-            .unwrap_or("ещё нет данных"),
-        restore["namespace"]["code"]
-            .as_str()
-            .unwrap_or("ещё нет данных"),
-        restore["agent_scope"].as_str().unwrap_or("shared"),
+    let current_goal = summarize_working_state_goal(
+        restore["current_goal"].as_str(),
+        restore["last_command"].as_str(),
     );
+    let next_step = summarize_working_state_next_step(restore["next_step"].as_str());
+    let scope = plain_working_state_scope(restore);
     let events_count = restore["events_count"].as_u64();
     let snapshot_age = elapsed_since_epoch_label(
         restore["captured_at_epoch_ms"].as_u64(),
         snapshot["captured_at_epoch_ms"].as_u64(),
     );
-    let last_command =
-        compact_dashboard_text(restore["last_command"].as_str(), 72, "ещё нет данных");
-    let last_results = compact_dashboard_text(
-        restore["last_results_summary"].as_str(),
-        108,
-        "ещё нет данных",
-    );
+    let restore_confidence = restore["restore_confidence"]
+        .as_str()
+        .unwrap_or("preliminary");
     let recent_queries = restore["recent_queries"]
         .as_array()
         .map(|items| items.len() as u64)
         .unwrap_or(0);
+    let last_command = summarize_working_state_command(restore["last_command"].as_str());
+    let last_command = if should_override_last_command_with_live_turn(
+        &last_command,
+        restore_confidence,
+        recent_queries,
+    ) {
+        working_state_live_turn_last_command_fallback(snapshot).unwrap_or(last_command)
+    } else {
+        last_command
+    };
+    let last_results = summarize_working_state_result(restore["last_results_summary"].as_str());
+    let last_results = if last_results == "ещё нет данных" {
+        working_state_live_turn_last_result_fallback(snapshot).unwrap_or(last_results)
+    } else {
+        last_results
+    };
     let active_files = restore["active_files"]
         .as_array()
         .cloned()
         .unwrap_or_default();
     let active_files_count = active_files.len() as u64;
+    let live_file_hints = live_response_latency_current_thread_file_hints(snapshot);
     let active_files_preview = active_files
         .iter()
         .filter_map(Value::as_str)
@@ -10144,9 +7198,12 @@ fn working_state_live_card(snapshot: &Value) -> Value {
         .take(3)
         .collect::<Vec<_>>()
         .join(", ");
-    let restore_confidence = restore["restore_confidence"]
-        .as_str()
-        .unwrap_or("preliminary");
+    let live_file_hints_preview = live_file_hints
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
     let restore_confidence_human = match restore_confidence {
         "high" => "высокая",
         "medium" => "средняя",
@@ -10154,100 +7211,122 @@ fn working_state_live_card(snapshot: &Value) -> Value {
         "low" => "низкая",
         other => other,
     };
-    let included_reasons =
-        working_state_decision_trace_summary(&restore["latest_decision_trace"], "included", "");
-    let excluded_reasons =
-        working_state_decision_trace_summary(&restore["latest_decision_trace"], "not_included", "");
-    let status = match restore_confidence {
+    let mut status = match restore_confidence {
         "high" | "medium" => "pass",
         "low" => "alert",
         _ if events_count.unwrap_or(0) > 0 => "waiting",
         _ => "unknown",
     };
-    let has_decision_trace = !included_reasons.is_empty() || !excluded_reasons.is_empty();
+    if live_turn_activity.is_some() && status == "unknown" {
+        status = "waiting";
+    }
     let mut rows = vec![
         metric_row(
-            "Область",
+            "Где",
             scope,
-            Some("В каком проекте, разделе и рабочем контуре Amai сейчас держит эту линию работы."),
+            Some("В каком проекте и разделе сейчас ведётся эта работа."),
         ),
         metric_row(
-            "Последний снимок",
-            format!(
-                "{} • {}",
-                snapshot_age,
-                format_count_with_word(events_count.unwrap_or(0), "событие", "события", "событий")
-            ),
-            Some(
-                "Сколько прошло с момента последнего локального рабочего снимка и сколько событий в него вошло.",
-            ),
+            "Обновлено",
+            snapshot_age.clone(),
+            Some("Когда эта сводка обновлялась в последний раз."),
         ),
         metric_row(
-            "Последняя команда",
-            last_command,
-            Some("Какое последнее действие оставило этот рабочий след."),
+            "Что дальше",
+            next_step.clone(),
+            Some("Какой следующий шаг сейчас считается основным."),
         ),
         metric_row(
             "Последний результат",
             last_results,
-            Some(
-                "Короткое человеческое описание того, что Amai считает последним реально полученным результатом.",
-            ),
+            Some("Коротко: что уже получилось на последнем шаге."),
         ),
-    ];
-    if has_decision_trace {
-        rows.push(metric_row(
-            "Почему включено",
-            included_reasons,
-            Some("Через какие retrieval-слои последний полезный контекст реально вошёл в рабочую линию и почему Amai посчитал их нужными."),
-        ));
-        rows.push(metric_row(
-            "Почему не вошло",
-            excluded_reasons,
-            Some("Какие retrieval-слои в последнем запросе ничего не добавили и по какой причине они были честно пропущены."),
-        ));
-    }
-    rows.extend(vec![
+        metric_row(
+            "Последняя команда",
+            last_command,
+            Some("Какое последнее действие было перед этой сводкой."),
+        ),
         metric_row(
             "Активные файлы",
             if active_files_preview.is_empty() {
-                format_u64(Some(active_files_count))
+                if !live_file_hints_preview.is_empty() {
+                    format!(
+                        "{} • {}",
+                        format_u64(Some(live_file_hints.len() as u64)),
+                        live_file_hints_preview
+                    )
+                } else {
+                    format_u64(Some(active_files_count))
+                }
             } else {
-                format!("{} • {}", format_u64(Some(active_files_count)), active_files_preview)
+                format!(
+                    "{} • {}",
+                    format_u64(Some(active_files_count)),
+                    active_files_preview
+                )
             },
-            Some("Сколько файлов Amai считает активными сейчас и какие первые несколько он видит в этой линии работы."),
+            Some(if !active_files_preview.is_empty() {
+                "Какие файлы сейчас чаще всего фигурируют в этой работе."
+            } else if !live_file_hints_preview.is_empty() {
+                "Ранние живые подсказки по файлам из последних same-thread запросов Amai до полного working-state snapshot."
+            } else {
+                "Какие файлы сейчас чаще всего фигурируют в этой работе."
+            }),
         ),
         metric_row(
+            "Следов в истории",
+            format_count_with_word(events_count.unwrap_or(0), "событие", "события", "событий"),
+            Some("Сколько подтверждённых событий уже есть у этой рабочей линии."),
+        ),
+    ];
+    if recent_queries > 0 {
+        rows.push(metric_row(
             "Недавние запросы",
             format_u64(Some(recent_queries)),
-            Some("Сколько недавних запросов вошло в рабочий снимок. Здесь может быть 0, если работа шла через continuity, проверочные прогоны или другой не-потоковый путь."),
-        ),
-    ]);
+            Some("Сколько недавних запросов попало в эту рабочую линию."),
+        ));
+    }
+    let live_turn_note_sentence = live_turn_activity.as_ref().map(|(_, note)| note.clone());
+    if let Some((row, _)) = live_turn_activity {
+        rows.push(row);
+    }
 
+    let live_turn_note_present = live_turn_note_sentence.is_some();
+    let card_note = if let Some(ref note_sentence) = live_turn_note_sentence {
+        format!(
+            "Короткая сводка по текущей работе. Следующий шаг: {}. {}",
+            next_step, note_sentence
+        )
+    } else {
+        format!(
+            "Короткая сводка по текущей работе. Следующий шаг: {}.",
+            next_step
+        )
+    };
     let mut card = card_with_rows(
         "Текущая работа",
         current_goal,
-        if has_decision_trace {
-            format!(
-                "Сейчас Amai ведёт такую работу. Следующий обязательный шаг: {}.",
-                next_step
-            )
-        } else {
-            format!(
-                "Сейчас Amai ведёт такую работу. Следующий обязательный шаг: {}. Эта линия пришла не из последнего подбора контекста, поэтому причины включения и исключения здесь пока не показываются.",
-                next_step
-            )
-        },
+        card_note,
         status,
         Some(source_label(
-            "Источник: latest_repo_working_state_restore.working_state_restore. Этот блок берёт последнюю рабочую линию именно текущего репозитория, а не глобально самый новый handoff.",
+            "Источник: последний рабочий снимок именно этого репозитория.",
             restore["captured_at_epoch_ms"].as_u64(),
         )),
-        Some("Показывает, чем Amai действительно занят сейчас именно в текущем репозитории: какая цель активна, какой следующий шаг остаётся обязательным, какая команда была последней и какие файлы ещё в работе. Это не замер скорости ответа, а снимок локальной рабочей линии.".to_string()),
+        Some("Показывает простую сводку по текущей работе в этом репозитории: что делаем, что дальше и на чём сейчас сфокусированы.".to_string()),
         rows,
     );
     if status == "waiting" {
-        card = with_status_label(card, "ждём устойчивый снимок");
+        let waiting_label = if live_turn_note_sentence
+            .as_deref()
+            .is_some_and(|note| note.contains("пока ещё не ответила"))
+        {
+            "ждём ответ Amai"
+        } else if live_turn_note_present {
+            "живой turn уже виден"
+        } else {
+            "ждём устойчивый снимок"
+        };
+        card = with_status_label(card, waiting_label);
     }
     if status != "pass" {
         let tooltip = if status == "alert" {
@@ -10259,56 +7338,41 @@ fn working_state_live_card(snapshot: &Value) -> Value {
                 next_step
             )
         } else if status == "waiting" {
-            format!(
-                "Статус пока не может считаться нормальным по следующим причинам:\n- Уверенность в этом рабочем снимке пока {}.\n- Последний локальный снимок сделан {}.\n- Рабочая линия уже содержит {}, но для устойчивого локального снимка нужно больше подтверждённых событий.\n- Следующий обязательный шаг сейчас: {}.",
-                restore_confidence_human,
-                snapshot_age,
-                format_count_with_word(events_count.unwrap_or(0), "событие", "события", "событий"),
-                next_step
-            )
+            if live_turn_note_sentence
+                .as_deref()
+                .is_some_and(|note| note.contains("пока ещё не ответила"))
+            {
+                format!(
+                    "Статус пока не может считаться нормальным по следующим причинам:\n- Новый live-turn уже открыт, но Amai в нём ещё не ответила.\n- Последний локальный снимок сделан {}.\n- Рабочая линия уже содержит {}, но для устойчивого локального снимка нужно больше подтверждённых событий.\n- Следующий обязательный шаг сейчас: {}.",
+                    snapshot_age,
+                    format_count_with_word(
+                        events_count.unwrap_or(0),
+                        "событие",
+                        "события",
+                        "событий"
+                    ),
+                    next_step
+                )
+            } else {
+                format!(
+                    "Статус пока не может считаться нормальным по следующим причинам:\n- Уверенность в этом рабочем снимке пока {}.\n- Последний локальный снимок сделан {}.\n- Рабочая линия уже содержит {}, но для устойчивого локального снимка нужно больше подтверждённых событий.\n- Следующий обязательный шаг сейчас: {}.",
+                    restore_confidence_human,
+                    snapshot_age,
+                    format_count_with_word(
+                        events_count.unwrap_or(0),
+                        "событие",
+                        "события",
+                        "событий"
+                    ),
+                    next_step
+                )
+            }
         } else {
             "Статус пока не может считаться нормальным по следующим причинам:\n- Рабочая линия ещё не накопила достаточно надёжный рабочий снимок.\n- Пока панель видит только предварительный или почти пустой след текущей работы.".to_string()
         };
         card = with_status_tooltip(card, &tooltip);
     }
     card
-}
-
-fn working_state_decision_trace_summary(trace: &Value, key: &str, fallback: &str) -> String {
-    let Some(items) = trace[key].as_array() else {
-        return fallback.to_string();
-    };
-    let parts = items
-        .iter()
-        .take(3)
-        .filter_map(|item| {
-            let strategy = item["strategy"].as_str()?;
-            let reason = item["reason"].as_str().unwrap_or_default();
-            let count = item["count"].as_u64();
-            let strategy_human = match strategy {
-                "exact_documents" => "точные совпадения",
-                "symbol_hits" => "совпадения по символам",
-                "lexical_chunks" => "лексические фрагменты",
-                "semantic_chunks" => "семантические фрагменты",
-                other => other,
-            };
-            let prefix = if let Some(value) = count {
-                format!("{strategy_human} ({value})")
-            } else {
-                strategy_human.to_string()
-            };
-            Some(if reason.is_empty() {
-                prefix
-            } else {
-                format!("{prefix}: {reason}")
-            })
-        })
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        fallback.to_string()
-    } else {
-        compact_dashboard_text(Some(&parts.join(" • ")), 132, fallback)
-    }
 }
 
 fn compare_table_card(
@@ -10348,10 +7412,6 @@ fn compare_table_row(label: &str, tooltip: &str, values: Vec<String>) -> Value {
         "tooltip": tooltip,
         "values": values,
     })
-}
-
-fn compare_pair(target: String, current: String) -> Vec<String> {
-    vec![target, current]
 }
 
 fn compact_dashboard_text(value: Option<&str>, max_chars: usize, fallback: &str) -> String {
@@ -10412,14 +7472,6 @@ const CLIENT_LIVE_CONTEXT_ROW_KEY: &str = "client_live_context";
 const CLIENT_LIVE_FULL_TURN_SAVINGS_ROW_KEY: &str = "client_live_full_turn_savings";
 const CLIENT_LIVE_LIMIT_ROW_KEY: &str = "client_live_limit";
 const CLIENT_LIMIT_HOURLY_BURN_ROW_KEY: &str = "client_limit_hourly_burn";
-
-fn prefixed_metric_label(prefix: &str, metric: &str) -> String {
-    if prefix.trim().is_empty() {
-        metric.to_string()
-    } else {
-        format!("{prefix} {metric}")
-    }
-}
 
 fn status_reason_tooltip(status: &str, reasons: Vec<String>, fallback: &str) -> Option<String> {
     if status == "pass" {
@@ -10628,7 +7680,8 @@ struct LiveLatencyTableTargets {
     p95_ms: f64,
     p99_ms: f64,
     max_ms: f64,
-    sample_count: u64,
+    live_readiness_sample_count: u64,
+    benchmark_sample_count: u64,
 }
 
 struct LiveLatencySliceAssessment {
@@ -10636,28 +7689,71 @@ struct LiveLatencySliceAssessment {
     note: String,
 }
 
+fn default_live_latency_table_targets(state: &str) -> LiveLatencyTableTargets {
+    match state {
+        "hot" => LiveLatencyTableTargets {
+            p50_ms: 1.0,
+            p95_ms: 2.0,
+            p99_ms: 3.0,
+            max_ms: 5.0,
+            live_readiness_sample_count: 100,
+            benchmark_sample_count: 100000,
+        },
+        _ => LiveLatencyTableTargets {
+            p50_ms: 2.0,
+            p95_ms: 4.0,
+            p99_ms: 6.0,
+            max_ms: 10.0,
+            live_readiness_sample_count: 100,
+            benchmark_sample_count: 10000,
+        },
+    }
+}
+
 fn live_latency_table_targets(snapshot: &Value, state: &str) -> LiveLatencyTableTargets {
+    let defaults = default_live_latency_table_targets(state);
     let thresholds = if state == "hot" {
         &snapshot["thresholds"]["retrieval"]["hot_live_table"]
     } else {
         &snapshot["thresholds"]["retrieval"]["cold_live_table"]
     };
     LiveLatencyTableTargets {
-        p50_ms: thresholds["target_p50_ms"].as_f64().unwrap_or(0.0),
-        p95_ms: thresholds["target_p95_ms"].as_f64().unwrap_or(0.0),
-        p99_ms: thresholds["target_p99_ms"].as_f64().unwrap_or(0.0),
-        max_ms: thresholds["target_max_ms"].as_f64().unwrap_or(0.0),
-        sample_count: thresholds["target_sample_count"].as_u64().unwrap_or(0),
+        p50_ms: thresholds["target_p50_ms"]
+            .as_f64()
+            .filter(|value| *value > 0.0)
+            .unwrap_or(defaults.p50_ms),
+        p95_ms: thresholds["target_p95_ms"]
+            .as_f64()
+            .filter(|value| *value > 0.0)
+            .unwrap_or(defaults.p95_ms),
+        p99_ms: thresholds["target_p99_ms"]
+            .as_f64()
+            .filter(|value| *value > 0.0)
+            .unwrap_or(defaults.p99_ms),
+        max_ms: thresholds["target_max_ms"]
+            .as_f64()
+            .filter(|value| *value > 0.0)
+            .unwrap_or(defaults.max_ms),
+        live_readiness_sample_count: thresholds["live_readiness_sample_count"]
+            .as_u64()
+            .or_else(|| thresholds["target_sample_count"].as_u64())
+            .filter(|value| *value > 0)
+            .unwrap_or(defaults.live_readiness_sample_count),
+        benchmark_sample_count: thresholds["benchmark_sample_count"]
+            .as_u64()
+            .or_else(|| thresholds["target_sample_count"].as_u64())
+            .filter(|value| *value > 0)
+            .unwrap_or(defaults.benchmark_sample_count),
     }
 }
 
 fn target_values(snapshot: &Value, targets: &LiveLatencyTableTargets) -> Vec<String> {
     vec![
-        format_time_threshold(snapshot, Some(targets.p50_ms), "<"),
-        format_time_threshold(snapshot, Some(targets.p95_ms), "<"),
-        format_time_threshold(snapshot, Some(targets.p99_ms), "<"),
-        format_time_threshold(snapshot, Some(targets.max_ms), "<"),
-        format_target_u64(">", targets.sample_count),
+        format_time_threshold(snapshot, Some(targets.p50_ms), "<="),
+        format_time_threshold(snapshot, Some(targets.p95_ms), "<="),
+        format_time_threshold(snapshot, Some(targets.p99_ms), "<="),
+        format_time_threshold(snapshot, Some(targets.max_ms), "<="),
+        format_target_u64(">=", targets.live_readiness_sample_count),
     ]
 }
 
@@ -10676,7 +7772,7 @@ fn headline_status_label(status: &str) -> &'static str {
         "pass" => "система в норме",
         "alert" => "нужно внимание",
         "critical" => "есть критичные сигналы",
-        "waiting" => "идёт накопление выборки",
+        "waiting" => "данных пока мало",
         _ => "данных пока мало",
     }
 }
@@ -10721,7 +7817,7 @@ fn assess_live_latency_slice(
     let Some(slice) = slice else {
         return LiveLatencySliceAssessment {
             status: "unknown",
-            note: "В этой сессии ещё не накопилась живая выборка для этого режима.".to_string(),
+            note: "В живом окне ещё не накопилась выборка для этого режима.".to_string(),
         };
     };
 
@@ -10729,7 +7825,7 @@ fn assess_live_latency_slice(
     if sample_count == 0 {
         return LiveLatencySliceAssessment {
             status: "unknown",
-            note: "В этой сессии ещё не накопилась живая выборка для этого режима.".to_string(),
+            note: "В живом окне ещё не накопилась выборка для этого режима.".to_string(),
         };
     }
 
@@ -10757,26 +7853,28 @@ fn assess_live_latency_slice(
     let failed_metrics = metrics
         .iter()
         .filter_map(|(label, value, target)| {
-            (!value.is_some_and(|value| value < *target)).then_some(*label)
+            (!value.is_some_and(|value| value <= *target)).then_some(*label)
         })
         .collect::<Vec<_>>();
-    let sample_ok = sample_count > targets.sample_count;
+    let sample_ok = sample_count >= targets.live_readiness_sample_count;
 
     if !sample_ok {
         return LiveLatencySliceAssessment {
             status: "waiting",
             note: if failed_metrics.is_empty() {
                 format!(
-                    "По задержке всё хорошо, но выборка ещё мала: {} из > {}.",
+                    "По задержке всё хорошо, но живое окно ещё мало: {} из >= {}. Строгая проверочная выборка отдельно: > {}.",
                     format_u64(Some(sample_count)),
-                    format_u64(Some(targets.sample_count))
+                    format_u64(Some(targets.live_readiness_sample_count)),
+                    format_u64(Some(targets.benchmark_sample_count))
                 )
             } else {
                 format!(
-                    "Пока рано делать строгий вывод: выборка ещё мала ({} из > {}), а текущие значения ещё не лучше эталона по {}.",
+                    "Пока рано делать строгий вывод: живое окно ещё мало ({} из >= {}), а текущие значения ещё не лучше эталона по {}. Строгая проверочная выборка отдельно: > {}.",
                     format_u64(Some(sample_count)),
-                    format_u64(Some(targets.sample_count)),
-                    failed_metrics.join(", ")
+                    format_u64(Some(targets.live_readiness_sample_count)),
+                    failed_metrics.join(", "),
+                    format_u64(Some(targets.benchmark_sample_count))
                 )
             },
         };
@@ -10786,7 +7884,7 @@ fn assess_live_latency_slice(
         return LiveLatencySliceAssessment {
             status: "critical",
             note: format!(
-                "Эталон уже честно не выполняется по {}. Живая выборка: {}.",
+                "Живой эталон уже не выполняется по {}. Живая выборка: {}. Строгая проверочная норма показывается отдельно.",
                 failed_metrics.join(", "),
                 format_u64(Some(sample_count))
             ),
@@ -10796,19 +7894,10 @@ fn assess_live_latency_slice(
     LiveLatencySliceAssessment {
         status: "pass",
         note: format!(
-            "Эталон выдержан. Живая выборка: {}.",
+            "Живой эталон выдержан. Живая выборка: {}. Строгая проверочная норма показывается отдельно.",
             format_u64(Some(sample_count))
         ),
     }
-}
-
-fn live_latency_compare_status(snapshot: &Value) -> &'static str {
-    let hot_targets = live_latency_table_targets(snapshot, "hot");
-    let cold_targets = live_latency_table_targets(snapshot, "cold");
-    let hot_status = assess_live_latency_slice(latency_slice(snapshot, "hot"), &hot_targets).status;
-    let cold_status =
-        assess_live_latency_slice(latency_slice(snapshot, "cold"), &cold_targets).status;
-    combine_live_compare_status(&[hot_status, cold_status])
 }
 
 fn combine_live_compare_status(statuses: &[&str]) -> &'static str {
@@ -10855,14 +7944,6 @@ fn cold_contour_status(snapshot: &Value) -> &'static str {
         Some("NOT MET") => "critical",
         _ => "unknown",
     }
-}
-
-fn latency_slice<'a>(snapshot: &'a Value, state: &str) -> Option<&'a Value> {
-    snapshot["token_budget_report"]["token_budget_report"]["current_session"]["latency_slices"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|slice| slice["state"].as_str() == Some(state))
 }
 
 fn savings_status(
@@ -11578,6 +8659,21 @@ fn observed_client_limit_hourly_burn_classification(
     }
 }
 
+fn client_turn_pressure_display_status_label<'a>(
+    status_label: &'a str,
+    same_thread_compaction_preferred: bool,
+) -> &'a str {
+    if same_thread_compaction_preferred {
+        match status_label {
+            "новый чат нужен сейчас" => "сожми текущий чат сейчас",
+            "новый чат рекомендован" => "сожми текущий чат",
+            _ => status_label,
+        }
+    } else {
+        status_label
+    }
+}
+
 fn client_turn_pressure_note_sentence_for_preference(
     guard: Option<ClientTurnPressureGuard>,
     same_thread_compaction_preferred: bool,
@@ -11629,7 +8725,7 @@ fn client_turn_pressure_note_sentence_for_preference(
         if same_thread_compaction_preferred {
             "Сейчас выгоднее сначала сжать текущий giant thread через same-thread compact window:"
         } else {
-            "Сейчас выгоднее завершить этот thread и продолжить в новом чате:"
+            "Сейчас giant thread уже требует fallback-внимания: не раздувай его дальше; новый чат допустим только после подтверждённого провала same-thread control:"
         },
         format_u64(Some(guard.turn_total_tokens)),
         format_u64(Some(guard.model_context_window)),
@@ -11650,14 +8746,13 @@ fn client_turn_pressure_metric_row(
     Some(metric_row(
         "Следующее действие",
         if same_thread_compaction_preferred && guard.severity == "critical" {
-            "открой compact window текущего giant thread и только потом решай, нужен ли новый чат"
-                .to_string()
+            "открой compact window текущего giant thread и проверь effect".to_string()
         } else if same_thread_compaction_preferred {
-            "сначала попробуй compact window текущего giant thread".to_string()
+            "защити текущий giant thread через same-thread control".to_string()
         } else if guard.severity == "critical" {
-            "сохрани handoff и переходи в новый чат через continuity startup".to_string()
+            "не раздувай giant thread; fallback через handoff/startup только если same-thread control реально не помог".to_string()
         } else {
-            "сохрани handoff и продолжай в новом чате через continuity startup".to_string()
+            "не раздувай giant thread; handoff/new chat допустимы только как fallback после same-thread failure".to_string()
         },
         Some(
             client_turn_pressure_tooltip(guard, action_bundle, same_thread_compaction_preferred)
@@ -11686,7 +8781,7 @@ fn client_turn_pressure_tooltip(
         ));
     } else {
         tooltip.push_str(
-            "\n- Exact same-meter share Amai в полном live-turn пока ещё не materialized, а текущий turn уже слишком раздут, чтобы откладывать переход в свежий чат",
+            "\n- Exact same-meter share Amai в полном live-turn пока ещё не materialized, а текущий turn уже слишком раздут, чтобы откладывать same-thread compaction и ждать точный pair на длинном контексте",
         );
     }
     if let Some(classification) = guard.hourly_burn_classification {
@@ -11718,7 +8813,7 @@ fn client_turn_pressure_tooltip(
     }
     if guard.no_amai_activity_in_current_live_turn {
         tooltip.push_str(
-            "\n- В текущем live-turn нет retrieval_context_pack от Amai: расход сейчас создаёт сам раздутый thread/context, поэтому лучший способ спасти 5ч окно — раньше перейти в свежий чат",
+            "\n- В текущем live-turn нет retrieval_context_pack от Amai: расход сейчас создаёт сам раздутый thread/context, поэтому лучший способ спасти 5ч окно — не раздувать дальше этот thread и удержать same-thread compact surface",
         );
     }
     if same_thread_compaction_preferred {
@@ -11727,7 +8822,7 @@ fn client_turn_pressure_tooltip(
         );
     } else {
         tooltip.push_str(
-            "\n- При таком соотношении продолжение в том же thread жжёт внешний клиентский лимит в основном размером самого thread/context, а не Amai-delta\n- Следующее действие: сохранить continuity handoff и продолжить в свежем чате через continuity startup",
+            "\n- При таком соотношении продолжение в том же thread жжёт внешний клиентский лимит в основном размером самого thread/context, а не Amai-delta\n- Если same-thread control недоступен или уже подтверждённо не помог, handoff и новый чат остаются только fallback.",
         );
     }
     if let Some(bundle) = action_bundle {
@@ -11765,14 +8860,14 @@ fn client_turn_pressure_tooltip(
             tooltip.push_str(&format!("\n- Ограничение: {note}"));
         }
         if let Some(command) = bundle["operator_flow"]["rotate_helper_command"].as_str() {
-            tooltip.push_str(&format!("\n- One-shot rotate helper: {command}"));
+            tooltip.push_str(&format!("\n- Fallback rotate helper: {command}"));
         }
         if let Some(command) = bundle["operator_flow"]["handoff_command"].as_str() {
             tooltip.push_str(&format!("\n- Готовая команда handoff: {command}"));
         }
         if let Some(command) = bundle["operator_flow"]["startup_command"].as_str() {
             tooltip.push_str(&format!(
-                "\n- После открытия нового чата запусти startup: {command}"
+                "\n- Если fallback всё-таки понадобится, после нового чата запусти startup: {command}"
             ));
         }
     }
@@ -11993,6 +9088,69 @@ fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<Value> {
     ))
 }
 
+fn compact_chat_selector_client_surface(restore_context: &Value) -> Value {
+    let repo_root = restore_context["project"]["repo_root"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| config::discover_repo_root(None).ok());
+    if let Some(repo_root) = repo_root {
+        onboarding::describe_client_surface(repo_root.as_path(), None).unwrap_or_else(|_| {
+            json!({
+                "client_key": "unknown",
+                "display_name": "Unknown client",
+                "startup_instruction_path": Value::Null,
+                "startup_instruction_mode": Value::Null,
+                "reconnect_shell_command": Value::Null,
+                "reconnect_bootstrap_command": Value::Null,
+                "fresh_chat_assist_summary": Value::Null,
+            })
+        })
+    } else {
+        json!({
+            "client_key": "unknown",
+            "display_name": "Unknown client",
+            "startup_instruction_path": Value::Null,
+            "startup_instruction_mode": Value::Null,
+            "reconnect_shell_command": Value::Null,
+            "reconnect_bootstrap_command": Value::Null,
+            "fresh_chat_assist_summary": Value::Null,
+        })
+    }
+}
+
+fn compact_chat_selector_prompt_file(restore_context: &Value) -> Option<String> {
+    let repo_root = restore_context["project"]["repo_root"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| config::discover_repo_root(None).ok())?;
+    let prompt_path = repo_root.join(".amai/continuity/compact-chat-prompt.txt");
+    if prompt_path.is_file() {
+        Some(prompt_path.display().to_string())
+    } else {
+        None
+    }
+}
+
+fn compact_chat_selector_manual_note(client_surface: &Value) -> Option<String> {
+    let mut note = "Если automatic clean chat launch недоступен, открой чистый context surface и вставь prompt_text вручную.".to_string();
+    if let Some(display_name) = client_surface["display_name"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        note.push_str(&format!(" Клиент: {display_name}."));
+    }
+    if let Some(summary) = client_surface["fresh_chat_assist_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        note.push(' ');
+        note.push_str(summary);
+    }
+    Some(note)
+}
+
 fn client_limit_hourly_burn_metric_row(
     hourly_burn: &Value,
     client_budget_target_percent: u64,
@@ -12090,6 +9248,12 @@ fn client_limit_hourly_burn_metric_row(
                 host_current_thread_control["feedback_ack_intro"]
                     .as_str()
                     .unwrap_or("После попытки запуска отметь исход same-thread host control.");
+            let compact_chat_client_surface = compact_chat_selector_client_surface(restore_context);
+            let compact_chat_prompt_file = compact_chat_selector_prompt_file(restore_context);
+            let compact_chat_prompt_file_value = compact_chat_prompt_file
+                .as_deref()
+                .map(Value::from)
+                .unwrap_or(Value::Null);
             let actual_remaining_percent = hourly_burn["actual_remaining_percent"].as_f64();
             let ideal_remaining_percent = hourly_burn["ideal_remaining_percent"].as_f64();
             let projected_reset_delta_minutes =
@@ -12161,6 +9325,24 @@ fn client_limit_hourly_burn_metric_row(
                             "compact_chat_command": client_budget_compact_chat_command(),
                             "compact_chat_button_label": "Compact chat",
                             "compact_chat_intro": "Подготовить fresh CHAT_START_RESTORE для huge-chat rebase через clean context surface.",
+                            "compact_chat_required_host_action":
+                                "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable",
+                            "compact_chat_prompt_file": compact_chat_prompt_file_value,
+                            "compact_chat_note":
+                                compact_chat_selector_manual_note(&compact_chat_client_surface),
+                            "compact_chat_client_surface": compact_chat_client_surface.clone(),
+                            "compact_chat_client_display_name":
+                                compact_chat_client_surface["display_name"].clone(),
+                            "compact_chat_assist_summary":
+                                compact_chat_client_surface["fresh_chat_assist_summary"].clone(),
+                            "compact_chat_startup_instruction_path":
+                                compact_chat_client_surface["startup_instruction_path"].clone(),
+                            "compact_chat_startup_instruction_mode":
+                                compact_chat_client_surface["startup_instruction_mode"].clone(),
+                            "compact_chat_reconnect_shell_command":
+                                compact_chat_client_surface["reconnect_shell_command"].clone(),
+                            "compact_chat_reconnect_bootstrap_command":
+                                compact_chat_client_surface["reconnect_bootstrap_command"].clone(),
                             "host_current_thread_control": host_current_thread_control.clone(),
                             "host_current_thread_control_button_label":
                                 host_current_thread_control_button_label,
@@ -12297,6 +9479,8 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
     } else {
         client_live_meter["status"].as_str().unwrap_or("missing")
     };
+    let (reply_prefix, global_reply_prefix, reply_prefix_source) =
+        current_agent_reply_prefix_fields(snapshot, report);
     json!({
         "status": live_status,
         "client_budget_target_percent": client_budget_target_percent,
@@ -12305,7 +9489,9 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
         "ended_at_epoch_ms": preferred_client_limit_observed_at_epoch_ms(client_live_meter)
             .map(Value::from)
             .unwrap_or_else(|| client_live_meter["ended_at_epoch_ms"].clone()),
-        "reply_prefix": client_limit_hourly_burn["reply_prefix"].clone(),
+        "reply_prefix": reply_prefix,
+        "global_reply_prefix": global_reply_prefix,
+        "reply_prefix_source": Value::from(reply_prefix_source),
         "rows": rows,
     })
 }
@@ -12316,13 +9502,59 @@ pub(crate) fn client_budget_root_cause_payload(snapshot: &Value) -> Value {
     client_budget_root_cause_payload_with_guard(snapshot, &guard)
 }
 
-pub(crate) fn client_budget_root_cause_payload_with_guard(snapshot: &Value, guard: &Value) -> Value {
+pub(crate) fn client_budget_root_cause_payload_with_guard(
+    snapshot: &Value,
+    guard: &Value,
+) -> Value {
     let report = &snapshot["token_budget_report"]["token_budget_report"];
     let client_live_meter = &report["client_live_meter"];
     let current_live_turn = &report["current_live_turn"];
     let current_session_statement = &report["statement_previews"]["current_session"];
     let alignment = &current_session_statement["client_limit_meter_alignment"];
     let hourly_burn = &report["client_limit_hourly_burn"];
+    let strict_lower_bound_tokens = alignment["strict_client_meter_slice"]["lower_bound_tokens"]
+        .as_u64()
+        .or_else(|| {
+            alignment["baseline_equivalence"]["measured_baseline_tokens_lower_bound"].as_u64()
+        });
+    let same_meter_exact_pair = exact_model_token_pair(current_session_statement, alignment);
+    let continuity_restore_component = alignment["baseline_equivalence"]["component_semantics"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["code"].as_str() == Some("continuity_restore_outside_retrieval"));
+    let continuity_restore_baseline_tokens =
+        continuity_restore_component.and_then(|item| item["baseline_measured_tokens"].as_u64());
+    let continuity_restore_observed_tokens =
+        continuity_restore_component.and_then(|item| item["observed_tokens"].as_u64());
+    let continuity_restore_delta_tokens = continuity_restore_baseline_tokens
+        .zip(continuity_restore_observed_tokens)
+        .map(|(baseline_tokens, observed_tokens)| observed_tokens as i64 - baseline_tokens as i64);
+    let current_turn_total_tokens = client_live_meter["client_turn_total_tokens"].as_u64();
+    let full_turn_overhang_tokens = current_turn_total_tokens
+        .zip(strict_lower_bound_tokens)
+        .map(|(turn_total_tokens, strict_tokens)| turn_total_tokens.saturating_sub(strict_tokens))
+        .filter(|value| *value > 0);
+    let full_turn_vs_strict_ratio = current_turn_total_tokens
+        .zip(strict_lower_bound_tokens)
+        .and_then(|(turn_total_tokens, strict_tokens)| {
+            if strict_tokens == 0 {
+                None
+            } else {
+                Some(turn_total_tokens as f64 / strict_tokens as f64)
+            }
+        });
+    let dominant_cost_surface = if current_live_turn["status"].as_str()
+        == Some("no_amai_activity_in_current_live_turn")
+        && full_turn_overhang_tokens
+            .zip(strict_lower_bound_tokens)
+            .is_some_and(|(overhang_tokens, strict_tokens)| {
+                overhang_tokens >= strict_tokens.saturating_mul(4).max(256)
+            }) {
+        Some("giant_thread_context_outside_same_meter_slice")
+    } else {
+        None
+    };
     let selected_host_current_thread_control_effect =
         guard["host_current_thread_control_effect"].clone();
     let primary_blocker = alignment["exact_pair_status"]["blockers"]
@@ -12494,6 +9726,75 @@ pub(crate) fn client_budget_root_cause_payload_with_guard(snapshot: &Value, guar
         "exact_pair_status".to_string(),
         Value::Object(exact_pair_status_payload),
     );
+    let mut same_meter_economics_payload = serde_json::Map::new();
+    if let Some(strict_tokens) = strict_lower_bound_tokens {
+        same_meter_economics_payload.insert(
+            "strict_lower_bound_tokens".to_string(),
+            Value::from(strict_tokens),
+        );
+    }
+    if let Some((without_amai_tokens, with_amai_tokens, saved_tokens, saved_pct)) =
+        same_meter_exact_pair
+    {
+        same_meter_economics_payload.insert(
+            "same_meter_without_amai_tokens".to_string(),
+            Value::from(without_amai_tokens),
+        );
+        same_meter_economics_payload.insert(
+            "same_meter_with_amai_tokens".to_string(),
+            Value::from(with_amai_tokens),
+        );
+        same_meter_economics_payload.insert(
+            "same_meter_saved_tokens".to_string(),
+            Value::from(saved_tokens),
+        );
+        if let Some(saved_pct_value) = serde_json::Number::from_f64(saved_pct) {
+            same_meter_economics_payload.insert(
+                "same_meter_saved_pct".to_string(),
+                Value::Number(saved_pct_value),
+            );
+        }
+    }
+    if let Some(baseline_tokens) = continuity_restore_baseline_tokens {
+        same_meter_economics_payload.insert(
+            "continuity_restore_baseline_tokens".to_string(),
+            Value::from(baseline_tokens),
+        );
+    }
+    if let Some(observed_tokens) = continuity_restore_observed_tokens {
+        same_meter_economics_payload.insert(
+            "continuity_restore_observed_tokens".to_string(),
+            Value::from(observed_tokens),
+        );
+    }
+    if let Some(delta_tokens) = continuity_restore_delta_tokens {
+        same_meter_economics_payload.insert(
+            "continuity_restore_delta_tokens".to_string(),
+            Value::from(delta_tokens),
+        );
+    }
+    if let Some(overhang_tokens) = full_turn_overhang_tokens {
+        same_meter_economics_payload.insert(
+            "full_turn_overhang_tokens".to_string(),
+            Value::from(overhang_tokens),
+        );
+    }
+    if let Some(ratio) = full_turn_vs_strict_ratio.and_then(serde_json::Number::from_f64) {
+        same_meter_economics_payload.insert(
+            "full_turn_vs_strict_ratio".to_string(),
+            Value::Number(ratio),
+        );
+    }
+    if let Some(surface) = dominant_cost_surface {
+        same_meter_economics_payload
+            .insert("dominant_cost_surface".to_string(), Value::from(surface));
+    }
+    if !same_meter_economics_payload.is_empty() {
+        payload.insert(
+            "same_meter_economics".to_string(),
+            Value::Object(same_meter_economics_payload),
+        );
+    }
     for field in [
         "measured_components",
         "missing_components",
@@ -13916,468 +11217,59 @@ fn humanize_check(snapshot: &Value, check: &Value) -> String {
     format!("{explanation} Сейчас: {value}. Состояние: {status}.")
 }
 
-fn human_timestamp(epoch_ms: u64) -> String {
-    if epoch_ms == 0 {
-        return "ещё нет данных".to_string();
-    }
-    let nanos = (epoch_ms as i128) * 1_000_000;
-    let Ok(offset) = UtcOffset::from_hms(3, 0, 0) else {
-        return "ещё нет данных".to_string();
-    };
-    let Ok(datetime) = OffsetDateTime::from_unix_timestamp_nanos(nanos) else {
-        return "ещё нет данных".to_string();
-    };
-    let format = format_description!("[year]-[month]-[day] [hour]:[minute]:[second] MSK");
-    datetime
-        .to_offset(offset)
-        .format(&format)
-        .unwrap_or_else(|_| "ещё нет данных".to_string())
-}
-
-fn human_timestamp_clock(epoch_ms: u64) -> String {
-    if epoch_ms == 0 {
-        return "ещё нет данных".to_string();
-    }
-    let nanos = (epoch_ms as i128) * 1_000_000;
-    let Ok(offset) = UtcOffset::from_hms(3, 0, 0) else {
-        return "ещё нет данных".to_string();
-    };
-    let Ok(datetime) = OffsetDateTime::from_unix_timestamp_nanos(nanos) else {
-        return "ещё нет данных".to_string();
-    };
-    let format = format_description!("[hour]:[minute]:[second] MSK");
-    datetime
-        .to_offset(offset)
-        .format(&format)
-        .unwrap_or_else(|_| "ещё нет данных".to_string())
-}
-
-fn human_epoch_seconds(epoch_seconds: u64) -> String {
-    if epoch_seconds == 0 {
-        return "ещё нет данных".to_string();
-    }
-    human_timestamp(epoch_seconds.saturating_mul(1000))
-}
-
-fn source_label(prefix: &str, epoch_ms: Option<u64>) -> String {
-    match epoch_ms.filter(|value| *value > 0) {
-        Some(epoch_ms) => format!("{prefix}. Измерено: {}.", human_timestamp(epoch_ms)),
-        None => prefix.to_string(),
-    }
-}
-
-fn client_display_name(key: &str) -> &str {
-    match key {
-        "vscode" => "VS Code",
-        "cursor" => "Cursor",
-        "codex" => "Codex",
-        "claude-code" => "Claude Code",
-        "claude-desktop" => "Claude Desktop",
-        other => other,
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct DashboardTimingFormat<'a> {
-    switch_to_nanoseconds_below_ms: f64,
-    switch_to_microseconds_below_ms: f64,
-    switch_to_seconds_at_or_above_ms: f64,
-    non_positive_floor_label: &'a str,
-    seconds_suffix: &'a str,
-    milliseconds_suffix: &'a str,
-    microseconds_suffix: &'a str,
-    nanoseconds_suffix: &'a str,
-    seconds_decimals: usize,
-    milliseconds_decimals: usize,
-    microseconds_decimals: usize,
-    nanoseconds_decimals: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum DurationDisplayUnit {
-    Seconds,
-    Milliseconds,
-    Microseconds,
-    Nanoseconds,
-}
-
-fn format_ms(snapshot: &Value, value: Option<f64>) -> String {
-    format_duration_ms(dashboard_timing_format(snapshot), value)
-}
-
-fn format_seconds(snapshot: &Value, value: Option<f64>) -> String {
-    format_duration_ms(
-        dashboard_timing_format(snapshot),
-        value.map(|number| number * 1000.0),
-    )
-}
-
-fn format_duration_ms(policy: DashboardTimingFormat<'_>, value: Option<f64>) -> String {
-    render_duration_ms_with_unit(policy, value, None)
-}
-
-fn render_duration_ms_with_unit(
-    policy: DashboardTimingFormat<'_>,
-    value: Option<f64>,
-    unit: Option<DurationDisplayUnit>,
-) -> String {
-    match value {
-        Some(number) if number <= 0.0 => policy.non_positive_floor_label.to_string(),
-        Some(number) => {
-            let display_unit = unit.unwrap_or_else(|| auto_duration_display_unit(policy, number));
-            let (scaled, decimals, suffix) = match display_unit {
-                DurationDisplayUnit::Seconds => (
-                    number / 1000.0,
-                    policy.seconds_decimals,
-                    policy.seconds_suffix,
-                ),
-                DurationDisplayUnit::Milliseconds => (
-                    number,
-                    policy.milliseconds_decimals,
-                    policy.milliseconds_suffix,
-                ),
-                DurationDisplayUnit::Microseconds => (
-                    number * 1000.0,
-                    policy.microseconds_decimals,
-                    policy.microseconds_suffix,
-                ),
-                DurationDisplayUnit::Nanoseconds => (
-                    number * 1_000_000.0,
-                    policy.nanoseconds_decimals,
-                    policy.nanoseconds_suffix,
-                ),
-            };
-            format!("{} {}", format_decimal_trimmed(scaled, decimals), suffix)
-        }
-        None => "ещё нет данных".to_string(),
-    }
-}
-
-fn auto_duration_display_unit(
-    policy: DashboardTimingFormat<'_>,
-    value_ms: f64,
-) -> DurationDisplayUnit {
-    if value_ms >= policy.switch_to_seconds_at_or_above_ms {
-        DurationDisplayUnit::Seconds
-    } else if value_ms < policy.switch_to_nanoseconds_below_ms {
-        DurationDisplayUnit::Nanoseconds
-    } else if value_ms < policy.switch_to_microseconds_below_ms {
-        DurationDisplayUnit::Microseconds
-    } else {
-        DurationDisplayUnit::Milliseconds
-    }
-}
-
-fn compare_duration_display_unit(
-    policy: DashboardTimingFormat<'_>,
-    left_ms: Option<f64>,
-    right_ms: Option<f64>,
-) -> Option<DurationDisplayUnit> {
-    [left_ms, right_ms]
-        .into_iter()
-        .flatten()
-        .filter(|value| *value > 0.0)
-        .reduce(f64::max)
-        .map(|value| auto_duration_display_unit(policy, value))
-}
-
-fn dashboard_timing_format(snapshot: &Value) -> DashboardTimingFormat<'_> {
-    let timing = &snapshot["thresholds"]["dashboard"]["timing_format"];
-    DashboardTimingFormat {
-        switch_to_nanoseconds_below_ms: timing["switch_to_nanoseconds_below_ms"]
-            .as_f64()
-            .expect("dashboard timing policy missing switch_to_nanoseconds_below_ms"),
-        switch_to_microseconds_below_ms: timing["switch_to_microseconds_below_ms"]
-            .as_f64()
-            .expect("dashboard timing policy missing switch_to_microseconds_below_ms"),
-        switch_to_seconds_at_or_above_ms: timing["switch_to_seconds_at_or_above_ms"]
-            .as_f64()
-            .expect("dashboard timing policy missing switch_to_seconds_at_or_above_ms"),
-        non_positive_floor_label: timing["non_positive_floor_label"]
-            .as_str()
-            .expect("dashboard timing policy missing non_positive_floor_label"),
-        seconds_suffix: timing["seconds_suffix"]
-            .as_str()
-            .expect("dashboard timing policy missing seconds_suffix"),
-        milliseconds_suffix: timing["milliseconds_suffix"]
-            .as_str()
-            .expect("dashboard timing policy missing milliseconds_suffix"),
-        microseconds_suffix: timing["microseconds_suffix"]
-            .as_str()
-            .expect("dashboard timing policy missing microseconds_suffix"),
-        nanoseconds_suffix: timing["nanoseconds_suffix"]
-            .as_str()
-            .expect("dashboard timing policy missing nanoseconds_suffix"),
-        seconds_decimals: timing["seconds_decimals"]
-            .as_u64()
-            .expect("dashboard timing policy missing seconds_decimals")
-            as usize,
-        milliseconds_decimals: timing["milliseconds_decimals"]
-            .as_u64()
-            .expect("dashboard timing policy missing milliseconds_decimals")
-            as usize,
-        microseconds_decimals: timing["microseconds_decimals"]
-            .as_u64()
-            .expect("dashboard timing policy missing microseconds_decimals")
-            as usize,
-        nanoseconds_decimals: timing["nanoseconds_decimals"]
-            .as_u64()
-            .expect("dashboard timing policy missing nanoseconds_decimals")
-            as usize,
-    }
-}
-
-fn format_ratio_percent(value: Option<f64>) -> String {
-    value
-        .map(|number| format!("{:.2}%", number * 100.0))
-        .unwrap_or_else(|| "ещё нет данных".to_string())
-}
-
-fn format_percent(value: Option<f64>) -> String {
-    value
-        .map(|number| format!("{number:.2}%"))
-        .unwrap_or_else(|| "ещё нет данных".to_string())
-}
-
-fn format_threshold_at_least(value: Option<f64>, unit: &str, decimals: usize) -> String {
-    format_threshold_value(value, ">", unit, decimals)
-}
-
-fn format_threshold_at_least_or_equal(value: Option<f64>, unit: &str, decimals: usize) -> String {
-    format_threshold_value(value, ">=", unit, decimals)
-}
-
-fn format_zero_or_at_most_percent(value: Option<f64>) -> String {
-    match value {
-        Some(number) if number.abs() < f64::EPSILON => {
-            format_threshold_value(Some(number), "=", "%", 2)
-        }
-        Some(number) => format_threshold_value(Some(number), "<=", "%", 2),
-        None => "ещё нет данных".to_string(),
-    }
-}
-
-fn format_threshold_value(
-    value: Option<f64>,
-    operator: &str,
-    unit: &str,
-    decimals: usize,
-) -> String {
-    match value {
-        Some(number) if unit.is_empty() => {
-            format!("{operator} {}", format_decimal(number, decimals))
-        }
-        Some(number) if unit == "%" => {
-            format!("{operator} {}%", format_decimal(number, decimals))
-        }
-        Some(number) => format!("{operator} {} {unit}", format_decimal(number, decimals)),
-        None => "ещё нет данных".to_string(),
-    }
-}
-
-fn format_time_threshold(snapshot: &Value, value: Option<f64>, operator: &str) -> String {
-    format_threshold_rendered(operator, format_ms(snapshot, value))
-}
-
-fn format_threshold_rendered(operator: &str, rendered: String) -> String {
-    if rendered == "ещё нет данных" {
-        rendered
-    } else {
-        format!("{operator} {rendered}")
-    }
-}
-
-fn format_decimal(value: f64, decimals: usize) -> String {
-    format!("{value:.prec$}", prec = decimals)
-}
-
-fn format_decimal_trimmed(value: f64, decimals: usize) -> String {
-    let mut rendered = format_decimal(value, decimals);
-    while rendered.contains('.') && rendered.ends_with('0') {
-        rendered.pop();
-    }
-    if rendered.ends_with('.') {
-        rendered.pop();
-    }
-    rendered
-}
-
-fn format_time_compare_pair(
-    snapshot: &Value,
-    target_ms: Option<f64>,
-    current_ms: Option<f64>,
-    operator: &str,
-) -> Vec<String> {
-    let policy = dashboard_timing_format(snapshot);
-    let unit = compare_duration_display_unit(policy, target_ms, current_ms);
-    compare_pair(
-        format_threshold_rendered(
-            operator,
-            render_duration_ms_with_unit(policy, target_ms, unit),
-        ),
-        render_duration_ms_with_unit(policy, current_ms, unit),
-    )
-}
-
-fn format_seconds_compare_pair(
-    snapshot: &Value,
-    target_seconds: Option<f64>,
-    current_seconds: Option<f64>,
-    operator: &str,
-) -> Vec<String> {
-    format_time_compare_pair(
-        snapshot,
-        target_seconds.map(|value| value * 1000.0),
-        current_seconds.map(|value| value * 1000.0),
-        operator,
-    )
-}
-
-fn format_burst_qps_table(value: Option<f64>) -> String {
-    match value {
-        Some(number) => format!("{}\nBurst QPS", format_burst_qps_number(number)),
-        None => "ещё нет данных".to_string(),
-    }
-}
-
-fn format_burst_qps_threshold(value: Option<f64>, operator: &str) -> String {
-    match value {
-        Some(number) => format!("{operator} {}\nBurst QPS", format_burst_qps_number(number)),
-        None => "ещё нет данных".to_string(),
-    }
-}
-
-fn format_burst_qps_number(value: f64) -> String {
-    let mut rendered = format!("{value:.2}");
-    while rendered.contains('.') && rendered.ends_with('0') {
-        rendered.pop();
-    }
-    if rendered.ends_with('.') {
-        rendered.pop();
-    }
-    rendered
-}
-
-fn format_u64(value: Option<u64>) -> String {
-    value
-        .map(|number| number.to_string())
-        .unwrap_or_else(|| "ещё нет данных".to_string())
-}
-
-fn format_target_u64(operator: &str, value: u64) -> String {
-    format!("{operator} {value}")
-}
-
-fn format_signed_count(value: Option<i64>) -> String {
-    value
-        .map(|number| number.to_string())
-        .unwrap_or_else(|| "ещё нет данных".to_string())
-}
-
-fn format_count_with_word(value: u64, one: &str, few: &str, many: &str) -> String {
-    let last_two = value % 100;
-    let last_one = value % 10;
-    let word = if (11..=14).contains(&last_two) {
-        many
-    } else {
-        match last_one {
-            1 => one,
-            2..=4 => few,
-            _ => many,
-        }
-    };
-    format!("{value} {word}")
-}
-
-fn format_f64_count(value: Option<f64>) -> String {
-    value
-        .map(|number| format!("{number:.0}"))
-        .unwrap_or_else(|| "ещё нет данных".to_string())
-}
-
-fn format_optional<F>(value: Option<f64>, formatter: F) -> String
-where
-    F: FnOnce(f64) -> String,
-{
-    value
-        .map(formatter)
-        .unwrap_or_else(|| "ещё нет данных".to_string())
-}
-
-fn human_bytes(value: f64) -> String {
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
-    if value >= GIB {
-        format!("{:.2} GiB", value / GIB)
-    } else if value >= MIB {
-        format!("{:.2} MiB", value / MIB)
-    } else if value >= KIB {
-        format!("{:.2} KiB", value / KIB)
-    } else {
-        format!("{value:.0} B")
-    }
-}
-
-fn human_bytes_per_sec(value: f64) -> String {
-    format!("{}/s", human_bytes(value))
-}
-
-fn format_celsius(value: f64) -> String {
-    format!("{value:.1}°C")
-}
-
-fn elapsed_since_epoch_label(start_epoch_ms: Option<u64>, end_epoch_ms: Option<u64>) -> String {
-    let Some(start_epoch_ms) = start_epoch_ms.filter(|value| *value > 0) else {
-        return "ещё нет данных".to_string();
-    };
-    let Some(end_epoch_ms) = end_epoch_ms.filter(|value| *value >= start_epoch_ms) else {
-        return "ещё нет данных".to_string();
-    };
-    human_elapsed_ms(end_epoch_ms.saturating_sub(start_epoch_ms))
-}
-
-fn human_elapsed_ms(value_ms: u64) -> String {
-    let total_minutes = value_ms / 60_000;
-    if total_minutes < 1 {
-        return "меньше минуты".to_string();
-    }
-
-    let days = total_minutes / (60 * 24);
-    let hours = (total_minutes % (60 * 24)) / 60;
-    let minutes = total_minutes % 60;
-    let mut parts = Vec::new();
-
-    if days > 0 {
-        parts.push(format!("{days} дн."));
-    }
-    if hours > 0 {
-        parts.push(format!("{hours} ч."));
-    }
-    if minutes > 0 {
-        parts.push(format!("{minutes} мин."));
-    }
-
-    if parts.is_empty() {
-        "меньше минуты".to_string()
-    } else {
-        parts.join(" ")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_scope_activity_card, artifact_cleanup_warning, benchmark_qdrant_live_card,
-        browser_base_url, build_benchmark_cards, build_continuity_correctness_card,
-        build_degradation_model_card, build_hero_cards, build_links, build_machine_cards,
+        artifact_cleanup_warning, benchmark_qdrant_live_card, browser_base_url,
+        build_benchmark_cards, build_governance_card, build_hero_cards, build_links,
+        build_live_summary_payload, build_machine_cards, build_payload, build_service_cards,
         build_top_cards, format_ms, format_time_compare_pair, human_elapsed_ms,
         live_latency_compare_card, monitoring_url, render_html, working_state_live_card,
         worst_status,
     };
+    use crate::config::AppConfig;
     use crate::hardware_telemetry::{AcceleratorSummary, MachineSummary};
     use crate::working_state;
     use serde_json::{Value, json};
+
+    fn test_config() -> AppConfig {
+        AppConfig {
+            stack_name: "amai".to_string(),
+            pg_db: "amai".to_string(),
+            app_db_user: "amai".to_string(),
+            app_db_password: "amai".to_string(),
+            postgres_dsn: "postgres://localhost/unused".to_string(),
+            app_postgres_dsn: "postgres://localhost/unused".to_string(),
+            qdrant_url: "http://127.0.0.1:6334".to_string(),
+            qdrant_http_url: "http://127.0.0.1:6334".to_string(),
+            qdrant_collection_code: "test".to_string(),
+            benchmark_qdrant_http_url: None,
+            benchmark_qdrant_collection_code: None,
+            qdrant_alias_code: "test".to_string(),
+            qdrant_collection_memory: "memory".to_string(),
+            qdrant_alias_memory: "memory".to_string(),
+            qdrant_code_dim: 384,
+            qdrant_memory_dim: 384,
+            qdrant_distance: "Cosine".to_string(),
+            s3_endpoint: "http://127.0.0.1:9000".to_string(),
+            s3_region: "us-east-1".to_string(),
+            s3_access_key: "test".to_string(),
+            s3_secret_key: "test".to_string(),
+            s3_bucket_artifacts: "artifacts".to_string(),
+            s3_bucket_transcripts: "transcripts".to_string(),
+            s3_bucket_context: "context".to_string(),
+            nats_url: "nats://127.0.0.1:4222".to_string(),
+            nats_http_url: "http://127.0.0.1:8222".to_string(),
+            edge_cache_path: "/tmp/edge-cache-test.db".into(),
+            default_retrieval_mode: "local_strict".to_string(),
+            code_embed_model: "multilingual_e5_small".to_string(),
+            memory_embed_model: "multilingual_e5_small".to_string(),
+            chunk_max_bytes: 512,
+            fallback_chunk_lines: 40,
+            fallback_chunk_overlap_lines: 5,
+            local_fast_cache_ttl_ms: 5_000,
+        }
+    }
 
     fn synthetic_machine_summary(
         disk_available_gib: f64,
@@ -14422,31 +11314,157 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_payload_exposes_live_compare_card_alias_from_top_cards() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1774239286880u64,
+            "observe_refresh": {"total_ms": 12},
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 2.0,
+                        "target_p99_ms": 3.0,
+                        "target_max_ms": 5.0,
+                        "live_readiness_sample_count": 100,
+                        "benchmark_sample_count": 100000,
+                        "target_sample_count": 100000
+                    },
+                    "cold_live_table": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 4.0,
+                        "target_p99_ms": 6.0,
+                        "target_max_ms": 10.0,
+                        "live_readiness_sample_count": 100,
+                        "benchmark_sample_count": 10000,
+                        "target_sample_count": 10000
+                    }
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "live_response_latency": {
+                        "current_session": {
+                            "sample_count": 0,
+                            "latency_slices": []
+                        },
+                        "rolling_window": {
+                            "sample_count": 1,
+                            "latency_slices": [
+                                {
+                                    "state": "cold",
+                                    "sample_count": 1,
+                                    "p50_latency_ms": 2.0,
+                                    "p95_latency_ms": 2.0,
+                                    "p99_latency_ms": 2.0,
+                                    "max_latency_ms": 2.0
+                                }
+                            ]
+                        }
+                    },
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn"
+                    }
+                }
+            }
+        });
+
+        let payload =
+            build_payload(&test_config(), &snapshot, "127.0.0.1:9464", 1000).expect("payload");
+
+        assert_eq!(
+            payload["live_compare_card"]["kind"].as_str(),
+            Some("live_compare")
+        );
+        assert_eq!(
+            payload["live_compare_card"]["title"].as_str(),
+            Some("Скорость ответа")
+        );
+        assert!(payload["client_budget_live"].is_object());
+    }
+
+    #[test]
     fn dashboard_html_refresh_contract_is_live_on_focus_and_visibility() {
-        let html = render_html(1000);
+        let html = render_html(1000, None);
         assert!(html.contains("const TOOLTIP_HIDE_GRACE_MS = 220;"));
+        assert!(html.contains("const DASHBOARD_BOOTSTRAP_PAYLOAD = null;"));
+        assert!(html.contains("async function fetchWithTimeout(path, timeoutMs, init = {}) {"));
+        assert!(html.contains(
+            "renderDashboardPayload(chooseInitialDashboardPayload(DASHBOARD_BOOTSTRAP_PAYLOAD));"
+        ));
+        assert!(html.contains(
+            "function chooseInitialDashboardPayload(bootstrapPayload) {\n      if (bootstrapPayload) {\n        return bootstrapPayload;\n      }\n      return null;\n    }"
+        ));
+        assert!(html.contains(
+            "const DASHBOARD_PAYLOAD_CACHE_KEY = \"amai-human-dashboard-last-payload-v1\";"
+        ));
         assert!(html.contains(
             "function scheduleHideTooltip(target = null, delayMs = TOOLTIP_HIDE_GRACE_MS) {"
         ));
+        assert!(html.contains(
+            "function isDocumentVisibleForRefresh() {\n      return document.visibilityState === \"visible\";\n    }"
+        ));
+        assert!(html.contains(
+            "function scheduleForcedDashboardRefresh(reason = \"forced_refresh\", delayMs = 0) {"
+        ));
         assert!(html.contains("document.addEventListener(\"visibilitychange\""));
-        assert!(html.contains("window.addEventListener(\"focus\", () => loadDashboard(true));"));
-        assert!(html.contains("window.addEventListener(\"pageshow\", () => loadDashboard(true));"));
+        assert!(html.contains(
+            "window.addEventListener(\"focus\", () => scheduleForcedDashboardRefresh(\"window_focus\"));"
+        ));
+        assert!(html.contains(
+            "window.addEventListener(\"pageshow\", () => scheduleForcedDashboardRefresh(\"window_pageshow\"));"
+        ));
         assert!(html.contains("const dashboardThreadId = new URLSearchParams(window.location.search).get(\"thread_id\");"));
-        assert!(html.contains("fetch(apiPathWithThreadHint(\"/api/client-budget-live\")"));
+        assert!(html.contains(
+            "fetchWithTimeout(\n          apiPathWithThreadHint(\"/api/client-budget-live\")"
+        ));
+        assert!(html.contains("scheduleForcedDashboardRefresh(\"initial_boot\");"));
+        assert!(html.contains(
+            "fetchWithTimeout(\n          apiPathWithThreadHint(\"/api/dashboard-live-summary\")"
+        ));
         assert!(html.contains("fetch(apiPathWithThreadHint(\"/api/client-budget-target\")"));
         assert!(html.contains("/api/client-budget-host-control-launch"));
         assert!(html.contains("/api/client-budget-host-control-feedback"));
-        assert!(html.contains("fetch(apiPathWithThreadHint(\"/api/dashboard\")"));
+        assert!(
+            html.contains("fetchWithTimeout(\n          apiPathWithThreadHint(\"/api/dashboard\")")
+        );
         assert!(html.contains("id=\"dashboard-toast\""));
         assert!(html.contains("tooltipLayer.addEventListener(\"mouseenter\", () => {"));
+        assert!(!html.contains(
+            "setInterval(() => syncDashboardLiveSummary(false), DASHBOARD_LIVE_SUMMARY_REFRESH_MS);"
+        ));
         assert!(html.contains(
             "setInterval(() => syncClientBudgetLiveRows(false), CLIENT_BUDGET_LIVE_REFRESH_MS);"
         ));
         assert!(!html.contains("setInterval(() => loadDashboard(false), REFRESH_MS);"));
+        assert!(!html.contains("syncActiveAgentBudgetLiveCard(false)"));
+        assert!(!html.contains("fetchActiveAgentBudgetLivePayload(force = false)"));
         assert!(!html.contains(
             "async function fetchClientBudgetLivePayload(force = false) {\n      if (!force && isRefreshPaused()) {"
         ));
         assert!(!html.contains("INTERACTION_HOLD_SELECTOR"));
+    }
+
+    #[test]
+    fn dashboard_html_contains_agent_rename_endpoint_and_inline_tooltip_trigger() {
+        let html = render_html(1000, None);
+        assert!(html.contains("/api/agent-display-name"));
+        assert!(html.contains("content.className = \"tooltip-inline-trigger has-tooltip\";"));
     }
 
     #[test]
@@ -14502,6 +11520,17 @@ mod tests {
     }
 
     #[test]
+    fn format_ms_falls_back_to_default_dashboard_timing_policy_when_missing() {
+        let snapshot = json!({});
+
+        assert_eq!(format_ms(&snapshot, Some(0.0)), "0 ns");
+        assert_eq!(format_ms(&snapshot, Some(0.0004)), "400 ns");
+        assert_eq!(format_ms(&snapshot, Some(0.0015)), "1.5 µs");
+        assert_eq!(format_ms(&snapshot, Some(2.3456)), "2.346 ms");
+        assert_eq!(format_ms(&snapshot, Some(2345.6)), "2.346 s");
+    }
+
+    #[test]
     fn compare_time_pair_uses_one_row_unit_for_target_and_current() {
         let snapshot = json!({
             "thresholds": {
@@ -14525,12 +11554,16 @@ mod tests {
         });
 
         assert_eq!(
-            format_time_compare_pair(&snapshot, Some(1.0), Some(0.674), "<"),
-            vec!["< 1 ms".to_string(), "0.674 ms".to_string()]
+            format_time_compare_pair(&snapshot, Some(1.0), Some(0.674), "<="),
+            vec!["<= 1 ms".to_string(), "0.674 ms".to_string()]
         );
         assert_eq!(
-            format_time_compare_pair(&snapshot, Some(0.015), Some(0.003226), "<"),
-            vec!["< 15 µs".to_string(), "3.226 µs".to_string()]
+            format_time_compare_pair(&snapshot, Some(0.015), Some(0.003226), "<="),
+            vec!["<= 15 µs".to_string(), "3.226 µs".to_string()]
+        );
+        assert_eq!(
+            format_time_compare_pair(&snapshot, Some(1.0), Some(0.000271), "<="),
+            vec!["<= 1 ms".to_string(), "271 ns".to_string()]
         );
     }
 
@@ -14553,18 +11586,32 @@ mod tests {
                 "points_count": 70200.0,
                 "segments_count": 8.0,
                 "index_optimize_queue": 0.0,
-                "update_queue_length": 0.0
+                "update_queue_length": 0.0,
+                "run_summary": {
+                    "benchmark_display_name": "VectorDBBench",
+                    "dataset_display_name": "dbpedia-openai-1000k-angular",
+                    "run_state": "finished_ok",
+                    "dataset_size": 990000,
+                    "latest_result": {
+                        "recall": 0.9958,
+                        "p95_ms": 0.0117,
+                        "p99_ms": 0.0129
+                    }
+                }
             }
         });
         let card = benchmark_qdrant_live_card(&snapshot);
         assert_eq!(card["status"].as_str(), Some("unknown"));
-        assert_eq!(card["status_label"].as_str(), Some("тест не запущен"));
-        assert_eq!(card["value"].as_str(), Some("402.57 MiB"));
+        assert_eq!(
+            card["status_label"].as_str(),
+            Some("последний прогон успешен")
+        );
+        assert_eq!(card["value"].as_str(), Some("последний прогон успешен"));
         assert!(
             card["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("последний сохранённый срез")
+                .contains("последнего успешного прогона")
         );
         let empty_rows = Vec::new();
         let labels = card["rows"]
@@ -14573,8 +11620,8 @@ mod tests {
             .iter()
             .filter_map(|row| row["label"].as_str())
             .collect::<Vec<_>>();
-        assert!(!labels.contains(&"Что это значит"));
-        assert!(!labels.contains(&"Техническая причина"));
+        assert!(labels.contains(&"Прогон"));
+        assert!(labels.contains(&"Последний результат"));
     }
 
     #[test]
@@ -14596,7 +11643,12 @@ mod tests {
                 "update_queue_length": null,
                 "memory_resident_bytes": null,
                 "points_count": null,
-                "segments_count": null
+                "segments_count": null,
+                "run_summary": {
+                    "benchmark_display_name": "VectorDBBench",
+                    "dataset_display_name": "dbpedia-openai-1000k-angular",
+                    "run_state": "not_started"
+                }
             }
         });
         let card = benchmark_qdrant_live_card(&snapshot);
@@ -14610,8 +11662,8 @@ mod tests {
             .iter()
             .filter_map(|row| row["label"].as_str())
             .collect::<Vec<_>>();
-        assert!(!labels.contains(&"Что это значит"));
-        assert!(!labels.contains(&"Техническая причина"));
+        assert!(labels.contains(&"Прогон"));
+        assert!(labels.contains(&"Состояние"));
     }
 
     #[test]
@@ -14633,18 +11685,74 @@ mod tests {
                 "points_count": 218800.0,
                 "segments_count": 8.0,
                 "index_optimize_queue": 0.0,
-                "update_queue_length": 0.0
+                "update_queue_length": 0.0,
+                "run_summary": {
+                    "benchmark_display_name": "VectorDBBench",
+                    "dataset_display_name": "dbpedia-openai-1000k-angular",
+                    "run_state": "finished_error"
+                }
             }
         });
         let card = benchmark_qdrant_live_card(&snapshot);
-        assert_eq!(card["status"].as_str(), Some("unknown"));
-        assert_eq!(card["status_label"].as_str(), Some("тест не запущен"));
-        assert_eq!(card["value"].as_str(), Some("209.53 MiB"));
+        assert_eq!(card["status"].as_str(), Some("alert"));
+        assert_eq!(
+            card["status_label"].as_str(),
+            Some("последний прогон с ошибкой")
+        );
+        assert_eq!(card["value"].as_str(), Some("последний прогон с ошибкой"));
         assert!(
             card["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("Тест сейчас не запущен")
+                .contains("завершился с ошибкой")
+        );
+    }
+
+    #[test]
+    fn benchmark_qdrant_card_is_waiting_while_live_run_is_still_in_progress() {
+        let snapshot = json!({
+            "thresholds": {
+                "qdrant": {
+                    "optimize_queue": { "target": 10.0 },
+                    "update_queue_length": { "target": 0.0 }
+                }
+            },
+            "benchmark_qdrant": {
+                "configured": true,
+                "available": true,
+                "active": true,
+                "from_last_success": false,
+                "http_url": "http://127.0.0.1:7633",
+                "memory_resident_bytes": 219709440.0,
+                "points_count": 990000.0,
+                "segments_count": 8.0,
+                "index_optimize_queue": 0.0,
+                "update_queue_length": 0.0,
+                "run_summary": {
+                    "benchmark_display_name": "ann-benchmarks",
+                    "dataset_display_name": "dbpedia-openai-1000k-angular",
+                    "run_state": "running",
+                    "dataset_size": 990000,
+                    "started_at_epoch_s": 1775800000,
+                    "live_progress": {
+                        "definition_label": "['angular', 'scalar', 32, 128]",
+                        "group_current": 9,
+                        "group_total": 18,
+                        "processed_current": 1000,
+                        "processed_total": 10000
+                    }
+                }
+            }
+        });
+        let card = benchmark_qdrant_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("waiting"));
+        assert_eq!(card["status_label"].as_str(), Some("идёт прогон"));
+        assert_eq!(card["value"].as_str(), Some("идёт прогон"));
+        assert!(
+            card["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Итоговый статус")
         );
     }
 
@@ -14671,8 +11779,8 @@ mod tests {
                 "retrieval": {
                     "hot_live_table": {
                         "target_p50_ms": 1.0,
-                        "target_p95_ms": 1.0,
-                        "target_p99_ms": 2.0,
+                        "target_p95_ms": 2.0,
+                        "target_p99_ms": 3.0,
                         "target_max_ms": 5.0,
                         "target_sample_count": 100000
                     },
@@ -14707,19 +11815,19 @@ mod tests {
         assert_eq!(card["status"].as_str(), Some("waiting"));
         assert_eq!(
             card["status_label"].as_str(),
-            Some("идёт накопление выборки")
+            Some("текущая серия ещё набирается")
         );
         assert!(
             card["metrics"][0]["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("ещё не накопилась живая выборка")
+                .contains("пока нет ни текущей серии, ни накопленного окна")
         );
         assert!(
             card["metrics"][1]["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("Пока рано делать строгий вывод")
+                .contains("По задержке всё хорошо")
         );
     }
 
@@ -14746,8 +11854,8 @@ mod tests {
                 "retrieval": {
                     "hot_live_table": {
                         "target_p50_ms": 1.0,
-                        "target_p95_ms": 1.0,
-                        "target_p99_ms": 2.0,
+                        "target_p95_ms": 2.0,
+                        "target_p99_ms": 3.0,
                         "target_max_ms": 5.0,
                         "target_sample_count": 100000
                     },
@@ -14792,7 +11900,7 @@ mod tests {
     }
 
     #[test]
-    fn live_compare_card_surfaces_mixed_live_slice_when_hot_cold_are_absent() {
+    fn live_compare_card_uses_live_readiness_floor_separately_from_benchmark_floor() {
         let snapshot = json!({
             "thresholds": {
                 "dashboard": {
@@ -14809,6 +11917,201 @@ mod tests {
                         "milliseconds_decimals": 3,
                         "microseconds_decimals": 3,
                         "nanoseconds_decimals": 0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 2.0,
+                        "target_p99_ms": 3.0,
+                        "target_max_ms": 5.0,
+                        "live_readiness_sample_count": 100,
+                        "benchmark_sample_count": 100000,
+                        "target_sample_count": 100000
+                    },
+                    "cold_live_table": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 4.0,
+                        "target_p99_ms": 6.0,
+                        "target_max_ms": 10.0,
+                        "live_readiness_sample_count": 100,
+                        "benchmark_sample_count": 10000,
+                        "target_sample_count": 10000
+                    }
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "profile": {
+                        "rolling_window_hours": 24
+                    },
+                    "live_response_latency": {
+                        "current_session": {
+                            "latency_slices": []
+                        },
+                        "rolling_window": {
+                            "latency_slices": [
+                                {
+                                    "state": "hot",
+                                    "sample_count": 24,
+                                    "p50_latency_ms": 0.8,
+                                    "p95_latency_ms": 0.9,
+                                    "p99_latency_ms": 1.4,
+                                    "max_latency_ms": 2.4
+                                },
+                                {
+                                    "state": "cold",
+                                    "sample_count": 140,
+                                    "p50_latency_ms": 1.9,
+                                    "p95_latency_ms": 3.9,
+                                    "p99_latency_ms": 5.0,
+                                    "max_latency_ms": 7.1
+                                }
+                            ]
+                        }
+                    },
+                    "current_session": {
+                        "latency_slices": []
+                    },
+                    "rolling_window": {
+                        "latency_slices": [
+                            {
+                                "state": "hot",
+                                "sample_count": 24,
+                                "p50_latency_ms": 0.8,
+                                "p95_latency_ms": 0.9,
+                                "p99_latency_ms": 1.4,
+                                "max_latency_ms": 2.4
+                            },
+                            {
+                                "state": "cold",
+                                "sample_count": 140,
+                                "p50_latency_ms": 1.9,
+                                "p95_latency_ms": 3.9,
+                                "p99_latency_ms": 5.0,
+                                "max_latency_ms": 7.1
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let card = live_latency_compare_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("waiting"));
+        assert_eq!(
+            card["status_label"].as_str(),
+            Some("онлайн-серия ещё набирается")
+        );
+        assert_eq!(
+            card["table"]["rows"][0]["values"][4].as_str(),
+            Some(">= 100")
+        );
+        assert_eq!(
+            card["table"]["rows"][3]["values"][4].as_str(),
+            Some(">= 100")
+        );
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Ниже рядом показаны и текущая серия")
+        );
+    }
+
+    #[test]
+    fn live_compare_card_falls_back_to_stable_targets_when_thresholds_are_missing() {
+        let snapshot = json!({
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "retrieval": {}
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "rolling_window": {
+                        "latency_slices": [
+                            {
+                                "state": "cold",
+                                "sample_count": 1,
+                                "current_latency_ms": 87.0,
+                                "p50_latency_ms": 87.0,
+                                "p95_latency_ms": 87.0,
+                                "p99_latency_ms": 87.0,
+                                "max_latency_ms": 87.0
+                            }
+                        ]
+                    },
+                    "current_session": {
+                        "latency_slices": []
+                    }
+                }
+            }
+        });
+
+        let card = live_latency_compare_card(&snapshot);
+        assert_eq!(
+            card["table"]["rows"][0]["values"],
+            json!(["<= 1 ms", "<= 2 ms", "<= 3 ms", "<= 5 ms", ">= 100"])
+        );
+        assert_eq!(
+            card["table"]["rows"][2]["values"],
+            json!(["<= 2 ms", "<= 4 ms", "<= 6 ms", "<= 10 ms", ">= 100"])
+        );
+    }
+
+    #[test]
+    fn live_compare_card_keeps_stable_rows_when_hot_cold_are_absent() {
+        let snapshot = json!({
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 2.0,
+                        "target_p99_ms": 3.0,
+                        "target_max_ms": 5.0,
+                        "live_readiness_sample_count": 100,
+                        "benchmark_sample_count": 100000,
+                        "target_sample_count": 100000
+                    },
+                    "cold_live_table": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 4.0,
+                        "target_p99_ms": 6.0,
+                        "target_max_ms": 10.0,
+                        "live_readiness_sample_count": 100,
+                        "benchmark_sample_count": 10000,
+                        "target_sample_count": 10000
                     }
                 }
             },
@@ -14833,28 +12136,473 @@ mod tests {
 
         let card = live_latency_compare_card(&snapshot);
         assert_eq!(card["status"].as_str(), Some("waiting"));
-        assert_eq!(
-            card["status_label"].as_str(),
-            Some("live без разделения режимов")
-        );
+        assert_eq!(card["status_label"].as_str(), Some("окно ещё набирается"));
         assert_eq!(
             card["metrics"][0]["label"].as_str(),
-            Some("Текущий live поток")
+            Some("Повторный запрос")
         );
-        assert_eq!(card["metrics"][0]["value"].as_str(), Some("1.2 ms"));
+        assert_eq!(card["metrics"][0]["value"].as_str(), Some("ещё нет данных"));
+        assert_eq!(card["metrics"][1]["label"].as_str(), Some("Новый запрос"));
+        assert_eq!(card["metrics"][1]["value"].as_str(), Some("ещё нет данных"));
         assert_eq!(
-            card["metrics"][1]["label"].as_str(),
-            Some("Последний запрос")
+            card["table"]["rows"][0]["label"].as_str(),
+            Some("Повторный запрос — эталон")
+        );
+        assert_eq!(
+            card["table"]["rows"][2]["label"].as_str(),
+            Some("Новый запрос — эталон")
         );
         assert_eq!(
             card["table"]["rows"].as_array().map(|rows| rows.len()),
-            Some(1)
+            Some(4)
         );
         assert!(
             card["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("общий live поток")
+                .contains("Последний живой ответ")
+        );
+    }
+
+    #[test]
+    fn live_compare_card_keeps_stable_rows_when_live_turn_is_empty() {
+        let snapshot = json!({
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 2.0,
+                        "target_p99_ms": 3.0,
+                        "target_max_ms": 5.0,
+                        "live_readiness_sample_count": 100,
+                        "benchmark_sample_count": 100000,
+                        "target_sample_count": 100000
+                    },
+                    "cold_live_table": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 4.0,
+                        "target_p99_ms": 6.0,
+                        "target_max_ms": 10.0,
+                        "live_readiness_sample_count": 100,
+                        "benchmark_sample_count": 10000,
+                        "target_sample_count": 10000
+                    }
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn"
+                    },
+                    "current_session": {
+                        "latency_slices": []
+                    },
+                    "rolling_window": {
+                        "latency_slices": []
+                    }
+                }
+            }
+        });
+
+        let card = live_latency_compare_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("unknown"));
+        assert_eq!(
+            card["table"]["rows"][0]["values"],
+            json!(["<= 1 ms", "<= 2 ms", "<= 3 ms", "<= 5 ms", ">= 100"])
+        );
+        assert_eq!(
+            card["table"]["rows"][1]["values"],
+            json!([
+                "ещё нет данных",
+                "ещё нет данных",
+                "ещё нет данных",
+                "ещё нет данных",
+                "0"
+            ])
+        );
+        assert_eq!(
+            card["table"]["rows"][2]["values"],
+            json!([
+                "ещё нет данных",
+                "ещё нет данных",
+                "ещё нет данных",
+                "ещё нет данных",
+                "0"
+            ])
+        );
+        assert_eq!(
+            card["table"]["rows"][3]["values"],
+            json!(["<= 2 ms", "<= 4 ms", "<= 6 ms", "<= 10 ms", ">= 100"])
+        );
+        assert_eq!(
+            card["table"]["rows"][4]["values"],
+            json!([
+                "ещё нет данных",
+                "ещё нет данных",
+                "ещё нет данных",
+                "ещё нет данных",
+                "0"
+            ])
+        );
+        assert_eq!(
+            card["table"]["rows"][5]["values"],
+            json!([
+                "ещё нет данных",
+                "ещё нет данных",
+                "ещё нет данных",
+                "ещё нет данных",
+                "0"
+            ])
+        );
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("В текущем live-turn пока нет новых Amai-событий")
+        );
+    }
+
+    #[test]
+    fn live_compare_card_prefers_rolling_window_so_stats_do_not_reset_on_new_chat() {
+        let snapshot = json!({
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 2.0,
+                        "target_p99_ms": 3.0,
+                        "target_max_ms": 5.0,
+                        "target_sample_count": 100000
+                    },
+                    "cold_live_table": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 4.0,
+                        "target_p99_ms": 6.0,
+                        "target_max_ms": 10.0,
+                        "target_sample_count": 10000
+                    }
+                }
+            },
+            "observe_refresh": {
+                "total_ms": 42
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "profile": {
+                        "rolling_window_hours": 24
+                    },
+                    "current_session": {
+                        "latency_slices": []
+                    },
+                    "rolling_window": {
+                        "latency_slices": [
+                            {
+                                "state": "hot",
+                                "sample_count": 120000,
+                                "p50_latency_ms": 0.8,
+                                "p95_latency_ms": 0.9,
+                                "p99_latency_ms": 1.4,
+                                "max_latency_ms": 2.2
+                            },
+                            {
+                                "state": "cold",
+                                "sample_count": 22000,
+                                "p50_latency_ms": 1.9,
+                                "p95_latency_ms": 3.9,
+                                "p99_latency_ms": 5.0,
+                                "max_latency_ms": 7.1
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let card = live_latency_compare_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("pass"));
+        assert_eq!(card["metrics"][0]["value"].as_str(), Some("800 µs"));
+        assert_eq!(card["metrics"][1]["value"].as_str(), Some("1.9 ms"));
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("накопительное окно 24 часов")
+        );
+        assert!(
+            card["title_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("задержку Amai")
+        );
+        assert!(
+            card["table"]["columns"][1]["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("задержка Amai")
+        );
+    }
+
+    #[test]
+    fn live_compare_card_explains_when_current_series_is_from_previous_turn() {
+        let snapshot = json!({
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 2.0,
+                        "target_p99_ms": 3.0,
+                        "target_max_ms": 5.0,
+                        "live_readiness_sample_count": 100,
+                        "benchmark_sample_count": 100000,
+                        "target_sample_count": 100000
+                    },
+                    "cold_live_table": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 4.0,
+                        "target_p99_ms": 6.0,
+                        "target_max_ms": 10.0,
+                        "live_readiness_sample_count": 100,
+                        "benchmark_sample_count": 10000,
+                        "target_sample_count": 10000
+                    }
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn"
+                    },
+                    "live_response_latency": {
+                        "current_session_relation": {
+                            "status": "recent_same_chat_series_previous_turn",
+                            "note": "Текущий live-turn уже начался, но в нём пока нет новых Amai-событий. Показанная текущая серия относится к недавним ответам этого же чата из предыдущего turn."
+                        },
+                        "current_session": {
+                            "latency_slices": [{
+                                "state": "cold",
+                                "sample_count": 1,
+                                "p50_latency_ms": 2.0,
+                                "p95_latency_ms": 2.0,
+                                "p99_latency_ms": 2.0,
+                                "max_latency_ms": 2.0
+                            }]
+                        },
+                        "rolling_window": {
+                            "latency_slices": [{
+                                "state": "cold",
+                                "sample_count": 1,
+                                "p50_latency_ms": 2.0,
+                                "p95_latency_ms": 2.0,
+                                "p99_latency_ms": 2.0,
+                                "max_latency_ms": 2.0
+                            }]
+                        }
+                    }
+                }
+            }
+        });
+
+        let card = live_latency_compare_card(&snapshot);
+        assert!(
+            card["note"]
+                .as_str()
+                .is_some_and(|note| note.contains("из предыдущего turn"))
+        );
+        assert!(
+            card["status_tooltip"]
+                .as_str()
+                .is_some_and(|note| note.contains("из предыдущего turn"))
+        );
+    }
+
+    #[test]
+    fn live_compare_card_ignores_end_to_end_response_window_for_amai_surface() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1_774_258_000_000u64,
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 2.0,
+                        "target_p99_ms": 3.0,
+                        "target_max_ms": 5.0,
+                        "live_readiness_sample_count": 100,
+                        "benchmark_sample_count": 100000,
+                        "target_sample_count": 100000
+                    },
+                    "cold_live_table": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 4.0,
+                        "target_p99_ms": 6.0,
+                        "target_max_ms": 10.0,
+                        "live_readiness_sample_count": 100,
+                        "benchmark_sample_count": 10000,
+                        "target_sample_count": 10000
+                    }
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "profile": {
+                        "rolling_window_hours": 24
+                    },
+                    "current_session": {
+                        "latency_slices": [
+                            {
+                                "state": "cold",
+                                "sample_count": 999,
+                                "p50_latency_ms": 1.0,
+                                "p95_latency_ms": 1.0,
+                                "p99_latency_ms": 1.0,
+                                "max_latency_ms": 1.0
+                            }
+                        ]
+                    },
+                    "rolling_window": {
+                        "latency_slices": []
+                    },
+                    "live_response_latency": {
+                        "current_session": {
+                            "latency_slices": [
+                                {
+                                    "state": "hot",
+                                    "sample_count": 2,
+                                    "current_latency_ms": 3200.0,
+                                    "p50_latency_ms": 2800.0,
+                                    "p95_latency_ms": 3200.0,
+                                    "p99_latency_ms": 3200.0,
+                                    "max_latency_ms": 3200.0
+                                }
+                            ],
+                            "latest_turn": {
+                                "ended_at_epoch_ms": 1_774_257_999_000u64
+                            }
+                        },
+                        "rolling_window": {
+                            "latency_slices": [
+                                {
+                                    "state": "hot",
+                                    "sample_count": 8,
+                                    "current_latency_ms": 3200.0,
+                                    "p50_latency_ms": 2800.0,
+                                    "p95_latency_ms": 4100.0,
+                                    "p99_latency_ms": 4200.0,
+                                    "max_latency_ms": 4200.0
+                                },
+                                {
+                                    "state": "cold",
+                                    "sample_count": 3,
+                                    "current_latency_ms": 8900.0,
+                                    "p50_latency_ms": 7600.0,
+                                    "p95_latency_ms": 8900.0,
+                                    "p99_latency_ms": 8900.0,
+                                    "max_latency_ms": 8900.0
+                                }
+                            ],
+                            "latest_turn": {
+                                "ended_at_epoch_ms": 1_774_257_999_000u64
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let card = live_latency_compare_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("waiting"));
+        assert_eq!(
+            card["status_label"].as_str(),
+            Some("текущая серия ещё набирается")
+        );
+        assert_eq!(card["metrics"][0]["value"].as_str(), Some("2.8 s"));
+        assert_eq!(card["metrics"][1]["value"].as_str(), Some("7.6 s"));
+        assert_eq!(
+            card["table"]["rows"][0]["label"].as_str(),
+            Some("Повторный запрос — эталон")
+        );
+        assert_eq!(
+            card["table"]["rows"][3]["label"].as_str(),
+            Some("Новый запрос — эталон")
+        );
+        assert_eq!(
+            card["table"]["rows"].as_array().map(|rows| rows.len()),
+            Some(6)
+        );
+        assert!(
+            card["source_label"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("live_response_latency")
+        );
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Главный сигнал теперь строится по текущей серии")
         );
     }
 
@@ -14882,8 +12630,8 @@ mod tests {
                 "retrieval": {
                     "hot_live_table": {
                         "target_p50_ms": 1.0,
-                        "target_p95_ms": 1.0,
-                        "target_p99_ms": 2.0,
+                        "target_p95_ms": 2.0,
+                        "target_p99_ms": 3.0,
                         "target_max_ms": 5.0,
                         "target_sample_count": 100000
                     },
@@ -14996,145 +12744,31 @@ mod tests {
         });
 
         let cards = build_top_cards(&snapshot);
-        assert_eq!(cards.len(), 3);
+        assert_eq!(cards.len(), 2);
         assert_eq!(cards[0]["title"].as_str(), Some("Скорость ответа"));
-        assert_eq!(cards[1]["title"].as_str(), Some("Агенты сейчас"));
-        assert_eq!(cards[2]["title"].as_str(), Some("Текущая работа"));
+        assert_eq!(cards[1]["title"].as_str(), Some("Текущая работа"));
         assert!(
             cards[0]["status_tooltip"]
                 .as_str()
                 .unwrap_or_default()
                 .is_empty()
         );
-        assert_eq!(cards[1]["status"].as_str(), Some("pass"));
         assert!(
-            cards[1]["note"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("active ExecCtl leases")
-        );
-        assert!(cards[1]["rows"].as_array().is_some_and(|rows| {
-            rows.iter()
-                .any(|row| row["label"].as_str() == Some("Работают прямо сейчас"))
-        }));
-        assert!(
-            cards[2]["status_tooltip"]
+            cards[1]["status_tooltip"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("Уверенность в этом рабочем снимке пока")
         );
         assert!(
-            cards[2]["note"]
+            cards[1]["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("Сейчас Amai ведёт такую работу")
+                .contains("Короткая сводка по текущей работе")
         );
-        assert!(cards[2]["rows"].as_array().is_some_and(|rows| {
+        assert!(cards[1]["rows"].as_array().is_some_and(|rows| {
             rows.iter()
-                .any(|row| row["label"].as_str() == Some("Последний снимок"))
+                .any(|row| row["label"].as_str() == Some("Что дальше"))
         }));
-        let rows = cards[2]["rows"].as_array().expect("rows");
-        assert!(rows.iter().any(|row| {
-            row["label"].as_str() == Some("Почему включено")
-                && row["value"]
-                    .as_str()
-                    .is_some_and(|value| value.contains("точные совпадения"))
-        }));
-        assert!(rows.iter().any(|row| {
-            row["label"].as_str() == Some("Почему не вошло")
-                && row["value"]
-                    .as_str()
-                    .is_some_and(|value| value.contains("семантические фрагменты"))
-        }));
-    }
-
-    #[test]
-    fn agent_scope_activity_card_separates_live_and_recent_truth_sources() {
-        let snapshot = json!({
-            "agent_scope_activity": {
-                "client_recent_window_minutes": 30,
-                "client_recent_thread_count": 2,
-                "client_recent_threads": [
-                    {
-                        "thread_id": "019d16f2-528d-7cc0-bcfe-8984f95f05c7",
-                        "cwd": "/home/art/Art",
-                        "rollout_path": "/home/art/.codex/sessions/2026/03/22/rollout-2026-03-22T22-07-52-019d16f2-528d-7cc0-bcfe-8984f95f05c7.jsonl",
-                        "title": "продолжай по Amai continuity",
-                        "agent_nickname": "Amai",
-                        "agent_role": "continuity",
-                        "model_provider": "openai",
-                        "model": "gpt-5.4",
-                        "reasoning_effort": "xhigh",
-                        "updated_at_epoch_ms": 1774239285880u64
-                    },
-                    {
-                        "thread_id": "019d258b-b511-74a2-b2f9-898ac18f5a34",
-                        "cwd": "/home/art/Bug-Bounty",
-                        "rollout_path": "/home/art/.codex/sessions/2026/03/25/rollout-2026-03-25T18-10-06-019d258b-b511-74a2-b2f9-898ac18f5a34.jsonl",
-                        "title": "Bug bounty search",
-                        "agent_nickname": "Hunter",
-                        "agent_role": "reports",
-                        "model_provider": "openai",
-                        "model": "gpt-5.4-mini",
-                        "reasoning_effort": "high",
-                        "updated_at_epoch_ms": 1774239200000u64
-                    }
-                ],
-                "active_now_count": 1,
-                "active_now_scopes": [
-                    {
-                        "agent_scope": "art::continuity::default",
-                        "owner_thread_id": "019d16f2-528d-7cc0-bcfe-8984f95f05c7",
-                        "heartbeat_at_epoch_ms": 1774239285880u64
-                    }
-                ],
-                "recent_scope_window_hours": 24,
-                "recent_scope_count": 4,
-                "recent_scopes": [
-                    {
-                        "agent_scope": "art::continuity::default",
-                        "captured_at_epoch_ms": 1774239285880u64
-                    },
-                    {
-                        "agent_scope": "bug_bounty::continuity::default",
-                        "captured_at_epoch_ms": 1774239200000u64
-                    }
-                ]
-            }
-        });
-
-        let card = agent_scope_activity_card(&snapshot);
-        assert_eq!(card["status"].as_str(), Some("alert"));
-        assert_eq!(card["status_label"].as_str(), Some("Amai видит не всех"));
-        assert_eq!(
-            card["value"].as_str(),
-            Some("2 чата за 30м • 1 живой агент сейчас в Amai")
-        );
-        assert!(
-            card["note"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("active ExecCtl leases")
-        );
-        let rows = card["rows"].as_array().expect("rows");
-        assert!(rows.iter().any(|row| {
-            row["label"].as_str() == Some("Работают прямо сейчас")
-                && row["value"]
-                    .as_str()
-                    .is_some_and(|value| value.contains("art::continuity::default"))
-        }));
-        assert!(rows.iter().any(|row| {
-            row["label"].as_str() == Some("Работали за 24ч")
-                && row["value"]
-                    .as_str()
-                    .is_some_and(|value| value.contains("bug_bounty::continuity::default"))
-        }));
-        assert_eq!(card["back_panel"]["kind"].as_str(), Some("hierarchy_tree"));
-        assert!(
-            card["back_panel"]["projects"]
-                .as_array()
-                .is_some_and(|projects| !projects.is_empty())
-        );
     }
 
     #[test]
@@ -15180,7 +12814,7 @@ mod tests {
             card["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("причины включения и исключения здесь пока не показываются")
+                .contains("Короткая сводка по текущей работе")
         );
 
         let unknown_card = working_state_live_card(&json!({
@@ -15192,7 +12826,351 @@ mod tests {
             unknown_card["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("не подмешивает сюда более свежую рабочую линию другого проекта")
+                .contains("нет свежего локального снимка")
+        );
+    }
+
+    #[test]
+    fn working_state_card_surfaces_current_live_turn_activity_when_exact_pair_is_ready() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1775412360000u64,
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_live_turn": {
+                        "status": "exact_pair_materialized",
+                        "retrieval_context_pack_count": 1,
+                        "matched_context_pack_ids_count": 1,
+                        "note": "Exact full-turn pair materialized from the actual VS Code meter.",
+                        "exact_pair": {
+                            "saved_pct": 76.52
+                        }
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "captured_at_epoch_ms": 1775412359000u64,
+                    "project": { "code": "amai" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "amai::continuity::default",
+                    "session_age_ms": 15u64,
+                    "events_count": 3u64,
+                    "current_goal": "Repair dashboard live-turn behavior",
+                    "next_step": "Surface live turn in current work card.",
+                    "last_command": "context pack",
+                    "last_results_summary": "current_live_turn exact pair materialized",
+                    "active_files": [
+                        "/home/art/agent-memory-index/src/dashboard.rs"
+                    ],
+                    "recent_queries": [],
+                    "restore_confidence": "medium"
+                }
+            }
+        });
+
+        let card = working_state_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("pass"));
+        assert!(
+            card["note"]
+                .as_str()
+                .is_some_and(|note| { note.contains("свежий живой ответ Amai") })
+        );
+        let rows = card["rows"].as_array().expect("rows");
+        let live_turn_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Живой turn Amai"))
+            .expect("live turn row");
+        assert!(
+            live_turn_row["value"].as_str().is_some_and(|value| {
+                value.contains("1 context-pack") && value.contains("76.52%")
+            })
+        );
+    }
+
+    #[test]
+    fn working_state_card_uses_waiting_status_when_only_live_turn_activity_is_fresh() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1775412360000u64,
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_live_turn": {
+                        "status": "exact_pair_materialized",
+                        "retrieval_context_pack_count": 1,
+                        "matched_context_pack_ids_count": 1,
+                        "note": "Exact full-turn pair materialized from the actual VS Code meter.",
+                        "exact_pair": {
+                            "saved_pct": 69.64
+                        }
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "captured_at_epoch_ms": 1775412359000u64,
+                    "project": { "code": "amai" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "amai::continuity::default",
+                    "session_age_ms": 15u64,
+                    "events_count": 0u64,
+                    "current_goal": "Current live-turn now surfaces same-thread Amai activity after fresh context-pack",
+                    "next_step": "Tighten current-work card so fresh exact-pair / thread activity is surfaced there too.",
+                    "last_command": "continuity handoff",
+                    "last_results_summary": null,
+                    "active_files": [],
+                    "recent_queries": [],
+                    "restore_confidence": "preliminary"
+                }
+            }
+        });
+
+        let card = working_state_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("waiting"));
+        assert_eq!(card["status_label"].as_str(), Some("живой turn уже виден"));
+        let rows = card["rows"].as_array().expect("rows");
+        let last_result_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Последний результат"))
+            .expect("last result row");
+        assert!(
+            last_result_row["value"]
+                .as_str()
+                .is_some_and(|value| { value.contains("Exact full-turn pair materialized") })
+        );
+        let last_command_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Последняя команда"))
+            .expect("last command row");
+        assert_eq!(
+            last_command_row["value"].as_str(),
+            Some("Amai context pack")
+        );
+    }
+
+    #[test]
+    fn preliminary_handoff_command_is_overridden_by_fresh_live_turn_command() {
+        assert!(super::should_override_last_command_with_live_turn(
+            "сохранена рабочая сводка",
+            "preliminary",
+            0,
+        ));
+        assert!(!super::should_override_last_command_with_live_turn(
+            "сохранена рабочая сводка",
+            "high",
+            0,
+        ));
+        assert!(!super::should_override_last_command_with_live_turn(
+            "сохранена рабочая сводка",
+            "preliminary",
+            2,
+        ));
+    }
+
+    #[test]
+    fn live_file_hints_restore_last_command_when_new_turn_is_still_empty() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn",
+                        "current_thread_bound": true,
+                        "retrieval_context_pack_count": 0,
+                        "matched_context_pack_ids_count": 0
+                    },
+                    "live_response_latency": {
+                        "current_session_relation": {
+                            "status": "recent_same_chat_series_previous_turn"
+                        },
+                        "current_thread_live_file_hints": {
+                            "hints": [
+                                {"label": "dashboard.rs", "query": "./src/dashboard.rs"}
+                            ]
+                        }
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "captured_at_epoch_ms": 1775412359000u64,
+                    "project": { "code": "amai" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "amai::continuity::default",
+                    "session_age_ms": 15u64,
+                    "events_count": 0u64,
+                    "current_goal": "Current live-turn now surfaces same-thread Amai activity after fresh context-pack",
+                    "next_step": "Tighten current-work card so fresh exact-pair / thread activity is surfaced there too.",
+                    "last_command": null,
+                    "last_results_summary": null,
+                    "active_files": [],
+                    "recent_queries": [],
+                    "restore_confidence": "preliminary"
+                }
+            }
+        });
+
+        let card = working_state_live_card(&snapshot);
+        let rows = card["rows"].as_array().expect("rows");
+        let last_command_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Последняя команда"))
+            .expect("last command row");
+        assert_eq!(
+            last_command_row["value"].as_str(),
+            Some("Amai context pack")
+        );
+    }
+
+    #[test]
+    fn working_state_card_falls_back_to_live_turn_when_working_state_is_missing() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_live_turn": {
+                        "status": "thread_activity_observed_turn_open",
+                        "retrieval_context_pack_count": 2,
+                        "matched_context_pack_ids_count": 1,
+                        "note": "Observed new retrieval_context_pack after the last completed turn."
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": null
+        });
+
+        let card = working_state_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("waiting"));
+        assert_eq!(card["status_label"].as_str(), Some("живой turn уже виден"));
+        assert!(card["note"].as_str().is_some_and(|note| {
+            note.contains("текущий chat turn уже видит свежую активность Amai")
+        }));
+        let rows = card["rows"].as_array().expect("rows");
+        let live_turn_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Живой turn Amai"))
+            .expect("live turn row");
+        assert_eq!(
+            live_turn_row["value"].as_str(),
+            Some("2 context-pack • turn ещё открыт")
+        );
+    }
+
+    #[test]
+    fn working_state_card_surfaces_open_turn_without_amai_answer_yet() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1775420265000u64,
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn",
+                        "current_thread_bound": true,
+                        "thread_id": "thread-live",
+                        "note": "В текущем live-turn не наблюдалось ни одного retrieval_context_pack от Amai."
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project": { "code": "amai" },
+                    "namespace": { "code": "continuity" },
+                    "next_step": "Wait for the next real Amai answer in this chat.",
+                    "current_goal": "Observe the next online answer",
+                    "events_count": 0u64,
+                    "restore_confidence": "preliminary"
+                }
+            }
+        });
+
+        let card = working_state_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("waiting"));
+        assert_eq!(card["status_label"].as_str(), Some("ждём ответ Amai"));
+        let rows = card["rows"].as_array().expect("rows");
+        let live_turn_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Живой turn Amai"))
+            .expect("live turn row");
+        assert_eq!(
+            live_turn_row["value"].as_str(),
+            Some("turn открыт • ответов Amai ещё нет")
+        );
+        assert!(
+            card["status_tooltip"]
+                .as_str()
+                .is_some_and(|tooltip| tooltip.contains("Amai в нём ещё не ответила"))
+        );
+    }
+
+    #[test]
+    fn working_state_card_uses_live_file_hints_when_active_files_are_empty() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1775420265000u64,
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn",
+                        "current_thread_bound": true,
+                        "thread_id": "thread-live"
+                    },
+                    "live_response_latency": {
+                        "current_thread_live_file_hints": {
+                            "hints": [
+                                { "label": "dashboard.rs", "query": "./src/dashboard.rs" },
+                                { "label": "token_budget.rs", "query": "./src/token_budget.rs" }
+                            ]
+                        }
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project": { "code": "amai" },
+                    "namespace": { "code": "continuity" },
+                    "next_step": "Add live file hints.",
+                    "current_goal": "Observe the next online answer",
+                    "events_count": 0u64,
+                    "restore_confidence": "preliminary",
+                    "active_files": []
+                }
+            }
+        });
+
+        let card = working_state_live_card(&snapshot);
+        let rows = card["rows"].as_array().expect("rows");
+        let active_files_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Активные файлы"))
+            .expect("active files row");
+        assert_eq!(
+            active_files_row["value"].as_str(),
+            Some("2 • dashboard.rs, token_budget.rs")
+        );
+    }
+
+    #[test]
+    fn summarize_working_state_next_step_humanizes_live_card_reconciliation_text() {
+        assert_eq!(
+            super::summarize_working_state_next_step(Some(
+                "If user continues, refine operator-facing copy or expand the same reconciliation pattern to other live cards."
+            )),
+            "уточнить операторский текст в live-карточках"
+        );
+        assert_eq!(
+            super::summarize_working_state_goal(
+                Some(
+                    "If user continues, refine operator-facing copy or expand the same reconciliation pattern to other live cards."
+                ),
+                None
+            ),
+            "доработка live-карточек панели"
+        );
+        assert_eq!(
+            super::summarize_working_state_next_step(Some(
+                "If user continues, enrich current-work card with live-thread active files or replace generic next-step text."
+            )),
+            "добавить в карточку текущей работы живые подсказки по активным файлам"
+        );
+        assert_eq!(
+            super::summarize_working_state_next_step(Some(
+                "Optionally continue by filling last-command placeholder from the same live-turn source so the card is fully operator-readable before working-state catches up."
+            )),
+            "заполнить в карточке текущей работы последнюю команду из живого Amai-turn"
         );
     }
 
@@ -16748,6 +14726,116 @@ mod tests {
     }
 
     #[test]
+    fn client_budget_root_cause_payload_surfaces_same_meter_economics_for_giant_thread_overhang() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "client_live_meter": {
+                        "status": "observed",
+                        "thread_binding_state": "current_thread_bound",
+                        "current_thread_bound": true,
+                        "client_turn_total_tokens": 87356,
+                        "context_used_percent": 33.45,
+                        "ended_at_epoch_ms": 2000,
+                        "status_bar_rate_limits": {
+                            "status": "observed",
+                            "observed_at_epoch_ms": 2000
+                        }
+                    },
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn",
+                        "exact_pair_available": true,
+                        "exact_pair": {
+                            "without_amai_tokens": 0,
+                            "with_amai_tokens": 0,
+                            "saved_tokens": 0,
+                            "saved_pct": 0.0
+                        }
+                    },
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "reply_prefix": "5ч KPI: переплата 1988.49%"
+                    },
+                    "statement_previews": {
+                        "current_session": {
+                            "observed_whole_cycle_with_amai_tokens": 72,
+                            "client_limit_meter_alignment": {
+                                "same_meter_as_client_limit": true,
+                                "strict_client_meter_slice": {
+                                    "lower_bound_tokens": 182
+                                },
+                                "baseline_equivalence": {
+                                    "measured_baseline_tokens_lower_bound": 182,
+                                    "component_semantics": [
+                                        {
+                                            "code": "client_prompt",
+                                            "baseline_measured_tokens": 4,
+                                            "observed_tokens": 4,
+                                            "whole_cycle_observed_complete": true
+                                        },
+                                        {
+                                            "code": "continuity_restore_outside_retrieval",
+                                            "baseline_measured_tokens": 178,
+                                            "observed_tokens": 68,
+                                            "whole_cycle_observed_complete": true
+                                        }
+                                    ]
+                                },
+                                "exact_pair_status": {
+                                    "state": "exact_pair_materialized",
+                                    "exact_pair_available": true,
+                                    "primary_blocking_reason": null,
+                                    "blockers": []
+                                },
+                                "measured_components": [
+                                    "client_prompt",
+                                    "continuity_restore_outside_retrieval"
+                                ],
+                                "missing_components": [],
+                                "partially_measured_components": [],
+                                "blocking_reasons": []
+                            }
+                        }
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {}
+            }
+        });
+
+        let payload = super::client_budget_root_cause_payload(&snapshot);
+        assert_eq!(
+            payload["same_meter_economics"]["strict_lower_bound_tokens"],
+            json!(182)
+        );
+        assert_eq!(
+            payload["same_meter_economics"]["same_meter_saved_tokens"],
+            json!(110)
+        );
+        assert_eq!(
+            payload["same_meter_economics"]["continuity_restore_baseline_tokens"],
+            json!(178)
+        );
+        assert_eq!(
+            payload["same_meter_economics"]["continuity_restore_observed_tokens"],
+            json!(68)
+        );
+        assert_eq!(
+            payload["same_meter_economics"]["continuity_restore_delta_tokens"],
+            json!(-110)
+        );
+        assert_eq!(
+            payload["same_meter_economics"]["full_turn_overhang_tokens"],
+            json!(87174)
+        );
+        assert_eq!(
+            payload["same_meter_economics"]["dominant_cost_surface"],
+            json!("giant_thread_context_outside_same_meter_slice")
+        );
+    }
+
+    #[test]
     fn client_turn_pressure_guard_triggers_on_large_thread_with_weak_full_turn_share() {
         let snapshot = json!({
             "token_budget_report": {
@@ -16804,6 +14892,9 @@ mod tests {
                     },
                     "client_live_meter": {
                         "status": "observed",
+                        "thread_binding_state": "current_thread_bound",
+                        "current_thread_bound": true,
+                        "thread_id": "019d4eb1-3e92-75e3-b22b-2bdf21f13885",
                         "client_turn_total_tokens": 206274,
                         "latest_model_context_window": 258400,
                         "context_used_percent": 79.82739938080495,
@@ -16821,7 +14912,7 @@ mod tests {
         assert_eq!(cards[0]["status"].as_str(), Some("critical"));
         assert_eq!(
             cards[0]["status_label"].as_str(),
-            Some("новый чат нужен сейчас")
+            Some("сожми текущий чат сейчас")
         );
         assert!(
             cards[0]["status_tooltip"]
@@ -16839,13 +14930,13 @@ mod tests {
             row["value"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("новый чат")
+                .contains("compact window")
         );
         assert!(
             row["value"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("continuity startup")
+                .contains("проверь effect")
         );
     }
 
@@ -17790,6 +15881,518 @@ mod tests {
     }
 
     #[test]
+    fn build_active_agent_budget_session_card_shows_only_active_agent_kpi_and_limit() {
+        let snapshot = json!({
+            "active_agent_budget": {
+                "aggregate": {
+                    "status": "observed",
+                    "classification": "saving",
+                    "reply_prefix": "5ч KPI: экономия 40.00%"
+                },
+                "agents": [
+                    {
+                        "agent_label": "Amai",
+                        "agent_scope": "amai::continuity::default",
+                        "thread_title": "compact dashboard rewrite",
+                        "personal_agent_kpi": {
+                            "reply_prefix": "5ч KPI: экономия 60.00%",
+                            "summary": "agent one"
+                        },
+                        "personal_client_limit": {
+                            "label_text": "Лимит клиента сейчас:",
+                            "value_text": "5ч остаётся 43.00%, 7д остаётся 23.00%",
+                            "tooltip": "personal limit one"
+                        },
+                        "client_live_meter": {
+                            "status": "observed",
+                            "current_thread_bound": true,
+                            "thread_binding_state": "current_thread_bound",
+                            "ended_at_epoch_ms": 2000,
+                            "primary_limit_used_percent": 57.0,
+                            "primary_limit_remaining_percent": 43.0,
+                            "secondary_limit_used_percent": 77.0,
+                            "secondary_limit_remaining_percent": 23.0,
+                            "status_bar_rate_limits": {
+                                "status": "observed",
+                                "source": "codex_app_server_account_rate_limits_read_v1",
+                                "observed_at_epoch_ms": 2000,
+                                "primary_limit_used_percent": 57.0,
+                                "primary_limit_remaining_percent": 43.0,
+                                "secondary_limit_used_percent": 77.0,
+                                "secondary_limit_remaining_percent": 23.0
+                            }
+                        }
+                    },
+                    {
+                        "agent_label": "Hunter",
+                        "agent_scope": "bug_bounty::continuity::default",
+                        "personal_agent_kpi": {
+                            "reply_prefix": "5ч KPI: экономия 20.00%",
+                            "summary": "agent two"
+                        },
+                        "personal_client_limit": {
+                            "label_text": "Личный thread-limit агента:",
+                            "value_text": "5ч остаётся 88.00%, 7д остаётся 91.00%",
+                            "tooltip": "personal limit two"
+                        },
+                        "client_live_meter": {
+                            "status": "observed",
+                            "current_thread_bound": true,
+                            "thread_binding_state": "current_thread_bound",
+                            "ended_at_epoch_ms": 2000,
+                            "primary_limit_used_percent": 57.0,
+                            "primary_limit_remaining_percent": 43.0,
+                            "secondary_limit_used_percent": 77.0,
+                            "secondary_limit_remaining_percent": 23.0,
+                            "status_bar_rate_limits": {
+                                "status": "observed",
+                                "source": "codex_app_server_account_rate_limits_read_v1",
+                                "observed_at_epoch_ms": 2000,
+                                "primary_limit_used_percent": 57.0,
+                                "primary_limit_remaining_percent": 43.0,
+                                "secondary_limit_used_percent": 77.0,
+                                "secondary_limit_remaining_percent": 23.0
+                            }
+                        }
+                    }
+                ]
+            }
+        });
+        let card = super::build_active_agent_budget_session_card(&snapshot).expect("card");
+        assert_eq!(card["value"].as_str(), Some("5ч KPI: экономия 40.00%"));
+        assert_eq!(
+            card["presentation_variant"].as_str(),
+            Some("active_agent_budget_grouped_v3")
+        );
+        assert_eq!(card["status_label"].as_str(), Some(""));
+        assert!(card["status_tooltip"].is_null());
+        let rows = card["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 6);
+        assert_eq!(rows[0]["label"].as_str(), Some("Агент:"));
+        assert_eq!(rows[1]["label"].as_str(), Some("Лимит клиента сейчас:"));
+        assert_eq!(rows[2]["label"].as_str(), Some("KPI:"));
+        let blocks = card["agent_blocks"].as_array().expect("agent blocks");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["agent_label"].as_str(), Some("Amai"));
+        assert!(
+            blocks[0]["agent_tooltip"]
+                .as_str()
+                .is_some_and(|value| value.contains("amai::continuity::default"))
+        );
+        assert!(
+            blocks[0]["limit_value"]
+                .as_str()
+                .is_some_and(|value| value.contains("5ч остаётся 43.00%"))
+        );
+        assert!(
+            blocks[0]["limit_tooltip"]
+                .as_str()
+                .is_some_and(|value| value.contains("personal limit one"))
+        );
+        assert_eq!(
+            blocks[0]["limit_label"].as_str(),
+            Some("Лимит клиента сейчас:")
+        );
+        assert_eq!(
+            blocks[0]["kpi_value"].as_str(),
+            Some("5ч KPI: экономия 60.00%")
+        );
+        assert!(
+            blocks[0]["kpi_tooltip"]
+                .as_str()
+                .is_some_and(|value| value.contains("agent one"))
+        );
+        assert_eq!(blocks[1]["agent_label"].as_str(), Some("Hunter"));
+        assert!(
+            blocks[1]["limit_value"]
+                .as_str()
+                .is_some_and(|value| value.contains("5ч остаётся 88.00%"))
+        );
+        assert_eq!(
+            blocks[1]["limit_label"].as_str(),
+            Some("Личный thread-limit агента:")
+        );
+        assert_eq!(
+            blocks[1]["kpi_value"].as_str(),
+            Some("5ч KPI: экономия 20.00%")
+        );
+    }
+
+    #[test]
+    fn build_active_agent_budget_session_card_collapses_shared_global_limit() {
+        let snapshot = json!({
+            "active_agent_budget": {
+                "aggregate": {
+                    "status": "observed",
+                    "classification": "overspend",
+                    "reply_prefix": "5ч KPI: переплата 33.00%"
+                },
+                "agents": [
+                    {
+                        "agent_label": "Amai",
+                        "agent_scope": "amai::continuity::default",
+                        "personal_agent_kpi": {
+                            "reply_prefix": "5ч KPI: переплата 44.00%",
+                            "summary": "agent one"
+                        },
+                        "personal_client_limit": {
+                            "label_text": "Лимит клиента сейчас:",
+                            "value_text": "5ч остаётся 12.00%, 7д остаётся 89.00%",
+                            "tooltip": "same exact global limit"
+                        }
+                    },
+                    {
+                        "agent_label": "Bug Bounty",
+                        "agent_scope": "bug_bounty::continuity::default",
+                        "personal_agent_kpi": {
+                            "reply_prefix": "5ч KPI: переплата 22.00%",
+                            "summary": "agent two"
+                        },
+                        "personal_client_limit": {
+                            "label_text": "Лимит клиента сейчас:",
+                            "value_text": "5ч остаётся 12.00%, 7д остаётся 89.00%",
+                            "tooltip": "same exact global limit"
+                        }
+                    }
+                ]
+            }
+        });
+
+        let card = super::build_active_agent_budget_session_card(&snapshot).expect("card");
+        assert_eq!(
+            card["shared_limit_label"].as_str(),
+            Some("Лимит клиента сейчас:")
+        );
+        assert_eq!(
+            card["shared_limit_value"].as_str(),
+            Some("5ч остаётся 12.00%, 7д остаётся 89.00%")
+        );
+        let rows = card["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0]["label"].as_str(), Some("Лимит клиента сейчас:"));
+        let blocks = card["agent_blocks"].as_array().expect("agent blocks");
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0].get("limit_label").is_none());
+        assert!(blocks[0].get("limit_value").is_none());
+        assert!(blocks[1].get("limit_label").is_none());
+        assert!(blocks[1].get("limit_value").is_none());
+    }
+
+    #[test]
+    fn build_active_agent_budget_session_card_surfaces_live_turn_pressure_per_agent() {
+        let snapshot = json!({
+            "active_agent_budget": {
+                "aggregate": {
+                    "status": "observed",
+                    "classification": "overspend",
+                    "reply_prefix": "5ч KPI: переплата 120.00%"
+                },
+                "agents": [
+                    {
+                        "agent_label": "Bug Bounty",
+                        "agent_scope": "bug_bounty::continuity::default",
+                        "thread_title": "Авито дальше",
+                        "cwd": "/home/art/Bug-Bounty",
+                        "personal_agent_kpi": {
+                            "reply_prefix": "5ч KPI: переплата 197.79%",
+                            "summary": "Личный 5ч KPI текущего active thread идёт в переплате 197.79%."
+                        },
+                        "personal_client_limit": {
+                            "label_text": "Лимит клиента сейчас:",
+                            "value_text": "5ч остаётся 16.00%, 7д остаётся 90.00%",
+                            "tooltip": "same exact global limit"
+                        },
+                        "client_live_meter": {
+                            "status": "observed",
+                            "current_thread_bound": true,
+                            "thread_binding_state": "current_thread_bound",
+                            "ended_at_epoch_ms": 1775155316431u64,
+                            "client_turn_total_tokens": 222596,
+                            "latest_model_context_window": 258400,
+                            "context_used_percent": 86.14,
+                            "status_bar_rate_limits": {
+                                "status": "observed",
+                                "observed_at_epoch_ms": 1775155316431u64
+                            }
+                        }
+                    }
+                ]
+            }
+        });
+
+        let card = super::build_active_agent_budget_session_card(&snapshot).expect("card");
+        let rows = card["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[3]["label"].as_str(), Some("Последний запрос:"));
+        assert_eq!(
+            rows[3]["value"].as_str(),
+            Some("222596 из 258400 · окно занято 86.14%")
+        );
+        assert!(
+            rows[3]["tooltip"]
+                .as_str()
+                .is_some_and(|value| value.contains("giant-thread pressure"))
+        );
+        let blocks = card["agent_blocks"].as_array().expect("agent blocks");
+        assert_eq!(
+            blocks[0]["pressure_value"].as_str(),
+            Some("222596 из 258400 · окно занято 86.14%")
+        );
+        assert!(
+            blocks[0]["pressure_tooltip"]
+                .as_str()
+                .is_some_and(|value| value.contains("Окно занято: 86.14%"))
+        );
+    }
+
+    #[test]
+    fn build_headline_prefers_active_agent_budget_average() {
+        let snapshot = json!({
+            "sla": {
+                "summary": {
+                    "pass": 19,
+                    "alert": 0,
+                    "critical": 0,
+                    "unknown": 0
+                }
+            },
+            "active_agent_budget": {
+                "headline": {
+                    "title": "Средний KPI активных агентов",
+                    "value_text": "5ч KPI: экономия 40.00%",
+                    "scope_label": "среднее по 2 активным агентам"
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "headline": {
+                        "title": "global fallback",
+                        "value_percent": 12.0,
+                        "scope_label": "fallback"
+                    }
+                }
+            }
+        });
+        let headline = super::build_headline(&snapshot, 1775039106398);
+        assert_eq!(
+            headline["token_title"].as_str(),
+            Some("Средний KPI активных агентов")
+        );
+        assert_eq!(
+            headline["token_value"].as_str(),
+            Some("5ч KPI: экономия 40.00%")
+        );
+        assert_eq!(headline["token_scope"].as_str(), Some(""));
+    }
+
+    #[test]
+    fn live_summary_payload_keeps_headline_and_active_agent_card_on_one_surface() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1774239286880u64,
+            "observe_refresh": {
+                "total_ms": 321u64,
+                "stage_ms": {
+                    "active_agent_budget": 44u64
+                }
+            },
+            "sla": {
+                "summary": {
+                    "pass": 19,
+                    "alert": 0,
+                    "critical": 0,
+                    "unknown": 0
+                }
+            },
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 2.0,
+                        "target_p99_ms": 3.0,
+                        "target_max_ms": 5.0,
+                        "target_sample_count": 100000
+                    },
+                    "cold_live_table": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 4.0,
+                        "target_p99_ms": 6.0,
+                        "target_max_ms": 10.0,
+                        "target_sample_count": 10000
+                    }
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "headline": {
+                        "title": "global fallback",
+                        "value_percent": 12.0,
+                        "scope_label": "fallback"
+                    },
+                    "current_session": {
+                        "latency_slices": [
+                            {
+                                "state": "mixed",
+                                "sample_count": 3,
+                                "current_latency_ms": 1.7,
+                                "p50_latency_ms": 1.2,
+                                "p95_latency_ms": 2.4,
+                                "p99_latency_ms": 2.4,
+                                "max_latency_ms": 2.4
+                            }
+                        ]
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "captured_at_epoch_ms": 1774239281880u64,
+                    "project": { "code": "amai" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "amai::continuity::default",
+                    "session_age_ms": 15u64,
+                    "events_count": 3u64,
+                    "current_goal": "Dashboard live summary poller keeps headline and top cards fresh",
+                    "next_step": "Keep headline and hero card on one live surface.",
+                    "last_command": "context pack",
+                    "last_results_summary": "Найдено: документов 0, символов 0.",
+                    "latest_decision_trace": null,
+                    "active_files": [],
+                    "recent_queries": ["dashboard live summary"],
+                    "restore_confidence": "preliminary"
+                }
+            },
+            "agent_scope_activity": {
+                "client_recent_window_minutes": 30,
+                "client_recent_thread_count": 2,
+                "client_recent_threads": [],
+                "active_now_count": 2,
+                "active_now_scopes": [
+                    {
+                        "agent_scope": "amai::continuity::default",
+                        "owner_thread_id": "thread-a",
+                        "heartbeat_at_epoch_ms": 1774239285880u64
+                    },
+                    {
+                        "agent_scope": "bug_bounty::continuity::default",
+                        "owner_thread_id": "thread-b",
+                        "heartbeat_at_epoch_ms": 1774239200000u64
+                    }
+                ],
+                "recent_scope_window_hours": 24,
+                "recent_scope_count": 2,
+                "recent_scopes": [
+                    {
+                        "agent_scope": "amai::continuity::default",
+                        "captured_at_epoch_ms": 1774239285880u64
+                    },
+                    {
+                        "agent_scope": "bug_bounty::continuity::default",
+                        "captured_at_epoch_ms": 1774239200000u64
+                    }
+                ]
+            },
+            "active_agent_budget": {
+                "headline": {
+                    "title": "Средний KPI активных агентов",
+                    "value_text": "5ч KPI: экономия 40.00%",
+                    "scope_label": "среднее по 2 активным агентам"
+                },
+                "aggregate": {
+                    "status": "observed",
+                    "classification": "saving",
+                    "reply_prefix": "5ч KPI: экономия 40.00%"
+                },
+                "agents": [
+                    {
+                        "agent_label": "Amai",
+                        "agent_scope": "amai::continuity::default",
+                        "thread_title": "Amai dashboard",
+                        "cwd": "/home/art/agent-memory-index",
+                        "personal_agent_kpi": {
+                            "reply_prefix": "5ч KPI: экономия 60.00%",
+                            "summary": "agent one"
+                        },
+                        "personal_client_limit": {
+                            "value_text": "5ч остаётся 43.00%, 7д остаётся 72.00%",
+                            "tooltip": "personal limit one"
+                        }
+                    },
+                    {
+                        "agent_label": "Hunter",
+                        "agent_scope": "bug_bounty::continuity::default",
+                        "thread_title": "Bug bounty",
+                        "cwd": "/home/art/Bug-Bounty",
+                        "personal_agent_kpi": {
+                            "reply_prefix": "5ч KPI: экономия 20.00%",
+                            "summary": "agent two"
+                        },
+                        "personal_client_limit": {
+                            "value_text": "5ч остаётся 88.00%, 7д остаётся 91.00%",
+                            "tooltip": "personal limit two"
+                        }
+                    }
+                ]
+            }
+        });
+
+        let payload = build_live_summary_payload(&test_config(), &snapshot, "127.0.0.1:9464", 1000)
+            .expect("payload");
+        assert_eq!(
+            payload["headline"]["token_value"].as_str(),
+            Some("5ч KPI: экономия 40.00%")
+        );
+        assert_eq!(
+            payload["active_agent_card"]["value"].as_str(),
+            Some("5ч KPI: экономия 40.00%")
+        );
+        assert_eq!(
+            payload["active_agent_card"]["presentation_variant"].as_str(),
+            Some("active_agent_budget_grouped_v3")
+        );
+        assert_eq!(
+            payload["top_cards"].as_array().map(|cards| cards.len()),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn compact_token_hero_card_leaves_active_agent_budget_minimal_card_unchanged() {
+        let card = json!({
+            "title": "Экономия токенов за текущую сессию",
+            "presentation_variant": "active_agent_budget_grouped_v3",
+            "status": "pass",
+            "status_label": "",
+            "rows": [],
+            "agent_blocks": [
+                {
+                    "agent_label": "Amai",
+                    "limit_value": "5ч остаётся 43.00%",
+                    "kpi_value": "5ч KPI: экономия 60.00%"
+                }
+            ]
+        });
+
+        let compact = super::compact_token_hero_card(card.clone());
+        assert_eq!(compact, card);
+    }
+
+    #[test]
     fn compact_token_hero_card_keeps_truth_only_rows_for_current_session() {
         let card = json!({
             "title": "Экономия токенов за текущую сессию",
@@ -17921,11 +16524,20 @@ mod tests {
                     "status": "observed",
                     "thread_binding_state": "current_thread_bound",
                     "current_thread_bound": true,
+                    "thread_id": "019d4eb1-3e92-75e3-b22b-2bdf21f13885",
                     "client_turn_total_tokens": 140921,
                     "latest_model_context_window": 258400,
                     "context_used_percent": 54.54,
                     "primary_limit_remaining_percent": 61.0,
                     "secondary_limit_remaining_percent": 88.0,
+                    "started_at_epoch_ms": 1774622174000u64,
+                    "ended_at_epoch_ms": 1774622949000u64
+                },
+                "current_live_turn": {
+                    "status": "no_amai_activity_in_current_live_turn",
+                    "thread_binding_state": "current_thread_bound",
+                    "current_thread_bound": true,
+                    "thread_id": "019d4eb1-3e92-75e3-b22b-2bdf21f13885",
                     "started_at_epoch_ms": 1774622174000u64,
                     "ended_at_epoch_ms": 1774622949000u64
                 },
@@ -18015,14 +16627,7 @@ mod tests {
         assert!(
             guard["reply_execution_gate"]["action_bundle"]["operator_flow"]["primary_command"]
                 .as_str()
-                .unwrap_or_default()
-                .contains("ctl-launch")
-        );
-        assert!(
-            guard["reply_execution_gate"]["action_bundle"]["operator_flow"]["host_current_thread_control_launch_command"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("--compact-window")
+                .is_some_and(|value| !value.is_empty())
         );
         assert!(
             guard["reply_execution_gate"]["action_bundle"]["operator_flow"]["rotate_helper_command"]
@@ -18076,6 +16681,192 @@ mod tests {
     }
 
     #[test]
+    fn client_turn_pressure_display_status_label_prefers_same_thread_copy() {
+        assert_eq!(
+            super::client_turn_pressure_display_status_label("новый чат нужен сейчас", true),
+            "сожми текущий чат сейчас"
+        );
+        assert_eq!(
+            super::client_turn_pressure_display_status_label("новый чат рекомендован", true),
+            "сожми текущий чат"
+        );
+        assert_eq!(
+            super::client_turn_pressure_display_status_label("реальная экономия не доказана", true),
+            "реальная экономия не доказана"
+        );
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_prefers_same_thread_surface_when_thread_is_available_even_in_inactive_stage()
+     {
+        let thread_id = "019d4eb1-3e92-75e3-b22b-2bdf21f13885";
+        let report = json!({
+            "client_live_meter": {
+                "status": "observed",
+                "thread_id": thread_id,
+                "client_turn_total_tokens": 91234,
+                "latest_model_context_window": 258400,
+                "current_thread_bound": true
+            }
+        });
+        let restore_context = json!({});
+        let host_context_compaction = json!({
+            "stage": "inactive"
+        });
+        let (surface, _effect, preferred) = super::selected_host_current_thread_control_state(
+            &report,
+            &restore_context,
+            &report["client_live_meter"],
+            &host_context_compaction,
+        );
+        assert_eq!(surface["available"], json!(true));
+        assert_eq!(
+            surface["command_id"],
+            json!(working_state::HOST_CURRENT_THREAD_CONTROL_COMMAND_ID)
+        );
+        assert!(preferred);
+    }
+
+    #[test]
+    fn current_session_budget_guard_ignores_foreign_thread_feedback_for_same_thread_confirmation() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "client_budget_target_percent": 50,
+                    "current_session": {
+                        "events_total": 1,
+                        "counted_events": 1,
+                        "verified_effective_saved_tokens": 216,
+                        "verified_effective_savings_pct": 76.86,
+                        "started_at_epoch_ms": 1774984250772u64,
+                        "ended_at_epoch_ms": 1774984250772u64,
+                        "verified_baseline_tokens": 281,
+                        "verified_observed_whole_cycle_with_amai_tokens": 69
+                    },
+                    "statement_previews": {
+                        "current_session": {
+                            "verified_observed_whole_cycle_with_amai_tokens": 69,
+                            "client_limit_meter_alignment": {
+                                "same_meter_as_client_limit": true,
+                                "exact_pair_status": {
+                                    "exact_pair_available": true,
+                                    "state": "exact_pair_materialized",
+                                    "blockers": []
+                                },
+                                "strict_client_meter_slice": {"lower_bound_tokens": 285},
+                                "explicit_boundary_surface": {
+                                    "blocks_full_same_meter_equivalence": false
+                                }
+                            }
+                        }
+                    },
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "classification": "overspend",
+                        "reply_prefix": "5ч KPI: переплата 100.82%",
+                        "kpi_percent": 100.81540973161394,
+                        "latest_observed_at_epoch_ms": 1774984496711u64,
+                        "projected_primary_used_per_hour_percent": 40.163081946322826,
+                        "remaining_window_minutes": 286.5548166666667,
+                        "actual_remaining_percent": 91.0,
+                        "ideal_remaining_percent": 95.51827222222222,
+                        "projected_reset_delta_minutes": -150.60907407407424
+                    },
+                    "client_live_meter": {
+                        "status": "observed",
+                        "thread_binding_state": "current_thread_bound",
+                        "thread_id": "019d4549-89d6-7640-a6e3-589979f08d20",
+                        "current_thread_bound": true,
+                        "client_turn_total_tokens": 150940,
+                        "latest_model_context_window": 258400,
+                        "context_used_percent": 58.413312693498455,
+                        "primary_limit_remaining_percent": 93,
+                        "primary_limit_used_percent": 7,
+                        "secondary_limit_remaining_percent": 83,
+                        "secondary_limit_used_percent": 17,
+                        "started_at_epoch_ms": 1774984228000u64,
+                        "ended_at_epoch_ms": 1774984490000u64,
+                        "status_bar_rate_limits": {
+                            "status": "observed",
+                            "source": "codex_app_server_account_rate_limits_read_v1",
+                            "status_bar_correlated": true,
+                            "observed_at_epoch_ms": 1774984496711u64,
+                            "primary_limit_used_percent": 9.0,
+                            "primary_limit_remaining_percent": 91.0,
+                            "secondary_limit_used_percent": 3.0,
+                            "secondary_limit_remaining_percent": 97.0
+                        }
+                    },
+                    "current_live_turn": {
+                        "status": "exact_pair_materialized",
+                        "exact_pair_available": true,
+                        "exact_pair": {
+                            "without_amai_tokens": 151437,
+                            "with_amai_tokens": 150940,
+                            "saved_tokens": 497,
+                            "saved_pct": 0.3281892800306398
+                        }
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project": {
+                        "code": "amai",
+                        "repo_root": "/home/art/agent-memory-index"
+                    },
+                    "namespace": {
+                        "code": "continuity"
+                    },
+                    "client_budget_target_percent": 50,
+                    "execctl_resume_state": "pending_return_queue_present",
+                    "current_goal": "same-thread ctl-launch now materializes fresh thread-bound budget surfaces immediately",
+                    "next_step": "First continue from a fresh chat via continuity startup to satisfy the required return task, then continue reducing remaining current-session/live-turn cost and giant-thread burn.",
+                    "thread_id": "",
+                    "recent_actions": [{
+                        "source_kind": "host_current_thread_control_feedback",
+                        "recorded_at_epoch_ms": 1774983785445u64,
+                        "summary": "Requested same-thread compact window launch via host current-thread control.",
+                        "host_current_thread_control_feedback": {
+                            "feedback_kind": "requested",
+                            "command_id": "hotkey-window-open-current",
+                            "feedback_snapshot": {
+                                "thread_id": "019d38ab-7c35-7553-b1c0-ae83c5eabf3f",
+                                "client_live_meter": {
+                                    "client_turn_total_tokens": 186324,
+                                    "context_used_percent": 72.10681114551083,
+                                    "primary_limit_used_percent": 0
+                                },
+                                "host_context_compaction": {
+                                    "compacted_at_epoch_ms": 1774981093000u64,
+                                    "compaction_count": 74,
+                                    "growth_since_compaction_tokens": 97713,
+                                    "stage": null
+                                }
+                            }
+                        }
+                    }]
+                }
+            }
+        });
+
+        let guard = super::current_session_budget_guard(&snapshot);
+
+        assert_ne!(
+            guard["reply_execution_gate"]["action_kind"],
+            json!("confirm_same_thread_host_control_feedback")
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["action_bundle"]["host_current_thread_control"]["feedback_pending"],
+            json!(false)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["action_bundle"]["host_current_thread_control"]["effect_verdict"],
+            json!("other_thread")
+        );
+    }
+
+    #[test]
     fn current_session_budget_guard_keeps_rotate_soon_as_advisory_only() {
         let snapshot = json!({
         "token_budget_report": {
@@ -18112,6 +16903,7 @@ mod tests {
                     "status": "observed",
                     "thread_binding_state": "current_thread_bound",
                     "current_thread_bound": true,
+                    "thread_id": "019d4eb1-3e92-75e3-b22b-2bdf21f13885",
                     "client_turn_total_tokens": 65000,
                     "latest_model_context_window": 258400,
                     "context_used_percent": 25.15,
@@ -18144,7 +16936,7 @@ mod tests {
         let guard = super::current_session_budget_guard(&snapshot);
         assert_eq!(guard["should_rotate_chat_now"], json!(false));
         assert_eq!(guard["should_rotate_chat_soon"], json!(true));
-        assert_eq!(guard["status_label"], json!("новый чат рекомендован"));
+        assert_eq!(guard["status_label"], json!("сожми текущий чат"));
         assert_eq!(guard["reply_execution_gate"]["blocking"], json!(false));
         assert_eq!(
             guard["reply_execution_gate"]["must_rotate_before_reply"],
@@ -18152,7 +16944,7 @@ mod tests {
         );
         assert_eq!(
             guard["reply_execution_gate"]["action_kind"],
-            json!("rotate_chat_for_client_budget")
+            json!("compact_current_thread_for_client_budget")
         );
         assert_eq!(
             guard["reply_execution_gate"]["reply_budget_mode"],
@@ -18177,6 +16969,10 @@ mod tests {
         assert_eq!(
             guard["reply_execution_gate"]["action_bundle"]["bundle_version"],
             json!("rotate-chat-action-bundle-v1")
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["action_bundle"]["operator_flow"]["primary_command_kind"],
+            json!("same_thread_host_control_launch_command")
         );
     }
 
@@ -18282,6 +17078,183 @@ mod tests {
             json!(true)
         );
         assert!(guard["reply_execution_gate"]["action_bundle"].is_null());
+    }
+
+    #[test]
+    fn current_session_budget_guard_prefers_live_personal_agent_reply_prefix() {
+        let snapshot = json!({
+        "active_agent_budget": {
+            "aggregate": {
+                "status": "observed",
+                "reply_prefix": "5ч KPI: экономия 28.49%"
+            }
+        },
+        "token_budget_report": {
+            "token_budget_report": {
+                "current_session": {
+                    "events_total": 1,
+                    "counted_events": 1,
+                    "verified_effective_saved_tokens": 138,
+                    "verified_effective_savings_pct": 56.56,
+                    "started_at_epoch_ms": 1774622516860u64,
+                    "ended_at_epoch_ms": 1774622516860u64,
+                    "verified_baseline_tokens": 240,
+                    "verified_observed_whole_cycle_with_amai_tokens": 106
+                },
+                "rolling_window": {"events_total": 0, "counted_events": 0},
+                "lifetime": {"events_total": 0, "counted_events": 0},
+                "statement_previews": {
+                    "current_session": {
+                        "verified_observed_whole_cycle_with_amai_tokens": 106,
+                        "client_limit_meter_alignment": {
+                            "same_meter_as_client_limit": true,
+                            "exact_pair_status": {"exact_pair_available": true},
+                            "strict_client_meter_slice": {"lower_bound_tokens": 240},
+                            "explicit_boundary_surface": {
+                                "blocks_full_same_meter_equivalence": false
+                            }
+                        }
+                    },
+                    "rolling_window": {},
+                    "lifetime": {}
+                },
+                "statement_export_previews": {"lifetime": {}},
+                "client_live_meter": {
+                    "status": "observed",
+                    "thread_binding_state": "current_thread_bound",
+                    "current_thread_bound": true,
+                    "thread_id": "thread-current",
+                    "client_turn_total_tokens": 30240,
+                    "latest_model_context_window": 258400,
+                    "context_used_percent": 11.70,
+                    "primary_limit_remaining_percent": 90.0,
+                    "secondary_limit_remaining_percent": 95.0,
+                    "started_at_epoch_ms": 1774622174000u64,
+                    "ended_at_epoch_ms": 1774622949000u64
+                },
+                "personal_agent_kpi": {
+                    "status": "observed",
+                    "reply_prefix": "5ч KPI: экономия 61.25%"
+                },
+                "client_limit_hourly_burn": {
+                    "status": "observed",
+                    "classification": "one_to_one",
+                    "kpi_percent": 0.41,
+                    "reply_prefix": "5ч KPI: 1:1"
+                },
+                    "profile": {"display_name": "Обычная рабочая машина"}
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project": {
+                        "code": "amai",
+                        "display_name": "Amai",
+                        "repo_root": "/home/art/agent-memory-index"
+                    },
+                    "namespace": {
+                        "code": "continuity",
+                        "display_name": "Continuity"
+                    },
+                    "execctl_resume_state": "pending_return_queue_present",
+                    "current_goal": "Same-meter spend control",
+                    "next_step": "Materialize live assistant generation source."
+                }
+            }
+        });
+
+        let guard = super::current_session_budget_guard(&snapshot);
+        assert_eq!(guard["reply_prefix"], json!("5ч KPI: 1:1"));
+        assert_eq!(guard["global_reply_prefix"], json!("5ч KPI: 1:1"));
+        assert_eq!(
+            guard["reply_prefix_source"],
+            json!("global_client_limit_hourly_burn")
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["reply_prefix"],
+            json!("5ч KPI: 1:1")
+        );
+    }
+
+    #[test]
+    fn current_session_budget_guard_marks_online_personal_kpi_source() {
+        let snapshot = json!({
+            "active_agent_budget": {
+                "aggregate": {
+                    "reply_prefix": "5ч KPI: экономия 10.00%"
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "events_total": 1,
+                        "counted_events": 1,
+                        "verified_effective_saved_tokens": 138,
+                        "verified_effective_savings_pct": 56.56
+                    },
+                    "rolling_window": {"events_total": 0, "counted_events": 0},
+                    "lifetime": {"events_total": 0, "counted_events": 0},
+                    "statement_previews": {
+                        "current_session": {
+                            "client_limit_meter_alignment": {
+                                "same_meter_as_client_limit": true,
+                                "exact_pair_status": {"exact_pair_available": true},
+                                "strict_client_meter_slice": {"lower_bound_tokens": 240},
+                                "explicit_boundary_surface": {
+                                    "blocks_full_same_meter_equivalence": false
+                                }
+                            }
+                        }
+                    },
+                    "statement_export_previews": {"lifetime": {}},
+                    "client_live_meter": {
+                        "status": "observed",
+                        "thread_binding_state": "current_thread_bound",
+                        "current_thread_bound": true,
+                        "thread_id": "thread-current",
+                        "client_turn_total_tokens": 30240,
+                        "latest_model_context_window": 258400,
+                        "context_used_percent": 11.70,
+                        "primary_limit_remaining_percent": 90.0,
+                        "secondary_limit_remaining_percent": 95.0,
+                        "started_at_epoch_ms": 1774622174000u64,
+                        "ended_at_epoch_ms": 1774622949000u64
+                    },
+                    "personal_agent_kpi": {
+                        "status": "observed",
+                        "confidence": "online_limit_contour",
+                        "reply_prefix": "5ч KPI: экономия 78.12%"
+                    },
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "classification": "one_to_one",
+                        "kpi_percent": 0.41,
+                        "reply_prefix": "5ч KPI: 1:1"
+                    },
+                    "profile": {"display_name": "Обычная рабочая машина"}
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project": {
+                        "code": "amai",
+                        "display_name": "Amai",
+                        "repo_root": "/home/art/agent-memory-index"
+                    },
+                    "namespace": {
+                        "code": "continuity",
+                        "display_name": "Continuity"
+                    }
+                }
+            }
+        });
+
+        let guard = super::current_session_budget_guard(&snapshot);
+        assert_eq!(guard["reply_prefix"], json!("5ч KPI: экономия 78.12%"));
+        assert_eq!(
+            guard["reply_prefix_source"],
+            json!("personal_agent_online_limit_contour")
+        );
     }
 
     #[test]
@@ -18789,18 +17762,18 @@ mod tests {
             guard["reply_execution_gate"]["action_kind"],
             json!("wait_for_global_client_budget_recovery")
         );
-        assert_eq!(guard["reply_execution_gate"]["blocking"], json!(true));
+        assert_eq!(guard["reply_execution_gate"]["blocking"], json!(false));
         assert_eq!(
             guard["reply_execution_gate"]["must_rotate_before_reply"],
             json!(false)
         );
         assert_eq!(
             guard["reply_execution_gate"]["must_wait_for_budget_recovery_before_reply"],
-            json!(true)
+            json!(false)
         );
         assert_eq!(
-            guard["reply_execution_gate"]["blocking_reply_contract"]["response_kind"],
-            json!(working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND)
+            guard["reply_execution_gate"]["blocking_reply_contract"]["active"],
+            json!(false)
         );
         assert_eq!(
             guard["reply_execution_gate"]["action_bundle"]["bundle_version"],
@@ -19314,88 +18287,229 @@ mod tests {
     }
 
     #[test]
-    fn degradation_card_surfaces_policy_gaps_without_fake_green_status() {
+    fn governance_card_surfaces_forgetting_job_breakdown() {
         let snapshot = json!({
-            "degradation_model": {
-                "summary": {
-                    "status": "unknown",
-                    "pass": 2,
-                    "critical": 0,
-                    "unknown": 9,
-                    "fail_closed_total": 5,
-                    "graceful_fallback_total": 6,
-                    "evidence_gaps": 9
+            "governance_surface": {
+                "human_override_audit": {
+                    "scope_override_events_total": 2,
+                    "forgetting_audit_log_entries_total": 17
                 },
-                "truth_ranking": [
-                    "continuity_handoff",
-                    "working_state_restore",
-                    "live_context_pack"
-                ],
-                "classes": [
-                    {
-                        "class_key": "cross_project_scope",
-                        "title": "Чужой проект",
-                        "mode": "fail_closed",
-                        "status": "pass",
-                        "reason": "Proof passed."
-                    },
-                    {
-                        "class_key": "stale_handoff",
-                        "title": "Устаревший handoff",
-                        "mode": "graceful_fallback",
-                        "status": "unknown",
-                        "reason": "Fresh proof is missing.",
-                        "last_evidence_at_epoch_ms": 42
-                    }
-                ]
+                "wrong_link_rate": {
+                    "open_conflict_count": 0
+                },
+                "poisoning_alert_count": {
+                    "active_quarantine_items": 0
+                },
+                "trust_state_distribution": {
+                    "disputed_memory_items": 0
+                },
+                "stale_memory_error_rate": {
+                    "rate": 0.125
+                },
+                "forgetting_job_breakdown": {
+                    "pruning_job": 7,
+                    "cold_archive_job": 3,
+                    "revalidation_job": 4,
+                    "de_duplication_job": 2,
+                    "summarization_job": 0
+                }
             }
         });
 
-        let card = build_degradation_model_card(&snapshot);
-        assert_eq!(card["title"], json!("Поведение при сбоях"));
-        assert_eq!(card["status"], json!("unknown"));
+        let card = build_governance_card(&snapshot);
+        assert_eq!(card["title"], json!("Жизненный цикл памяти"));
+        assert_eq!(card["status"], json!("pass"));
+        assert_eq!(card["rows"][0]["value"], json!("7"));
+        assert_eq!(card["rows"][1]["value"], json!("3"));
+        assert_eq!(card["rows"][2]["value"], json!("4"));
+        assert_eq!(card["rows"][3]["value"], json!("2"));
+        assert_eq!(card["rows"][4]["value"], json!("0"));
+    }
+
+    #[test]
+    fn governance_card_alert_headline_surfaces_quarantine_and_conflicts() {
+        let snapshot = json!({
+            "governance_surface": {
+                "human_override_audit": {
+                    "forgetting_audit_log_entries_total": 18
+                },
+                "wrong_link_rate": {
+                    "open_conflict_count": 135
+                },
+                "poisoning_alert_count": {
+                    "active_quarantine_items": 66,
+                    "active_quarantine_breakdown": [
+                        {
+                            "quarantine_reason": "proof quarantine",
+                            "entity_kind": "import_packet",
+                            "source_kind": "import_packet_override",
+                            "item_count": 60
+                        }
+                    ]
+                },
+                "open_conflict_breakdown": [
+                    {
+                        "summary": "truth conflict detected",
+                        "source_kind": "verification_conflict_runtime",
+                        "item_count": 120
+                    }
+                ],
+                "trust_state_distribution": {
+                    "disputed_memory_items": 0
+                },
+                "stale_memory_error_rate": {
+                    "rate": 0.0095
+                },
+                "forgetting_job_breakdown": {
+                    "pruning_job": 6,
+                    "cold_archive_job": 6,
+                    "revalidation_job": 6,
+                    "de_duplication_job": 0,
+                    "summarization_job": 0
+                }
+            }
+        });
+
+        let card = build_governance_card(&snapshot);
+        assert_eq!(card["status"], json!("alert"));
+        assert_eq!(card["value"], json!("66 в quarantine • 135 конфликтов"));
         assert!(
             card["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("без свежего доказательства")
+                .contains("главный quarantine-класс")
         );
-        assert_eq!(card["rows"][0]["value"], json!("1 из 5 подтверждены"));
-        assert_eq!(card["rows"][1]["value"], json!("0 из 6 подтверждены"));
-        assert_eq!(card["rows"][2]["value"], json!("9"));
         assert!(
-            card["status_tooltip"]
+            card["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("Устаревший handoff")
+                .contains("главный конфликт")
         );
+        assert_eq!(card["rows"][6]["label"], json!("Quarantine"));
+        assert_eq!(card["rows"][6]["value"], json!("66"));
+        assert_eq!(card["rows"][7]["label"], json!("Спорные"));
+        assert_eq!(card["rows"][8]["label"], json!("Открытые конфликты"));
     }
 
     #[test]
-    fn continuity_correctness_card_surfaces_verified_probe_counts() {
+    fn governance_card_uses_correct_russian_count_forms_in_alert_headline() {
         let snapshot = json!({
-            "continuity_correctness_model": {
-                "summary": {
-                    "status": "pass",
-                    "probe_count": 9,
-                    "verified_probes": 9,
-                    "failed_probes": 0,
-                    "recovered_useful": 7,
-                    "fail_closed": 2,
-                    "evidence_gap": false
+            "governance_surface": {
+                "human_override_audit": {
+                    "forgetting_audit_log_entries_total": 1
                 },
-                "last_evidence_at_epoch_ms": 42,
-                "failed_probe_names": []
+                "wrong_link_rate": {
+                    "open_conflict_count": 1
+                },
+                "poisoning_alert_count": {
+                    "active_quarantine_items": 0,
+                    "active_quarantine_breakdown": []
+                },
+                "open_conflict_breakdown": [
+                    {
+                        "summary": "cli get conflict 1",
+                        "source_kind": "runtime_cli",
+                        "item_count": 1
+                    }
+                ],
+                "trust_state_distribution": {
+                    "disputed_memory_items": 0
+                },
+                "stale_memory_error_rate": {
+                    "rate": 0.0
+                },
+                "forgetting_job_breakdown": {
+                    "pruning_job": 0,
+                    "cold_archive_job": 0,
+                    "revalidation_job": 0,
+                    "de_duplication_job": 0,
+                    "summarization_job": 0
+                }
             }
         });
 
-        let card = build_continuity_correctness_card(&snapshot);
-        assert_eq!(card["title"], json!("Правильное продолжение"));
-        assert_eq!(card["status"], json!("pass"));
-        assert_eq!(card["value"], json!("9 из 9 проверок подтверждены"));
-        assert_eq!(card["rows"][0]["value"], json!("7"));
-        assert_eq!(card["rows"][1]["value"], json!("2"));
-        assert_eq!(card["rows"][2]["value"], json!("0"));
+        let card = build_governance_card(&snapshot);
+        assert_eq!(card["value"], json!("1 конфликт"));
+    }
+
+    #[test]
+    fn service_cards_keep_only_live_operator_cards() {
+        let snapshot = json!({
+            "postgres": {
+                "query_probe_p95_ms": 1.5,
+                "connection_usage_ratio": 0.2,
+                "replica_lag_seconds": 0.0,
+                "deadlocks_delta": 0.0,
+                "transactions_per_sec": 12.0,
+                "wal_bytes_per_sec": 4096.0
+            },
+            "qdrant": {
+                "index_optimize_queue": 0.0,
+                "update_queue_length": 0.0,
+                "memory_resident_bytes": 1024.0,
+                "points_count": 10.0,
+                "segments_count": 2.0
+            },
+            "nats": {
+                "publish_probe_p95_ms": 1.0,
+                "consumer_lag_msgs": 0.0,
+                "jetstream_disk_usage_ratio": 0.1
+            },
+            "thresholds": {
+                "postgres": {
+                    "query_probe_p95_ms": { "target": 5.0 },
+                    "connection_usage_ratio": { "target": 0.8 }
+                },
+                "qdrant": {
+                    "optimize_queue": { "target": 0.0 },
+                    "update_queue_length": { "target": 0.0 }
+                },
+                "nats": {
+                    "publish_probe_p95_ms": { "target": 5.0 },
+                    "consumer_lag_msgs": { "target": 0.0 },
+                    "jetstream_disk_usage_ratio": { "target": 0.8 }
+                }
+            },
+            "governance_surface": {
+                "human_override_audit": {
+                    "forgetting_audit_log_entries_total": 4
+                },
+                "wrong_link_rate": {
+                    "open_conflict_count": 0
+                },
+                "poisoning_alert_count": {
+                    "active_quarantine_items": 0
+                },
+                "trust_state_distribution": {
+                    "disputed_memory_items": 0
+                },
+                "stale_memory_error_rate": {
+                    "rate": 0.05
+                },
+                "forgetting_job_breakdown": {
+                    "pruning_job": 1,
+                    "cold_archive_job": 1,
+                    "revalidation_job": 1,
+                    "de_duplication_job": 1,
+                    "summarization_job": 0
+                }
+            },
+            "benchmark_external_summary": {}
+        });
+
+        let cards = build_service_cards(&snapshot);
+        let titles: Vec<&str> = cards
+            .iter()
+            .filter_map(|card| card["title"].as_str())
+            .collect();
+
+        assert!(titles.contains(&"PostgreSQL"));
+        assert!(titles.contains(&"Qdrant Amai live"));
+        assert!(titles.contains(&"Qdrant внешнего бенча"));
+        assert!(titles.contains(&"NATS / JetStream"));
+        assert!(titles.contains(&"Жизненный цикл памяти"));
+        assert!(!titles.contains(&"Поведение при сбоях"));
+        assert!(!titles.contains(&"Правильное продолжение"));
     }
 
     #[test]
@@ -19427,10 +18541,10 @@ mod tests {
                     "query": "alpha_runtime_summary",
                     "disable_cache": false,
                     "qps": 1661.13,
-                    "p50_ms": 0.568,
-                    "p95_ms": 0.681,
-                    "p99_ms": 1.182,
-                    "max_ms": 1.182,
+                    "p50_ms": 0.000211,
+                    "p95_ms": 0.000271,
+                    "p99_ms": 0.000280,
+                    "max_ms": 0.000280,
                     "iterations": 20,
                     "warmup": 3
                 }
@@ -19441,9 +18555,9 @@ mod tests {
                     "executive_summary": { "verdict": "TARGET MET" },
                     "profile": {
                         "target_p50_ms": 2.0,
-                        "target_p95_ms": 4.0,
-                        "target_p99_ms": 6.0,
-                        "target_max_ms": 10.0,
+                        "target_p95_ms": 12.0,
+                        "target_p99_ms": 13.0,
+                        "target_max_ms": 15.0,
                         "min_precision": 0.9,
                         "min_recall": 0.9,
                         "min_target_hit_rate": 0.9,
@@ -19479,6 +18593,133 @@ mod tests {
                     "semantic_precision": 1.0
                 }
             },
+            "latest_procedural_benchmark": {
+                "captured_at_epoch_ms": 5,
+                "procedural_benchmark": {
+                    "benchmark_run_state": "dual_line_materialized",
+                    "benchmark_run_state_ru": "обе benchmark-линии materialized",
+                    "benchmark_metric_kind": "procedural_skill_metrics",
+                    "benchmark_with_amai_series": [
+                        { "metric_key": "reuse_quality", "value": 1.0 },
+                        { "metric_key": "bad_skill_suppression", "value": 1.0 },
+                        { "metric_key": "stale_skill_suppression", "value": 1.0 },
+                        { "metric_key": "shadow_to_verified_uplift", "value": 1.0 },
+                        { "metric_key": "evaluator_correctness", "value": 1.0 }
+                    ],
+                    "benchmark_without_amai_series": [
+                        { "metric_key": "reuse_quality", "value": 0.0 },
+                        { "metric_key": "bad_skill_suppression", "value": 1.0 },
+                        { "metric_key": "stale_skill_suppression", "value": 1.0 },
+                        { "metric_key": "shadow_to_verified_uplift", "value": 0.0 },
+                        { "metric_key": "evaluator_correctness", "value": 1.0 }
+                    ],
+                    "benchmark_line_summaries": {
+                        "with_amai": {
+                            "line_code": "with_amai",
+                            "state": "materialized",
+                            "point_count": 5,
+                            "pass_percent": 100.0
+                        },
+                        "without_amai_but_measuring": {
+                            "line_code": "without_amai_but_measuring",
+                            "state": "materialized",
+                            "point_count": 5,
+                            "pass_percent": 60.0,
+                            "reason_ru": "Amai не помогает, но benchmark продолжает измерять procedural lane."
+                        }
+                    },
+                    "benchmark_run_passport": {
+                        "multi_platform_runtime_contract": "platform-neutral benchmark snapshot"
+                    },
+                    "summary": {
+                        "total_metrics": 5,
+                        "passed_metrics": 5,
+                        "pass_percent": 100.0,
+                        "without_amai_series_available": true
+                    },
+                    "procedural_metrics": [
+                        {
+                            "metric_key": "reuse_quality",
+                            "label_ru": "Reuse quality",
+                            "tooltip_ru": "Skill reuse quality",
+                            "passed": true
+                        },
+                        {
+                            "metric_key": "bad_skill_suppression",
+                            "label_ru": "Bad-skill suppression",
+                            "tooltip_ru": "Bad skill suppression",
+                            "passed": true
+                        },
+                        {
+                            "metric_key": "stale_skill_suppression",
+                            "label_ru": "Stale-skill suppression",
+                            "tooltip_ru": "Stale skill suppression",
+                            "passed": true
+                        },
+                        {
+                            "metric_key": "shadow_to_verified_uplift",
+                            "label_ru": "Shadow-to-verified uplift",
+                            "tooltip_ru": "Shadow uplift",
+                            "passed": true
+                        },
+                        {
+                            "metric_key": "evaluator_correctness",
+                            "label_ru": "Evaluator correctness",
+                            "tooltip_ru": "Evaluator correctness",
+                            "passed": true
+                        }
+                    ]
+                }
+            },
+            "latest_memory_benchmark_score": {
+                "_observability": {
+                    "captured_at_epoch_ms": 6
+                },
+                "memory_benchmark_score": {
+                    "bench": "longmemeval",
+                    "dataset": "longmemeval_s_cleaned",
+                    "note": "Baseline scorer: exact/contains match + abstention heuristics. Official upstream scoring not yet implemented.",
+                    "capability_breakdown": {
+                        "longmemeval_overall_accuracy": 0.02,
+                        "longmemeval_abstention_accuracy": 0.0,
+                        "longmemeval_false_answer_rate_on_abstention": 1.0
+                    },
+                    "summary": {
+                        "total": 500,
+                        "missing_prediction": 490,
+                        "abstention_expected": 32
+                    }
+                }
+            },
+            "procedural_benchmark_history": {
+                "history_count": 2,
+                "with_amai_history_count": 2,
+                "without_amai_history_count": 2,
+                "history_rows": [
+                    {
+                        "benchmark_run_id": "procedural-benchmark-1",
+                        "captured_at_epoch_ms": 4,
+                        "benchmark_run_state": "dual_line_materialized",
+                        "with_amai_pass_percent": 80.0,
+                        "without_amai_pass_percent": 40.0
+                    },
+                    {
+                        "benchmark_run_id": "procedural-benchmark-2",
+                        "captured_at_epoch_ms": 5,
+                        "benchmark_run_state": "dual_line_materialized",
+                        "with_amai_pass_percent": 100.0,
+                        "without_amai_pass_percent": 60.0
+                    }
+                ],
+                "with_amai_pass_percent_series": [
+                    { "benchmark_run_id": "procedural-benchmark-1", "captured_at_epoch_ms": 4, "pass_percent": 80.0 },
+                    { "benchmark_run_id": "procedural-benchmark-2", "captured_at_epoch_ms": 5, "pass_percent": 100.0 }
+                ],
+                "without_amai_pass_percent_series": [
+                    { "benchmark_run_id": "procedural-benchmark-1", "captured_at_epoch_ms": 4, "pass_percent": 40.0 },
+                    { "benchmark_run_id": "procedural-benchmark-2", "captured_at_epoch_ms": 5, "pass_percent": 60.0 }
+                ]
+            },
             "thresholds": {
                 "dashboard": {
                     "timing_format": {
@@ -19511,8 +18752,8 @@ mod tests {
                 "retrieval": {
                     "hot_live_table": {
                         "target_p50_ms": 1.0,
-                        "target_p95_ms": 1.0,
-                        "target_p99_ms": 2.0,
+                        "target_p95_ms": 2.0,
+                        "target_p99_ms": 3.0,
                         "target_max_ms": 5.0
                     },
                     "hot_benchmark_table": {
@@ -19535,14 +18776,12 @@ mod tests {
         });
 
         let cards = build_benchmark_cards(&snapshot);
-        assert_eq!(
-            cards[0]["title"].as_str(),
-            Some("Hot Load Benchmark / latest_retrieval_load_hot")
-        );
-        assert_eq!(
-            cards[1]["title"].as_str(),
-            Some("Hot Retrieval Benchmark / latest_retrieval_hot")
-        );
+        let titles: Vec<&str> = cards
+            .iter()
+            .filter_map(|card| card["title"].as_str())
+            .collect();
+        assert_eq!(cards[0]["title"].as_str(), Some("Нагрузка после прогрева"));
+        assert_eq!(cards[1]["title"].as_str(), Some("Повторный запрос"));
         assert!(
             cards[0]["note"]
                 .as_str()
@@ -19555,6 +18794,7 @@ mod tests {
                 .unwrap_or_default()
                 .contains("источник SLA-метрики retrieval.hot_p95_ms")
         );
+        assert_eq!(cards[1]["headline_value"].as_str(), Some("271 ns"));
         assert_eq!(
             cards[0]["table"]["rows"][0]["values"][0].as_str(),
             Some("> 1200000\nBurst QPS")
@@ -19570,6 +18810,22 @@ mod tests {
         assert_eq!(
             cards[1]["table"]["rows"][0]["values"][0].as_str(),
             Some("нет SLA-порога")
+        );
+        assert_eq!(
+            cards[1]["table"]["rows"][1]["values"][1].as_str(),
+            Some("211 ns")
+        );
+        assert_eq!(
+            cards[1]["table"]["rows"][2]["values"][1].as_str(),
+            Some("271 ns")
+        );
+        assert_eq!(
+            cards[1]["table"]["rows"][3]["values"][1].as_str(),
+            Some("280 ns")
+        );
+        assert_eq!(
+            cards[1]["table"]["rows"][4]["values"][1].as_str(),
+            Some("280 ns")
         );
         assert_eq!(
             cards[1]["table"]["rows"][5]["values"][0].as_str(),
@@ -19592,10 +18848,139 @@ mod tests {
             Some("98.00%")
         );
         assert_eq!(
+            cards[3]["headline_value"].as_str(),
+            Some("утечки 0 • symbol 100.00% • semantic 100.00%")
+        );
+        assert_eq!(
             cards[3]["extra_class"].as_str(),
             Some("benchmark-span-full")
         );
         assert_eq!(cards[3]["table_orientation"].as_str(), Some("transposed"));
+        assert_eq!(cards[4]["title"].as_str(), Some("Память и изоляция"));
+        assert_eq!(cards[4]["status"].as_str(), Some("critical"));
+        assert_eq!(
+            cards[4]["headline_value"].as_str(),
+            Some("500 кейсов • overall 2.00% • abstention 0.00%")
+        );
+        assert_eq!(
+            cards[4]["table"]["rows"][0]["values"][1].as_str(),
+            Some("longmemeval")
+        );
+        assert_eq!(
+            cards[4]["table"]["rows"][2]["values"][1].as_str(),
+            Some("500")
+        );
+        assert_eq!(
+            cards[4]["table"]["rows"][5]["values"][1].as_str(),
+            Some("100.00%")
+        );
+        assert_eq!(
+            cards[4]["table"]["rows"][6]["values"][1].as_str(),
+            Some("490")
+        );
+        assert!(
+            cards[4]["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Missing predictions")
+        );
+        assert_eq!(cards[5]["title"].as_str(), Some("Навыки и память действий"));
+        assert_eq!(
+            cards[5]["headline_value"].as_str(),
+            Some(
+                "5 из 5 skill-метрик подтверждены с Amai (100.00%); линия без Amai materialized отдельно"
+            )
+        );
+        assert_eq!(cards[5]["status"].as_str(), Some("pass"));
+        assert!(
+            cards[5]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("generic memory score запрещён")
+        );
+        assert!(
+            cards[5]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Линия без Amai materialized отдельно")
+        );
+        assert_eq!(
+            cards[5]["benchmark_metric_kind"].as_str(),
+            Some("procedural_skill_metrics")
+        );
+        assert_eq!(
+            cards[5]["benchmark_run_state"].as_str(),
+            Some("dual_line_materialized")
+        );
+        assert_eq!(
+            cards[5]["without_amai_series_available"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][0]["label"].as_str(),
+            Some("Metric kind")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][0]["values"][1].as_str(),
+            Some("procedural_skill_metrics")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][1]["values"][1].as_str(),
+            Some("dual_line_materialized (обе benchmark-линии materialized)")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][3]["values"][1].as_str(),
+            Some("materialized")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][4]["values"][1].as_str(),
+            Some("5")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][5]["values"][1].as_str(),
+            Some("materialized")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][6]["values"][1].as_str(),
+            Some("platform-neutral benchmark snapshot")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][7]["label"].as_str(),
+            Some("История benchmark")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][7]["values"][1].as_str(),
+            Some("2")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][8]["values"][1].as_str(),
+            Some("2")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][9]["values"][1].as_str(),
+            Some("2")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][10]["label"].as_str(),
+            Some("Reuse quality")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][14]["values"][1].as_str(),
+            Some("pass")
+        );
+        assert_eq!(
+            cards[5]["benchmark_with_amai_history_series"]
+                .as_array()
+                .map(|items| items.len()),
+            Some(2)
+        );
+        assert_eq!(
+            cards[5]["benchmark_without_amai_history_series"]
+                .as_array()
+                .map(|items| items.len()),
+            Some(2)
+        );
+        assert!(titles.contains(&"Память и изоляция"));
     }
 
     #[test]
@@ -19731,8 +19116,8 @@ mod tests {
                 "retrieval": {
                     "hot_live_table": {
                         "target_p50_ms": 1.0,
-                        "target_p95_ms": 1.0,
-                        "target_p99_ms": 2.0,
+                        "target_p95_ms": 2.0,
+                        "target_p99_ms": 3.0,
                         "target_max_ms": 5.0
                     },
                     "hot_benchmark_table": {
@@ -19881,6 +19266,82 @@ mod tests {
     }
 
     #[test]
+    fn client_budget_live_payload_prefers_live_personal_agent_reply_prefix() {
+        let snapshot = json!({
+            "active_agent_budget": {
+                "aggregate": {
+                    "status": "observed",
+                    "reply_prefix": "5ч KPI: экономия 28.49%"
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "client_budget_target_percent": 50
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "client_live_meter": {
+                        "status": "observed",
+                        "current_thread_bound": true,
+                        "thread_binding_state": "current_thread_bound",
+                        "ended_at_epoch_ms": 1000,
+                        "client_turn_total_tokens": 1000,
+                        "latest_model_context_window": 2000,
+                        "context_used_percent": 50.0,
+                        "primary_limit_used_percent": 57.0,
+                        "primary_limit_remaining_percent": 43.0,
+                        "secondary_limit_used_percent": 77.0,
+                        "secondary_limit_remaining_percent": 23.0,
+                        "status_bar_rate_limits": {
+                            "status": "observed",
+                            "source": "codex_app_server_account_rate_limits_read_v1",
+                            "observed_at_epoch_ms": 2000,
+                            "primary_limit_used_percent": 57.0,
+                            "primary_limit_remaining_percent": 43.0,
+                            "secondary_limit_used_percent": 77.0,
+                            "secondary_limit_remaining_percent": 23.0
+                        }
+                    },
+                    "current_live_turn": {
+                        "exact_pair_available": false
+                    },
+                    "personal_agent_kpi": {
+                        "status": "observed",
+                        "reply_prefix": "5ч KPI: экономия 61.25%"
+                    },
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "classification": "saving",
+                        "reply_prefix": "5ч KPI: экономия 50.00%",
+                        "projected_primary_used_per_hour_percent": 10.0,
+                        "kpi_percent": 50.0,
+                        "remaining_window_minutes": 30.0,
+                        "actual_remaining_percent": 75.0,
+                        "ideal_remaining_percent": 50.0,
+                        "latest_observed_at_epoch_ms": 2000,
+                        "projected_reset_delta_minutes": 30.0
+                    }
+                }
+            }
+        });
+
+        let payload = super::client_budget_live_payload(&snapshot);
+        assert_eq!(
+            payload["reply_prefix"].as_str(),
+            Some("5ч KPI: экономия 50.00%")
+        );
+        assert_eq!(
+            payload["global_reply_prefix"].as_str(),
+            Some("5ч KPI: экономия 50.00%")
+        );
+        assert_eq!(
+            payload["reply_prefix_source"],
+            json!("global_client_limit_hourly_burn")
+        );
+    }
+
+    #[test]
     fn client_limit_hourly_burn_row_embeds_same_thread_host_control_in_selector() {
         let row = super::client_limit_hourly_burn_metric_row(
             &json!({
@@ -20023,6 +19484,84 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("compact window")
+        );
+    }
+
+    #[test]
+    fn client_limit_hourly_burn_row_embeds_compact_chat_client_surface_assist() {
+        let row = super::client_limit_hourly_burn_metric_row(
+            &json!({
+                "status": "observed",
+                "classification": "saving",
+                "reply_prefix": "5ч KPI: экономия 50.00%",
+                "projected_primary_used_per_hour_percent": 10.0,
+                "kpi_percent": 50.0,
+                "remaining_window_minutes": 30.0,
+                "actual_remaining_percent": 75.0,
+                "ideal_remaining_percent": 50.0,
+                "latest_observed_at_epoch_ms": 2000,
+                "projected_reset_delta_minutes": 30.0
+            }),
+            50,
+            &json!({
+                "project": {
+                    "repo_root": env!("CARGO_MANIFEST_DIR")
+                }
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 6000,
+                "client_turn_total_tokens": 15000,
+                "context_used_percent": 5.8,
+                "primary_limit_used_percent": 24
+            }),
+            &json!({
+                "stage": "preserve",
+                "growth_since_compaction_tokens": 4800
+            }),
+            &working_state::build_host_current_thread_control_surface_for_thread_and_stage(
+                Some("thread-current"),
+                working_state::HostContextCompactionStage::Preserve,
+            ),
+        )
+        .expect("hourly burn row");
+        assert_eq!(
+            row["target_selector"]["compact_chat_required_host_action"],
+            json!("open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable")
+        );
+        assert!(
+            row["target_selector"]["compact_chat_note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("clean")
+        );
+        assert!(
+            row["target_selector"]["compact_chat_assist_summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("./scripts/reconnect_local.sh --client")
+        );
+        assert!(
+            row["target_selector"]["compact_chat_reconnect_bootstrap_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("./scripts/amai_exec.sh bootstrap reconnect --client")
+        );
+    }
+
+    #[test]
+    fn compact_chat_selector_client_surface_falls_back_to_discovered_repo_root() {
+        let surface = super::compact_chat_selector_client_surface(&json!({}));
+        assert!(
+            surface["display_name"]
+                .as_str()
+                .is_some_and(|value| !value.trim().is_empty())
+        );
+        assert!(
+            surface["reconnect_shell_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("./scripts/reconnect_local.sh --client")
         );
     }
 
@@ -20179,6 +19718,53 @@ mod tests {
     }
 
     #[test]
+    fn host_current_thread_control_effect_clears_measurement_pending_after_short_idle_window() {
+        let effect = super::host_current_thread_control_effect_payload_for_command(
+            &json!({
+                "recent_actions": [{
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 1_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "opened",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 100000,
+                                "context_used_percent": 40.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 20000,
+                                "stage": "inactive"
+                            }
+                        }
+                    }
+                }]
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 31_500,
+                "client_turn_total_tokens": 100000,
+                "context_used_percent": 40.0,
+                "primary_limit_used_percent": 60
+            }),
+            &json!({
+                "stage": "inactive",
+                "growth_since_compaction_tokens": 20000
+            }),
+            Some("thread-overlay-open-current"),
+        );
+        assert_eq!(effect["measurement_pending"], json!(false));
+        assert_eq!(effect["measurement_sufficient"], json!(true));
+        assert_eq!(effect["retry_allowed"], json!(true));
+        assert_eq!(
+            effect["effect_verdict"],
+            json!("opened_overlay_surface_observed")
+        );
+    }
+
+    #[test]
     fn host_current_thread_control_effect_marks_verified_compaction_after_requested_feedback() {
         let effect = super::host_current_thread_control_effect_payload_for_command(
             &json!({
@@ -20271,6 +19857,8 @@ mod tests {
         );
         assert_eq!(effect["full_scale_client_burn_worsened"], json!(true));
         assert_eq!(effect["rotate_fallback_recommended"], json!(true));
+        assert_eq!(effect["material_compaction_gain_observed"], json!(false));
+        assert_eq!(effect["retry_allowed"], json!(false));
         assert!(
             effect["summary"]
                 .as_str()
@@ -20363,6 +19951,8 @@ mod tests {
             "critical",
             "сожми текущий чат сейчас",
             Some("5ч KPI: переплата 10.00%"),
+            Some("5ч KPI: переплата 10.00%"),
+            "personal_agent_5h_kpi",
             Some(9_000),
             10,
             false,
@@ -20422,6 +20012,8 @@ mod tests {
             "critical",
             "сожми текущий чат сейчас",
             Some("5ч KPI: переплата 10.00%"),
+            Some("5ч KPI: переплата 10.00%"),
+            "personal_agent_5h_kpi",
             Some(9_000),
             10,
             false,
@@ -20479,6 +20071,8 @@ mod tests {
             "critical",
             "сожми текущий чат сейчас",
             Some("5ч KPI: переплата 10.00%"),
+            Some("5ч KPI: переплата 10.00%"),
+            "personal_agent_5h_kpi",
             Some(9_000),
             10,
             false,
@@ -20533,6 +20127,8 @@ mod tests {
             "critical",
             "новый чат нужен сейчас",
             Some("5ч KPI: переплата 10.00%"),
+            Some("5ч KPI: переплата 10.00%"),
+            "personal_agent_5h_kpi",
             Some(9_000),
             10,
             false,
@@ -20587,6 +20183,8 @@ mod tests {
             "critical",
             "новый чат нужен сейчас",
             Some("5ч KPI: переплата 10.00%"),
+            Some("5ч KPI: переплата 10.00%"),
+            "personal_agent_5h_kpi",
             Some(9_000),
             10,
             false,
@@ -20648,6 +20246,8 @@ mod tests {
             "critical",
             "новый чат нужен сейчас",
             Some("5ч KPI: переплата 10.00%"),
+            Some("5ч KPI: переплата 10.00%"),
+            "personal_agent_5h_kpi",
             Some(9_000),
             10,
             true,
@@ -20771,7 +20371,176 @@ mod tests {
     }
 
     #[test]
-    fn selected_host_current_thread_control_state_drops_same_thread_preference_when_both_surfaces_worsen_full_scale_burn()
+    fn selected_host_current_thread_control_state_drops_same_thread_preference_only_after_verified_failure_on_both_surfaces()
+     {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            }
+        });
+        let restore = json!({
+            "thread_id": "thread-current",
+            "recent_actions": [
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 1_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 170_000,
+                                "context_used_percent": 65.0,
+                                "primary_limit_used_percent": 20
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 80_000,
+                                "stage": "critical_regrowth",
+                                "compaction_count": 1,
+                                "compacted_at_epoch_ms": 1_500
+                            }
+                        }
+                    }
+                },
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 2_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 160_000,
+                                "context_used_percent": 62.0,
+                                "primary_limit_used_percent": 20
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 60_000,
+                                "stage": "critical_regrowth",
+                                "compaction_count": 1,
+                                "compacted_at_epoch_ms": 2_500
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let client_live_meter = json!({
+            "thread_id": "thread-current",
+            "ended_at_epoch_ms": 602_000,
+            "client_turn_total_tokens": 188_000,
+            "context_used_percent": 72.5,
+            "primary_limit_used_percent": 40
+        });
+        let host_context_compaction = json!({
+            "stage": "critical_regrowth",
+            "growth_since_compaction_tokens": 95_000,
+            "compaction_count": 2,
+            "compacted_at_epoch_ms": 3_000
+        });
+        let (_surface, effect, same_thread_preferred) =
+            super::selected_host_current_thread_control_state(
+                &report,
+                &restore,
+                &client_live_meter,
+                &host_context_compaction,
+            );
+        assert_eq!(same_thread_preferred, false);
+        assert_eq!(effect["rotate_fallback_recommended"], json!(true));
+        assert_eq!(effect["full_scale_client_burn_worsened"], json!(true));
+        assert_eq!(effect["retry_allowed"], json!(false));
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_keeps_same_thread_preference_when_verified_compaction_has_material_gain()
+     {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            }
+        });
+        let restore = json!({
+            "thread_id": "thread-current",
+            "recent_actions": [
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 1_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 170_000,
+                                "context_used_percent": 65.0,
+                                "primary_limit_used_percent": 20
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 80_000,
+                                "stage": "critical_regrowth",
+                                "compaction_count": 1,
+                                "compacted_at_epoch_ms": 1_500
+                            }
+                        }
+                    }
+                },
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 2_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 160_000,
+                                "context_used_percent": 62.0,
+                                "primary_limit_used_percent": 20
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 60_000,
+                                "stage": "critical_regrowth",
+                                "compaction_count": 1,
+                                "compacted_at_epoch_ms": 2_500
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let client_live_meter = json!({
+            "thread_id": "thread-current",
+            "ended_at_epoch_ms": 602_000,
+            "client_turn_total_tokens": 92_000,
+            "context_used_percent": 35.5,
+            "primary_limit_used_percent": 40
+        });
+        let host_context_compaction = json!({
+            "stage": "critical_regrowth",
+            "growth_since_compaction_tokens": 0,
+            "compaction_count": 2,
+            "compacted_at_epoch_ms": 3_000
+        });
+        let (_surface, effect, same_thread_preferred) =
+            super::selected_host_current_thread_control_state(
+                &report,
+                &restore,
+                &client_live_meter,
+                &host_context_compaction,
+            );
+        assert_eq!(same_thread_preferred, true);
+        assert_eq!(effect["rotate_fallback_recommended"], json!(true));
+        assert_eq!(effect["full_scale_client_burn_worsened"], json!(true));
+        assert_eq!(effect["material_compaction_gain_observed"], json!(true));
+        assert_eq!(effect["retry_allowed"], json!(true));
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_keeps_same_thread_preference_when_both_surfaces_only_have_observational_rotate_fallback()
      {
         let report = json!({
             "client_live_meter": {
@@ -20842,14 +20611,16 @@ mod tests {
                 &client_live_meter,
                 &host_context_compaction,
             );
-        assert_eq!(same_thread_preferred, false);
+        assert_eq!(same_thread_preferred, true);
         assert_eq!(effect["rotate_fallback_recommended"], json!(true));
-        assert_eq!(effect["full_scale_client_burn_worsened"], json!(true));
-        assert_eq!(effect["retry_allowed"], json!(false));
+        assert_eq!(
+            effect["verified_host_compaction_observed_after_feedback"],
+            json!(false)
+        );
     }
 
     #[test]
-    fn selected_host_current_thread_control_state_drops_same_thread_preference_for_oversized_critical_regrowth()
+    fn selected_host_current_thread_control_state_keeps_same_thread_preference_for_oversized_critical_regrowth_without_verified_failure()
      {
         let report = json!({
             "client_live_meter": {
@@ -20880,7 +20651,7 @@ mod tests {
                 &client_live_meter,
                 &host_context_compaction,
             );
-        assert_eq!(same_thread_preferred, false);
+        assert_eq!(same_thread_preferred, true);
     }
 
     #[test]
@@ -20941,6 +20712,65 @@ mod tests {
         );
         assert_eq!(effect["command_id"], json!("hotkey-window-open-current"));
         assert_eq!(effect["effect_verdict"], json!("measurement_pending"));
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_ignores_pending_feedback_from_other_thread() {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            }
+        });
+        let restore = json!({
+            "thread_id": "thread-current",
+            "recent_actions": [
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 5_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-old",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 110000,
+                                "context_used_percent": 46.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 26000,
+                                "stage": "inactive"
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let client_live_meter = json!({
+            "thread_id": "thread-current",
+            "ended_at_epoch_ms": 9_000,
+            "client_turn_total_tokens": 111000,
+            "context_used_percent": 46.2,
+            "primary_limit_used_percent": 60
+        });
+        let host_context_compaction = json!({
+            "stage": "inactive",
+            "growth_since_compaction_tokens": 26200
+        });
+
+        let (surface, effect, _) = super::selected_host_current_thread_control_state(
+            &report,
+            &restore,
+            &client_live_meter,
+            &host_context_compaction,
+        );
+
+        assert_eq!(
+            surface["command_id"],
+            json!(working_state::HOST_CURRENT_THREAD_CONTROL_COMMAND_ID)
+        );
+        assert_eq!(effect["command_id"], Value::Null);
     }
 
     #[test]

@@ -56,19 +56,25 @@ cleanup() {
 trap cleanup EXIT
 
 exporter_ready=0
-for _ in $(seq 1 45); do
+for _ in $(seq 1 90); do
   if ! kill -0 "$observe_pid" >/dev/null 2>&1; then
     cat tmp/observe-exporter.log
     exit 1
   fi
-  if curl -fsS "http://127.0.0.1:${observe_port}/healthz" >/dev/null; then
+  healthz_payload="$(curl --silent --show-error --max-time 3 "http://127.0.0.1:${observe_port}/healthz" || true)"
+  if [[ -n "${healthz_payload}" ]] && printf '%s' "${healthz_payload}" | jq -e '.status == "up"' >/dev/null; then
     exporter_ready=1
     break
   fi
+  printf '%s' "${healthz_payload}" > tmp/observe-healthz-last.json || true
   sleep 1
 done
 if [[ "${exporter_ready}" -ne 1 ]]; then
   cat tmp/observe-exporter.log
+  if [[ -s tmp/observe-healthz-last.json ]]; then
+    echo "last healthz payload:"
+    cat tmp/observe-healthz-last.json
+  fi
   exit 1
 fi
 
@@ -77,8 +83,42 @@ curl -fsS "http://127.0.0.1:${observe_port}/metrics" | rg '^amai_(qdrant_index_o
 
 step "verify human dashboard endpoints"
 curl -fsS "http://127.0.0.1:${observe_port}/" | rg 'Amai Human Dashboard|Главная польза прямо сейчас|Польза проекта видна сразу' >/dev/null
+curl -fsS "http://127.0.0.1:${observe_port}/" | rg '/api/dashboard-live-summary|syncDashboardLiveSummary' >/dev/null
+if curl -fsS "http://127.0.0.1:${observe_port}/" | rg '/api/active-agent-budget-live|syncActiveAgentBudgetLiveCard|fetchActiveAgentBudgetLivePayload' >/dev/null; then
+  echo "human dashboard page still exposes split active-agent live poller" >&2
+  exit 1
+fi
 curl -fsS "http://127.0.0.1:${observe_port}/api/dashboard" | rg '"top_cards"|"service_cards"|"glossary"' >/dev/null
+dashboard_json="$(curl -fsS "http://127.0.0.1:${observe_port}/api/dashboard")"
+printf '%s' "$dashboard_json" | jq -e '
+  .service_cards
+  | any(.title == "Жизненный цикл памяти")
+' >/dev/null
+printf '%s' "$dashboard_json" | jq -e '
+  .service_cards[]
+  | select(.title == "Жизненный цикл памяти")
+  | (.rows | any(.label == "Pruning"))
+    and (.rows | any(.label == "Archive"))
+    and (.rows | any(.label == "Revalidation"))
+    and (.rows | any(.label == "Dedup / compaction"))
+' >/dev/null
+curl -fsS "http://127.0.0.1:${observe_port}/api/dashboard-live-summary" | rg '"headline"|"active_agent_card"|"top_cards"' >/dev/null
+api_reply_prefix="$(curl -fsS "http://127.0.0.1:${observe_port}/api/client-limit-hourly-burn" | jq -r '.reply_prefix')"
+script_reply_prefix="$(AMI_OBSERVE_BIND="${AMI_OBSERVE_BIND}" /home/art/.codex/skills/vscode-5h-kpi-prefix/scripts/read_kpi_prefix.sh)"
+if [[ "$api_reply_prefix" != "$script_reply_prefix" ]]; then
+  echo "5h KPI prefix script drifted from /api/client-limit-hourly-burn" >&2
+  echo "api:    $api_reply_prefix" >&2
+  echo "script: $script_reply_prefix" >&2
+  exit 1
+fi
 curl -fsS "http://127.0.0.1:${observe_port}/api/snapshot" | rg '"sla"|"postgres"|"token_budget_report"' >/dev/null
+curl -fsS "http://127.0.0.1:${observe_port}/api/snapshot" | jq -e '
+  .governance_surface.governance_surface_version == "governance-surface-v2"
+  and (.governance_surface.forgetting_job_breakdown.pruning_job != null)
+  and (.governance_surface.forgetting_job_breakdown.cold_archive_job != null)
+  and (.governance_surface.forgetting_job_breakdown.revalidation_job != null)
+  and (.governance_surface.forgetting_action_breakdown != null)
+' >/dev/null
 curl -fsS "http://127.0.0.1:${observe_port}/" | rg '/brand/amai_mark.svg|/favicon.ico' >/dev/null
 curl -fsS "http://127.0.0.1:${observe_port}/brand/amai_mark.svg" | rg '<svg' >/dev/null
 curl -fsS "http://127.0.0.1:${observe_port}/brand/amai_lockup.svg" | rg '<svg' >/dev/null
@@ -122,3 +162,8 @@ step "build live snapshot"
 cargo run --release --quiet -- observe snapshot
 step "run live sla-check"
 cargo run --release --quiet -- observe sla-check
+
+cleanup
+trap - EXIT
+
+printf 'proof_observability: ok\n'

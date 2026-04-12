@@ -1,11 +1,13 @@
 use crate::config::AppConfig;
 use anyhow::{Context, Result};
 use qdrant_client::qdrant::{
-    Condition, CreateAliasBuilder, CreateCollectionBuilder, DeletePointsBuilder, Distance, Filter,
-    PointStruct, ScoredPoint, SearchPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
+    Condition, CreateAliasBuilder, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder,
+    DeletePointsBuilder, Distance, FieldType, Filter, PointStruct, ScoredPoint,
+    SearchPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
 };
 use qdrant_client::{Payload, Qdrant};
 use serde_json::Value;
+use std::sync::{Mutex, OnceLock};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -15,10 +17,36 @@ pub struct VectorPoint {
     pub payload: Value,
 }
 
+#[derive(Clone)]
+struct CachedQdrantClient {
+    qdrant_url: String,
+    client: Qdrant,
+}
+
+static QDRANT_CLIENT_CACHE: OnceLock<Mutex<Option<CachedQdrantClient>>> = OnceLock::new();
+
 pub fn connect(cfg: &AppConfig) -> Result<Qdrant> {
-    Qdrant::from_url(&cfg.qdrant_url)
+    let cache = QDRANT_CLIENT_CACHE.get_or_init(|| Mutex::new(None));
+    if let Some(cached) = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("qdrant client cache lock poisoned"))?
+        .as_ref()
+        .filter(|cached| cached.qdrant_url == cfg.qdrant_url)
+    {
+        return Ok(cached.client.clone());
+    }
+
+    let client = Qdrant::from_url(&cfg.qdrant_url)
         .build()
-        .with_context(|| format!("failed to connect to Qdrant at {}", cfg.qdrant_url))
+        .with_context(|| format!("failed to connect to Qdrant at {}", cfg.qdrant_url))?;
+    let mut guard = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("qdrant client cache lock poisoned"))?;
+    *guard = Some(CachedQdrantClient {
+        qdrant_url: cfg.qdrant_url.clone(),
+        client: client.clone(),
+    });
+    Ok(client)
 }
 
 pub async fn bootstrap_collections(client: &Qdrant, cfg: &AppConfig) -> Result<()> {
@@ -30,6 +58,7 @@ pub async fn bootstrap_collections(client: &Qdrant, cfg: &AppConfig) -> Result<(
         cfg.qdrant_distance()?,
     )
     .await?;
+    ensure_code_collection_payload_indexes(client, &cfg.qdrant_collection_code).await?;
     ensure_collection_and_alias(
         client,
         &cfg.qdrant_collection_memory,
@@ -76,6 +105,29 @@ async fn ensure_collection_and_alias(
             .await
             .with_context(|| format!("failed to create alias {alias} -> {collection}"))?;
     }
+    Ok(())
+}
+
+async fn ensure_code_collection_payload_indexes(client: &Qdrant, collection: &str) -> Result<()> {
+    ensure_keyword_field_index(client, collection, "project_code").await?;
+    ensure_keyword_field_index(client, collection, "namespace_code").await?;
+    ensure_keyword_field_index(client, collection, "document_id").await?;
+    Ok(())
+}
+
+async fn ensure_keyword_field_index(
+    client: &Qdrant,
+    collection: &str,
+    field_name: &str,
+) -> Result<()> {
+    client
+        .create_field_index(CreateFieldIndexCollectionBuilder::new(
+            collection,
+            field_name,
+            FieldType::Keyword,
+        ))
+        .await
+        .with_context(|| format!("failed to ensure payload index {field_name} in {collection}"))?;
     Ok(())
 }
 

@@ -1,7 +1,10 @@
 use crate::config::AppConfig;
+use crate::postgres;
 use anyhow::Result;
 use async_nats::jetstream;
 use async_nats::jetstream::stream::{self, RetentionPolicy, StorageType};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio_postgres::Client as PgClient;
 
 pub async fn connect(cfg: &AppConfig) -> Result<async_nats::Client> {
     Ok(async_nats::connect(&cfg.nats_url).await?)
@@ -47,4 +50,43 @@ pub async fn status_stream_names(client: async_nats::Client) -> Result<Vec<Strin
         }
     }
     Ok(names)
+}
+
+pub async fn relay_memory_write_outbox(
+    cfg: &AppConfig,
+    db: &PgClient,
+    limit: i64,
+) -> Result<usize> {
+    let client = connect(cfg).await?;
+    let deliveries = postgres::claim_pending_memory_write_outbox(db, limit).await?;
+    let mut published = 0usize;
+    for delivery in deliveries {
+        let payload = serde_json::to_vec(&delivery.payload)?;
+        match client
+            .publish(delivery.subject.clone(), payload.into())
+            .await
+        {
+            Ok(_) => {
+                client.flush().await?;
+                let published_at_epoch_ms =
+                    SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
+                postgres::mark_memory_write_outbox_published(
+                    db,
+                    delivery.memory_write_outbox_id,
+                    published_at_epoch_ms,
+                )
+                .await?;
+                published += 1;
+            }
+            Err(error) => {
+                postgres::mark_memory_write_outbox_failed(
+                    db,
+                    delivery.memory_write_outbox_id,
+                    &error.to_string(),
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(published)
 }

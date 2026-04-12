@@ -97,10 +97,31 @@ pub async fn index_project(
         &cfg.default_retrieval_mode,
     )
     .await?;
-    postgres::delete_namespace_documents(db, namespace.namespace_id).await?;
-
     let git_commit_sha = resolve_git_commit(&project.repo_root).await.ok();
     let files = collect_files(&index_root, args.limit_files, args.paths_file.as_deref())?;
+    if args.preserve_namespace_documents {
+        if files.is_empty() {
+            postgres::delete_namespace_documents(db, namespace.namespace_id).await?;
+        } else {
+            let keep_paths = files
+                .iter()
+                .map(|path| {
+                    path.strip_prefix(&project.repo_root)
+                        .unwrap_or(path)
+                        .display()
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
+            postgres::delete_namespace_documents_except_paths(
+                db,
+                namespace.namespace_id,
+                &keep_paths,
+            )
+            .await?;
+        }
+    } else {
+        postgres::delete_namespace_documents(db, namespace.namespace_id).await?;
+    }
     let qdrant_client = if args.skip_embeddings {
         None
     } else {
@@ -125,6 +146,11 @@ pub async fn index_project(
     let mut language_breakdown = BTreeMap::<String, usize>::new();
 
     for file in files {
+        let _relative_path = file
+            .strip_prefix(&project.repo_root)
+            .unwrap_or(&file)
+            .display()
+            .to_string();
         let analyzed = analyze_file(cfg, &project, &file, git_commit_sha.as_deref())?;
         let document_id = Uuid::new_v4();
         files_indexed += 1;

@@ -11,7 +11,10 @@ display_name = "LiveMCPBench-style local MCP matrix"
 summary = "Measured local matrix для MCP tool discovery, context routing, observability и fail-closed hostile paths внутри Amai MCP."
 min_success_rate = 1.0
 max_failures = 0
-max_p95_ms = 15000.0
+# live matrix now includes full `amai_observe_snapshot` and `amai_token_report` MCP calls.
+# Both are intentionally product-real heavy tools, so the matrix budget must allow their
+# measured local latency with headroom instead of pretending they are lightweight reads.
+max_p95_ms = 25000.0
 task_codes = [
   "tool_catalog",
   "project_listing",
@@ -31,7 +34,7 @@ display_name = "MCP-Universe-style local task matrix"
 summary = "Measured local matrix для multi-domain MCP usage и isolation контуров: happy path, hostile tool routing и explicit multi-agent continuity isolation."
 min_success_rate = 1.0
 max_failures = 0
-max_p95_ms = 20000.0
+max_p95_ms = 25000.0
 task_codes = [
   "tool_catalog",
   "project_listing",
@@ -125,7 +128,7 @@ class = "hostile"
 display_name = "Unknown MCP tool fails closed"
 kind = "unknown_tool_fail_closed"
 eval_pattern = "isolation_boundary"
-expected_error_contains = "unknown MCP tool"
+expected_error_contains = "amai_unknown_tool"
 
 [tasks.unknown_project_fail_closed]
 order = 10

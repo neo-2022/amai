@@ -81,6 +81,16 @@ cargo run --release --quiet -- project register \
   --display-name "Amai" \
   --repo-root "${repo_root}"
 
+cargo run --release --quiet -- access-policy ensure \
+  --workspace default \
+  --project "${art_project_code}" \
+  --code "${art_project_code}_cross_project_review_read" \
+  --display-name "Art cross-project review read" \
+  --object-class fact \
+  --scope-type cross_project_linked \
+  --precedence 200 \
+  --can-read
+
 cargo run --release --quiet -- namespace ensure \
   --project "${art_project_code}" \
   --code review \

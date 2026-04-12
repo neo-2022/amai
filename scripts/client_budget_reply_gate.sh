@@ -7,6 +7,19 @@ cd "$REPO_ROOT"
 
 source "$SCRIPT_DIR/load_env.sh"
 
+startup_contract_path=".amai/onboarding/project-chat-startup-contract.json"
+if [[ -f "$startup_contract_path" ]] && command -v jq >/dev/null 2>&1; then
+  reply_blocking_removed="$(
+    jq -r '
+      .startup_contract.live_client_budget_enforcement.reply_blocking_removed
+      // false
+    ' "$startup_contract_path" 2>/dev/null || printf 'false'
+  )"
+  if [[ "$reply_blocking_removed" == "true" ]]; then
+    exit 0
+  fi
+fi
+
 observe_bind="${AMI_OBSERVE_BIND:-0.0.0.0:9464}"
 observe_host="${observe_bind%:*}"
 observe_port="${observe_bind##*:}"
@@ -22,6 +35,7 @@ esac
 
 api_url="http://${observe_host}:${observe_port}/api/client-budget-gate"
 cache_path="${REPO_ROOT}/state/observe/client_budget_gate_cache.json"
+CLIENT_BUDGET_GATE_CACHE_VERSION="client-budget-gate-cache-v7"
 
 fresh_compact_client_budget_gate_cache_available() {
   [[ -f "$cache_path" ]] || return 1
@@ -37,8 +51,10 @@ fresh_compact_client_budget_gate_cache_available() {
       // 0
     ' "$cache_path" 2>/dev/null || printf '0'
   )"
+  cache_version="$(jq -r '.cache_version // ""' "$cache_path" 2>/dev/null || printf '')"
   [[ "$fetched_at_ms" =~ ^[0-9]+$ ]] || return 1
   [[ "$observed_at_ms" =~ ^[0-9]+$ ]] || return 1
+  [[ "$cache_version" == "$CLIENT_BUDGET_GATE_CACHE_VERSION" ]] || return 1
   (( now_ms - fetched_at_ms <= 10000 )) || return 1
   (( now_ms - observed_at_ms <= 10000 )) || return 1
 }

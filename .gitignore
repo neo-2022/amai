@@ -37,3 +37,7 @@ output/
 .vscode/
 .cursor/
 .github/instructions/amai-continuity-startup.instructions.md
+
+# Local agent/dev artifacts (must not be committed).
+.codex
+.playwright-cli/

@@ -28,8 +28,6 @@ psql "${dsn}" -v ON_ERROR_STOP=1 -f "${repo_root}/sql/000_bootstrap.sql" >/dev/n
   --code continuity \
   --display-name Continuity >/dev/null
 
-psql "${dsn}" -v ON_ERROR_STOP=1 -c "DROP TABLE IF EXISTS ami.execctl_task_leases" >/dev/null
-
 ./target/release/amai continuity handoff \
   --project "${project_code}" \
   --headline "Same-meter spend control" \

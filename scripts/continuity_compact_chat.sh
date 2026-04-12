@@ -76,7 +76,8 @@ if [[ "$api_supported" == "true" ]] \
       --arg namespace "$namespace" '
         {
           project: (if ($project | length) > 0 then $project else null end),
-          namespace: $namespace
+          namespace: $namespace,
+          launch_host: false
         }
       ' 2>/dev/null || true
   )"

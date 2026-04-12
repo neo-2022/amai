@@ -1,0 +1,101 @@
+{
+  "name": "vscode-gemini-proxy",
+  "displayName": "Gemini Proxy Chat (Local)",
+  "description": "Minimal VS Code chat command that calls Gemini via a custom proxy endpoint.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:geminiProxy.ask",
+    "onCommand:geminiProxy.openChat"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "geminiProxy.ask",
+        "title": "Gemini Proxy: Ask"
+      },
+      {
+        "command": "geminiProxy.openChat",
+        "title": "Gemini Proxy: Open Chat"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Gemini Proxy",
+      "properties": {
+        "geminiProxy.baseUrl": {
+          "type": "string",
+          "default": "https://gemini-proxy.bold-violet-3c8d.workers.dev",
+          "description": "Base URL of the Gemini proxy (Cloudflare Worker)."
+        },
+        "geminiProxy.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Google AI Studio API key."
+        },
+        "geminiProxy.model": {
+          "type": "string",
+          "default": "gemini-2.5-flash",
+          "description": "Gemini model id (e.g. gemini-2.5-flash, gemini-2.5-pro)."
+        },
+        "geminiProxy.useV1": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use /v1/ instead of /v1beta/ in the API path."
+        },
+        "geminiProxy.maxContextChars": {
+          "type": "number",
+          "default": 20000,
+          "description": "Maximum number of characters to attach from file/selection context."
+        },
+        "geminiProxy.maxSearchResults": {
+          "type": "number",
+          "default": 20,
+          "description": "Maximum number of search matches to attach from project search."
+        },
+        "geminiProxy.allowCommands": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow running shell commands from the chat tool bridge."
+        },
+        "geminiProxy.allowFileRead": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow reading files and listing directories via the tool bridge."
+        },
+        "geminiProxy.allowFileWrite": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow writing files via the tool bridge."
+        },
+        "geminiProxy.allowExternalPaths": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow file access outside the current workspace root."
+        },
+        "geminiProxy.commandTimeoutMs": {
+          "type": "number",
+          "default": 20000,
+          "description": "Max command runtime in milliseconds."
+        },
+        "geminiProxy.commandMaxBuffer": {
+          "type": "number",
+          "default": 1048576,
+          "description": "Max command output buffer size in bytes."
+        },
+        "geminiProxy.allowAutoToolCalls": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically execute TOOL_CALL blocks without confirmation."
+        }
+      }
+    }
+  }
+}

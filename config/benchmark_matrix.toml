@@ -361,6 +361,50 @@ current_gaps = [
 proof_commands = []
 next_step = "Вернуться после materialized MCP and answer-judge contours."
 
+[benchmarks.procedural_memory_evolution]
+order = 6
+display_name = "Procedural Memory Evolution"
+aliases = [
+  "procedural-memory-benchmark",
+  "procedural memory benchmark",
+  "skills and action memory",
+  "навыки и память действий"
+]
+family = "general_assistant_reasoning"
+coverage_level = "partial"
+summary = "Внутренний compare-plane benchmark для procedural memory: skill reuse, bad-skill suppression, stale-skill suppression, shadow-to-verified uplift и evaluator correctness поверх truth-layer, а не вместо него."
+reference_url = "docs/AMAI_COMPARE_EXPERIMENT_PLAN.md"
+why_relevant = [
+  "Нужен как user-facing quality contour для procedural evolution, а не как скрытый набор stage-local proof.",
+  "Не даёт Stage 8 закрываться на общих словах про skills без measured benchmark plane."
+]
+amai_focus = [
+  "skill reuse quality",
+  "bad-skill suppression",
+  "stale-skill suppression",
+  "shadow-to-verified uplift",
+  "evaluator correctness"
+]
+current_coverage = [
+  "Есть procedural seed, shadow review, negative procedural memory и shared-promotion-by-approval proofs.",
+  "Есть refinement/version history contours для patch-vs-merge discipline и traceable skill evolution.",
+  "Есть отдельный compare-plane proof bundle `./scripts/proof_procedural_benchmark.sh`."
+]
+current_gaps = [
+  "Пока это proof-bundle benchmark, а не richer scored run с persisted per-metric history.",
+  "Нет ещё отдельной dashboard-card линии с time-series по reuse quality / suppression / uplift."
+]
+proof_commands = [
+  "./scripts/proof_procedural_benchmark.sh",
+  "./scripts/proof_procedural_seed.sh",
+  "./scripts/proof_procedural_shadow_review.sh",
+  "./scripts/proof_negative_procedural_memory.sh",
+  "./scripts/proof_shared_promotion_by_approval.sh",
+  "./scripts/proof_skill_refinement_contour.sh",
+  "./scripts/proof_skill_version_history.sh"
+]
+next_step = "Материализовать persisted benchmark surface и richer scored reporting по reuse/suppression/uplift метрикам поверх этого proof bundle."
+
 [benchmarks.swe_bench_verified]
 order = 1
 display_name = "SWE-bench Verified"

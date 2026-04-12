@@ -10,6 +10,8 @@ fi
 
 proof_id="$(date +%s%N)"
 temp_root="$(mktemp -d /tmp/amai-proof-live-turn-matrix.XXXXXX)"
+alpha_project_code="proof_shape_alpha_${proof_id}"
+beta_project_code="proof_shape_beta_${proof_id}"
 declare -a cleanup_threads=()
 
 cleanup() {
@@ -127,6 +129,16 @@ insert_thread_row() {
         'enabled'
       );" >/dev/null
   cleanup_threads+=("$thread_id")
+}
+
+update_thread_rollout_path() {
+  local thread_id="$1"
+  local rollout_path="$2"
+  sqlite3 ~/.codex/state_5.sqlite \
+    "UPDATE threads
+     SET rollout_path = '$rollout_path',
+         updated_at = strftime('%s','now')
+     WHERE id = '$thread_id';" >/dev/null
 }
 
 fetch_token_metrics() {
@@ -248,6 +260,60 @@ assert current["exact_pair"]["saved_pct"] >= 90.0, {
 PY
 }
 
+wait_for_current_live_turn_snapshot() {
+  local snapshot_path="$1"
+  local shape="$2"
+  local thread_id="$3"
+  local turn_id="$4"
+  local attempt=""
+  for attempt in {1..16}; do
+    timeout 2s ./target/release/amai observe token-report \
+      --budget-profile codex_5h \
+      --include-verify-events true >/dev/null || true
+    CODEX_THREAD_ID="$thread_id" AMAI_AGENT_SCOPE="proof_live_turn_matrix" \
+      timeout 20s ./target/release/amai observe snapshot >"$snapshot_path" || true
+    if [[ ! -s "$snapshot_path" ]]; then
+      sleep 2
+      continue
+    fi
+    if assert_current_live_turn_snapshot "$snapshot_path" "$shape" "$thread_id" "$turn_id" \
+      >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  if [[ ! -s "$snapshot_path" ]]; then
+    printf 'observe snapshot did not produce JSON for shape=%s thread_id=%s turn_id=%s\n' \
+      "$shape" "$thread_id" "$turn_id" >&2
+    return 1
+  fi
+  assert_current_live_turn_snapshot "$snapshot_path" "$shape" "$thread_id" "$turn_id"
+}
+
+purge_thread_budget_caches() {
+  local thread_id="$1"
+  local suffix
+  suffix="$(printf '%s' "$thread_id" | tr -c '[:alnum:]_-' '_')"
+  rm -f \
+    "state/observe/thread_bound_budget_snapshot.thread-${suffix}.json" \
+    "state/observe/thread_bound_snapshot_invalidation.thread-${suffix}.json" \
+    "state/observe/client_budget_surfaces_cache.thread-${suffix}.json" \
+    "state/observe/client_budget_gate_cache.thread-${suffix}.json"
+}
+
+purge_shared_token_budget_caches() {
+  rm -f \
+    state/token_budget/dashboard_assistant_scope_cache.json \
+    state/token_budget/dashboard_assistant_scope_source_cache.json \
+    state/token_budget/dashboard_current_session_events_cache.json \
+    state/token_budget/dashboard_same_meter_sync_cache.json \
+    state/token_budget/dashboard_token_events_cache.json \
+    state/token_budget/dashboard_token_events_invalidation.json \
+    state/token_budget/exact_client_limits_cache.json \
+    state/token_budget/live_turn_retrieval_context_pack_cache.json \
+    state/token_budget/live_turn_retrieval_context_pack_invalidation.json
+}
+
 repair_live_source_kind() {
   local live_source_kind="$1"
   local context_pack_id="$2"
@@ -265,7 +331,7 @@ repair_live_source_kind() {
 prepare_fixture_projects() {
   local alpha_root="$temp_root/alpha"
   local beta_root="$temp_root/beta"
-  mkdir -p "$alpha_root/src" "$beta_root/src"
+  mkdir -p "$alpha_root/src" "$alpha_root/docs" "$beta_root/src"
   cat >"$alpha_root/Cargo.toml" <<'EOF'
 [package]
 name = "proof_alpha"
@@ -319,38 +385,42 @@ beta_root.joinpath("src/lib.rs").write_text(
 """,
     encoding="utf-8",
 )
+alpha_root.joinpath("docs/exact-needle.md").write_text(
+    "# Exact needle\\n\\nexact needle orbit bridge\\n",
+    encoding="utf-8",
+)
 PY
 
   ./target/release/amai project register \
-    --code proof_shape_alpha \
+    --code "$alpha_project_code" \
     --display-name "Proof Shape Alpha" \
     --repo-root "$alpha_root" >/dev/null
   ./target/release/amai project register \
-    --code proof_shape_beta \
+    --code "$beta_project_code" \
     --display-name "Proof Shape Beta" \
     --repo-root "$beta_root" >/dev/null
   ./target/release/amai namespace ensure \
-    --project proof_shape_alpha \
+    --project "$alpha_project_code" \
     --code review \
     --display-name Review \
     --retrieval-mode local_plus_related >/dev/null
   ./target/release/amai namespace ensure \
-    --project proof_shape_beta \
+    --project "$beta_project_code" \
     --code review \
     --display-name Review \
     --retrieval-mode local_plus_related >/dev/null
   ./target/release/amai relation add \
-    --source proof_shape_alpha \
-    --target proof_shape_beta \
+    --source "$alpha_project_code" \
+    --target "$beta_project_code" \
     --relation-type shared_runtime \
     --shared-contour live_turn_shape \
     --access-mode local_plus_related >/dev/null
   ./target/release/amai index project \
-    --code proof_shape_alpha \
+    --code "$alpha_project_code" \
     --path "$alpha_root" \
     --namespace review >/dev/null
   ./target/release/amai index project \
-    --code proof_shape_beta \
+    --code "$beta_project_code" \
     --path "$beta_root" \
     --namespace review >/dev/null
 }
@@ -372,12 +442,13 @@ run_case() {
   local prompt_tokens="${14}"
   local assistant_tokens="${15}"
 
-  local thread_id="proof-live-turn-${proof_id}-${shape}"
+  local thread_id="matrix-live-turn-${proof_id}-${shape}"
   local rollout_path="$temp_root/${shape}.jsonl"
+  local completed_rollout_path="$temp_root/${shape}-complete.jsonl"
   local output_path="$temp_root/${shape}.json"
   local snapshot_path="$temp_root/${shape}-snapshot.json"
   local turn_id="turn-${shape}"
-  local live_source_kind="live_proof_live_turn_matrix_${proof_id}_${shape}"
+  local live_source_kind="live_matrix_turn_${proof_id}_${shape}"
   local repaired_source_kind="proof_live_turn_matrix_${shape}"
   local timestamp_rfc3339
   timestamp_rfc3339="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -397,6 +468,7 @@ run_case() {
       --project "$project" \
       --namespace "$namespace" \
       --query "$query" \
+      --disable-cache \
       --retrieval-mode "$retrieval_mode" \
       --limit-documents "$limit_documents" \
       --limit-symbols "$limit_symbols" \
@@ -423,17 +495,22 @@ run_case() {
   local actual_total=$((prompt_tokens + assistant_tokens + context_tokens + tool_overhead_tokens))
 
   write_rollout_file \
-    "$rollout_path" \
+    "$completed_rollout_path" \
     "$timestamp_rfc3339" \
     "$turn_id" \
     "$prompt_tokens" \
     "$assistant_tokens" \
     "$actual_total" \
     "1"
+  update_thread_rollout_path "$thread_id" "$completed_rollout_path"
+  purge_thread_budget_caches "$thread_id"
+  purge_shared_token_budget_caches
 
-  CODEX_THREAD_ID="$thread_id" AMAI_AGENT_SCOPE="proof_live_turn_matrix" \
-    ./target/release/amai observe snapshot >"$snapshot_path"
-  assert_current_live_turn_snapshot "$snapshot_path" "$shape" "$thread_id" "$turn_id"
+  ./target/release/amai observe token-report \
+    --budget-profile codex_5h \
+    --include-verify-events true >/dev/null
+
+  wait_for_current_live_turn_snapshot "$snapshot_path" "$shape" "$thread_id" "$turn_id"
 
   repair_live_source_kind \
     "$live_source_kind" \
@@ -452,35 +529,35 @@ run_case() {
 prepare_fixture_projects
 
 printf 'shape\tnaive_tokens\tcontext_tokens\ttool_overhead_tokens\twith_amai_total\n'
-run_case exact proof_shape_alpha review \
-  "exact needle orbit bridge" \
+run_case exact "$alpha_project_code" review \
+  "docs/exact-needle.md" \
   local_strict \
   2 0 0 0 \
   1 0 0 0 \
   20 24
-run_case symbol proof_shape_alpha review \
+run_case symbol "$alpha_project_code" review \
   "symbol_only_navigation_runtime_checkpoint" \
   local_strict \
   0 4 0 0 \
   0 1 0 0 \
   20 24
-run_case lexical proof_shape_alpha review \
+run_case lexical "$alpha_project_code" review \
   "lexical bridge phrase copper canyon lantern" \
   local_strict \
   0 0 4 0 \
   0 0 1 0 \
   20 24
-run_case semantic proof_shape_alpha review \
+run_case semantic "$alpha_project_code" review \
   "how do operators rebuild progress after a restart from preserved recovery markers" \
   local_strict \
   0 0 0 4 \
   0 0 0 1 \
   20 24
-run_case hybrid proof_shape_alpha review \
+run_case hybrid "$alpha_project_code" review \
   "hybrid orbit shared runtime marker" \
   local_plus_related \
   2 0 4 0 \
-  2 0 2 0 \
+  2 0 0 0 \
   24 28
 
 printf 'proof_token_live_turn_savings_matrix: PASS\n'

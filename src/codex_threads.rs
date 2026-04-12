@@ -89,6 +89,7 @@ struct RolloutTurnObservation {
     token_count_events: usize,
     started_at_epoch_ms: i64,
     ended_at_epoch_ms: i64,
+    first_assistant_response_at_epoch_ms: Option<i64>,
     approved_context_pack_calls: usize,
     client_turn_total_tokens: u64,
     client_turn_input_tokens: u64,
@@ -99,6 +100,10 @@ struct RolloutTurnObservation {
     latest_model_context_window: u64,
     latest_primary_limit_used_percent: u64,
     latest_secondary_limit_used_percent: u64,
+    latest_primary_window_duration_mins: Option<u64>,
+    latest_primary_resets_at_epoch_seconds: Option<u64>,
+    latest_secondary_window_duration_mins: Option<u64>,
+    latest_secondary_resets_at_epoch_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -126,6 +131,7 @@ struct RolloutTurnParseState {
     pending_context_compaction: Option<PendingRolloutContextCompactionObservation>,
     latest_context_compaction: Option<RolloutContextCompactionObservationData>,
     compaction_count: usize,
+    tolerated_jsonl_skips: RolloutJsonlToleranceSummary,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -142,6 +148,11 @@ struct LatestRolloutTokenCountSnapshot {
     latest_model_context_window: u64,
     latest_primary_limit_used_percent: u64,
     latest_secondary_limit_used_percent: u64,
+    latest_primary_window_duration_mins: Option<u64>,
+    latest_primary_resets_at_epoch_seconds: Option<u64>,
+    latest_secondary_window_duration_mins: Option<u64>,
+    latest_secondary_resets_at_epoch_seconds: Option<u64>,
+    rollout_jsonl_tolerance_summary: RolloutJsonlToleranceSummary,
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +218,8 @@ pub struct RolloutClientMeterObservation {
     pub turn_id: String,
     pub started_at_epoch_ms: i64,
     pub ended_at_epoch_ms: i64,
+    #[serde(default)]
+    pub first_assistant_response_at_epoch_ms: Option<i64>,
     pub client_turn_total_tokens: u64,
     pub client_turn_input_tokens: u64,
     pub client_turn_cached_input_tokens: u64,
@@ -216,7 +229,47 @@ pub struct RolloutClientMeterObservation {
     pub latest_model_context_window: u64,
     pub latest_primary_limit_used_percent: u64,
     pub latest_secondary_limit_used_percent: u64,
+    #[serde(default)]
+    pub latest_primary_window_duration_mins: Option<u64>,
+    #[serde(default)]
+    pub latest_primary_resets_at_epoch_seconds: Option<u64>,
+    #[serde(default)]
+    pub latest_secondary_window_duration_mins: Option<u64>,
+    #[serde(default)]
+    pub latest_secondary_resets_at_epoch_seconds: Option<u64>,
+    #[serde(default)]
+    pub rollout_jsonl_tolerance_summary: RolloutJsonlToleranceSummary,
     pub observation_source: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RolloutJsonlToleranceSummary {
+    #[serde(default)]
+    pub skipped_empty_or_nul_lines: u64,
+    #[serde(default)]
+    pub skipped_non_json_prefix_lines: u64,
+    #[serde(default)]
+    pub sanitized_nul_json_lines: u64,
+}
+
+impl RolloutJsonlToleranceSummary {
+    pub fn has_tolerated_skips(&self) -> bool {
+        self.skipped_empty_or_nul_lines > 0
+            || self.skipped_non_json_prefix_lines > 0
+            || self.sanitized_nul_json_lines > 0
+    }
+
+    fn merge_max_from(&mut self, other: &Self) {
+        self.skipped_empty_or_nul_lines = self
+            .skipped_empty_or_nul_lines
+            .max(other.skipped_empty_or_nul_lines);
+        self.skipped_non_json_prefix_lines = self
+            .skipped_non_json_prefix_lines
+            .max(other.skipped_non_json_prefix_lines);
+        self.sanitized_nul_json_lines = self
+            .sanitized_nul_json_lines
+            .max(other.sanitized_nul_json_lines);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -280,7 +333,7 @@ static ROLLOUT_TURN_OBSERVATION_CACHE: OnceLock<
     Mutex<HashMap<PathBuf, CachedRolloutTurnObservations>>,
 > = OnceLock::new();
 static THREAD_RECORD_BY_ID_CACHE: OnceLock<Mutex<Option<CachedThreadRecordById>>> = OnceLock::new();
-const LATEST_CLIENT_METER_SHARED_CACHE_VERSION: &str = "latest-rollout-client-meter-cache-v1";
+const LATEST_CLIENT_METER_SHARED_CACHE_VERSION: &str = "latest-rollout-client-meter-cache-v6";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedLatestRolloutClientMeterCache {
@@ -303,6 +356,20 @@ pub fn current_thread_id() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn thread_record_matches_repo_root(record: &ThreadRecord, repo_root: &str) -> bool {
+    record.cwd == repo_root || record.cwd.starts_with(&format!("{repo_root}/"))
+}
+
+pub fn preferred_thread_id_for_repo(repo_root: &str) -> Result<Option<String>> {
+    if let Some(current_thread_id) = current_thread_id().as_deref()
+        && let Some(record) = thread_record_by_id(current_thread_id)?
+        && thread_record_matches_repo_root(&record, repo_root)
+    {
+        return Ok(Some(record.thread_id));
+    }
+    Ok(current_thread_record(repo_root, None)?.map(|record| record.thread_id))
 }
 
 pub fn derive_thread_index_summary(
@@ -1249,6 +1316,22 @@ pub fn latest_rollout_client_meter_observation_for_thread(
     latest_rollout_client_meter_observation_from_path(thread_id, &rollout_path)
 }
 
+pub fn rollout_client_meter_observations_for_thread(
+    thread_id: &str,
+) -> Result<Vec<RolloutClientMeterObservation>> {
+    let Some(record) = thread_record_by_id(thread_id)? else {
+        return Ok(Vec::new());
+    };
+    if record.rollout_path.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rollout_path = PathBuf::from(record.rollout_path);
+    if !rollout_path.exists() {
+        return Ok(Vec::new());
+    }
+    parse_rollout_client_meter_observations(thread_id, &rollout_path)
+}
+
 pub fn latest_rollout_context_compaction_observation_for_thread(
     thread_id: &str,
 ) -> Result<Option<RolloutContextCompactionObservation>> {
@@ -1938,9 +2021,11 @@ fn rollout_summary_from_path_at_time(
 
 fn extract_chat_messages_from_rollout_text(text: &str) -> Result<Vec<RolloutMessage>> {
     let mut messages = Vec::new();
+    let mut tolerated_jsonl_skips = RolloutJsonlToleranceSummary::default();
     for line in text.lines() {
-        let row: Value =
-            serde_json::from_str(line).context("failed to parse rollout jsonl line")?;
+        let Some(row) = parse_rollout_jsonl_line(line, &mut tolerated_jsonl_skips)? else {
+            continue;
+        };
         if row["type"].as_str() != Some("response_item") {
             continue;
         }
@@ -2023,31 +2108,35 @@ fn parse_rollout_client_meter_observations(
     thread_id: &str,
     rollout_path: &Path,
 ) -> Result<Vec<RolloutClientMeterObservation>> {
-    Ok(
-        snapshot_rollout_turn_observations(&load_rollout_turn_parse_state(rollout_path)?)
-            .into_iter()
-            .filter(|turn| {
-                turn.client_turn_total_tokens > 0 || turn.latest_cumulative_total_tokens > 0
-            })
-            .map(|turn| RolloutClientMeterObservation {
-                thread_id: thread_id.to_string(),
-                rollout_path: rollout_path.display().to_string(),
-                turn_id: turn.turn_id,
-                started_at_epoch_ms: turn.started_at_epoch_ms,
-                ended_at_epoch_ms: turn.ended_at_epoch_ms,
-                client_turn_total_tokens: turn.client_turn_total_tokens,
-                client_turn_input_tokens: turn.client_turn_input_tokens,
-                client_turn_cached_input_tokens: turn.client_turn_cached_input_tokens,
-                client_turn_output_tokens: turn.client_turn_output_tokens,
-                client_turn_reasoning_output_tokens: turn.client_turn_reasoning_output_tokens,
-                latest_cumulative_total_tokens: turn.latest_cumulative_total_tokens,
-                latest_model_context_window: turn.latest_model_context_window,
-                latest_primary_limit_used_percent: turn.latest_primary_limit_used_percent,
-                latest_secondary_limit_used_percent: turn.latest_secondary_limit_used_percent,
-                observation_source: "codex_rollout_client_meter_v1".to_string(),
-            })
-            .collect(),
-    )
+    let parse_state = load_rollout_turn_parse_state(rollout_path)?;
+    let tolerated_jsonl_skips = parse_state.tolerated_jsonl_skips.clone();
+    Ok(snapshot_rollout_turn_observations(&parse_state)
+        .into_iter()
+        .filter(|turn| turn.client_turn_total_tokens > 0 || turn.latest_cumulative_total_tokens > 0)
+        .map(|turn| RolloutClientMeterObservation {
+            thread_id: thread_id.to_string(),
+            rollout_path: rollout_path.display().to_string(),
+            turn_id: turn.turn_id,
+            started_at_epoch_ms: turn.started_at_epoch_ms,
+            ended_at_epoch_ms: turn.ended_at_epoch_ms,
+            first_assistant_response_at_epoch_ms: turn.first_assistant_response_at_epoch_ms,
+            client_turn_total_tokens: turn.client_turn_total_tokens,
+            client_turn_input_tokens: turn.client_turn_input_tokens,
+            client_turn_cached_input_tokens: turn.client_turn_cached_input_tokens,
+            client_turn_output_tokens: turn.client_turn_output_tokens,
+            client_turn_reasoning_output_tokens: turn.client_turn_reasoning_output_tokens,
+            latest_cumulative_total_tokens: turn.latest_cumulative_total_tokens,
+            latest_model_context_window: turn.latest_model_context_window,
+            latest_primary_limit_used_percent: turn.latest_primary_limit_used_percent,
+            latest_secondary_limit_used_percent: turn.latest_secondary_limit_used_percent,
+            latest_primary_window_duration_mins: turn.latest_primary_window_duration_mins,
+            latest_primary_resets_at_epoch_seconds: turn.latest_primary_resets_at_epoch_seconds,
+            latest_secondary_window_duration_mins: turn.latest_secondary_window_duration_mins,
+            latest_secondary_resets_at_epoch_seconds: turn.latest_secondary_resets_at_epoch_seconds,
+            rollout_jsonl_tolerance_summary: tolerated_jsonl_skips.clone(),
+            observation_source: "codex_rollout_client_meter_v1".to_string(),
+        })
+        .collect())
 }
 
 fn latest_rollout_client_meter_observation_from_path(
@@ -2109,12 +2198,14 @@ fn latest_rollout_token_count_snapshot(
 fn latest_rollout_token_count_snapshot_from_text(
     text: &str,
 ) -> Result<Option<LatestRolloutTokenCountSnapshot>> {
+    let mut tolerated_jsonl_skips = RolloutJsonlToleranceSummary::default();
     let mut token_row: Option<Value> = None;
     let mut task_started_row: Option<Value> = None;
     let mut seen_token = false;
     for line in text.lines().rev() {
-        let row: Value =
-            serde_json::from_str(line).context("failed to parse rollout jsonl line")?;
+        let Some(row) = parse_rollout_jsonl_line(line, &mut tolerated_jsonl_skips)? else {
+            continue;
+        };
         let row_type = row["type"].as_str().unwrap_or_default();
         let payload_type = row["payload"]["type"].as_str().unwrap_or_default();
         if !seen_token {
@@ -2135,6 +2226,8 @@ fn latest_rollout_token_count_snapshot_from_text(
     let payload = &token_row["payload"];
     let last_token_usage = &payload["info"]["last_token_usage"];
     let total_token_usage = &payload["info"]["total_token_usage"];
+    let primary_rate_limits = &payload["rate_limits"]["primary"];
+    let secondary_rate_limits = &payload["rate_limits"]["secondary"];
     Ok(Some(LatestRolloutTokenCountSnapshot {
         turn_id: task_started_row
             .as_ref()
@@ -2175,7 +2268,36 @@ fn latest_rollout_token_count_snapshot_from_text(
             .as_f64()
             .map(|value| value.round() as u64)
             .unwrap_or_default(),
+        latest_primary_window_duration_mins: rollout_number_as_u64(
+            &primary_rate_limits["window_minutes"],
+        ),
+        latest_primary_resets_at_epoch_seconds: rollout_number_as_u64(
+            &primary_rate_limits["resets_at"],
+        ),
+        latest_secondary_window_duration_mins: rollout_number_as_u64(
+            &secondary_rate_limits["window_minutes"],
+        ),
+        latest_secondary_resets_at_epoch_seconds: rollout_number_as_u64(
+            &secondary_rate_limits["resets_at"],
+        ),
+        rollout_jsonl_tolerance_summary: tolerated_jsonl_skips,
     }))
+}
+
+fn rollout_number_as_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| {
+            value
+                .as_i64()
+                .and_then(|item| (item >= 0).then_some(item as u64))
+        })
+        .or_else(|| value.as_f64().map(|item| item.round() as u64))
+        .or_else(|| {
+            value
+                .as_str()
+                .and_then(|item| item.trim().parse::<u64>().ok())
+        })
 }
 
 fn latest_rollout_context_compaction_observation_from_path(
@@ -2221,6 +2343,7 @@ fn client_meter_observation_from_latest_snapshot(
             snapshot.ended_at_epoch_ms
         },
         ended_at_epoch_ms: snapshot.ended_at_epoch_ms,
+        first_assistant_response_at_epoch_ms: None,
         client_turn_total_tokens: snapshot.client_turn_total_tokens,
         client_turn_input_tokens: snapshot.client_turn_input_tokens,
         client_turn_cached_input_tokens: snapshot.client_turn_cached_input_tokens,
@@ -2230,6 +2353,11 @@ fn client_meter_observation_from_latest_snapshot(
         latest_model_context_window: snapshot.latest_model_context_window,
         latest_primary_limit_used_percent: snapshot.latest_primary_limit_used_percent,
         latest_secondary_limit_used_percent: snapshot.latest_secondary_limit_used_percent,
+        latest_primary_window_duration_mins: snapshot.latest_primary_window_duration_mins,
+        latest_primary_resets_at_epoch_seconds: snapshot.latest_primary_resets_at_epoch_seconds,
+        latest_secondary_window_duration_mins: snapshot.latest_secondary_window_duration_mins,
+        latest_secondary_resets_at_epoch_seconds: snapshot.latest_secondary_resets_at_epoch_seconds,
+        rollout_jsonl_tolerance_summary: snapshot.rollout_jsonl_tolerance_summary.clone(),
         observation_source: "codex_rollout_client_meter_v2".to_string(),
     }
 }
@@ -2286,6 +2414,25 @@ fn merge_client_meter_observation_with_latest_snapshot(
         observation.latest_secondary_limit_used_percent =
             snapshot.latest_secondary_limit_used_percent;
     }
+    if snapshot.latest_primary_window_duration_mins.is_some() {
+        observation.latest_primary_window_duration_mins =
+            snapshot.latest_primary_window_duration_mins;
+    }
+    if snapshot.latest_primary_resets_at_epoch_seconds.is_some() {
+        observation.latest_primary_resets_at_epoch_seconds =
+            snapshot.latest_primary_resets_at_epoch_seconds;
+    }
+    if snapshot.latest_secondary_window_duration_mins.is_some() {
+        observation.latest_secondary_window_duration_mins =
+            snapshot.latest_secondary_window_duration_mins;
+    }
+    if snapshot.latest_secondary_resets_at_epoch_seconds.is_some() {
+        observation.latest_secondary_resets_at_epoch_seconds =
+            snapshot.latest_secondary_resets_at_epoch_seconds;
+    }
+    observation
+        .rollout_jsonl_tolerance_summary
+        .merge_max_from(&snapshot.rollout_jsonl_tolerance_summary);
     observation.observation_source = "codex_rollout_client_meter_v2".to_string();
     observation
 }
@@ -2413,7 +2560,9 @@ fn process_rollout_turn_observation_line(
     state: &mut RolloutTurnParseState,
     line: &str,
 ) -> Result<()> {
-    let row: Value = serde_json::from_str(line).context("failed to parse rollout jsonl line")?;
+    let Some(row) = parse_rollout_jsonl_line(line, &mut state.tolerated_jsonl_skips)? else {
+        return Ok(());
+    };
     let row_type = row["type"].as_str().unwrap_or_default();
     let payload = &row["payload"];
     let timestamp_epoch_ms = row["timestamp"]
@@ -2519,6 +2668,27 @@ fn process_rollout_turn_observation_line(
                 if secondary_limit_used_percent > 0 {
                     turn.latest_secondary_limit_used_percent = secondary_limit_used_percent;
                 }
+                let primary_window_duration_mins =
+                    rollout_number_as_u64(&payload["rate_limits"]["primary"]["window_minutes"]);
+                if primary_window_duration_mins.is_some() {
+                    turn.latest_primary_window_duration_mins = primary_window_duration_mins;
+                }
+                let primary_resets_at_epoch_seconds =
+                    rollout_number_as_u64(&payload["rate_limits"]["primary"]["resets_at"]);
+                if primary_resets_at_epoch_seconds.is_some() {
+                    turn.latest_primary_resets_at_epoch_seconds = primary_resets_at_epoch_seconds;
+                }
+                let secondary_window_duration_mins =
+                    rollout_number_as_u64(&payload["rate_limits"]["secondary"]["window_minutes"]);
+                if secondary_window_duration_mins.is_some() {
+                    turn.latest_secondary_window_duration_mins = secondary_window_duration_mins;
+                }
+                let secondary_resets_at_epoch_seconds =
+                    rollout_number_as_u64(&payload["rate_limits"]["secondary"]["resets_at"]);
+                if secondary_resets_at_epoch_seconds.is_some() {
+                    turn.latest_secondary_resets_at_epoch_seconds =
+                        secondary_resets_at_epoch_seconds;
+                }
             }
         }
         ("compacted", _) => {
@@ -2582,6 +2752,16 @@ fn process_rollout_turn_observation_line(
                 );
             }
         }
+        ("response_item", "message") => {
+            if let Some(turn) = state.current_turn.as_mut() {
+                turn.ended_at_epoch_ms = timestamp_epoch_ms;
+                if payload["role"].as_str() == Some("assistant")
+                    && turn.first_assistant_response_at_epoch_ms.is_none()
+                {
+                    turn.first_assistant_response_at_epoch_ms = Some(timestamp_epoch_ms);
+                }
+            }
+        }
         _ => {
             if let Some(turn) = state.current_turn.as_mut() {
                 turn.ended_at_epoch_ms = timestamp_epoch_ms;
@@ -2589,6 +2769,33 @@ fn process_rollout_turn_observation_line(
         }
     }
     Ok(())
+}
+
+fn parse_rollout_jsonl_line(
+    line: &str,
+    tolerated_jsonl_skips: &mut RolloutJsonlToleranceSummary,
+) -> Result<Option<Value>> {
+    let had_nul_padding = line.as_bytes().contains(&b'\0');
+    let trimmed = line.trim_matches(|c: char| c.is_ascii_whitespace() || c == '\0');
+    if trimmed.is_empty() || !trimmed.starts_with('{') {
+        if trimmed.is_empty() {
+            tolerated_jsonl_skips.skipped_empty_or_nul_lines = tolerated_jsonl_skips
+                .skipped_empty_or_nul_lines
+                .saturating_add(1);
+        } else {
+            tolerated_jsonl_skips.skipped_non_json_prefix_lines = tolerated_jsonl_skips
+                .skipped_non_json_prefix_lines
+                .saturating_add(1);
+        }
+        return Ok(None);
+    }
+    if had_nul_padding {
+        tolerated_jsonl_skips.sanitized_nul_json_lines = tolerated_jsonl_skips
+            .sanitized_nul_json_lines
+            .saturating_add(1);
+    }
+    let row: Value = serde_json::from_str(trimmed).context("failed to parse rollout jsonl line")?;
+    Ok(Some(row))
 }
 
 fn rollout_file_version(rollout_path: &Path) -> (u64, u64) {
@@ -3707,6 +3914,15 @@ mod tests {
     }
 
     #[test]
+    fn rollout_parser_ignores_nul_padding_lines() {
+        let rollout = "{\"timestamp\":\"2026-03-21T12:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"вопрос\"}]}}\n\0\0\0\0\n{\"timestamp\":\"2026-03-21T12:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"ответ\"}]}}\n";
+        let messages = extract_chat_messages_from_rollout_text(rollout).expect("messages");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text, "вопрос");
+        assert_eq!(messages[1].text, "ответ");
+    }
+
+    #[test]
     fn select_tail_messages_prefers_last_real_user_and_final_answer() {
         let rollout = r##"{"timestamp":"2026-03-21T12:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"вопрос"}]}}
 {"timestamp":"2026-03-21T12:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"иду смотреть"}]}}
@@ -3995,6 +4211,127 @@ mod tests {
         assert_eq!(observation.latest_model_context_window, 258400);
         assert_eq!(observation.latest_primary_limit_used_percent, 69);
         assert_eq!(observation.latest_secondary_limit_used_percent, 21);
+    }
+
+    #[test]
+    fn latest_rollout_client_meter_observation_captures_first_assistant_response_time() {
+        let rollout_path = std::env::temp_dir().join(format!(
+            "amai-rollout-client-meter-first-response-{}.jsonl",
+            Uuid::new_v4()
+        ));
+        fs::write(
+            &rollout_path,
+            r#"{"timestamp":"2026-03-25T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"timestamp":"2026-03-25T10:00:05Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"иду смотреть"}]}}
+{"timestamp":"2026-03-25T10:01:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-1","arguments":"{\"cmd\":\"true\"}"}}
+{"timestamp":"2026-03-25T10:02:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":110},"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":110},"model_context_window":258400},"rate_limits":{"primary":{"used_percent":1.0},"secondary":{"used_percent":1.0}}}}
+{"timestamp":"2026-03-25T10:02:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+"#,
+        )
+        .expect("write rollout");
+
+        let observation =
+            super::latest_rollout_client_meter_observation("/home/art/Art", Some(&rollout_path))
+                .expect("observation")
+                .expect("candidate");
+        let _ = fs::remove_file(&rollout_path);
+        let started_at_epoch_ms =
+            super::parse_rfc3339_epoch_s("2026-03-25T10:00:00Z").expect("start") * 1000;
+        let first_response_epoch_ms =
+            super::parse_rfc3339_epoch_s("2026-03-25T10:00:05Z").expect("first") * 1000;
+        let ended_at_epoch_ms =
+            super::parse_rfc3339_epoch_s("2026-03-25T10:02:03Z").expect("end") * 1000;
+
+        assert_eq!(observation.turn_id, "turn-1");
+        assert_eq!(observation.started_at_epoch_ms, started_at_epoch_ms);
+        assert_eq!(
+            observation.first_assistant_response_at_epoch_ms,
+            Some(first_response_epoch_ms)
+        );
+        assert_eq!(observation.ended_at_epoch_ms, ended_at_epoch_ms);
+    }
+
+    #[test]
+    fn latest_rollout_client_meter_observation_ignores_nul_padding_lines() {
+        let rollout_path = std::env::temp_dir().join(format!(
+            "amai-rollout-client-meter-nul-{}.jsonl",
+            Uuid::new_v4()
+        ));
+        fs::write(
+            &rollout_path,
+            b"{\"timestamp\":\"2026-03-25T10:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-1\"}}\n\0\0\0\0\0\n{\"timestamp\":\"2026-03-25T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":62909,\"cached_input_tokens\":34176,\"output_tokens\":1415,\"reasoning_output_tokens\":870,\"total_tokens\":64324},\"last_token_usage\":{\"input_tokens\":34855,\"cached_input_tokens\":28672,\"output_tokens\":679,\"reasoning_output_tokens\":354,\"total_tokens\":35534},\"model_context_window\":258400},\"rate_limits\":{\"primary\":{\"used_percent\":69.0},\"secondary\":{\"used_percent\":21.0}}}}\n{\"timestamp\":\"2026-03-25T10:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-1\"}}\n",
+        )
+        .expect("write rollout");
+
+        let observation =
+            super::latest_rollout_client_meter_observation("/home/art/Art", Some(&rollout_path))
+                .expect("observation")
+                .expect("candidate");
+        let _ = fs::remove_file(&rollout_path);
+
+        assert_eq!(observation.turn_id, "turn-1");
+        assert_eq!(observation.client_turn_total_tokens, 35534);
+        assert_eq!(observation.latest_primary_limit_used_percent, 69);
+        assert_eq!(observation.latest_secondary_limit_used_percent, 21);
+        assert_eq!(
+            observation
+                .rollout_jsonl_tolerance_summary
+                .skipped_empty_or_nul_lines,
+            1
+        );
+        assert_eq!(
+            observation
+                .rollout_jsonl_tolerance_summary
+                .sanitized_nul_json_lines,
+            0
+        );
+    }
+
+    #[test]
+    fn latest_rollout_client_meter_observation_surfaces_sanitized_nul_json_lines() {
+        let rollout_path = std::env::temp_dir().join(format!(
+            "amai-rollout-client-meter-nul-json-{}.jsonl",
+            Uuid::new_v4()
+        ));
+        fs::write(
+            &rollout_path,
+            b"{\"timestamp\":\"2026-03-25T10:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-1\"}}\n\0\0\0{\"timestamp\":\"2026-03-25T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":62909,\"cached_input_tokens\":34176,\"output_tokens\":1415,\"reasoning_output_tokens\":870,\"total_tokens\":64324},\"last_token_usage\":{\"input_tokens\":34855,\"cached_input_tokens\":28672,\"output_tokens\":679,\"reasoning_output_tokens\":354,\"total_tokens\":35534},\"model_context_window\":258400},\"rate_limits\":{\"primary\":{\"used_percent\":69.0},\"secondary\":{\"used_percent\":21.0}}}}\n{\"timestamp\":\"2026-03-25T10:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-1\"}}\n",
+        )
+        .expect("write rollout");
+
+        let observation =
+            super::latest_rollout_client_meter_observation("/home/art/Art", Some(&rollout_path))
+                .expect("observation")
+                .expect("candidate");
+        let _ = fs::remove_file(&rollout_path);
+
+        assert_eq!(observation.turn_id, "turn-1");
+        assert_eq!(observation.client_turn_total_tokens, 35534);
+        assert_eq!(observation.latest_primary_limit_used_percent, 69);
+        assert_eq!(observation.latest_secondary_limit_used_percent, 21);
+        assert_eq!(
+            observation
+                .rollout_jsonl_tolerance_summary
+                .sanitized_nul_json_lines,
+            1
+        );
+        assert_eq!(
+            observation
+                .rollout_jsonl_tolerance_summary
+                .skipped_empty_or_nul_lines,
+            0
+        );
+    }
+
+    #[test]
+    fn latest_rollout_token_snapshot_skips_partial_head_fragment() {
+        let text = "partial-tail-fragment\n{\"timestamp\":\"2026-03-25T10:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-1\"}}\n{\"timestamp\":\"2026-03-25T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":62909,\"cached_input_tokens\":34176,\"output_tokens\":1415,\"reasoning_output_tokens\":870,\"total_tokens\":64324},\"last_token_usage\":{\"input_tokens\":34855,\"cached_input_tokens\":28672,\"output_tokens\":679,\"reasoning_output_tokens\":354,\"total_tokens\":35534},\"model_context_window\":258400},\"rate_limits\":{\"primary\":{\"used_percent\":69.0},\"secondary\":{\"used_percent\":21.0}}}}\n";
+        let snapshot =
+            super::latest_rollout_token_count_snapshot_from_text(text).expect("snapshot");
+        let snapshot = snapshot.expect("candidate");
+        assert_eq!(snapshot.turn_id, "turn-1");
+        assert_eq!(snapshot.client_turn_total_tokens, 35534);
+        assert_eq!(snapshot.latest_primary_limit_used_percent, 69);
     }
 
     #[test]
@@ -4948,8 +5285,14 @@ mod tests {
         super::store_thread_record_by_id_cache(&db_path, "thread-current", Some(record.clone()));
         let loaded = super::cached_thread_record_by_id(&db_path, "thread-current")
             .expect("cached thread record");
-        assert_eq!(loaded.as_ref().map(|item| item.thread_id.as_str()), Some("thread-current"));
-        assert_eq!(loaded.as_ref().map(|item| item.rollout_path.as_str()), Some("/tmp/rollout.jsonl"));
+        assert_eq!(
+            loaded.as_ref().map(|item| item.thread_id.as_str()),
+            Some("thread-current")
+        );
+        assert_eq!(
+            loaded.as_ref().map(|item| item.rollout_path.as_str()),
+            Some("/tmp/rollout.jsonl")
+        );
         let _ = fs::remove_file(&db_path);
     }
 

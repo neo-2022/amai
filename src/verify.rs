@@ -1,8 +1,8 @@
 use crate::bootstrap;
 use crate::cli::{
     ContextPackArgs, VerifyAccuracyArgs, VerifyBenchmarkArgs, VerifyDegradationArgs,
-    VerifyHostileArgs, VerifyLoadArgs, VerifyTextCompareArgs, VerifyTokenBenchmarkArgs,
-    VerifyTokenBenchmarkSuiteArgs,
+    VerifyHostileArgs, VerifyLoadArgs, VerifyProceduralBenchmarkArgs, VerifyTextCompareArgs,
+    VerifyTokenBenchmarkArgs, VerifyTokenBenchmarkSuiteArgs,
 };
 use crate::compatibility;
 use crate::config::AppConfig;
@@ -267,6 +267,7 @@ pub async fn run_accuracy(
             limit_symbols: 8,
             limit_chunks: 8,
             limit_semantic_chunks: 8,
+            at_epoch_ms: None,
             token_source_kind: "verify_context_pack".to_string(),
             client_prompt_tokens: None,
             assistant_generation_tokens: None,
@@ -288,6 +289,7 @@ pub async fn run_accuracy(
         limit_symbols: 8,
         limit_chunks: 8,
         limit_semantic_chunks: 8,
+        at_epoch_ms: None,
         token_source_kind: "verify_context_pack".to_string(),
         client_prompt_tokens: None,
         assistant_generation_tokens: None,
@@ -311,6 +313,7 @@ pub async fn run_accuracy(
             limit_symbols: 8,
             limit_chunks: 8,
             limit_semantic_chunks: 8,
+            at_epoch_ms: None,
             token_source_kind: "verify_context_pack".to_string(),
             client_prompt_tokens: None,
             assistant_generation_tokens: None,
@@ -335,6 +338,7 @@ pub async fn run_accuracy(
             limit_symbols: 8,
             limit_chunks: 8,
             limit_semantic_chunks: 8,
+            at_epoch_ms: None,
             token_source_kind: "verify_context_pack".to_string(),
             client_prompt_tokens: None,
             assistant_generation_tokens: None,
@@ -358,6 +362,7 @@ pub async fn run_accuracy(
             limit_symbols: 8,
             limit_chunks: 8,
             limit_semantic_chunks: 8,
+            at_epoch_ms: None,
             token_source_kind: "verify_context_pack".to_string(),
             client_prompt_tokens: None,
             assistant_generation_tokens: None,
@@ -577,36 +582,33 @@ pub async fn run_accuracy(
     )?;
     let canonical_eval = build_accuracy_canonical_eval(&eval_probes)?;
 
-    if cross_project_leakage != 0 {
-        return Err(anyhow!(
+    let failure_reason = if cross_project_leakage != 0 {
+        Some(format!(
             "accuracy verification failed: cross_project_leakage={cross_project_leakage}"
-        ));
-    }
-    if hostile_cross_project_leakage != 0 {
-        return Err(anyhow!(
+        ))
+    } else if hostile_cross_project_leakage != 0 {
+        Some(format!(
             "accuracy verification failed: hostile_cross_project_leakage={hostile_cross_project_leakage}"
-        ));
-    }
-    if strict_cross_namespace_leakage != 0 {
-        return Err(anyhow!(
+        ))
+    } else if strict_cross_namespace_leakage != 0 {
+        Some(format!(
             "accuracy verification failed: strict_cross_namespace_leakage={strict_cross_namespace_leakage}"
-        ));
-    }
-    if hostile_cross_namespace_leakage != 0 {
-        return Err(anyhow!(
+        ))
+    } else if hostile_cross_namespace_leakage != 0 {
+        Some(format!(
             "accuracy verification failed: hostile_cross_namespace_leakage={hostile_cross_namespace_leakage}"
-        ));
-    }
-    if cross_namespace_leakage != 0 {
-        return Err(anyhow!(
+        ))
+    } else if cross_namespace_leakage != 0 {
+        Some(format!(
             "accuracy verification failed: cross_namespace_leakage={cross_namespace_leakage}"
-        ));
-    }
-    if symbol_precision < 1.0 || semantic_precision < 1.0 {
-        return Err(anyhow!(
+        ))
+    } else if symbol_precision < 1.0 || semantic_precision < 1.0 {
+        Some(format!(
             "accuracy verification failed: symbol_precision={symbol_precision:.3}, semantic_precision={semantic_precision:.3}"
-        ));
-    }
+        ))
+    } else {
+        None
+    };
 
     let accuracy_run_id = Uuid::new_v4();
     let captured_at_epoch_ms = SystemTime::now()
@@ -660,6 +662,8 @@ pub async fn run_accuracy(
             "semantic_precision": semantic_precision,
             "symbol_precision": symbol_precision,
             "overall_precision": overall_precision,
+            "verification_passed": failure_reason.is_none(),
+            "failure_reason": failure_reason,
             "formal_invariants": formal_invariants,
             "canonical_eval": canonical_eval
         },
@@ -668,6 +672,9 @@ pub async fn run_accuracy(
     });
     let _ = postgres::insert_observability_snapshot(db, "retrieval_accuracy", &payload).await?;
     println!("{}", serde_json::to_string_pretty(&payload)?);
+    if let Some(reason) = payload["accuracy_verification"]["failure_reason"].as_str() {
+        return Err(anyhow!(reason.to_string()));
+    }
     Ok(())
 }
 
@@ -1122,6 +1129,7 @@ pub async fn run_token_benchmark_suite(
                     limit_symbols: args.limit_symbols,
                     limit_chunks: args.limit_chunks,
                     limit_semantic_chunks: args.limit_semantic_chunks,
+                    at_epoch_ms: None,
                     token_source_kind: "verify_context_pack".to_string(),
                     client_prompt_tokens: None,
                     assistant_generation_tokens: None,
@@ -1223,6 +1231,146 @@ pub async fn run_token_benchmark_suite(
     Ok(())
 }
 
+pub async fn run_procedural_benchmark(
+    _cfg: &AppConfig,
+    db: &mut Client,
+    args: &VerifyProceduralBenchmarkArgs,
+) -> Result<()> {
+    let content = fs::read_to_string(&args.json_file).with_context(|| {
+        format!(
+            "failed to read procedural benchmark payload {}",
+            args.json_file.display()
+        )
+    })?;
+    let payload: Value = serde_json::from_str(&content).with_context(|| {
+        format!(
+            "failed to parse procedural benchmark payload {}",
+            args.json_file.display()
+        )
+    })?;
+    validate_procedural_benchmark_payload(&payload)?;
+    let _ = postgres::insert_observability_snapshot(db, "procedural_benchmark", &payload).await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+fn validate_procedural_benchmark_payload(payload: &Value) -> Result<()> {
+    let root = payload
+        .get("procedural_benchmark")
+        .ok_or_else(|| anyhow!("procedural benchmark payload missing procedural_benchmark root"))?;
+    if root["benchmark_code"].as_str() != Some("procedural_memory_evolution") {
+        return Err(anyhow!(
+            "procedural benchmark payload must use benchmark_code=procedural_memory_evolution"
+        ));
+    }
+    if root["benchmark_metric_kind"].as_str() != Some("procedural_skill_metrics") {
+        return Err(anyhow!(
+            "procedural benchmark payload must use benchmark_metric_kind=procedural_skill_metrics"
+        ));
+    }
+    let metrics = root["procedural_metrics"]
+        .as_array()
+        .ok_or_else(|| anyhow!("procedural benchmark payload missing procedural_metrics array"))?;
+    if metrics.len() < 5 {
+        return Err(anyhow!(
+            "procedural benchmark payload must expose at least 5 metric rows"
+        ));
+    }
+    let summary = &root["summary"];
+    if summary["total_metrics"].as_u64().unwrap_or(0) < 5 {
+        return Err(anyhow!(
+            "procedural benchmark summary must expose total_metrics >= 5"
+        ));
+    }
+    let with_amai_series = root["benchmark_with_amai_series"]
+        .as_array()
+        .ok_or_else(|| {
+            anyhow!("procedural benchmark payload missing benchmark_with_amai_series")
+        })?;
+    if with_amai_series.is_empty() {
+        return Err(anyhow!(
+            "procedural benchmark payload must expose non-empty benchmark_with_amai_series"
+        ));
+    }
+    let run_state = root["benchmark_run_state"]
+        .as_str()
+        .ok_or_else(|| anyhow!("procedural benchmark payload missing benchmark_run_state"))?;
+    let run_state_ru = root["benchmark_run_state_ru"]
+        .as_str()
+        .ok_or_else(|| anyhow!("procedural benchmark payload missing benchmark_run_state_ru"))?;
+    if run_state.trim().is_empty() || run_state_ru.trim().is_empty() {
+        return Err(anyhow!(
+            "procedural benchmark run state fields must be non-empty"
+        ));
+    }
+    let line_summaries = root["benchmark_line_summaries"]
+        .as_object()
+        .ok_or_else(|| anyhow!("procedural benchmark payload missing benchmark_line_summaries"))?;
+    let with_summary = line_summaries
+        .get("with_amai")
+        .ok_or_else(|| anyhow!("procedural benchmark payload missing with_amai line summary"))?;
+    let without_summary = line_summaries
+        .get("without_amai_but_measuring")
+        .ok_or_else(|| {
+            anyhow!("procedural benchmark payload missing without_amai_but_measuring line summary")
+        })?;
+    if with_summary["state"].as_str() != Some("materialized") {
+        return Err(anyhow!(
+            "procedural benchmark with_amai line summary must be materialized"
+        ));
+    }
+    if with_summary["point_count"].as_u64().unwrap_or(0) != with_amai_series.len() as u64 {
+        return Err(anyhow!(
+            "procedural benchmark with_amai line summary point_count must match benchmark_with_amai_series"
+        ));
+    }
+    let without_available = summary["without_amai_series_available"]
+        .as_bool()
+        .ok_or_else(|| {
+            anyhow!("procedural benchmark summary missing without_amai_series_available")
+        })?;
+    let without_amai_series = root["benchmark_without_amai_series"]
+        .as_array()
+        .ok_or_else(|| {
+            anyhow!("procedural benchmark payload missing benchmark_without_amai_series")
+        })?;
+    if without_available {
+        if without_amai_series.is_empty() {
+            return Err(anyhow!(
+                "procedural benchmark payload marked without_amai available but series is empty"
+            ));
+        }
+        if without_summary["state"].as_str() != Some("materialized") {
+            return Err(anyhow!(
+                "procedural benchmark without_amai line summary must be materialized when series is available"
+            ));
+        }
+        if without_summary["point_count"].as_u64().unwrap_or(0) != without_amai_series.len() as u64
+        {
+            return Err(anyhow!(
+                "procedural benchmark without_amai line summary point_count must match benchmark_without_amai_series"
+            ));
+        }
+    } else {
+        if !without_amai_series.is_empty() {
+            return Err(anyhow!(
+                "procedural benchmark without_amai series must stay empty when summary says unavailable"
+            ));
+        }
+        if without_summary["state"].as_str() != Some("not_materialized") {
+            return Err(anyhow!(
+                "procedural benchmark without_amai line summary must be not_materialized when series is unavailable"
+            ));
+        }
+        if without_summary["point_count"].as_u64().unwrap_or(0) != 0 {
+            return Err(anyhow!(
+                "procedural benchmark without_amai line summary point_count must stay zero when series is unavailable"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct TextCompareCase {
     query: String,
@@ -1306,6 +1454,7 @@ pub async fn run_text_compare(
             limit_symbols: args.limit_symbols,
             limit_chunks: args.limit_chunks,
             limit_semantic_chunks: args.limit_semantic_chunks,
+            at_epoch_ms: None,
             token_source_kind: "verify_context_pack".to_string(),
             client_prompt_tokens: None,
             assistant_generation_tokens: None,
@@ -2674,6 +2823,7 @@ mod tests {
         item_matches_text_compare_case, normalize_engineering_context, payload_contains_text_hit,
         percentile_sample, precision_ratio, render_context_pack_prompt,
         render_filtered_context_prompt, safe_lossy_prefix, text_compare_eval_probe,
+        validate_procedural_benchmark_payload,
     };
     use crate::cli::ContextPackArgs;
     use proptest::prelude::*;
@@ -2703,6 +2853,7 @@ mod tests {
             limit_symbols: 8,
             limit_chunks: 8,
             limit_semantic_chunks: 8,
+            at_epoch_ms: None,
             token_source_kind: "live_context_pack".to_string(),
             client_prompt_tokens: None,
             assistant_generation_tokens: None,
@@ -2725,6 +2876,7 @@ mod tests {
             limit_symbols: 8,
             limit_chunks: 8,
             limit_semantic_chunks: 8,
+            at_epoch_ms: None,
             token_source_kind: "verify_context_pack".to_string(),
             client_prompt_tokens: None,
             assistant_generation_tokens: None,
@@ -2769,6 +2921,104 @@ mod tests {
         assert!(!payload_contains_text_hit(
             &payload, "beta", "review", "needle"
         ));
+    }
+
+    #[test]
+    fn validate_procedural_benchmark_payload_requires_consistent_line_summaries() {
+        let payload = json!({
+            "procedural_benchmark": {
+                "benchmark_code": "procedural_memory_evolution",
+                "benchmark_metric_kind": "procedural_skill_metrics",
+                "benchmark_run_state": "dual_line_materialized",
+                "benchmark_run_state_ru": "обе benchmark-линии materialized",
+                "benchmark_with_amai_series": [
+                    {"metric_key":"reuse_quality","value":1.0},
+                    {"metric_key":"bad_skill_suppression","value":1.0},
+                    {"metric_key":"stale_skill_suppression","value":1.0},
+                    {"metric_key":"shadow_to_verified_uplift","value":1.0},
+                    {"metric_key":"evaluator_correctness","value":1.0}
+                ],
+                "benchmark_without_amai_series": [
+                    {"metric_key":"reuse_quality","value":0.0},
+                    {"metric_key":"bad_skill_suppression","value":1.0},
+                    {"metric_key":"stale_skill_suppression","value":1.0},
+                    {"metric_key":"shadow_to_verified_uplift","value":0.0},
+                    {"metric_key":"evaluator_correctness","value":1.0}
+                ],
+                "benchmark_line_summaries": {
+                    "with_amai": {
+                        "line_code": "with_amai",
+                        "state": "materialized",
+                        "point_count": 5,
+                        "pass_percent": 100.0
+                    },
+                    "without_amai_but_measuring": {
+                        "line_code": "without_amai_but_measuring",
+                        "state": "materialized",
+                        "point_count": 5,
+                        "pass_percent": 60.0
+                    }
+                },
+                "procedural_metrics": [
+                    {"metric_key":"reuse_quality","passed":true},
+                    {"metric_key":"bad_skill_suppression","passed":true},
+                    {"metric_key":"stale_skill_suppression","passed":true},
+                    {"metric_key":"shadow_to_verified_uplift","passed":true},
+                    {"metric_key":"evaluator_correctness","passed":true}
+                ],
+                "summary": {
+                    "total_metrics": 5,
+                    "passed_metrics": 5,
+                    "without_amai_series_available": true
+                }
+            }
+        });
+        validate_procedural_benchmark_payload(&payload).expect("payload should validate");
+
+        let invalid_payload = json!({
+            "procedural_benchmark": {
+                "benchmark_code": "procedural_memory_evolution",
+                "benchmark_metric_kind": "procedural_skill_metrics",
+                "benchmark_run_state": "dual_line_materialized",
+                "benchmark_run_state_ru": "обе benchmark-линии materialized",
+                "benchmark_with_amai_series": [
+                    {"metric_key":"reuse_quality","value":1.0},
+                    {"metric_key":"bad_skill_suppression","value":1.0},
+                    {"metric_key":"stale_skill_suppression","value":1.0},
+                    {"metric_key":"shadow_to_verified_uplift","value":1.0},
+                    {"metric_key":"evaluator_correctness","value":1.0}
+                ],
+                "benchmark_without_amai_series": [
+                    {"metric_key":"reuse_quality","value":0.0}
+                ],
+                "benchmark_line_summaries": {
+                    "with_amai": {
+                        "line_code": "with_amai",
+                        "state": "materialized",
+                        "point_count": 5,
+                        "pass_percent": 100.0
+                    },
+                    "without_amai_but_measuring": {
+                        "line_code": "without_amai_but_measuring",
+                        "state": "not_materialized",
+                        "point_count": 0
+                    }
+                },
+                "procedural_metrics": [
+                    {"metric_key":"reuse_quality","passed":true},
+                    {"metric_key":"bad_skill_suppression","passed":true},
+                    {"metric_key":"stale_skill_suppression","passed":true},
+                    {"metric_key":"shadow_to_verified_uplift","passed":true},
+                    {"metric_key":"evaluator_correctness","passed":true}
+                ],
+                "summary": {
+                    "total_metrics": 5,
+                    "passed_metrics": 5,
+                    "without_amai_series_available": false
+                }
+            }
+        });
+        assert!(validate_procedural_benchmark_payload(&invalid_payload).is_err());
     }
 
     #[test]

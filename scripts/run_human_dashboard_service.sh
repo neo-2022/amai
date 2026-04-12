@@ -20,6 +20,30 @@ ready_url="http://${health_host}:${port}/api/client-budget-root-cause"
 binary="./target/release/amai"
 nats_http_url="${AMI_NATS_HTTP_URL:-http://127.0.0.1:58222}"
 compose_file="./compose.yaml"
+./scripts/render_nats_config.sh >/dev/null
+lock_dir="./state/observe"
+lock_file="${lock_dir}/run_human_dashboard_service.lock"
+
+mkdir -p "${lock_dir}"
+exec 9>"${lock_file}"
+if ! flock -n 9; then
+  if curl -fsS "${health_url}" >/dev/null 2>&1; then
+    echo "Amai human dashboard already running at ${health_url}" >&2
+    exit 0
+  fi
+  echo "run_human_dashboard_service: another launcher instance is already active" >&2
+  exit 1
+fi
+
+existing_pid="$(
+  pgrep -fo "^${binary//\//\\/} observe serve --bind ${bind}$" 2>/dev/null || true
+)"
+if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" >/dev/null 2>&1; then
+  if curl -fsS "${health_url}" >/dev/null 2>&1; then
+    echo "Amai human dashboard already running at ${health_url} (pid=${existing_pid})" >&2
+    exit 0
+  fi
+fi
 
 nats_varz_healthy() {
   curl -fsS "${nats_http_url%/}/varz" >/dev/null 2>&1

@@ -22,6 +22,7 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &WarmupCacheArgs) -> Re
             limit_symbols: args.limit_symbols,
             limit_chunks: args.limit_chunks,
             limit_semantic_chunks: args.limit_semantic_chunks,
+            at_epoch_ms: None,
             token_source_kind: "proof_warmup_context_pack".to_string(),
             client_prompt_tokens: None,
             assistant_generation_tokens: None,

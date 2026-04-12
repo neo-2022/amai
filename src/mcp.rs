@@ -3,8 +3,8 @@ use crate::cli::{
     VerifyMemoryMatrixArgs, VerifyTokenBenchmarkArgs,
 };
 use crate::{
-    benchmark_matrix, compatibility, config, continuity, memory_task_matrix, observe,
-    postgres, profiles, retrieval, token_budget, verify, working_state,
+    benchmark_matrix, compatibility, config, continuity, memory_task_matrix, observe, postgres,
+    profiles, retrieval, token_budget, verify, working_state,
 };
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
@@ -25,149 +25,11 @@ pub(crate) const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 pub(crate) const SERVER_NAME: &str = "Art-memory-agent-index";
 const MCP_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
+use crate::mcp_errors::{
+    McpError, McpErrorSpec, mcp_jsonrpc_error_response, mcp_tool_error_result,
+};
+
 type McpToolResult<T> = std::result::Result<T, McpError>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct McpErrorSpec {
-    jsonrpc_code: i64,
-    message: &'static str,
-    amai_error_code: &'static str,
-    amai_error_class: &'static str,
-    retryable: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct McpError {
-    spec: McpErrorSpec,
-    detail: String,
-}
-
-impl McpError {
-    fn parse(detail: impl Into<String>) -> Self {
-        Self {
-            spec: McpErrorSpec {
-                jsonrpc_code: -32700,
-                message: "invalid JSON-RPC payload",
-                amai_error_code: "invalid_json_rpc_payload",
-                amai_error_class: "protocol_parse",
-                retryable: false,
-            },
-            detail: detail.into(),
-        }
-    }
-
-    fn invalid_request(detail: impl Into<String>) -> Self {
-        Self {
-            spec: McpErrorSpec {
-                jsonrpc_code: -32600,
-                message: "invalid request",
-                amai_error_code: "invalid_request",
-                amai_error_class: "protocol_request",
-                retryable: false,
-            },
-            detail: detail.into(),
-        }
-    }
-
-    fn invalid_params(detail: impl Into<String>) -> Self {
-        Self {
-            spec: McpErrorSpec {
-                jsonrpc_code: -32602,
-                message: "invalid params",
-                amai_error_code: "invalid_params",
-                amai_error_class: "client_input",
-                retryable: false,
-            },
-            detail: detail.into(),
-        }
-    }
-
-    fn method_not_found(detail: impl Into<String>) -> Self {
-        Self {
-            spec: McpErrorSpec {
-                jsonrpc_code: -32601,
-                message: "method not found",
-                amai_error_code: "method_not_found",
-                amai_error_class: "protocol_dispatch",
-                retryable: false,
-            },
-            detail: detail.into(),
-        }
-    }
-
-    fn prompt_not_found(detail: impl Into<String>) -> Self {
-        Self {
-            spec: McpErrorSpec {
-                jsonrpc_code: -32601,
-                message: "prompt not found",
-                amai_error_code: "prompt_not_found",
-                amai_error_class: "prompt_dispatch",
-                retryable: false,
-            },
-            detail: detail.into(),
-        }
-    }
-
-    fn tool_not_found(detail: impl Into<String>) -> Self {
-        Self {
-            spec: McpErrorSpec {
-                jsonrpc_code: -32601,
-                message: "tool not found",
-                amai_error_code: "tool_not_found",
-                amai_error_class: "tool_dispatch",
-                retryable: false,
-            },
-            detail: detail.into(),
-        }
-    }
-
-    fn tool_runtime(error: anyhow::Error) -> Self {
-        Self {
-            spec: McpErrorSpec {
-                jsonrpc_code: -32000,
-                message: "tool execution failed",
-                amai_error_code: "tool_execution_failed",
-                amai_error_class: "tool_runtime",
-                retryable: false,
-            },
-            detail: format!("{error:#}"),
-        }
-    }
-}
-
-fn mcp_error_taxonomy_payload(error: &McpError) -> Value {
-    json!({
-        "amai_error_code": error.spec.amai_error_code,
-        "amai_error_class": error.spec.amai_error_class,
-        "retryable": error.spec.retryable,
-        "detail": error.detail,
-    })
-}
-
-fn mcp_jsonrpc_error_response(id: Value, error: &McpError) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": error.spec.jsonrpc_code,
-            "message": error.spec.message,
-            "data": mcp_error_taxonomy_payload(error),
-        }
-    })
-}
-
-fn mcp_tool_error_result(error: &McpError) -> Value {
-    json!({
-        "content": [{
-            "type": "text",
-            "text": format!("tool failed: {}", error.detail)
-        }],
-        "isError": true,
-        "structuredContent": {
-            "error_taxonomy": mcp_error_taxonomy_payload(error),
-        }
-    })
-}
 
 pub async fn serve(cfg: &AppConfig) -> Result<()> {
     let stdin = tokio::io::stdin();
@@ -686,6 +548,32 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP startup contract lost live_client_budget_enforcement reply_execution_gate mapping"
         ));
     }
+    if startup_contract["live_client_budget_enforcement"]["reply_prefix_field"].as_str()
+        != Some("reply_prefix")
+        || startup_contract["live_client_budget_enforcement"]["reply_prefix_enforcement_flag"]
+            .as_str()
+            != Some("--enforce-online-reply-prefix")
+        || startup_contract["live_client_budget_enforcement"]["required_reply_prefix_source"]
+            .as_str()
+            != Some("personal_agent_online_limit_contour")
+        || startup_contract["live_client_budget_enforcement"]["required_reply_prefix_non_empty"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["live_client_budget_enforcement"]
+            ["reply_prefix_preflight_blocks_substantive_reply"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["live_client_budget_enforcement"]["output_prefix_enforcement_mode"]
+            .as_str()
+            != Some("instruction_preflight_fail_closed")
+        || startup_contract["live_client_budget_enforcement"]["output_prefix_host_enforced"]
+            .as_bool()
+            != Some(false)
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement reply-prefix preflight semantics"
+        ));
+    }
     if startup_contract["live_client_budget_enforcement"]["reply_budget_mode_field"].as_str()
         != Some("reply_budget_mode")
         || startup_contract["live_client_budget_enforcement"]["reply_budget_contract_field"]
@@ -767,13 +655,19 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         })?;
     if !rotate_status_labels
         .iter()
-        .any(|value| value.as_str() == Some("новый чат нужен сейчас"))
+        .any(|value| value.as_str() == Some("сожми текущий чат сейчас"))
+        || !rotate_status_labels
+            .iter()
+            .any(|value| value.as_str() == Some("сожми текущий чат"))
+        || rotate_status_labels
+            .iter()
+            .any(|value| value.as_str() == Some("новый чат нужен сейчас"))
         || rotate_status_labels
             .iter()
             .any(|value| value.as_str() == Some("новый чат рекомендован"))
     {
         return Err(anyhow!(
-            "MCP startup contract lost advisory rotate status labels or still treats rotate-soon labels as hard-stop"
+            "MCP startup contract lost same-thread advisory status labels or still leaks stale new-chat labels"
         ));
     }
     if startup_contract["live_client_budget_enforcement"]["save_handoff_before_rotate"]
@@ -792,6 +686,13 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP startup contract lost live_client_budget_enforcement truth semantics"
         ));
     }
+    if startup_contract["live_client_budget_enforcement"]["reply_blocking_removed"].as_bool()
+        != Some(true)
+    {
+        return Err(anyhow!(
+            "MCP startup contract does not explicitly disable client-budget blocked replies"
+        ));
+    }
     if startup_contract["live_client_budget_enforcement"]["blocking_reply_contract_field"]
         .as_str()
         != Some("blocking_reply_contract")
@@ -799,25 +700,25 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             .as_str()
             != Some(working_state::CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION)
         || startup_contract["live_client_budget_enforcement"]["blocking_reply_response_kind"]
-            .as_str()
-            != Some(working_state::CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND)
+            .is_null()
+            != true
         || startup_contract["live_client_budget_enforcement"]["blocking_reply_max_sentences"]
             .as_u64()
-            != Some(working_state::CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES)
+            != Some(0)
         || startup_contract["live_client_budget_enforcement"]
             ["blocking_reply_must_avoid_substantive_work"]
             .as_bool()
-            != Some(true)
+            != Some(false)
         || startup_contract["live_client_budget_enforcement"]
             ["blocking_reply_must_use_action_bundle_operator_flow"]
             .as_bool()
-            != Some(true)
+            != Some(false)
         || startup_contract["live_client_budget_enforcement"]["blocking_reply_template"]
-            .as_str()
-            != Some(working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE)
+            .is_null()
+            != true
     {
         return Err(anyhow!(
-            "MCP startup contract lost live_client_budget_enforcement blocked reply contract"
+            "MCP startup contract lost live_client_budget_enforcement disabled blocked-reply contract semantics"
         ));
     }
     let blocking_action_kinds =
@@ -828,15 +729,9 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
                     "MCP startup contract lost live_client_budget_enforcement.blocking_action_kinds"
                 )
             })?;
-    if !blocking_action_kinds
-        .iter()
-        .any(|value| value.as_str() == Some("wait_for_global_client_budget_recovery"))
-        || blocking_action_kinds
-            .iter()
-            .any(|value| value.as_str() == Some("rotate_chat_for_client_budget"))
-    {
+    if !blocking_action_kinds.is_empty() {
         return Err(anyhow!(
-            "MCP startup contract lost live_client_budget_enforcement blocking action kinds or still treats rotate pressure as hard-blocking"
+            "MCP startup contract still treats client-budget reply states as hard-blocking"
         ));
     }
     let allowed_response_kinds = startup_contract["live_client_budget_enforcement"]
@@ -847,13 +742,9 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
                 "MCP startup contract lost live_client_budget_enforcement.blocking_reply_allowed_response_kinds"
             )
         })?;
-    if !allowed_response_kinds.iter().any(|value| {
-        value.as_str() == Some(working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND)
-    }) || allowed_response_kinds.iter().any(|value| {
-        value.as_str() == Some(working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND)
-    }) {
+    if !allowed_response_kinds.is_empty() {
         return Err(anyhow!(
-            "MCP startup contract lost live_client_budget_enforcement allowed blocked-reply kinds or still treats rotate pressure as blocked-reply mode"
+            "MCP startup contract still advertises allowed blocked-reply response kinds"
         ));
     }
     let allowed_templates = startup_contract["live_client_budget_enforcement"]
@@ -864,13 +755,9 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
                 "MCP startup contract lost live_client_budget_enforcement.blocking_reply_allowed_templates"
             )
         })?;
-    if !allowed_templates.iter().any(|value| {
-        value.as_str() == Some(working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE)
-    }) || allowed_templates.iter().any(|value| {
-        value.as_str() == Some(working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE)
-    }) {
+    if !allowed_templates.is_empty() {
         return Err(anyhow!(
-            "MCP startup contract lost live_client_budget_enforcement allowed blocked-reply templates or still advertises rotate pressure as blocked template"
+            "MCP startup contract still advertises blocked-reply templates"
         ));
     }
     let target_control = &startup_contract["live_client_budget_enforcement"]["target_control"];
@@ -915,7 +802,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         || compact_chat_control["reply_with_confirmation_after_prepare"].as_bool() != Some(true)
         || compact_chat_control["prompt_text_required_for_rebase"].as_bool() != Some(true)
         || compact_chat_control["required_host_action"].as_str()
-            != Some("open_clean_chat_surface_and_inject_prompt_text")
+            != Some("open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable")
     {
         return Err(anyhow!(
             "MCP startup contract lost live_client_budget_enforcement compact-chat control semantics"
@@ -931,6 +818,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         .collect::<BTreeSet<_>>();
     let expected_tools = BTreeSet::from([
         "amai_benchmark_coverage".to_string(),
+        "amai_continuity_handoff".to_string(),
         "amai_continuity_startup".to_string(),
         "amai_list_projects".to_string(),
         "amai_list_namespaces".to_string(),
@@ -1695,6 +1583,12 @@ async fn handle_tool_call(cfg: &AppConfig, request: ToolCallRequest) -> McpToolR
                 .await
                 .map_err(McpError::tool_runtime)
         }
+        "amai_continuity_handoff" => {
+            let args: ContinuityHandoffToolArgs = parse_arguments(request.arguments)?;
+            tool_continuity_handoff(cfg, args)
+                .await
+                .map_err(McpError::tool_runtime)
+        }
         "amai_context_pack" => {
             let args: ContextPackToolArgs = parse_arguments(request.arguments)?;
             tool_context_pack(cfg, args)
@@ -1748,14 +1642,13 @@ async fn maybe_live_client_budget_preflight_block(
     cfg: &AppConfig,
     tool_name: &str,
 ) -> Result<Option<Value>> {
-    if !tool_requires_live_client_budget_preflight(tool_name) {
-        return Ok(None);
-    }
-    let guard = observe::collect_compact_client_budget_guard(cfg).await?;
-    if !working_state::client_budget_guard_blocks_expensive_tool_turn(&guard) {
-        return Ok(None);
-    }
-    Ok(Some(client_budget_blocked_tool_result(tool_name, &guard)))
+    let _ = cfg;
+    let _ = tool_requires_live_client_budget_preflight(tool_name);
+    // Tool-turn client-budget pressure is advisory-only. Live guard data stays
+    // available through client_budget_gate/root_cause surfaces, but MCP tools
+    // must not be hard-blocked by same_meter_pure_burn_turn_active or
+    // max_tool_roundtrips_soft=0.
+    Ok(None)
 }
 
 fn tool_requires_live_client_budget_preflight(tool_name: &str) -> bool {
@@ -1770,6 +1663,7 @@ fn tool_requires_live_client_budget_preflight(tool_name: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 fn compact_mcp_client_budget_reply_gate_payload(guard: &Value) -> Value {
     let reply_execution_gate = &guard["reply_execution_gate"];
     let preserves_return_obligation = reply_execution_gate["preserves_return_obligation"]
@@ -1805,19 +1699,20 @@ fn compact_mcp_client_budget_reply_gate_payload(guard: &Value) -> Value {
     })
 }
 
+#[cfg(test)]
 fn client_budget_blocked_tool_result(tool_name: &str, guard: &Value) -> Value {
     let action_kind = guard["reply_execution_gate"]["action_kind"]
         .as_str()
         .unwrap_or("continue_current_chat");
-    let same_meter_pure_burn_turn_active = guard["reply_execution_gate"]
-        ["same_meter_pure_burn_turn_active"]
-        .as_bool()
-        .unwrap_or(false);
-    let zero_roundtrip_stop_loss_active = guard["reply_execution_gate"]
-        ["must_avoid_new_tool_turn_without_specific_delta_goal"]
-        .as_bool()
-        .unwrap_or(false)
-        && guard["reply_execution_gate"]["max_tool_roundtrips_soft"].as_i64() == Some(0);
+    let same_meter_pure_burn_turn_active =
+        guard["reply_execution_gate"]["same_meter_pure_burn_turn_active"]
+            .as_bool()
+            .unwrap_or(false);
+    let zero_roundtrip_stop_loss_active =
+        guard["reply_execution_gate"]["must_avoid_new_tool_turn_without_specific_delta_goal"]
+            .as_bool()
+            .unwrap_or(false)
+            && guard["reply_execution_gate"]["max_tool_roundtrips_soft"].as_i64() == Some(0);
     let reply_prefix = guard["reply_execution_gate"]["reply_prefix"]
         .as_str()
         .or_else(|| guard["reply_prefix"].as_str())
@@ -1872,7 +1767,7 @@ fn client_budget_blocked_tool_result(tool_name: &str, guard: &Value) -> Value {
 
 async fn tool_list_projects(cfg: &AppConfig) -> Result<Value> {
     let db = postgres::connect_admin(cfg).await?;
-    let projects = postgres::list_projects(&db).await?;
+    let projects = postgres::list_projects(&db, None, None).await?;
     let project_summary = summarize_codes(
         &projects
             .iter()
@@ -2039,10 +1934,52 @@ async fn tool_continuity_startup(
             "continuity_startup": public_payload["continuity_startup"].clone(),
             "chat_start_restore": public_payload["chat_start_restore"].clone(),
             "working_state_restore": public_payload["working_state_restore"].clone(),
-            "retrieval_science": public_payload["retrieval_science"].clone(),
-            "degradation_policy": public_payload["degradation_policy"].clone(),
             "tool_runtime_reconcile": public_payload["tool_runtime_reconcile"].clone(),
             "continuity_startup_summary": summary_json
+        }),
+    ))
+}
+
+async fn tool_continuity_handoff(
+    cfg: &AppConfig,
+    args: ContinuityHandoffToolArgs,
+) -> Result<Value> {
+    let payload = continuity::handoff_payload_from_parts(
+        cfg,
+        &args.project,
+        &args.namespace,
+        &args.headline,
+        &args.next_step,
+        args.details.as_deref().unwrap_or_default(),
+        args.resolve_current_goal,
+        &args.resolved_headlines,
+        &args.resolved_task_ids,
+    )
+    .await?;
+    let node = &payload["continuity_handoff"];
+    let summary = json!({
+        "project_code": node["project"]["code"].clone(),
+        "namespace_code": node["namespace"]["code"].clone(),
+        "headline": node["headline"].clone(),
+        "next_step": node["next_step"].clone(),
+        "local_path": node["local_path"].clone(),
+        "resolve_current_goal": node["resolve_current_goal"].clone(),
+        "resolved_pending_return_count": node["resolved_pending_return_headlines"]
+            .as_array()
+            .map(|values| values.len())
+            .unwrap_or(0),
+    });
+    Ok(tool_result(
+        format!(
+            "continuity handoff :: {}::{} headline={} next_step={}",
+            summary["project_code"].as_str().unwrap_or_default(),
+            summary["namespace_code"].as_str().unwrap_or_default(),
+            summary["headline"].as_str().unwrap_or_default(),
+            summary["next_step"].as_str().unwrap_or_default(),
+        ),
+        json!({
+            "continuity_handoff": node.clone(),
+            "continuity_handoff_summary": summary
         }),
     ))
 }
@@ -3315,6 +3252,7 @@ async fn tool_warm_cache(cfg: &AppConfig, args: WarmCacheToolArgs) -> Result<Val
             limit_symbols: args.limit_symbols,
             limit_chunks: args.limit_chunks,
             limit_semantic_chunks: args.limit_semantic_chunks,
+            at_epoch_ms: None,
             token_source_kind: "proof_warmup_context_pack".to_string(),
             client_prompt_tokens: None,
             assistant_generation_tokens: None,
@@ -3486,7 +3424,7 @@ fn protocol_manifest() -> Value {
         "default_retrieval_mode": "local_strict",
         "startup_contracts": {
             "project_chat_startup": {
-                "contract_version": "continuity-startup-contract-v18",
+                "contract_version": "continuity-startup-contract-v19",
                 "tool": "amai_continuity_startup",
                 "prompt": "amai-continuity-startup",
                 "purpose": "project-scoped continuity restore plus live client-budget discipline before each substantive reply in a new, resumed, or ongoing chat",
@@ -3572,6 +3510,12 @@ fn protocol_manifest() -> Value {
                     "reply_execution_gate_field": "reply_execution_gate",
                     "reply_execution_gate_version": "client-reply-budget-gate-v1",
                     "reply_prefix_field": "reply_prefix",
+                    "reply_prefix_enforcement_flag": "--enforce-online-reply-prefix",
+                    "required_reply_prefix_source": "personal_agent_online_limit_contour",
+                    "required_reply_prefix_non_empty": true,
+                    "reply_prefix_preflight_blocks_substantive_reply": true,
+                    "output_prefix_enforcement_mode": "instruction_preflight_fail_closed",
+                    "output_prefix_host_enforced": false,
                     "reply_budget_mode_field": "reply_budget_mode",
                     "reply_budget_contract_field": "reply_budget_contract",
                     "compact_reply_mode_value": working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
@@ -3582,33 +3526,37 @@ fn protocol_manifest() -> Value {
                     "guard_enforcement_flag": "--enforce-reply-gate",
                     "guard_enforcement_exit_on_blocking": true,
                     "must_check_before_each_substantive_reply": true,
+                    "continuity_write_exempt_from_reply_guard": true,
+                    "continuity_write_required_before_rotate": true,
+                    "continuity_write_operations": [
+                        "continuity import",
+                        "continuity handoff",
+                        "observe /api/continuity-handoff"
+                    ],
                     "max_guard_age_seconds": 10,
                     "stale_guard_requires_refresh": true,
                     "rotate_now_field": "should_rotate_chat_now",
                     "rotate_soon_field": "should_rotate_chat_soon",
                     "status_label_field": "status_label",
                     "rotate_status_labels": [
-                        "новый чат нужен сейчас"
+                        "сожми текущий чат",
+                        "сожми текущий чат сейчас"
                     ],
                     "save_handoff_before_rotate": true,
                     "fresh_chat_requires_continuity_startup": true,
                     "full_scale_client_truth_required": true,
-                    "blocking_action_kinds": [
-                        "wait_for_global_client_budget_recovery"
-                    ],
+                    "reply_blocking_removed": true,
+                    "tool_turn_blocking_removed": true,
+                    "blocking_action_kinds": [],
                     "blocking_reply_contract_field": "blocking_reply_contract",
                     "blocking_reply_contract_version": working_state::CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION,
-                    "blocking_reply_response_kind": working_state::CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND,
-                    "blocking_reply_allowed_response_kinds": [
-                        working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND
-                    ],
-                    "blocking_reply_max_sentences": working_state::CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES,
-                    "blocking_reply_must_avoid_substantive_work": true,
-                    "blocking_reply_must_use_action_bundle_operator_flow": true,
-                    "blocking_reply_template": working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE,
-                    "blocking_reply_allowed_templates": [
-                        working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE
-                    ],
+                    "blocking_reply_response_kind": Value::Null,
+                    "blocking_reply_allowed_response_kinds": [],
+                    "blocking_reply_max_sentences": 0,
+                    "blocking_reply_must_avoid_substantive_work": false,
+                    "blocking_reply_must_use_action_bundle_operator_flow": false,
+                    "blocking_reply_template": Value::Null,
+                    "blocking_reply_allowed_templates": [],
                     "target_control": {
                         "exact_chat_command_pattern": continuity::client_budget_target_chat_command_pattern(),
                         "chat_command_prefix": continuity::CLIENT_BUDGET_TARGET_CHAT_COMMAND_PREFIX,
@@ -3630,7 +3578,7 @@ fn protocol_manifest() -> Value {
                         "switch_immediately_on_exact_chat_command": true,
                         "reply_with_confirmation_after_prepare": true,
                         "prompt_text_required_for_rebase": true,
-                        "required_host_action": "open_clean_chat_surface_and_inject_prompt_text"
+                        "required_host_action": "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable"
                     }
                 },
                 "required_summary_fields": [
@@ -3712,6 +3660,10 @@ fn protocol_manifest() -> Value {
             "amai_continuity_startup": {
                 "summary_field": "continuity_startup_summary",
                 "short_summary_contract": "project-scoped startup restore summary with headline, next step, prompt availability and execctl return obligations",
+            },
+            "amai_continuity_handoff": {
+                "summary_field": "continuity_handoff_summary",
+                "short_summary_contract": "project-scoped continuity handoff write result with headline, next step and resolved-goal markers",
             },
             "amai_context_pack": {
                 "summary_field": "context_pack_summary",
@@ -3880,6 +3832,18 @@ fn tool_definitions() -> Vec<Value> {
                 "readOnlyHint": true,
                 "destructiveHint": false,
                 "idempotentHint": true,
+                "openWorldHint": false
+            }
+        }),
+        json!({
+            "name": "amai_continuity_handoff",
+            "description": "Write a project-scoped continuity handoff so the next agent turn can resume from a compact explicit handoff record.",
+            "inputSchema": continuity_handoff_input_schema(),
+            "annotations": {
+                "title": "Continuity Handoff",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
                 "openWorldHint": false
             }
         }),
@@ -4215,6 +4179,13 @@ fn context_pack_input_schema(include_persist: bool) -> Value {
             }),
         ),
         (
+            "at_epoch_ms".to_string(),
+            json!({
+                "type": ["integer", "null"],
+                "description": "Optional epoch-ms timestamp to resolve temporal truth at an exact time."
+            }),
+        ),
+        (
             "token_source_kind".to_string(),
             json!({
                 "type": "string",
@@ -4295,6 +4266,52 @@ fn continuity_startup_input_schema() -> Value {
                 "description": "Token ledger source kind for continuity-startup observed whole-cycle events. Use proof_/verify_ prefixes for engineering calls."
             }
         },
+        "additionalProperties": false
+    })
+}
+
+fn continuity_handoff_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "project": {
+                "type": "string",
+                "description": "Registered project code."
+            },
+            "namespace": {
+                "type": "string",
+                "default": "continuity",
+                "description": "Continuity namespace code."
+            },
+            "headline": {
+                "type": "string",
+                "description": "Compact handoff headline."
+            },
+            "next_step": {
+                "type": "string",
+                "description": "The next concrete step for the following turn."
+            },
+            "details": {
+                "type": ["string", "null"],
+                "description": "Optional extra handoff details."
+            },
+            "resolved_headlines": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional headlines to mark as resolved in the same handoff."
+            },
+            "resolved_task_ids": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional stable task ids to mark as resolved in the same handoff."
+            },
+            "resolve_current_goal": {
+                "type": "boolean",
+                "default": false,
+                "description": "When true, resolve the current active goal while writing this handoff."
+            }
+        },
+        "required": ["project", "headline", "next_step"],
         "additionalProperties": false
     })
 }
@@ -4987,6 +5004,8 @@ struct ContextPackToolArgs {
     limit_chunks: usize,
     #[serde(default = "default_limit_semantic_chunks")]
     limit_semantic_chunks: usize,
+    #[serde(default)]
+    at_epoch_ms: Option<i64>,
     #[serde(default = "default_context_pack_token_source_kind")]
     token_source_kind: String,
     #[serde(default)]
@@ -5011,6 +5030,26 @@ struct ContinuityStartupToolArgs {
     namespace: String,
     #[serde(default = "default_continuity_startup_token_source_kind")]
     token_source_kind: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ContinuityHandoffToolArgs {
+    #[serde(default)]
+    project: String,
+    #[serde(default = "default_continuity_namespace")]
+    namespace: String,
+    #[serde(default)]
+    headline: String,
+    #[serde(default)]
+    next_step: String,
+    #[serde(default)]
+    details: Option<String>,
+    #[serde(default)]
+    resolved_headlines: Vec<String>,
+    #[serde(default)]
+    resolved_task_ids: Vec<String>,
+    #[serde(default)]
+    resolve_current_goal: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -5051,6 +5090,7 @@ impl ContextPackToolArgs {
             limit_symbols: self.limit_symbols,
             limit_chunks: self.limit_chunks,
             limit_semantic_chunks: self.limit_semantic_chunks,
+            at_epoch_ms: self.at_epoch_ms,
             token_source_kind: self.token_source_kind.clone(),
             client_prompt_tokens: self.client_prompt_tokens,
             assistant_generation_tokens: self.assistant_generation_tokens,
@@ -5289,9 +5329,10 @@ mod tests {
         ContextPackToolArgs, ContinuityStartupToolArgs, McpConfigArgs, McpError,
         benchmark_coverage_summary, context_pack_contains_primary_project,
         context_pack_input_schema, context_pack_summary, context_pack_tool_stats_block,
-        context_pack_tool_summary, continuity_startup_input_schema, continuity_startup_summary,
-        inject_proof_tool_arguments, mcp_tool_error_result, memory_matrix_summary,
-        normalized_server_name, observe_snapshot_summary, observe_whole_cycle_input_schema,
+        context_pack_tool_summary, continuity_handoff_input_schema,
+        continuity_startup_input_schema, continuity_startup_summary, inject_proof_tool_arguments,
+        mcp_tool_error_result, memory_matrix_summary, normalized_server_name,
+        observe_snapshot_summary, observe_whole_cycle_input_schema,
         observe_whole_cycle_turn_input_schema, prompt_result, protocol_manifest,
         render_client_config, snapshot_has_only_ignored_critical_metrics, stack_preflight_summary,
         summarize_codes, summarize_namespace_modes, token_benchmark_summary, token_report_summary,
@@ -5450,6 +5491,7 @@ mod tests {
             limit_symbols: 8,
             limit_chunks: 8,
             limit_semantic_chunks: 8,
+            at_epoch_ms: None,
             token_source_kind: "proof_mcp_context_pack".to_string(),
             client_prompt_tokens: Some(42),
             assistant_generation_tokens: Some(24),
@@ -5479,6 +5521,22 @@ mod tests {
     }
 
     #[test]
+    fn continuity_handoff_schema_exposes_writer_fields() {
+        let schema = continuity_handoff_input_schema();
+        let properties = schema["properties"]
+            .as_object()
+            .expect("properties must be object");
+        assert!(properties.contains_key("project"));
+        assert!(properties.contains_key("namespace"));
+        assert!(properties.contains_key("headline"));
+        assert!(properties.contains_key("next_step"));
+        assert!(properties.contains_key("details"));
+        assert!(properties.contains_key("resolved_headlines"));
+        assert!(properties.contains_key("resolved_task_ids"));
+        assert!(properties.contains_key("resolve_current_goal"));
+    }
+
+    #[test]
     fn continuity_startup_tool_args_forward_cli_contract() {
         let args = ContinuityStartupToolArgs {
             project: Some("art".to_string()),
@@ -5497,6 +5555,21 @@ mod tests {
         assert_eq!(cli.namespace, "continuity");
         assert!(cli.json);
         assert_eq!(cli.token_source_kind, "proof_mcp_continuity_startup");
+    }
+
+    #[test]
+    fn startup_contract_tool_set_includes_continuity_handoff() {
+        let tools = super::tool_definitions();
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"].as_str() == Some("amai_continuity_handoff"))
+        );
+        let manifest = super::protocol_manifest();
+        assert_eq!(
+            manifest["tool_contracts"]["amai_continuity_handoff"]["summary_field"],
+            json!("continuity_handoff_summary")
+        );
     }
 
     #[test]
@@ -6064,6 +6137,7 @@ mod tests {
                 serialize_ms: 22,
                 persist_ms: 23,
             },
+            retrieval_lower_bound_ms_precise: None,
         };
 
         let compact_stats = context_pack_tool_stats_block(&stats);
@@ -6221,7 +6295,7 @@ mod tests {
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["contract_version"].as_str(),
-            Some("continuity-startup-contract-v18")
+            Some("continuity-startup-contract-v19")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["must_call_before_substantive_work"].as_bool(),
@@ -6618,7 +6692,7 @@ mod tests {
         let expected_target_pattern = continuity::client_budget_target_chat_command_pattern();
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["contract_version"].as_str(),
-            Some("continuity-startup-contract-v18")
+            Some("continuity-startup-contract-v19")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
@@ -6655,6 +6729,42 @@ mod tests {
                 ["reply_prefix_field"]
                 .as_str(),
             Some("reply_prefix")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["reply_prefix_enforcement_flag"]
+                .as_str(),
+            Some("--enforce-online-reply-prefix")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["required_reply_prefix_source"]
+                .as_str(),
+            Some("personal_agent_online_limit_contour")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["required_reply_prefix_non_empty"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["reply_prefix_preflight_blocks_substantive_reply"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["output_prefix_enforcement_mode"]
+                .as_str(),
+            Some("instruction_preflight_fail_closed")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["output_prefix_host_enforced"]
+                .as_bool(),
+            Some(false)
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
@@ -6731,14 +6841,43 @@ mod tests {
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
                 ["blocking_reply_response_kind"]
-                .as_str(),
-            Some(working_state::CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND)
+                .is_null(),
+            true
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
                 ["blocking_reply_max_sentences"]
                 .as_u64(),
-            Some(working_state::CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES)
+            Some(0)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["reply_blocking_removed"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["continuity_write_exempt_from_reply_guard"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["continuity_write_required_before_rotate"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["continuity_write_operations"]
+                .as_array()
+                .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
+            Some(vec![
+                "continuity import",
+                "continuity handoff",
+                "observe /api/continuity-handoff"
+            ])
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
@@ -6781,7 +6920,7 @@ mod tests {
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
                 ["compact_chat_control"]["required_host_action"]
                 .as_str(),
-            Some("open_clean_chat_surface_and_inject_prompt_text")
+            Some("open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable")
         );
         assert_eq!(
             manifest["error_contracts"]["tool_execution_failed"]["error_class"].as_str(),
@@ -7071,8 +7210,8 @@ mod tests {
                 "startup_next_action": {
                     "action_kind": "rotate_chat_for_client_budget",
                     "blocking": true,
-                    "headline": "Клиентский лимит: новый чат нужен сейчас",
-                    "next_step": "сохрани handoff и продолжай только в свежем чате через continuity startup"
+                    "headline": "Клиентский лимит: сожми текущий чат сейчас",
+                    "next_step": "сначала сожми текущий чат; continuity startup используй только как fallback"
                 },
                 "execctl_active_lease": {
                     "lease_owner_state": "same_session_owner"
@@ -7101,42 +7240,28 @@ mod tests {
     }
 
     #[test]
-    fn startup_contract_exposes_global_budget_wait_reply_contract() {
+    fn startup_contract_disables_client_budget_blocked_replies() {
         let contract = super::project_chat_startup_contract();
         let enforcement = &contract["live_client_budget_enforcement"];
+        assert_eq!(enforcement["reply_blocking_removed"], json!(true));
+        assert_eq!(enforcement["tool_turn_blocking_removed"], json!(true));
         let blocking_action_kinds = enforcement["blocking_action_kinds"]
             .as_array()
             .expect("blocking action kinds");
-        assert!(
-            blocking_action_kinds
-                .iter()
-                .any(|value| value.as_str() == Some("wait_for_global_client_budget_recovery"))
-        );
-        assert!(
-            !blocking_action_kinds
-                .iter()
-                .any(|value| { value.as_str() == Some("rotate_chat_for_client_budget") })
-        );
+        assert!(blocking_action_kinds.is_empty());
 
         let allowed_response_kinds = enforcement["blocking_reply_allowed_response_kinds"]
             .as_array()
             .expect("allowed response kinds");
-        assert!(allowed_response_kinds.iter().any(|value| {
-            value.as_str() == Some(working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND)
-        }));
-        assert!(!allowed_response_kinds.iter().any(|value| {
-            value.as_str() == Some(working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND)
-        }));
+        assert!(allowed_response_kinds.is_empty());
 
         let allowed_templates = enforcement["blocking_reply_allowed_templates"]
             .as_array()
             .expect("allowed templates");
-        assert!(allowed_templates.iter().any(|value| {
-            value.as_str() == Some(working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE)
-        }));
-        assert!(!allowed_templates.iter().any(|value| {
-            value.as_str() == Some(working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE)
-        }));
+        assert!(allowed_templates.is_empty());
+        assert!(enforcement["blocking_reply_template"].is_null());
+        assert!(enforcement["blocking_reply_response_kind"].is_null());
+        assert_eq!(enforcement["blocking_reply_max_sentences"], json!(0));
     }
 
     #[test]
@@ -7196,7 +7321,7 @@ mod tests {
     #[test]
     fn client_budget_blocked_tool_result_keeps_compact_machine_readable_gate() {
         let guard = json!({
-            "status_label": "новый чат нужен сейчас",
+            "status_label": "сожми текущий чат сейчас",
             "reply_prefix": "5ч KPI: переплата 6.62%",
             "observed_at_epoch_ms": 1774765483000_u64,
             "max_guard_age_seconds": 10,
@@ -7305,18 +7430,15 @@ mod tests {
             json!("same_meter_pure_burn_turn")
         );
         assert_eq!(
-            result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]
-                ["same_meter_pure_burn_turn_active"],
+            result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]["same_meter_pure_burn_turn_active"],
             json!(true)
         );
         assert_eq!(
-            result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]
-                ["must_avoid_new_tool_turn_without_specific_delta_goal"],
+            result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]["must_avoid_new_tool_turn_without_specific_delta_goal"],
             json!(true)
         );
         assert_eq!(
-            result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]
-                ["max_tool_roundtrips_soft"],
+            result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]["max_tool_roundtrips_soft"],
             json!(0)
         );
         assert_eq!(
@@ -7330,7 +7452,7 @@ mod tests {
     #[test]
     fn client_budget_blocked_tool_result_marks_zero_roundtrip_stop_loss_without_pure_burn() {
         let guard = json!({
-            "status_label": "новый чат нужен сейчас",
+            "status_label": "сожми текущий чат сейчас",
             "reply_prefix": "5ч KPI: переплата 8.00%",
             "observed_at_epoch_ms": 1774765483000_u64,
             "max_guard_age_seconds": 10,

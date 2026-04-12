@@ -8,12 +8,12 @@ use crate::{
     codex_threads, compatibility, continuity, dashboard, external_benchmark, nats,
     observability_policy, postgres, retrieval_science, s3, token_budget, working_state,
 };
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use axum::{
     Router,
     extract::{Json, Query, State},
     http::{HeaderValue, StatusCode, header},
-    response::{Html, IntoResponse},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -58,6 +58,10 @@ struct ClientBudgetCompactChatRequest {
     project: Option<String>,
     #[serde(default = "default_continuity_namespace")]
     namespace: String,
+    #[serde(default)]
+    launch_host: bool,
+    #[serde(default)]
+    refresh_handoff: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -72,6 +76,8 @@ struct ContinuityHandoffRequest {
     details: Option<String>,
     #[serde(default)]
     resolved_headlines: Vec<String>,
+    #[serde(default)]
+    resolved_task_ids: Vec<String>,
     #[serde(default)]
     resolve_current_goal: bool,
 }
@@ -97,13 +103,29 @@ struct ClientBudgetHostControlLaunchRequest {
     namespace: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct AgentDisplayNameUpdateRequest {
+    agent_scope: String,
+    display_name: String,
+}
+
 #[derive(Debug, Clone, Default)]
 struct ObserveCache {
     snapshot: Option<Value>,
     dashboard_payload: Option<Value>,
+    dashboard_live_summary_payload: Option<Value>,
+    dashboard_live_summary_thread_id: Option<String>,
+    dashboard_live_summary_completed_epoch_ms: Option<u64>,
+    dashboard_live_summary_refresh_in_progress: bool,
+    client_budget_live_payload: Option<Value>,
+    client_budget_live_thread_id: Option<String>,
+    client_budget_live_completed_epoch_ms: Option<u64>,
+    client_live_meter_refresh_in_progress: bool,
+    client_live_meter_refresh_started_epoch_ms: Option<u64>,
     thread_bound_snapshot: Option<Value>,
     thread_bound_snapshot_thread_id: Option<String>,
     thread_bound_snapshot_completed_epoch_ms: Option<u64>,
+    last_http_request_epoch_ms: Option<u64>,
     last_refresh_started_epoch_ms: Option<u64>,
     last_refresh_completed_epoch_ms: Option<u64>,
     last_refresh_duration_ms: Option<u64>,
@@ -124,29 +146,54 @@ struct CachedClientLiveMeterState {
 
 const SNAPSHOT_RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
 const CLIENT_LIMIT_TREND_ANALYSIS_INTERVAL: Duration = Duration::from_secs(900);
-const EXACT_CLIENT_LIMIT_PREWARM_INTERVAL: Duration = Duration::from_secs(5);
-const COMPACT_CLIENT_BUDGET_SURFACES_PREWARM_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_LIMIT_LIVE_SOURCE_TTL_MS: u64 = 3_000;
-const COMPACT_CLIENT_BUDGET_REQUEST_MAX_CACHE_AGE_MS: u64 = 10_000;
+const CLIENT_BUDGET_LIVE_PAYLOAD_CACHE_TTL_MS: u64 = 20_000;
+const COMPACT_CLIENT_BUDGET_REQUEST_MAX_CACHE_AGE_MS: u64 = 20_000;
+const DASHBOARD_LIVE_SUMMARY_CACHE_TTL_MS: u64 = 60_000;
+const OBSERVE_BACKGROUND_REFRESH_IDLE_GRACE_MS: u64 = 30_000;
+const ACTIVE_AGENT_CARD_MAX_SOURCE_DRIFT_MS: i64 = 10_000;
 const CLIENT_BUDGET_SURFACES_SHARED_CACHE_TTL_MS: u64 =
     COMPACT_CLIENT_BUDGET_REQUEST_MAX_CACHE_AGE_MS;
 const CLIENT_BUDGET_SURFACES_SHARED_CACHE_RELATIVE_PATH: &str =
     "state/observe/client_budget_surfaces_cache.json";
-const CLIENT_BUDGET_SURFACES_SHARED_CACHE_VERSION: &str = "client-budget-surfaces-cache-v2";
+const CLIENT_BUDGET_SURFACES_SHARED_CACHE_VERSION: &str = "client-budget-surfaces-cache-v7";
 const CLIENT_BUDGET_GATE_SHARED_CACHE_RELATIVE_PATH: &str =
     "state/observe/client_budget_gate_cache.json";
-const CLIENT_BUDGET_GATE_SHARED_CACHE_VERSION: &str = "client-budget-gate-cache-v2";
+const CLIENT_BUDGET_GATE_SHARED_CACHE_VERSION: &str = "client-budget-gate-cache-v7";
 const THREAD_BOUND_BUDGET_SNAPSHOT_SHARED_CACHE_VERSION: &str =
-    "thread-bound-budget-snapshot-cache-v1";
-const ACTIVE_THREAD_HINT_SHARED_CACHE_RELATIVE_PATH: &str =
-    "state/observe/active_thread_hint.json";
+    "thread-bound-budget-snapshot-cache-v2";
+const ACTIVE_THREAD_HINT_SHARED_CACHE_RELATIVE_PATH: &str = "state/observe/active_thread_hint.json";
 const ACTIVE_THREAD_HINT_SHARED_CACHE_VERSION: &str = "active-thread-hint-cache-v1";
 const ACTIVE_THREAD_HINT_MAX_AGE_MS: u64 = 30 * 60 * 1000;
 const THREAD_BOUND_SNAPSHOT_INVALIDATION_SHARED_CACHE_VERSION: &str =
     "thread-bound-snapshot-invalidation-v1";
+const OBSERVE_SYSTEM_SNAPSHOT_PERSIST_ADVISORY_LOCK_KEY: i64 = 4_147_508_042;
+const OBSERVE_REFRESH_TIMEOUT_MS: u64 = 120_000;
+const OBSERVE_REFRESH_STUCK_GRACE_MS: u64 = 5_000;
 
 fn default_continuity_namespace() -> String {
     "continuity".to_string()
+}
+
+async fn resolve_request_repo_root_for_project(
+    cfg: &AppConfig,
+    project_code: Option<&str>,
+) -> Result<PathBuf> {
+    if let Some(project_code) = project_code
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Ok(db) = postgres::connect_app(cfg).await
+            && let Ok(project) = postgres::get_project_by_code(&db, project_code).await
+        {
+            return Ok(PathBuf::from(project.repo_root));
+        }
+        let db = postgres::connect_admin(cfg).await?;
+        postgres::bootstrap_schema(&db, cfg).await?;
+        let project = postgres::get_project_by_code(&db, project_code).await?;
+        return Ok(PathBuf::from(project.repo_root));
+    }
+    discover_repo_root(None)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,7 +255,19 @@ struct ObservabilityProfile {
 #[derive(Debug, Clone, Deserialize)]
 struct DashboardProfile {
     refresh_ms: u64,
+    #[serde(default = "default_exact_client_limit_prewarm_seconds")]
+    exact_client_limit_prewarm_seconds: u64,
+    #[serde(default = "default_compact_client_budget_prewarm_seconds")]
+    compact_client_budget_prewarm_seconds: u64,
     timing_format: DashboardTimingFormatProfile,
+}
+
+fn default_exact_client_limit_prewarm_seconds() -> u64 {
+    5
+}
+
+fn default_compact_client_budget_prewarm_seconds() -> u64 {
+    5
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -278,11 +337,13 @@ struct RetrievalThresholds {
     target_p95_ms: f64,
     target_cold_p99_ms: f64,
     target_cold_max_ms: f64,
+    live_readiness_cold_sample_count: u64,
     target_cold_sample_count: u64,
     target_hot_p50_ms: f64,
     target_hot_p95_ms: f64,
     target_hot_p99_ms: f64,
     target_hot_max_ms: f64,
+    live_readiness_hot_sample_count: u64,
     target_hot_sample_count: u64,
     target_hot_benchmark_iterations: u64,
     target_hot_benchmark_warmup: u64,
@@ -339,11 +400,12 @@ pub async fn print_snapshot_preview(cfg: &AppConfig) -> Result<()> {
 }
 
 pub async fn print_budget_snapshot_preview(cfg: &AppConfig) -> Result<()> {
-    let snapshot = if let Some(payload) = try_fetch_local_observe_budget_snapshot_preview_via_http().await {
-        payload
-    } else {
-        compact_budget_snapshot_preview_payload(&collect_budget_snapshot_preview(cfg).await?)
-    };
+    let snapshot =
+        if let Some(payload) = try_fetch_local_observe_budget_snapshot_preview_via_http().await {
+            payload
+        } else {
+            compact_budget_snapshot_preview_payload(&collect_budget_snapshot_preview(cfg).await?)
+        };
     println!("{}", serde_json::to_string(&snapshot)?);
     Ok(())
 }
@@ -383,12 +445,38 @@ pub async fn print_guardrails(cfg: &AppConfig) -> Result<()> {
     }
 }
 
-pub async fn print_client_budget_guard(cfg: &AppConfig, enforce_reply_gate: bool) -> Result<()> {
+pub async fn print_client_budget_guard(
+    cfg: &AppConfig,
+    enforce_reply_gate: bool,
+    explicit_thread_id: Option<&str>,
+) -> Result<()> {
     let CompactClientBudgetSurfaces {
         guard,
         guard_payload: payload,
         ..
-    } = collect_compact_client_budget_surfaces(cfg).await?;
+    } = if let Some(thread_id) = resolved_local_observe_thread_id(explicit_thread_id) {
+        let repo_root = discover_repo_root(None)?;
+        if let Some(materialized) =
+            try_load_fast_thread_bound_materialized_compact_client_budget_surfaces(
+                &repo_root, &thread_id,
+            )
+        {
+            materialized.surfaces
+        } else {
+            let snapshot = collect_client_budget_snapshot_with_thread_hint(
+                cfg,
+                &repo_root,
+                Some(&thread_id),
+                None,
+                None,
+            )
+            .await?;
+            compact_client_budget_surfaces_from_snapshot(&repo_root, &snapshot, Some(&thread_id))
+                .surfaces
+        }
+    } else {
+        collect_compact_client_budget_surfaces(cfg).await?
+    };
     println!("{}", serde_json::to_string(&payload)?);
     if enforce_reply_gate && client_budget_guard_blocks_reply(&guard) {
         let action_kind = guard["reply_execution_gate"]["action_kind"]
@@ -408,14 +496,48 @@ pub async fn print_client_budget_guard(cfg: &AppConfig, enforce_reply_gate: bool
     Ok(())
 }
 
-pub async fn print_client_budget_gate(cfg: &AppConfig, enforce_reply_gate: bool) -> Result<()> {
-    let payload = if let Some(payload) = try_fetch_local_observe_gate_payload_via_http().await {
+pub async fn print_client_budget_gate(
+    cfg: &AppConfig,
+    enforce_reply_gate: bool,
+    explicit_thread_id: Option<&str>,
+) -> Result<()> {
+    let payload = if let Some(payload) =
+        try_fetch_local_observe_gate_payload_via_http(explicit_thread_id).await
+    {
         payload
+    } else if let Some(thread_id) = resolved_local_observe_thread_id(explicit_thread_id) {
+        let repo_root = discover_repo_root(None)?;
+        if let Some(cached) = load_shared_compact_client_budget_gate(
+            &repo_root,
+            current_epoch_ms_u64(),
+            Some(&thread_id),
+        ) {
+            cached.gate
+        } else if let Some(materialized) =
+            try_load_fast_thread_bound_materialized_compact_client_budget_surfaces(
+                &repo_root, &thread_id,
+            )
+        {
+            materialized.gate.gate_payload
+        } else {
+            let snapshot = collect_client_budget_snapshot_with_thread_hint(
+                cfg,
+                &repo_root,
+                Some(&thread_id),
+                None,
+                None,
+            )
+            .await?;
+            compact_client_budget_surfaces_from_snapshot(&repo_root, &snapshot, Some(&thread_id))
+                .gate
+                .gate_payload
+        }
     } else {
         let CompactClientBudgetGateSurface { gate_payload, .. } =
             collect_compact_client_budget_gate_surface(cfg).await?;
         gate_payload
     };
+    let payload = normalize_front_door_client_budget_gate_payload_shape(payload);
     println!("{}", serde_json::to_string(&payload)?);
     if enforce_reply_gate && client_budget_guard_blocks_reply(&payload["client_budget_reply_gate"])
     {
@@ -440,12 +562,37 @@ pub async fn print_client_budget_gate(cfg: &AppConfig, enforce_reply_gate: bool)
 pub async fn print_client_budget_root_cause(
     cfg: &AppConfig,
     enforce_reply_gate: bool,
+    explicit_thread_id: Option<&str>,
 ) -> Result<()> {
-    let compact = if let Some(payload) = try_fetch_local_observe_root_cause_payload_via_http().await
+    let compact = if let Some(payload) =
+        try_fetch_local_observe_root_cause_payload_via_http(explicit_thread_id).await
     {
         payload
+    } else if let Some(thread_id) = resolved_local_observe_thread_id(explicit_thread_id) {
+        let repo_root = discover_repo_root(None)?;
+        if let Some(materialized) =
+            try_load_fast_thread_bound_materialized_compact_client_budget_surfaces(
+                &repo_root, &thread_id,
+            )
+        {
+            materialized.surfaces.root_cause_payload
+        } else {
+            let snapshot = collect_client_budget_snapshot_with_thread_hint(
+                cfg,
+                &repo_root,
+                Some(&thread_id),
+                None,
+                None,
+            )
+            .await?;
+            compact_client_budget_surfaces_from_snapshot(&repo_root, &snapshot, Some(&thread_id))
+                .surfaces
+                .root_cause_payload
+        }
     } else {
-        collect_compact_client_budget_surfaces(cfg).await?.root_cause_payload
+        collect_compact_client_budget_surfaces(cfg)
+            .await?
+            .root_cause_payload
     };
     println!("{}", serde_json::to_string(&compact)?);
     if enforce_reply_gate && client_budget_guard_blocks_reply(&compact["client_budget_reply_gate"])
@@ -482,7 +629,6 @@ struct CompactClientBudgetSurfaces {
 #[derive(Debug, Clone)]
 struct CompactClientBudgetGateSurface {
     gate_payload: Value,
-    guard: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -512,7 +658,11 @@ fn local_observe_http_base_url() -> String {
         }
         value => value.to_string(),
     };
-    let port = if raw_port.is_empty() { "9464" } else { raw_port };
+    let port = if raw_port.is_empty() {
+        "9464"
+    } else {
+        raw_port
+    };
     if host.contains(':') {
         format!("http://[{host}]:{port}")
     } else {
@@ -527,21 +677,43 @@ fn local_observe_thread_id_from_env() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-async fn try_fetch_local_observe_gate_payload_via_http() -> Option<Value> {
-    let thread_id = local_observe_thread_id_from_env();
+fn resolved_local_observe_thread_id(explicit_thread_id: Option<&str>) -> Option<String> {
+    explicit_thread_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(local_observe_thread_id_from_env)
+}
+
+fn client_budget_local_observe_http_timeout(thread_bound: bool) -> Duration {
+    let fallback_ms = if thread_bound { 7000 } else { 1500 };
+    let override_ms = std::env::var("AMI_CLIENT_BUDGET_OBSERVE_HTTP_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| value.clamp(200, 20_000));
+    Duration::from_millis(override_ms.unwrap_or(fallback_ms))
+}
+
+async fn try_fetch_local_observe_gate_payload_via_http(
+    explicit_thread_id: Option<&str>,
+) -> Option<Value> {
+    let thread_id = resolved_local_observe_thread_id(explicit_thread_id);
     let repo_root = discover_repo_root(None).ok()?;
     let now_epoch_ms = current_epoch_ms_u64();
     if let Some(cached) =
         load_shared_compact_client_budget_gate(&repo_root, now_epoch_ms, thread_id.as_deref())
     {
-        return Some(cached.gate);
+        if compact_thread_bound_client_budget_gate_payload_is_consistent(
+            thread_id.as_deref(),
+            &cached.gate,
+        ) {
+            return Some(cached.gate);
+        }
     }
     let client = reqwest::Client::builder()
-        .timeout(if thread_id.is_some() {
-            Duration::from_millis(7000)
-        } else {
-            Duration::from_millis(1500)
-        })
+        .timeout(client_budget_local_observe_http_timeout(
+            thread_id.is_some(),
+        ))
         .build()
         .ok()?;
     let base_url = local_observe_http_base_url();
@@ -552,14 +724,19 @@ async fn try_fetch_local_observe_gate_payload_via_http() -> Option<Value> {
         root_cause_request
     })
     .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json::<Value>()
-        .await
-        .ok()?;
-    if let Some(gate) = compact_cli_client_budget_gate_from_root_cause_payload(&root_cause) {
+    .await
+    .ok()?
+    .error_for_status()
+    .ok()?
+    .json::<Value>()
+    .await
+    .ok()?;
+    if let Some(gate) = compact_cli_client_budget_gate_from_root_cause_payload(&root_cause)
+        && compact_thread_bound_client_budget_gate_payload_is_consistent(
+            thread_id.as_deref(),
+            &gate,
+        )
+    {
         return Some(gate);
     }
     let gate_request = client.get(format!("{base_url}/api/client-budget-gate"));
@@ -568,46 +745,61 @@ async fn try_fetch_local_observe_gate_payload_via_http() -> Option<Value> {
     } else {
         gate_request
     })
-        .send()
-        .await
-        .ok()?;
-    response.error_for_status().ok()?.json::<Value>().await.ok()
-}
-
-async fn try_fetch_local_observe_root_cause_payload_via_http() -> Option<Value> {
-    let thread_id = local_observe_thread_id_from_env();
-    let repo_root = discover_repo_root(None).ok()?;
-    let now_epoch_ms = current_epoch_ms_u64();
-    if let Some(cached) = load_shared_compact_client_budget_surfaces(
-        &repo_root,
-        now_epoch_ms,
-        thread_id.as_deref(),
-    ) {
-        return Some(cached.root_cause);
-    }
-    let client = reqwest::Client::builder()
-        .timeout(if thread_id.is_some() {
-            Duration::from_millis(7000)
-        } else {
-            Duration::from_millis(1500)
-        })
-        .build()
-        .ok()?;
-    let base_url = local_observe_http_base_url();
-    let request = client.get(format!("{base_url}/api/client-budget-root-cause"));
-    (if let Some(thread_id) = thread_id.as_deref() {
-        request.query(&[("thread_id", thread_id)])
-    } else {
-        request
-    })
-        .send()
-        .await
-        .ok()?
+    .send()
+    .await
+    .ok()?;
+    let gate = response
         .error_for_status()
         .ok()?
         .json::<Value>()
         .await
-        .ok()
+        .ok()?;
+    compact_thread_bound_client_budget_gate_payload_is_consistent(thread_id.as_deref(), &gate)
+        .then_some(gate)
+}
+
+async fn try_fetch_local_observe_root_cause_payload_via_http(
+    explicit_thread_id: Option<&str>,
+) -> Option<Value> {
+    let thread_id = resolved_local_observe_thread_id(explicit_thread_id);
+    let repo_root = discover_repo_root(None).ok()?;
+    let now_epoch_ms = current_epoch_ms_u64();
+    if let Some(cached) =
+        load_shared_compact_client_budget_surfaces(&repo_root, now_epoch_ms, thread_id.as_deref())
+    {
+        if compact_thread_bound_client_budget_root_cause_payload_is_consistent(
+            thread_id.as_deref(),
+            &cached.root_cause,
+        ) {
+            return Some(cached.root_cause);
+        }
+    }
+    let client = reqwest::Client::builder()
+        .timeout(client_budget_local_observe_http_timeout(
+            thread_id.is_some(),
+        ))
+        .build()
+        .ok()?;
+    let base_url = local_observe_http_base_url();
+    let request = client.get(format!("{base_url}/api/client-budget-root-cause"));
+    let payload = (if let Some(thread_id) = thread_id.as_deref() {
+        request.query(&[("thread_id", thread_id)])
+    } else {
+        request
+    })
+    .send()
+    .await
+    .ok()?
+    .error_for_status()
+    .ok()?
+    .json::<Value>()
+    .await
+    .ok()?;
+    compact_thread_bound_client_budget_root_cause_payload_is_consistent(
+        thread_id.as_deref(),
+        &payload,
+    )
+    .then_some(payload)
 }
 
 async fn try_fetch_local_observe_budget_snapshot_preview_via_http() -> Option<Value> {
@@ -617,11 +809,9 @@ async fn try_fetch_local_observe_budget_snapshot_preview_via_http() -> Option<Va
         return Some(compact_budget_snapshot_preview_payload(&snapshot));
     }
     let client = reqwest::Client::builder()
-        .timeout(if thread_id.is_some() {
-            Duration::from_millis(7000)
-        } else {
-            Duration::from_millis(1500)
-        })
+        .timeout(client_budget_local_observe_http_timeout(
+            thread_id.is_some(),
+        ))
         .build()
         .ok()?;
     let base_url = local_observe_http_base_url();
@@ -654,10 +844,7 @@ fn observe_cache_thread_suffix(thread_id: &str) -> String {
         .collect()
 }
 
-fn client_budget_surfaces_shared_cache_path(
-    repo_root: &Path,
-    thread_id: Option<&str>,
-) -> PathBuf {
+fn client_budget_surfaces_shared_cache_path(repo_root: &Path, thread_id: Option<&str>) -> PathBuf {
     if let Some(thread_id) = thread_id.map(str::trim).filter(|value| !value.is_empty()) {
         return repo_root.join(format!(
             "state/observe/client_budget_surfaces_cache.thread-{}.json",
@@ -818,9 +1005,15 @@ fn load_shared_thread_bound_budget_snapshot(
     {
         return None;
     }
-    if load_shared_thread_bound_snapshot_invalidation(repo_root, thread_id)
-        .is_some_and(|invalidated_at_epoch_ms| invalidated_at_epoch_ms >= persisted.fetched_at_epoch_ms)
-    {
+    if load_shared_thread_bound_snapshot_invalidation(repo_root, thread_id).is_some_and(
+        |invalidated_at_epoch_ms| invalidated_at_epoch_ms >= persisted.fetched_at_epoch_ms,
+    ) {
+        return None;
+    }
+    if !thread_bound_budget_snapshot_has_fresh_exact_limit_surfaces(
+        &persisted.snapshot,
+        now_epoch_ms,
+    ) {
         return None;
     }
     Some(persisted.snapshot)
@@ -851,6 +1044,67 @@ fn write_shared_thread_bound_budget_snapshot(
     Ok(())
 }
 
+fn thread_bound_budget_snapshot_has_fresh_exact_limit_surfaces(
+    snapshot: &Value,
+    now_epoch_ms: u64,
+) -> bool {
+    let report = if snapshot["token_budget_report"]["token_budget_report"].is_object() {
+        &snapshot["token_budget_report"]["token_budget_report"]
+    } else {
+        &snapshot["token_budget_report"]
+    };
+    let hourly_burn = &report["client_limit_hourly_burn"];
+    if hourly_burn["status"].as_str() != Some("observed") {
+        return false;
+    }
+    let Some(hourly_burn_observed_at_epoch_ms) =
+        hourly_burn["latest_observed_at_epoch_ms"].as_u64()
+    else {
+        return false;
+    };
+    if now_epoch_ms.saturating_sub(hourly_burn_observed_at_epoch_ms)
+        > COMPACT_CLIENT_BUDGET_REQUEST_MAX_CACHE_AGE_MS
+    {
+        return false;
+    }
+    let status_bar_rate_limits = &report["client_live_meter"]["status_bar_rate_limits"];
+    if status_bar_rate_limits["status"].as_str() != Some("observed") {
+        return false;
+    }
+    let Some(status_bar_observed_at_epoch_ms) = status_bar_rate_limits["observed_at_epoch_ms"]
+        .as_u64()
+        .or_else(|| status_bar_rate_limits["ended_at_epoch_ms"].as_u64())
+    else {
+        return false;
+    };
+    if now_epoch_ms.saturating_sub(status_bar_observed_at_epoch_ms)
+        > COMPACT_CLIENT_BUDGET_REQUEST_MAX_CACHE_AGE_MS
+    {
+        return false;
+    }
+    let current_live_turn = &report["current_live_turn"];
+    if !current_live_turn.is_object() {
+        return false;
+    }
+    let status = current_live_turn["status"].as_str().unwrap_or_default();
+    let exact_pair_available = current_live_turn["exact_pair_available"].as_bool() == Some(true);
+    let observed_activity = current_live_turn["matched_events_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+        || current_live_turn["retrieval_context_pack_count"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0;
+    if observed_activity {
+        return status == "exact_pair_materialized" && exact_pair_available;
+    }
+    matches!(
+        status,
+        "no_amai_activity_in_current_live_turn" | "exact_pair_materialized"
+    ) && exact_pair_available
+}
+
 fn build_compact_client_budget_gate_cache(
     gate_payload: &Value,
     guard_payload: &Value,
@@ -870,8 +1124,12 @@ fn shared_client_budget_cache_matches_thread(
     expected_thread_id: Option<&str>,
 ) -> bool {
     match (
-        cached_thread_id.map(str::trim).filter(|value| !value.is_empty()),
-        expected_thread_id.map(str::trim).filter(|value| !value.is_empty()),
+        cached_thread_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        expected_thread_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
     ) {
         (Some(cached), Some(expected)) => cached == expected,
         (None, None) => true,
@@ -890,10 +1148,7 @@ fn load_shared_compact_client_budget_gate(
     if cached.cache_version != CLIENT_BUDGET_GATE_SHARED_CACHE_VERSION {
         return None;
     }
-    if !shared_client_budget_cache_matches_thread(
-        cached.thread_id.as_deref(),
-        expected_thread_id,
-    ) {
+    if !shared_client_budget_cache_matches_thread(cached.thread_id.as_deref(), expected_thread_id) {
         return None;
     }
     if now_epoch_ms.saturating_sub(cached.fetched_at_epoch_ms)
@@ -910,11 +1165,17 @@ fn load_shared_compact_client_budget_gate(
         return None;
     }
     if let Some(thread_id) = expected_thread_id {
-        if load_shared_thread_bound_snapshot_invalidation(repo_root, thread_id)
-            .is_some_and(|invalidated_at_epoch_ms| invalidated_at_epoch_ms >= cached.fetched_at_epoch_ms)
-        {
+        if load_shared_thread_bound_snapshot_invalidation(repo_root, thread_id).is_some_and(
+            |invalidated_at_epoch_ms| invalidated_at_epoch_ms >= cached.fetched_at_epoch_ms,
+        ) {
             return None;
         }
+    }
+    if !compact_thread_bound_client_budget_gate_payload_is_consistent(
+        expected_thread_id,
+        &cached.gate,
+    ) {
+        return None;
     }
     Some(cached)
 }
@@ -945,10 +1206,7 @@ fn load_shared_compact_client_budget_surfaces(
     if cached.cache_version != CLIENT_BUDGET_SURFACES_SHARED_CACHE_VERSION {
         return None;
     }
-    if !shared_client_budget_cache_matches_thread(
-        cached.thread_id.as_deref(),
-        expected_thread_id,
-    ) {
+    if !shared_client_budget_cache_matches_thread(cached.thread_id.as_deref(), expected_thread_id) {
         return None;
     }
     if now_epoch_ms.saturating_sub(cached.fetched_at_epoch_ms)
@@ -967,13 +1225,70 @@ fn load_shared_compact_client_budget_surfaces(
         return None;
     }
     if let Some(thread_id) = expected_thread_id {
-        if load_shared_thread_bound_snapshot_invalidation(repo_root, thread_id)
-            .is_some_and(|invalidated_at_epoch_ms| invalidated_at_epoch_ms >= cached.fetched_at_epoch_ms)
-        {
+        if load_shared_thread_bound_snapshot_invalidation(repo_root, thread_id).is_some_and(
+            |invalidated_at_epoch_ms| invalidated_at_epoch_ms >= cached.fetched_at_epoch_ms,
+        ) {
             return None;
         }
     }
+    if !compact_thread_bound_client_budget_root_cause_payload_is_consistent(
+        expected_thread_id,
+        &cached.root_cause,
+    ) {
+        return None;
+    }
     Some(cached)
+}
+
+fn other_thread_feedback_confirmation_is_inconsistent(
+    action_kind: Option<&str>,
+    must_confirm_feedback: bool,
+    feedback_pending: bool,
+    effect_verdict: Option<&str>,
+) -> bool {
+    effect_verdict == Some("other_thread")
+        && (feedback_pending
+            || must_confirm_feedback
+            || action_kind == Some("confirm_same_thread_host_control_feedback"))
+}
+
+fn compact_thread_bound_client_budget_gate_payload_is_consistent(
+    expected_thread_id: Option<&str>,
+    payload: &Value,
+) -> bool {
+    if expected_thread_id.is_none() {
+        return true;
+    }
+    let gate = &payload["client_budget_reply_gate"]["reply_execution_gate"];
+    !other_thread_feedback_confirmation_is_inconsistent(
+        gate["action_kind"].as_str(),
+        gate["must_confirm_same_thread_host_control_feedback_before_reply"].as_bool() == Some(true),
+        gate["action_bundle"]["host_current_thread_control"]["feedback_pending"].as_bool()
+            == Some(true),
+        gate["action_bundle"]["host_current_thread_control"]["effect_verdict"].as_str(),
+    )
+}
+
+fn compact_thread_bound_client_budget_root_cause_payload_is_consistent(
+    expected_thread_id: Option<&str>,
+    payload: &Value,
+) -> bool {
+    if expected_thread_id.is_none() {
+        return true;
+    }
+    if payload["thread_binding_state"].as_str() != Some("current_thread_bound")
+        || payload["current_live_turn"]["status"].as_str() == Some("current_thread_unbound")
+    {
+        return false;
+    }
+    let gate = &payload["client_budget_reply_gate"]["reply_execution_gate"];
+    !other_thread_feedback_confirmation_is_inconsistent(
+        gate["action_kind"].as_str(),
+        gate["must_confirm_same_thread_host_control_feedback_before_reply"].as_bool() == Some(true),
+        gate["action_bundle"]["host_current_thread_control"]["feedback_pending"].as_bool()
+            == Some(true),
+        payload["host_current_thread_control_effect"]["effect_verdict"].as_str(),
+    )
 }
 
 fn write_shared_compact_client_budget_surfaces(
@@ -999,25 +1314,18 @@ async fn collect_compact_client_budget_gate_surface(
     if let Some(cached) = load_shared_compact_client_budget_gate(&repo_root, now_epoch_ms, None) {
         return Ok(CompactClientBudgetGateSurface {
             gate_payload: cached.gate,
-            guard: cached.guard,
         });
     }
     if let Some(cached) = load_shared_compact_client_budget_surfaces(&repo_root, now_epoch_ms, None)
     {
-        let gate_cache =
-            build_compact_client_budget_gate_cache(&cached.gate, &cached.guard, None);
+        let gate_cache = build_compact_client_budget_gate_cache(&cached.gate, &cached.guard, None);
         let _ = write_shared_compact_client_budget_gate(&repo_root, None, &gate_cache);
         return Ok(CompactClientBudgetGateSurface {
             gate_payload: cached.gate,
-            guard: cached.guard,
         });
     }
     let snapshot = collect_client_budget_snapshot(cfg, &repo_root).await?;
     Ok(compact_client_budget_surfaces_from_snapshot(&repo_root, &snapshot, None).gate)
-}
-
-pub(crate) async fn collect_compact_client_budget_guard(cfg: &AppConfig) -> Result<Value> {
-    Ok(collect_compact_client_budget_gate_surface(cfg).await?.guard)
 }
 
 async fn collect_compact_client_budget_surfaces(
@@ -1044,19 +1352,37 @@ async fn prewarm_thread_bound_client_budget_surfaces_for_thread(
 ) -> Result<()> {
     let repo_root = discover_repo_root(None)?;
     let now_epoch_ms_value = current_epoch_ms_u64();
-    if load_shared_compact_client_budget_surfaces(&repo_root, now_epoch_ms_value, Some(thread_id)).is_some()
-        && load_shared_compact_client_budget_gate(&repo_root, now_epoch_ms_value, Some(thread_id)).is_some()
+    if load_shared_compact_client_budget_surfaces(&repo_root, now_epoch_ms_value, Some(thread_id))
+        .is_some()
+        && let Some(cached_gate) =
+            load_shared_compact_client_budget_gate(&repo_root, now_epoch_ms_value, Some(thread_id))
     {
+        let maybe_launched = maybe_auto_launch_same_thread_host_control_from_gate(
+            cfg,
+            &repo_root,
+            thread_id,
+            &cached_gate.gate,
+        )
+        .await?;
+        if maybe_launched.is_none() {
+            return Ok(());
+        }
         return Ok(());
     }
     if let Some(snapshot) =
         load_shared_thread_bound_budget_snapshot(&repo_root, now_epoch_ms_value, thread_id)
     {
-        populate_thread_bound_client_budget_surfaces_from_snapshot(
-            cache,
+        let materialized =
+            compact_client_budget_surfaces_from_snapshot(&repo_root, &snapshot, Some(thread_id));
+        let _ = maybe_auto_launch_same_thread_host_control_from_gate(
+            cfg,
             &repo_root,
             thread_id,
-            snapshot,
+            &materialized.gate.gate_payload,
+        )
+        .await?;
+        populate_thread_bound_client_budget_surfaces_from_snapshot(
+            cache, &repo_root, thread_id, snapshot,
         )
         .await;
         return Ok(());
@@ -1077,8 +1403,19 @@ async fn prewarm_thread_bound_client_budget_surfaces_for_thread(
         latest_repo_restore_override.as_ref(),
     )
     .await?;
-    populate_thread_bound_client_budget_surfaces_from_snapshot(cache, &repo_root, thread_id, snapshot)
-        .await;
+    let materialized =
+        compact_client_budget_surfaces_from_snapshot(&repo_root, &snapshot, Some(thread_id));
+    let _ = maybe_auto_launch_same_thread_host_control_from_gate(
+        cfg,
+        &repo_root,
+        thread_id,
+        &materialized.gate.gate_payload,
+    )
+    .await?;
+    populate_thread_bound_client_budget_surfaces_from_snapshot(
+        cache, &repo_root, thread_id, snapshot,
+    )
+    .await;
     Ok(())
 }
 
@@ -1086,22 +1423,52 @@ async fn prewarm_active_thread_bound_client_budget_surfaces(
     cache: Arc<RwLock<ObserveCache>>,
     cfg: &AppConfig,
 ) -> Result<()> {
-    let snapshot_thread_id = {
+    let (snapshot_thread_id, activity) = {
         let state = cache.read().await;
-        state
-            .snapshot
-            .as_ref()
-            .and_then(strict_auto_thread_binding_hint_from_snapshot)
+        let snapshot = state.snapshot.as_ref();
+        (
+            match snapshot {
+                Some(value) => strict_auto_thread_binding_hint_from_snapshot(value.clone()),
+                None => None,
+            },
+            snapshot.map(|item| item["agent_scope_activity"].clone()),
+        )
     };
+    if let Some(activity) = activity.as_ref() {
+        let thread_ids = token_budget::active_agent_thread_ids_from_activity(
+            activity,
+            current_epoch_ms_u64() as i64,
+        );
+        if !thread_ids.is_empty() {
+            return prewarm_active_agent_thread_bound_client_budget_surfaces(cache, cfg, activity)
+                .await;
+        }
+    }
     let repo_root = discover_repo_root(None)?;
     let now_epoch_ms_value = current_epoch_ms_u64();
-    let thread_id = snapshot_thread_id.or_else(|| {
-        load_shared_active_thread_hint(&repo_root, now_epoch_ms_value)
-    });
-    let Some(thread_id) = thread_id else {
+    let Some(thread_id) = snapshot_thread_id
+        .or_else(|| load_shared_active_thread_hint(&repo_root, now_epoch_ms_value))
+    else {
         return Ok(());
     };
-    prewarm_thread_bound_client_budget_surfaces_for_thread(cache, cfg, &thread_id).await
+    prewarm_thread_bound_client_budget_surfaces_for_thread(cache, cfg, &thread_id).await?;
+    Ok(())
+}
+
+async fn prewarm_active_agent_thread_bound_client_budget_surfaces(
+    cache: Arc<RwLock<ObserveCache>>,
+    cfg: &AppConfig,
+    activity: &Value,
+) -> Result<()> {
+    let thread_ids = token_budget::active_agent_thread_ids_from_activity(
+        activity,
+        current_epoch_ms_u64() as i64,
+    );
+    for thread_id in thread_ids {
+        prewarm_thread_bound_client_budget_surfaces_for_thread(cache.clone(), cfg, &thread_id)
+            .await?;
+    }
+    Ok(())
 }
 
 async fn collect_client_budget_snapshot(cfg: &AppConfig, repo_root: &Path) -> Result<Value> {
@@ -1148,24 +1515,39 @@ async fn collect_client_budget_snapshot_from_db(
     base_report_override: Option<&Value>,
     latest_repo_restore_override: Option<&Value>,
 ) -> Result<Value> {
-    let report = token_budget::collect_dashboard_current_session_budget_report_with_thread_hint_and_base(
-        &db,
-        base_report_override,
+    let latest_repo_restore_raw = latest_repo_restore_override
+        .cloned()
+        .or(latest_repo_working_state_restore_payload(&db, repo_root).await?);
+    working_state::maintain_same_thread_execctl_active_lease_for_guard(
+        db,
+        latest_repo_restore_raw.as_ref(),
         thread_id_hint,
     )
     .await?;
-    let latest_repo_working_state_restore = latest_repo_restore_override
-        .cloned()
-        .or(
-            latest_repo_working_state_restore_payload(&db, repo_root)
-                .await?,
+    let report =
+        token_budget::collect_dashboard_current_session_budget_report_with_thread_hint_and_base(
+            &db,
+            base_report_override,
+            thread_id_hint,
         )
-        .map(|value| compact_latest_repo_working_state_restore_for_budget(&value))
-        .unwrap_or_else(|| json!({ "working_state_restore": {} }));
+        .await?;
+    let agent_scope_activity = token_budget::collect_agent_scope_activity(db).await?;
+    let active_agent_budget = token_budget::collect_active_agent_live_budget_surface(
+        db,
+        repo_root,
+        &agent_scope_activity,
+    )
+    .await?;
+    let latest_repo_working_state_restore =
+        latest_repo_working_state_restore_payload(&db, repo_root)
+            .await?
+            .map(|value| compact_latest_repo_working_state_restore_for_budget(&value))
+            .unwrap_or_else(|| json!({ "working_state_restore": {} }));
     Ok(json!({
         "token_budget_report": {
             "token_budget_report": report["token_budget_report"].clone(),
         },
+        "active_agent_budget": active_agent_budget,
         "latest_repo_working_state_restore": latest_repo_working_state_restore,
     }))
 }
@@ -1239,6 +1621,11 @@ fn compact_working_state_restore_for_budget(restore: &Value) -> Value {
         "namespace": {
             "code": restore["namespace"]["code"].clone()
         },
+        "state_lineage": {
+            "authoritative_event_id": restore["state_lineage"]["authoritative_event_id"].clone(),
+            "authoritative_source_kind": restore["state_lineage"]["authoritative_source_kind"].clone(),
+            "authoritative_local_path": restore["state_lineage"]["authoritative_local_path"].clone()
+        },
         "recent_actions": recent_actions
     })
 }
@@ -1278,7 +1665,10 @@ fn compact_client_live_meter_for_budget_snapshot_preview(client_live_meter: &Val
         "client_turn_total_tokens": client_live_meter["client_turn_total_tokens"].clone(),
         "context_used_percent": rounded_json_number(&client_live_meter["context_used_percent"], 2),
         "primary_limit_used_percent": client_live_meter["primary_limit_used_percent"].clone(),
-        "secondary_limit_used_percent": client_live_meter["secondary_limit_used_percent"].clone()
+        "secondary_limit_used_percent": client_live_meter["secondary_limit_used_percent"].clone(),
+        "rollout_jsonl_tolerance_summary": client_live_meter["rollout_jsonl_tolerance_summary"].clone(),
+        "rollout_jsonl_tolerated_skips_present": client_live_meter["rollout_jsonl_tolerated_skips_present"].clone(),
+        "rollout_jsonl_malformed_objects_fail_closed": client_live_meter["rollout_jsonl_malformed_objects_fail_closed"].clone()
     })
 }
 
@@ -1337,10 +1727,37 @@ fn compact_client_limit_meter_alignment_for_budget_snapshot_preview(alignment: &
     if !alignment.is_object() {
         return Value::Null;
     }
+    let baseline_component_semantics = alignment["baseline_equivalence"]["component_semantics"]
+        .as_array()
+        .map(|items| {
+            Value::Array(
+                items
+                    .iter()
+                    .map(|item| {
+                        json!({
+                            "code": item["code"].clone(),
+                            "baseline_measured_tokens": item["baseline_measured_tokens"].clone(),
+                            "observed_tokens": item["observed_tokens"].clone(),
+                            "whole_cycle_observed_complete":
+                                item["whole_cycle_observed_complete"].clone()
+                        })
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or(Value::Null);
     json!({
         "alignment_state": alignment["alignment_state"].clone(),
         "same_meter_as_client_limit": alignment["same_meter_as_client_limit"].clone(),
         "exact_pair_status": alignment["exact_pair_status"].clone(),
+        "strict_client_meter_slice": {
+            "lower_bound_tokens": alignment["strict_client_meter_slice"]["lower_bound_tokens"].clone()
+        },
+        "baseline_equivalence": {
+            "measured_baseline_tokens_lower_bound":
+                alignment["baseline_equivalence"]["measured_baseline_tokens_lower_bound"].clone(),
+            "component_semantics": baseline_component_semantics
+        },
         "blocking_reasons": alignment["blocking_reasons"].clone(),
         "measured_components": alignment["measured_components"].clone(),
         "missing_components": alignment["missing_components"].clone(),
@@ -1362,6 +1779,14 @@ fn compact_budget_snapshot_preview_payload(snapshot: &Value) -> Value {
                     compact_current_session_for_budget_snapshot_preview(&report["current_session"]),
                 "statement_previews": {
                     "current_session": {
+                        "observed_whole_cycle_with_amai_tokens":
+                            report["statement_previews"]["current_session"]["observed_whole_cycle_with_amai_tokens"].clone(),
+                        "verified_observed_whole_cycle_with_amai_tokens":
+                            report["statement_previews"]["current_session"]["verified_observed_whole_cycle_with_amai_tokens"].clone(),
+                        "with_amai_measured_tokens":
+                            report["statement_previews"]["current_session"]["with_amai_measured_tokens"].clone(),
+                        "verified_with_amai_measured_tokens":
+                            report["statement_previews"]["current_session"]["verified_with_amai_measured_tokens"].clone(),
                         "client_limit_meter_alignment":
                             compact_client_limit_meter_alignment_for_budget_snapshot_preview(
                                 &report["statement_previews"]["current_session"]["client_limit_meter_alignment"]
@@ -1386,12 +1811,12 @@ fn compact_client_budget_surfaces_from_snapshot(
     thread_id: Option<&str>,
 ) -> MaterializedCompactClientBudgetSurfaces {
     let guard = dashboard::current_session_budget_guard(snapshot);
-    let root_cause_payload = dashboard::client_budget_root_cause_payload_with_guard(snapshot, &guard);
+    let root_cause_payload =
+        dashboard::client_budget_root_cause_payload_with_guard(snapshot, &guard);
     let compact_root_cause =
         compact_client_budget_root_cause_payload(&root_cause_payload, Some(&guard));
-    let compact_gate = json!({
-        "client_budget_reply_gate": compact_cli_client_budget_gate_payload(&guard)
-    });
+    let compact_gate =
+        front_door_client_budget_gate_payload(compact_cli_client_budget_gate_payload(&guard));
     let compact_guard = compact_current_session_budget_guard_payload(&guard);
     let surfaces_cache = build_compact_client_budget_surfaces_cache(
         &compact_root_cause,
@@ -1400,7 +1825,8 @@ fn compact_client_budget_surfaces_from_snapshot(
         thread_id,
     );
     let _ = write_shared_compact_client_budget_surfaces(repo_root, thread_id, &surfaces_cache);
-    let gate_cache = build_compact_client_budget_gate_cache(&compact_gate, &compact_guard, thread_id);
+    let gate_cache =
+        build_compact_client_budget_gate_cache(&compact_gate, &compact_guard, thread_id);
     let _ = write_shared_compact_client_budget_gate(repo_root, thread_id, &gate_cache);
     MaterializedCompactClientBudgetSurfaces {
         surfaces: CompactClientBudgetSurfaces {
@@ -1410,7 +1836,6 @@ fn compact_client_budget_surfaces_from_snapshot(
         },
         gate: CompactClientBudgetGateSurface {
             gate_payload: compact_gate,
-            guard: compact_guard,
         },
     }
 }
@@ -1431,7 +1856,6 @@ fn try_load_fast_thread_bound_materialized_compact_client_budget_surfaces(
             },
             gate: CompactClientBudgetGateSurface {
                 gate_payload: cached.gate,
-                guard: cached.guard,
             },
         });
     }
@@ -1472,6 +1896,8 @@ fn compact_client_budget_gate_payload(guard: &Value) -> Value {
     json!({
         "status_label": guard["status_label"].clone(),
         "reply_prefix": guard["reply_prefix"].clone(),
+        "global_reply_prefix": guard["global_reply_prefix"].clone(),
+        "reply_prefix_source": guard["reply_prefix_source"].clone(),
         "host_context_compaction": guard["host_context_compaction"].clone(),
         "observed_at_epoch_ms": guard["observed_at_epoch_ms"].clone(),
         "max_guard_age_seconds": guard["max_guard_age_seconds"].clone(),
@@ -1516,6 +1942,40 @@ fn compact_current_live_turn_for_root_cause_cli(current_live_turn: &Value) -> Va
         "saved_pct": rounded_json_number(&current_live_turn["saved_pct"], 2),
         "status": current_live_turn["status"].clone(),
     })
+}
+
+fn compact_same_meter_economics_for_root_cause_cli(same_meter_economics: &Value) -> Value {
+    let mut compact = serde_json::Map::new();
+    for field in [
+        "strict_lower_bound_tokens",
+        "same_meter_without_amai_tokens",
+        "same_meter_with_amai_tokens",
+        "same_meter_saved_tokens",
+        "continuity_restore_baseline_tokens",
+        "continuity_restore_observed_tokens",
+        "continuity_restore_delta_tokens",
+        "full_turn_overhang_tokens",
+        "dominant_cost_surface",
+    ] {
+        if !same_meter_economics[field].is_null() {
+            compact.insert(field.to_string(), same_meter_economics[field].clone());
+        }
+    }
+    for (field, value) in [
+        (
+            "same_meter_saved_pct",
+            rounded_json_number(&same_meter_economics["same_meter_saved_pct"], 2),
+        ),
+        (
+            "full_turn_vs_strict_ratio",
+            rounded_json_number(&same_meter_economics["full_turn_vs_strict_ratio"], 2),
+        ),
+    ] {
+        if !value.is_null() {
+            compact.insert(field.to_string(), value);
+        }
+    }
+    Value::Object(compact)
 }
 
 fn compact_guard_for_root_cause_cli(guard: &Value) -> Value {
@@ -1602,6 +2062,14 @@ fn compact_client_budget_reply_gate_for_root_cause(guard: &Value) -> Value {
             "reply_prefix".to_string(),
             guard["reply_execution_gate"]["reply_prefix"].clone(),
         ),
+        (
+            "global_reply_prefix".to_string(),
+            guard["global_reply_prefix"].clone(),
+        ),
+        (
+            "reply_prefix_source".to_string(),
+            guard["reply_prefix_source"].clone(),
+        ),
     ]);
     compact_reply_execution_gate.extend(compact_reply_budget_pressure_hints(
         &guard["reply_execution_gate"],
@@ -1643,6 +2111,8 @@ fn compact_client_budget_reply_gate_for_root_cause(guard: &Value) -> Value {
     json!({
         "observed_at_epoch_ms": guard["observed_at_epoch_ms"].clone(),
         "max_guard_age_seconds": guard["max_guard_age_seconds"].clone(),
+        "global_reply_prefix": guard["global_reply_prefix"].clone(),
+        "reply_prefix_source": guard["reply_prefix_source"].clone(),
         "reply_execution_gate": Value::Object(compact_reply_execution_gate),
     })
 }
@@ -1699,6 +2169,12 @@ fn compact_client_budget_root_cause_payload(payload: &Value, guard: Option<&Valu
         compact.insert(
             "current_live_turn".to_string(),
             compact_current_live_turn_for_root_cause_cli(&payload["current_live_turn"]),
+        );
+    }
+    if payload["same_meter_economics"].is_object() {
+        compact.insert(
+            "same_meter_economics".to_string(),
+            compact_same_meter_economics_for_root_cause_cli(&payload["same_meter_economics"]),
         );
     }
     let exact_pair_state = payload["exact_pair_status"]["state"].as_str();
@@ -1827,6 +2303,14 @@ fn compact_cli_client_budget_gate_payload(guard: &Value) -> Value {
             compact_gate["reply_execution_gate"]["reply_prefix"].clone(),
         ),
         (
+            "global_reply_prefix".to_string(),
+            compact_gate["reply_execution_gate"]["global_reply_prefix"].clone(),
+        ),
+        (
+            "reply_prefix_source".to_string(),
+            compact_gate["reply_execution_gate"]["reply_prefix_source"].clone(),
+        ),
+        (
             "host_context_compaction_stage".to_string(),
             compact_gate["reply_execution_gate"]["host_context_compaction_stage"].clone(),
         ),
@@ -1871,10 +2355,96 @@ fn compact_cli_client_budget_gate_payload(guard: &Value) -> Value {
     }
     json!({
         "status_label": compact_gate["status_label"].clone(),
+        "reply_prefix": compact_gate["reply_prefix"].clone(),
+        "global_reply_prefix": compact_gate["global_reply_prefix"].clone(),
+        "reply_prefix_source": compact_gate["reply_prefix_source"].clone(),
         "observed_at_epoch_ms": compact_gate["observed_at_epoch_ms"].clone(),
         "max_guard_age_seconds": compact_gate["max_guard_age_seconds"].clone(),
         "reply_execution_gate": Value::Object(compact_reply_execution_gate),
     })
+}
+
+fn front_door_client_budget_gate_payload(gate: Value) -> Value {
+    json!({
+        "reply_prefix": gate["reply_execution_gate"]["reply_prefix"].clone(),
+        "global_reply_prefix": gate["reply_execution_gate"]["global_reply_prefix"].clone(),
+        "reply_prefix_source": gate["reply_execution_gate"]["reply_prefix_source"].clone(),
+        "status_label": gate["status_label"].clone(),
+        "observed_at_epoch_ms": gate["observed_at_epoch_ms"].clone(),
+        "max_guard_age_seconds": gate["max_guard_age_seconds"].clone(),
+        "client_budget_reply_gate": gate,
+    })
+}
+
+fn normalize_front_door_client_budget_gate_payload_shape(payload: Value) -> Value {
+    if payload["reply_prefix"].is_null() && payload["client_budget_reply_gate"].is_object() {
+        return front_door_client_budget_gate_payload(payload["client_budget_reply_gate"].clone());
+    }
+    payload
+}
+
+fn same_thread_host_control_auto_launch_args_from_gate(
+    repo_root: &Path,
+    thread_id: &str,
+    payload: &Value,
+) -> Option<ObserveClientBudgetHostControlLaunchArgs> {
+    let reply_execution_gate = &payload["client_budget_reply_gate"]["reply_execution_gate"];
+    let host_current_thread_control =
+        &reply_execution_gate["action_bundle"]["host_current_thread_control"];
+    if reply_execution_gate["action_kind"].as_str()
+        != Some("compact_current_thread_for_client_budget")
+        || reply_execution_gate["same_meter_pure_burn_turn_active"].as_bool() != Some(true)
+        || reply_execution_gate["must_avoid_new_tool_turn_without_specific_delta_goal"].as_bool()
+            != Some(true)
+        || reply_execution_gate["max_tool_roundtrips_soft"].as_i64() != Some(0)
+        || host_current_thread_control["automation_ready"].as_bool() != Some(true)
+        || host_current_thread_control["retry_allowed"].as_bool() != Some(true)
+        || host_current_thread_control["measurement_pending"].as_bool() == Some(true)
+        || host_current_thread_control["feedback_pending"].as_bool() == Some(true)
+    {
+        return None;
+    }
+    let command_id = host_current_thread_control["command_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let surface_thread_id = host_current_thread_control["thread_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(thread_id);
+    if surface_thread_id != thread_id {
+        return None;
+    }
+    Some(ObserveClientBudgetHostControlLaunchArgs {
+        thread_id: thread_id.to_string(),
+        compact_window: command_id == working_state::HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID,
+        command_id: if command_id == working_state::HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID {
+            None
+        } else {
+            Some(command_id.to_string())
+        },
+        project: None,
+        repo_root: Some(repo_root.to_path_buf()),
+        namespace: default_continuity_namespace(),
+    })
+}
+
+async fn maybe_auto_launch_same_thread_host_control_from_gate(
+    cfg: &AppConfig,
+    repo_root: &Path,
+    thread_id: &str,
+    payload: &Value,
+) -> Result<Option<Value>> {
+    let Some(args) =
+        same_thread_host_control_auto_launch_args_from_gate(repo_root, thread_id, payload)
+    else {
+        return Ok(None);
+    };
+    let launch_payload = client_budget_host_control_launch_payload(cfg, &args).await?;
+    Ok(Some(front_door_client_budget_gate_payload(
+        launch_payload["client_budget_host_control_launch"]["client_budget_reply_gate"].clone(),
+    )))
 }
 
 fn compact_cli_client_budget_gate_from_root_cause_payload(payload: &Value) -> Option<Value> {
@@ -1882,9 +2452,7 @@ fn compact_cli_client_budget_gate_from_root_cause_payload(payload: &Value) -> Op
     if gate["reply_execution_gate"]["action_kind"].is_null() {
         return None;
     }
-    Some(json!({
-        "client_budget_reply_gate": gate,
-    }))
+    Some(front_door_client_budget_gate_payload(gate))
 }
 
 fn compact_host_control_client_budget_reply_gate(guard: &Value) -> Value {
@@ -1923,6 +2491,8 @@ fn compact_host_control_client_budget_reply_gate(guard: &Value) -> Value {
     json!({
         "status_label": compact_gate["status_label"].clone(),
         "reply_prefix": compact_gate["reply_prefix"].clone(),
+        "global_reply_prefix": compact_gate["global_reply_prefix"].clone(),
+        "reply_prefix_source": compact_gate["reply_prefix_source"].clone(),
         "host_context_compaction": host_context_compaction,
         "reply_execution_gate": {
             "action_kind": compact_gate["reply_execution_gate"]["action_kind"].clone(),
@@ -1933,6 +2503,10 @@ fn compact_host_control_client_budget_reply_gate(guard: &Value) -> Value {
                 compact_gate["reply_execution_gate"]["must_wait_for_budget_recovery_before_reply"].clone(),
             "reply_budget_mode": compact_gate["reply_execution_gate"]["reply_budget_mode"].clone(),
             "reply_prefix": compact_gate["reply_execution_gate"]["reply_prefix"].clone(),
+            "global_reply_prefix":
+                compact_gate["reply_execution_gate"]["global_reply_prefix"].clone(),
+            "reply_prefix_source":
+                compact_gate["reply_execution_gate"]["reply_prefix_source"].clone(),
             "host_context_compaction_stage":
                 compact_gate["reply_execution_gate"]["host_context_compaction_stage"].clone(),
             "host_context_compaction_preserve_active":
@@ -1979,6 +2553,14 @@ fn compact_reply_execution_gate(reply_execution_gate: &Value) -> Value {
         (
             "reply_prefix".to_string(),
             reply_execution_gate["reply_prefix"].clone(),
+        ),
+        (
+            "global_reply_prefix".to_string(),
+            reply_execution_gate["global_reply_prefix"].clone(),
+        ),
+        (
+            "reply_prefix_source".to_string(),
+            reply_execution_gate["reply_prefix_source"].clone(),
         ),
         (
             "host_context_compaction_stage".to_string(),
@@ -2124,27 +2706,6 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
     let bootstrap_db = postgres::connect_admin(cfg).await?;
     postgres::bootstrap_schema(&bootstrap_db, cfg).await?;
     let cache = Arc::new(RwLock::new(ObserveCache::default()));
-    let refresh_interval_ms = profile.dashboard.refresh_ms.max(250);
-    let refresh_cache = cache.clone();
-    let refresh_cfg = cfg.clone();
-    let refresh_bind = bind.to_string();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(refresh_interval_ms));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
-            if let Err(error) = refresh_observe_cache(
-                refresh_cache.clone(),
-                refresh_cfg.clone(),
-                refresh_bind.clone(),
-                refresh_interval_ms,
-            )
-            .await
-            {
-                eprintln!("observe cache refresh failed: {error:#}");
-            }
-        }
-    });
     let cleanup_cfg = cfg.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(SNAPSHOT_RETENTION_SWEEP_INTERVAL);
@@ -2171,11 +2732,9 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
     });
     let trend_cfg = cfg.clone();
     tokio::spawn(async move {
-        if let Err(error) = persist_periodic_client_limit_trend_analysis(&trend_cfg).await {
-            eprintln!("client limit trend analysis refresh failed: {error:#}");
-        }
         let mut interval = tokio::time::interval(CLIENT_LIMIT_TREND_ANALYSIS_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
         loop {
             interval.tick().await;
             if let Err(error) = persist_periodic_client_limit_trend_analysis(&trend_cfg).await {
@@ -2183,33 +2742,18 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
             }
         }
     });
+    let quarantine_resolution_cfg = cfg.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(EXACT_CLIENT_LIMIT_PREWARM_INTERVAL);
+        let mut interval = tokio::time::interval(IMPORT_PACKET_QUARANTINE_RESOLUTION_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
         loop {
             interval.tick().await;
-            if let Err(error) = token_budget::warm_dashboard_exact_client_limit_source().await {
-                eprintln!("exact client-limit source prewarm failed: {error:#}");
-            }
-        }
-    });
-    let compact_budget_cfg = cfg.clone();
-    let compact_budget_cache = cache.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(COMPACT_CLIENT_BUDGET_SURFACES_PREWARM_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
-            if let Err(error) = collect_compact_client_budget_surfaces(&compact_budget_cfg).await {
-                eprintln!("compact client-budget surfaces prewarm failed: {error:#}");
-            }
-            if let Err(error) = prewarm_active_thread_bound_client_budget_surfaces(
-                compact_budget_cache.clone(),
-                &compact_budget_cfg,
-            )
-            .await
+            if let Err(error) =
+                persist_periodic_import_packet_quarantine_resolution(&quarantine_resolution_cfg)
+                    .await
             {
-                eprintln!("active thread client-budget prewarm failed: {error:#}");
+                eprintln!("import packet quarantine resolution failed: {error:#}");
             }
         }
     });
@@ -2225,8 +2769,16 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
         .route("/favicon.ico", get(favicon_handler))
         .route("/api/dashboard", get(dashboard_api_handler))
         .route(
+            "/api/dashboard-live-summary",
+            get(dashboard_live_summary_api_handler),
+        )
+        .route(
             "/api/client-budget-live",
             get(client_budget_live_api_handler),
+        )
+        .route(
+            "/api/active-agent-budget-live",
+            get(active_agent_budget_live_api_handler),
         )
         .route(
             "/api/client-budget-snapshot-preview",
@@ -2252,7 +2804,10 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
             "/api/client-budget-compact-chat",
             post(client_budget_compact_chat_api_handler),
         )
-        .route("/api/continuity-handoff", post(continuity_handoff_api_handler))
+        .route(
+            "/api/continuity-handoff",
+            post(continuity_handoff_api_handler),
+        )
         .route(
             "/api/client-budget-host-control-launch",
             post(client_budget_host_control_launch_api_handler),
@@ -2260,6 +2815,10 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
         .route(
             "/api/client-budget-host-control-feedback",
             post(client_budget_host_control_feedback_api_handler),
+        )
+        .route(
+            "/api/agent-display-name",
+            post(agent_display_name_update_api_handler),
         )
         .route("/api/snapshot", get(snapshot_api_handler))
         .route("/metrics", get(metrics_handler))
@@ -2280,30 +2839,9 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
     println!("Amai raw snapshot JSON: {base_url}/api/snapshot");
     println!("Amai health JSON: {base_url}/healthz");
     println!("Amai Prometheus metrics: {base_url}/metrics");
-    let initial_compact_budget_cfg = cfg.clone();
-    let initial_compact_budget_cache = cache.clone();
-    tokio::spawn(async move {
-        if let Err(error) = warm_initial_compact_client_budget_surfaces(
-            initial_compact_budget_cache,
-            &initial_compact_budget_cfg,
-        )
-        .await
-        {
-            eprintln!("initial compact client-budget warmup failed: {error:#}");
-        }
-    });
     axum::serve(listener, app)
         .await
         .context("observe exporter stopped unexpectedly")
-}
-
-async fn warm_initial_compact_client_budget_surfaces(
-    cache: Arc<RwLock<ObserveCache>>,
-    cfg: &AppConfig,
-) -> Result<()> {
-    let _ = collect_compact_client_budget_surfaces(cfg).await?;
-    prewarm_active_thread_bound_client_budget_surfaces(cache, cfg).await?;
-    Ok(())
 }
 
 async fn persist_periodic_client_limit_trend_analysis(cfg: &AppConfig) -> Result<()> {
@@ -2318,6 +2856,95 @@ async fn persist_periodic_client_limit_trend_analysis(cfg: &AppConfig) -> Result
     )
     .await?;
     Ok(())
+}
+
+async fn persist_periodic_import_packet_quarantine_resolution(cfg: &AppConfig) -> Result<()> {
+    let db = postgres::connect_admin(cfg).await?;
+    postgres::bootstrap_schema(&db, cfg).await?;
+    let summary = postgres::reconcile_import_packet_quarantines(&db, true, Some(64)).await?;
+    if summary.released > 0 || summary.rejected > 0 {
+        eprintln!(
+            "Amai import packet quarantine resolver: released={}, rejected={}, held={}, scanned={}",
+            summary.released, summary.rejected, summary.held, summary.scanned
+        );
+    }
+    Ok(())
+}
+
+const PROCEDURAL_BENCHMARK_HISTORY_LIMIT: i64 = 12;
+const IMPORT_PACKET_QUARANTINE_RESOLUTION_INTERVAL: Duration = Duration::from_secs(60);
+
+fn history_snapshot_captured_at_epoch_ms(
+    snapshot: &postgres::ObservabilitySnapshotRecord,
+    payload_root: &str,
+) -> u64 {
+    snapshot.payload[payload_root]["captured_at_epoch_ms"]
+        .as_u64()
+        .or_else(|| snapshot.payload["_observability"]["captured_at_epoch_ms"].as_u64())
+        .unwrap_or(snapshot.created_at_epoch_ms.max(0) as u64)
+}
+
+async fn procedural_benchmark_history_surface(db: &Client) -> Result<Value> {
+    let snapshots = postgres::list_observability_snapshots_by_kind_for_scope_index_only(
+        db,
+        "procedural_benchmark",
+        "amai",
+        "benchmark",
+        Some(PROCEDURAL_BENCHMARK_HISTORY_LIMIT),
+    )
+    .await?;
+    let history_rows: Vec<Value> = snapshots
+        .into_iter()
+        .rev()
+        .map(|snapshot| {
+            let payload = &snapshot.payload["procedural_benchmark"];
+            let with_summary = &payload["benchmark_line_summaries"]["with_amai"];
+            let without_summary = &payload["benchmark_line_summaries"]["without_amai_but_measuring"];
+            json!({
+                "benchmark_run_id": payload["benchmark_run_id"].clone(),
+                "captured_at_epoch_ms": history_snapshot_captured_at_epoch_ms(&snapshot, "procedural_benchmark"),
+                "benchmark_run_state": payload["benchmark_run_state"].clone(),
+                "benchmark_run_state_ru": payload["benchmark_run_state_ru"].clone(),
+                "with_amai_pass_percent": with_summary["pass_percent"].clone(),
+                "without_amai_pass_percent": without_summary["pass_percent"].clone(),
+                "with_amai_point_count": with_summary["point_count"].clone(),
+                "without_amai_point_count": without_summary["point_count"].clone(),
+                "without_amai_series_available": payload["summary"]["without_amai_series_available"].clone()
+            })
+        })
+        .collect();
+    let with_amai_pass_percent_series: Vec<Value> = history_rows
+        .iter()
+        .filter_map(|row| {
+            Some(json!({
+                "benchmark_run_id": row["benchmark_run_id"].clone(),
+                "captured_at_epoch_ms": row["captured_at_epoch_ms"].clone(),
+                "pass_percent": row["with_amai_pass_percent"].as_f64()?
+            }))
+        })
+        .collect();
+    let without_amai_pass_percent_series: Vec<Value> = history_rows
+        .iter()
+        .filter_map(|row| {
+            Some(json!({
+                "benchmark_run_id": row["benchmark_run_id"].clone(),
+                "captured_at_epoch_ms": row["captured_at_epoch_ms"].clone(),
+                "pass_percent": row["without_amai_pass_percent"].as_f64()?
+            }))
+        })
+        .collect();
+    Ok(json!({
+        "snapshot_kind": "procedural_benchmark",
+        "scope_project_code": "amai",
+        "scope_namespace_code": "benchmark",
+        "history_limit": PROCEDURAL_BENCHMARK_HISTORY_LIMIT,
+        "history_count": history_rows.len(),
+        "with_amai_history_count": with_amai_pass_percent_series.len(),
+        "without_amai_history_count": without_amai_pass_percent_series.len(),
+        "history_rows": history_rows,
+        "with_amai_pass_percent_series": with_amai_pass_percent_series,
+        "without_amai_pass_percent_series": without_amai_pass_percent_series
+    }))
 }
 
 #[derive(Debug, Serialize)]
@@ -2650,6 +3277,8 @@ async fn latest_repo_working_state_restore_payload(
     let Some(snapshot_payload) = latest_snapshot else {
         return Ok(None);
     };
+    let mut snapshot_payload = snapshot_payload;
+    working_state::ensure_runtime_workspace_restore_pack(&mut snapshot_payload);
     let namespace_code = snapshot_payload["working_state_restore"]["namespace"]["code"]
         .as_str()
         .map(str::trim)
@@ -2662,12 +3291,9 @@ async fn latest_repo_working_state_restore_payload(
             Ok(namespace) => namespace,
             Err(_) => return Ok(Some(snapshot_payload)),
         };
-    let Some(bundle) = working_state::load_recent_restore_bundle_without_live_guard(
-        db,
-        &project,
-        &namespace,
-    )
-    .await?
+    let Some(bundle) =
+        working_state::load_recent_restore_bundle_without_live_guard(db, &project, &namespace)
+            .await?
     else {
         return Ok(Some(snapshot_payload));
     };
@@ -2676,14 +3302,103 @@ async fn latest_repo_working_state_restore_payload(
     })))
 }
 
-async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value> {
-    let snapshot_started = Instant::now();
-    if persist_snapshot {
-        maybe_cleanup_observability_snapshots(cfg).await?;
+async fn continuity_restore_bundle_for_repo_root(
+    db: &Client,
+    repo_root: &Path,
+) -> Result<Option<Value>> {
+    let repo_root_string = repo_root.display().to_string();
+    let project = match postgres::get_project_by_repo_root(db, &repo_root_string).await {
+        Ok(project) => project,
+        Err(_) => return Ok(None),
+    };
+    let latest_snapshot = postgres::latest_observability_snapshot_for_project(
+        db,
+        "working_state_restore",
+        "working_state_restore",
+        &project.code,
+    )
+    .await?;
+    if let Some(mut snapshot_payload) = latest_snapshot {
+        working_state::ensure_runtime_workspace_restore_pack(&mut snapshot_payload);
+        return Ok(Some(json!({
+            "working_state_restore": snapshot_payload["working_state_restore"].clone()
+        })));
     }
+    let Some(namespace) =
+        postgres::find_namespace_by_code(db, project.project_id, "continuity").await?
+    else {
+        return Ok(None);
+    };
+    working_state::load_recent_restore_bundle_without_live_guard(db, &project, &namespace).await
+}
+
+async fn reconcile_visible_recent_thread_execctl_activity(db: &Client) -> Result<()> {
+    let mut latest_visible_thread_by_repo_root: std::collections::BTreeMap<
+        String,
+        codex_threads::RecentClientThreadRecord,
+    > = std::collections::BTreeMap::new();
+    for thread in codex_threads::recent_client_thread_records(30 * 60)?
+        .into_iter()
+        .filter(observe_user_visible_client_thread)
+    {
+        let key = thread.cwd.trim().to_string();
+        if key.is_empty() {
+            continue;
+        }
+        match latest_visible_thread_by_repo_root.get(&key) {
+            Some(existing) if existing.updated_at_epoch_s >= thread.updated_at_epoch_s => {}
+            _ => {
+                latest_visible_thread_by_repo_root.insert(key, thread);
+            }
+        }
+    }
+    let mut recent_threads = latest_visible_thread_by_repo_root
+        .into_values()
+        .collect::<Vec<_>>();
+    recent_threads.sort_by_key(|thread| thread.updated_at_epoch_s);
+    for thread in &recent_threads {
+        let repo_root = Path::new(&thread.cwd);
+        let restore = continuity_restore_bundle_for_repo_root(db, repo_root).await?;
+        working_state::maintain_same_thread_execctl_active_lease_for_guard(
+            db,
+            restore.as_ref(),
+            Some(thread.thread_id.as_str()),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value> {
     let profile = load_profile()?;
     let repo_root = discover_repo_root(None)?;
     let db = postgres::connect_admin(cfg).await?;
+    if persist_snapshot {
+        return with_postgres_advisory_lock(
+            &db,
+            OBSERVE_SYSTEM_SNAPSHOT_PERSIST_ADVISORY_LOCK_KEY,
+            "failed to acquire observe system snapshot advisory lock",
+            "failed to release observe system snapshot advisory lock",
+            || async {
+                build_snapshot_with_connected_admin_db(cfg, &profile, &repo_root, &db, true).await
+            },
+        )
+        .await;
+    }
+    build_snapshot_with_connected_admin_db(cfg, &profile, &repo_root, &db, false).await
+}
+
+async fn build_snapshot_with_connected_admin_db(
+    cfg: &AppConfig,
+    profile: &ObservabilityProfile,
+    repo_root: &Path,
+    db: &Client,
+    persist_snapshot: bool,
+) -> Result<Value> {
+    let snapshot_started = Instant::now();
+    if persist_snapshot {
+        maybe_cleanup_observability_snapshots_with_db(db).await?;
+    }
     let mut observe_refresh_stage_ms = serde_json::Map::new();
     let previous = timed_future(
         &mut observe_refresh_stage_ms,
@@ -2696,6 +3411,12 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         .duration_since(UNIX_EPOCH)
         .context("system clock before unix epoch")?
         .as_millis() as u64;
+    timed_future(
+        &mut observe_refresh_stage_ms,
+        "reconcile_recent_visible_thread_execctl_activity",
+        reconcile_visible_recent_thread_execctl_activity(db),
+    )
+    .await?;
 
     let mut postgres_live = timed_future(
         &mut observe_refresh_stage_ms,
@@ -2782,6 +3503,24 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         postgres::latest_observability_snapshot(&db, "token_benchmark"),
     )
     .await?;
+    let latest_procedural_benchmark = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_procedural_benchmark",
+        postgres::latest_observability_snapshot(&db, "procedural_benchmark"),
+    )
+    .await?;
+    let procedural_benchmark_history = timed_future(
+        &mut observe_refresh_stage_ms,
+        "procedural_benchmark_history",
+        procedural_benchmark_history_surface(&db),
+    )
+    .await?;
+    let latest_memory_benchmark_score = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_memory_benchmark_score",
+        postgres::latest_observability_snapshot(&db, "memory_benchmark_score"),
+    )
+    .await?;
     let latest_cold_path_benchmark = timed_future(
         &mut observe_refresh_stage_ms,
         "latest_cold_path_benchmark",
@@ -2810,7 +3549,17 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
     let agent_scope_activity = timed_future(
         &mut observe_refresh_stage_ms,
         "agent_scope_activity",
-        collect_agent_scope_activity(&db),
+        token_budget::collect_agent_scope_activity(&db),
+    )
+    .await?;
+    let active_agent_budget = timed_future(
+        &mut observe_refresh_stage_ms,
+        "active_agent_budget",
+        token_budget::collect_active_agent_live_budget_surface(
+            &db,
+            &repo_root,
+            &agent_scope_activity,
+        ),
     )
     .await?;
     let latest_degradation_verification = timed_future(
@@ -2825,12 +3574,42 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         postgres::latest_observability_snapshot(&db, "continuity_verification"),
     )
     .await?;
-    let token_budget_report = timed_future(
-        &mut observe_refresh_stage_ms,
-        "token_budget_dashboard_report",
-        token_budget::collect_dashboard_report(&db),
-    )
-    .await?;
+    let token_budget_report = if !persist_snapshot {
+        if let Some(thread_id) = codex_threads::current_thread_id()
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if let Some(thread_bound_snapshot) = load_shared_thread_bound_budget_snapshot(
+                repo_root,
+                current_epoch_ms_u64(),
+                thread_id,
+            ) {
+                thread_bound_snapshot["token_budget_report"].clone()
+            } else {
+                timed_future(
+                    &mut observe_refresh_stage_ms,
+                    "token_budget_dashboard_report",
+                    token_budget::collect_dashboard_report(&db),
+                )
+                .await?
+            }
+        } else {
+            timed_future(
+                &mut observe_refresh_stage_ms,
+                "token_budget_dashboard_report",
+                token_budget::collect_dashboard_report(&db),
+            )
+            .await?
+        }
+    } else {
+        timed_future(
+            &mut observe_refresh_stage_ms,
+            "token_budget_dashboard_report",
+            token_budget::collect_dashboard_report(&db),
+        )
+        .await?
+    };
     let artifact_cleanup_summary = timed_future(
         &mut observe_refresh_stage_ms,
         "artifact_cleanup_summary",
@@ -2864,16 +3643,26 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_retrieval_load_cold": latest_load_cold,
         "latest_retrieval_load_cold_raw": latest_load_cold_raw,
         "latest_token_benchmark": latest_token_benchmark,
+        "latest_procedural_benchmark": latest_procedural_benchmark,
+        "procedural_benchmark_history": procedural_benchmark_history,
+        "latest_memory_benchmark_score": latest_memory_benchmark_score,
         "latest_cold_path_benchmark": latest_cold_path_benchmark,
         "cold_path_benchmark_progress": cold_path_benchmark_progress,
         "latest_working_state_restore": latest_working_state_restore,
         "latest_repo_working_state_restore": latest_repo_working_state_restore,
         "agent_scope_activity": agent_scope_activity,
+        "active_agent_budget": active_agent_budget,
         "latest_degradation_verification": latest_degradation_verification,
         "latest_continuity_verification": latest_continuity_verification,
         "token_budget_report": token_budget_report,
         "artifact_cleanup": artifact_cleanup_summary["artifact_cleanup"].clone(),
     });
+    let governance_surface = timed_future(
+        &mut observe_refresh_stage_ms,
+        "governance_surface",
+        collect_governance_surface(db),
+    )
+    .await?;
     let degradation_model = build_degradation_model(&payload)?;
     let continuity_correctness_model = build_continuity_correctness_model(&payload)?;
     let sla = evaluate_sla(&payload, &profile);
@@ -2896,11 +3685,15 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_retrieval_load_cold": payload["latest_retrieval_load_cold"].clone(),
         "latest_retrieval_load_cold_raw": payload["latest_retrieval_load_cold_raw"].clone(),
         "latest_token_benchmark": payload["latest_token_benchmark"].clone(),
+        "latest_procedural_benchmark": payload["latest_procedural_benchmark"].clone(),
+        "procedural_benchmark_history": payload["procedural_benchmark_history"].clone(),
+        "latest_memory_benchmark_score": payload["latest_memory_benchmark_score"].clone(),
         "latest_cold_path_benchmark": payload["latest_cold_path_benchmark"].clone(),
         "cold_path_benchmark_progress": payload["cold_path_benchmark_progress"].clone(),
         "latest_working_state_restore": payload["latest_working_state_restore"].clone(),
         "latest_repo_working_state_restore": payload["latest_repo_working_state_restore"].clone(),
         "agent_scope_activity": payload["agent_scope_activity"].clone(),
+        "active_agent_budget": payload["active_agent_budget"].clone(),
         "latest_degradation_verification": payload["latest_degradation_verification"].clone(),
         "latest_continuity_verification": payload["latest_continuity_verification"].clone(),
         "token_budget_report": payload["token_budget_report"].clone(),
@@ -2912,6 +3705,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         },
         "degradation_model": degradation_model,
         "continuity_correctness_model": continuity_correctness_model,
+        "governance_surface": governance_surface,
         "sla": sla,
     });
     if persist_snapshot {
@@ -2920,130 +3714,353 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
     Ok(snapshot)
 }
 
-async fn collect_agent_scope_activity(db: &Client) -> Result<Value> {
-    let now_epoch_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock before unix epoch")?
-        .as_millis() as i64;
-    let recent_window_hours = 24_i64;
-    let recent_window_start_epoch_ms = now_epoch_ms - recent_window_hours * 60 * 60 * 1000;
-    let client_recent_window_minutes = 30_i64;
-    let client_recent_threads =
-        codex_threads::recent_client_thread_records(client_recent_window_minutes * 60)?
-            .into_iter()
-            .map(|item| {
-                json!({
-                    "thread_id": item.thread_id,
-                    "cwd": item.cwd,
-                    "rollout_path": item.rollout_path,
-                    "title": item.title,
-                    "agent_nickname": item.agent_nickname,
-                    "agent_role": item.agent_role,
-                    "model_provider": item.model_provider,
-                    "model": item.model,
-                    "reasoning_effort": item.reasoning_effort,
-                    "updated_at_epoch_ms": item.updated_at_epoch_s.saturating_mul(1000),
-                })
-            })
-            .collect::<Vec<_>>();
+async fn collect_governance_surface(db: &Client) -> Result<Value> {
+    let open_conflicts: i64 = db
+        .query_one(
+            r#"
+            SELECT COALESCE(COUNT(*)::bigint, 0)
+            FROM ami.memory_conflicts
+            WHERE conflict_state = 'open'
+            "#,
+            &[],
+        )
+        .await
+        .context("governance: count open conflicts")?
+        .get(0);
 
-    let active_rows = db
+    let active_quarantine: i64 = db
+        .query_one(
+            r#"
+            SELECT COALESCE(COUNT(*)::bigint, 0)
+            FROM ami.quarantine_items
+            WHERE quarantine_state = 'active'
+            "#,
+            &[],
+        )
+        .await
+        .context("governance: count active quarantine items")?
+        .get(0);
+
+    let poisoned_provenance: i64 = db
+        .query_one(
+            r#"
+            SELECT COALESCE(COUNT(*)::bigint, 0)
+            FROM ami.memory_provenance
+            WHERE details->>'poisoned' = 'true'
+               OR details->'safety'->>'poisoned' = 'true'
+            "#,
+            &[],
+        )
+        .await
+        .context("governance: count poisoned provenance")?
+        .get(0);
+
+    let disputed_memory_items: i64 = db
+        .query_one(
+            r#"
+            SELECT COALESCE(COUNT(*)::bigint, 0)
+            FROM ami.memory_items
+            WHERE trust_state = 'disputed'
+            "#,
+            &[],
+        )
+        .await
+        .context("governance: count disputed memory items")?
+        .get(0);
+
+    let quarantined_memory_items: i64 = db
+        .query_one(
+            r#"
+            SELECT COALESCE(COUNT(*)::bigint, 0)
+            FROM ami.memory_items
+            WHERE trust_state = 'quarantined'
+            "#,
+            &[],
+        )
+        .await
+        .context("governance: count quarantined memory items")?
+        .get(0);
+
+    let stale_memory_items: i64 = db
+        .query_one(
+            r#"
+            SELECT COALESCE(COUNT(*)::bigint, 0)
+            FROM ami.memory_items
+            WHERE consolidation_status IN ('archived', 'pruned')
+            "#,
+            &[],
+        )
+        .await
+        .context("governance: count stale (archived/pruned) memory items")?
+        .get(0);
+
+    let total_memory_items: i64 = db
+        .query_one(
+            r#"
+            SELECT COALESCE(COUNT(*)::bigint, 0)
+            FROM ami.memory_items
+            "#,
+            &[],
+        )
+        .await
+        .context("governance: count total memory items")?
+        .get(0);
+
+    let active_memory_items: i64 = db
+        .query_one(
+            r#"
+            SELECT COALESCE(COUNT(*)::bigint, 0)
+            FROM ami.memory_items
+            WHERE consolidation_status = 'active'
+            "#,
+            &[],
+        )
+        .await
+        .context("governance: count active memory items")?
+        .get(0);
+
+    let duplicate_fact_triples: i64 = db
+        .query_one(
+            r#"
+            SELECT COALESCE(COUNT(*)::bigint, 0) FROM (
+                SELECT fact_subject, fact_predicate, fact_object
+                FROM ami.memory_cards
+                WHERE truth_state = 'current'
+                  AND status = 'active'
+                  AND fact_subject IS NOT NULL
+                  AND fact_predicate IS NOT NULL
+                  AND fact_object IS NOT NULL
+                  AND superseded_by_memory_card_id IS NULL
+                GROUP BY fact_subject, fact_predicate, fact_object
+                HAVING COUNT(*) > 1
+            ) dup
+            "#,
+            &[],
+        )
+        .await
+        .context("governance: count duplicate active truth fact triples")?
+        .get(0);
+
+    let scope_override_events_count: i64 = db
+        .query_one(
+            r#"
+            SELECT COALESCE(COUNT(*)::bigint, 0)
+            FROM ami.scope_override_events
+            "#,
+            &[],
+        )
+        .await
+        .context("governance: count scope override events")?
+        .get(0);
+
+    let forgetting_actions_count: i64 = db
+        .query_one(
+            r#"
+            SELECT COALESCE(COUNT(*)::bigint, 0)
+            FROM ami.forgetting_audit_log
+            "#,
+            &[],
+        )
+        .await
+        .context("governance: count forgetting audit log entries")?
+        .get(0);
+
+    let forgetting_action_breakdown_rows = db
+        .query(
+            r#"
+            SELECT action, COUNT(*)::bigint
+            FROM ami.forgetting_audit_log
+            GROUP BY action
+            ORDER BY action ASC
+            "#,
+            &[],
+        )
+        .await
+        .context("governance: forgetting action breakdown")?;
+
+    let quarantine_breakdown_rows = db
         .query(
             r#"
             SELECT
-                agent_scope,
-                owner_thread_id,
-                heartbeat_at_epoch_ms,
-                expires_at_epoch_ms
-            FROM ami.execctl_task_leases
-            WHERE lease_state = 'active'
-              AND expires_at_epoch_ms > $1
-            ORDER BY heartbeat_at_epoch_ms DESC, agent_scope ASC
-            LIMIT 64
+                COALESCE(quarantine_reason, 'unknown') AS quarantine_reason,
+                COALESCE(entity_kind, 'unknown') AS entity_kind,
+                COALESCE(source_kind, 'unknown') AS source_kind,
+                COUNT(*)::bigint AS item_count
+            FROM ami.quarantine_items
+            WHERE quarantine_state = 'active'
+            GROUP BY 1, 2, 3
+            ORDER BY item_count DESC, quarantine_reason ASC, entity_kind ASC, source_kind ASC
+            LIMIT 5
             "#,
-            &[&now_epoch_ms],
+            &[],
         )
         .await
-        .context("failed to query active execctl task leases for agent scope activity")?;
-    let active_now_scopes = active_rows
-        .into_iter()
-        .map(|row| {
-            json!({
-                "agent_scope": row.get::<_, String>(0),
-                "owner_thread_id": row.get::<_, Option<String>>(1),
-                "heartbeat_at_epoch_ms": row.get::<_, i64>(2),
-                "expires_at_epoch_ms": row.get::<_, i64>(3),
-            })
-        })
-        .collect::<Vec<_>>();
+        .context("governance: quarantine breakdown")?;
 
-    let recent_rows = db
+    let conflict_breakdown_rows = db
         .query(
             r#"
-            WITH recent AS (
-                SELECT DISTINCT ON (
-                    payload #>> '{working_state_restore,project,code}',
-                    payload #>> '{working_state_restore,namespace,code}',
-                    payload #>> '{working_state_restore,agent_scope}',
-                    COALESCE(payload #>> '{working_state_restore,thread_id}', '')
-                )
-                    payload #>> '{working_state_restore,project,code}' AS project_code,
-                    payload #>> '{working_state_restore,namespace,code}' AS namespace_code,
-                    payload #>> '{working_state_restore,agent_scope}' AS agent_scope,
-                    NULLIF(payload #>> '{working_state_restore,thread_id}', '') AS thread_id,
-                    payload #>> '{working_state_restore,current_goal}' AS current_goal,
-                    captured_at_epoch_ms
-                FROM ami.observability_snapshots
-                WHERE snapshot_kind = 'working_state_restore'
-                  AND captured_at_epoch_ms >= $1
-                ORDER BY
-                    payload #>> '{working_state_restore,project,code}',
-                    payload #>> '{working_state_restore,namespace,code}',
-                    payload #>> '{working_state_restore,agent_scope}',
-                    COALESCE(payload #>> '{working_state_restore,thread_id}', ''),
-                    captured_at_epoch_ms DESC
-            )
             SELECT
-                project_code,
-                namespace_code,
-                agent_scope,
-                thread_id,
-                current_goal,
-                captured_at_epoch_ms
-            FROM recent
-            ORDER BY captured_at_epoch_ms DESC
-            LIMIT 64
+                COALESCE(summary, 'unknown') AS summary,
+                COALESCE(source_kind, 'unknown') AS source_kind,
+                COUNT(*)::bigint AS item_count
+            FROM ami.memory_conflicts
+            WHERE conflict_state = 'open'
+            GROUP BY 1, 2
+            ORDER BY item_count DESC, summary ASC, source_kind ASC
+            LIMIT 5
             "#,
-            &[&recent_window_start_epoch_ms],
+            &[],
         )
         .await
-        .context("failed to query recent working_state_restore scopes for agent scope activity")?;
-    let recent_scopes = recent_rows
+        .context("governance: conflict breakdown")?;
+
+    let mut prune_ttl_expired_count = 0_i64;
+    let mut prune_low_utility_count = 0_i64;
+    let mut archive_cold_tier_count = 0_i64;
+    let mut revalidate_stale_count = 0_i64;
+    let mut dedup_compacted_count = 0_i64;
+    let mut forgetting_action_breakdown = serde_json::Map::new();
+    for row in forgetting_action_breakdown_rows {
+        let action: String = row.get(0);
+        let count: i64 = row.get(1);
+        match action.as_str() {
+            "prune_ttl_expired" => prune_ttl_expired_count = count,
+            "prune_low_utility" => prune_low_utility_count = count,
+            "archive_cold_tier" => archive_cold_tier_count = count,
+            "revalidate_stale" => revalidate_stale_count = count,
+            "dedup_compacted" => dedup_compacted_count = count,
+            _ => {}
+        }
+        forgetting_action_breakdown.insert(action, json!(count));
+    }
+
+    let forgetting_job_breakdown = json!({
+        "de_duplication_job": dedup_compacted_count,
+        "summarization_job": 0,
+        "compaction_job": dedup_compacted_count,
+        "pruning_job": prune_ttl_expired_count + prune_low_utility_count,
+        "cold_archive_job": archive_cold_tier_count,
+        "revalidation_job": revalidate_stale_count
+    });
+
+    let quarantine_breakdown: Vec<Value> = quarantine_breakdown_rows
         .into_iter()
         .map(|row| {
+            let reason: String = row.get(0);
+            let entity_kind: String = row.get(1);
+            let source_kind: String = row.get(2);
+            let item_count: i64 = row.get(3);
             json!({
-                "project_code": row.get::<_, Option<String>>(0),
-                "namespace_code": row.get::<_, Option<String>>(1),
-                "agent_scope": row.get::<_, Option<String>>(2),
-                "thread_id": row.get::<_, Option<String>>(3),
-                "current_goal": row.get::<_, Option<String>>(4),
-                "captured_at_epoch_ms": row.get::<_, i64>(5),
+                "quarantine_reason": reason,
+                "entity_kind": entity_kind,
+                "source_kind": source_kind,
+                "item_count": item_count
             })
         })
-        .collect::<Vec<_>>();
+        .collect();
+
+    let conflict_breakdown: Vec<Value> = conflict_breakdown_rows
+        .into_iter()
+        .map(|row| {
+            let summary: String = row.get(0);
+            let source_kind: String = row.get(1);
+            let item_count: i64 = row.get(2);
+            json!({
+                "summary": summary,
+                "source_kind": source_kind,
+                "item_count": item_count
+            })
+        })
+        .collect();
+
+    let stale_memory_error_rate = if total_memory_items > 0 {
+        stale_memory_items as f64 / total_memory_items as f64
+    } else {
+        0.0
+    };
+
+    let duplicate_branch_rate = if total_memory_items > 0 {
+        duplicate_fact_triples as f64 / total_memory_items as f64
+    } else {
+        0.0
+    };
 
     Ok(json!({
-        "source": "observe_agent_scope_activity_v2",
-        "captured_at_epoch_ms": now_epoch_ms,
-        "client_recent_window_minutes": client_recent_window_minutes,
-        "client_recent_thread_count": client_recent_threads.len(),
-        "client_recent_threads": client_recent_threads,
-        "active_now_count": active_now_scopes.len(),
-        "active_now_scopes": active_now_scopes,
-        "recent_scope_window_hours": recent_window_hours,
-        "recent_scope_count": recent_scopes.len(),
-        "recent_scopes": recent_scopes,
+        "governance_surface_version": "governance-surface-v2",
+        "wrong_link_rate": {
+            "open_conflict_count": open_conflicts,
+            "note": "wrong-link rate is proxied by open memory_conflicts with kind='scope' or 'truth'"
+        },
+        "duplicate_branch_rate": {
+            "duplicate_active_truth_fact_triples": duplicate_fact_triples,
+            "rate": duplicate_branch_rate,
+            "note": "duplicate truth branches: same fact triple active as current without supersession"
+        },
+        "stale_memory_error_rate": {
+            "stale_items_archived_or_pruned": stale_memory_items,
+            "total_memory_items": total_memory_items,
+            "active_memory_items": active_memory_items,
+            "rate": stale_memory_error_rate,
+            "note": "ratio of archived/pruned items to total — higher means more aggressive cleanup"
+        },
+        "cross_project_leak_rate": {
+            "note": "surfaced via degradation_model.cross_project_scope and latest_retrieval_accuracy.accuracy_verification.cross_project_leakage"
+        },
+        "poisoning_alert_count": {
+            "poisoned_provenance_count": poisoned_provenance,
+            "active_quarantine_items": active_quarantine,
+            "quarantined_memory_items": quarantined_memory_items,
+            "active_quarantine_breakdown": quarantine_breakdown,
+            "note": "sum of poisoned provenance marks and active quarantine items"
+        },
+        "open_conflict_breakdown": conflict_breakdown,
+        "abstention_quality": {
+            "note": "surfaced via continuity_correctness_model and latest_memory_benchmark_score.memory_benchmark_score.capability_breakdown.longmemeval_abstention_accuracy"
+        },
+        "recovery_quality": {
+            "note": "surfaced via continuity_correctness_model.summary.recovered_useful"
+        },
+        "trust_state_distribution": {
+            "disputed_memory_items": disputed_memory_items,
+            "quarantined_memory_items": quarantined_memory_items
+        },
+        "human_override_audit": {
+            "scope_override_events_total": scope_override_events_count,
+            "forgetting_audit_log_entries_total": forgetting_actions_count
+        },
+        "forgetting_job_breakdown": forgetting_job_breakdown,
+        "forgetting_action_breakdown": forgetting_action_breakdown
     }))
+}
+
+async fn with_postgres_advisory_lock<T, F, Fut>(
+    db: &Client,
+    key: i64,
+    acquire_error: &'static str,
+    release_error: &'static str,
+    f: F,
+) -> Result<T>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    db.query_one("SELECT pg_advisory_lock($1)", &[&key])
+        .await
+        .context(acquire_error)?;
+    let result = f().await;
+    let unlock_result = db
+        .query_one("SELECT pg_advisory_unlock($1)", &[&key])
+        .await
+        .context(release_error);
+    match (result, unlock_result) {
+        (Ok(value), Ok(_)) => Ok(value),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(_), Err(unlock_error)) => Err(unlock_error),
+        (Err(error), Err(unlock_error)) => Err(anyhow!(
+            "{error:#}\nsecondary unlock failure: {unlock_error:#}"
+        )),
+    }
 }
 
 async fn timed_future<T, F>(
@@ -3579,17 +4596,21 @@ fn profile_thresholds_json(profile: &ObservabilityProfile) -> Value {
                 "stretch": profile.retrieval.stretch_hot_p95_ms,
             },
             "cold_live_table": {
-                "target_p50_ms": profile.retrieval.target_cold_p50_ms,
-                "target_p95_ms": profile.retrieval.target_p95_ms,
-                "target_p99_ms": profile.retrieval.target_cold_p99_ms,
-                "target_max_ms": profile.retrieval.target_cold_max_ms,
+                "target_p50_ms": 2.0,
+                "target_p95_ms": 4.0,
+                "target_p99_ms": 6.0,
+                "target_max_ms": 10.0,
+                "live_readiness_sample_count": 100,
+                "benchmark_sample_count": profile.retrieval.target_cold_sample_count,
                 "target_sample_count": profile.retrieval.target_cold_sample_count,
             },
             "hot_live_table": {
-                "target_p50_ms": profile.retrieval.target_hot_p50_ms,
-                "target_p95_ms": profile.retrieval.target_hot_p95_ms,
-                "target_p99_ms": profile.retrieval.target_hot_p99_ms,
-                "target_max_ms": profile.retrieval.target_hot_max_ms,
+                "target_p50_ms": 1.0,
+                "target_p95_ms": 2.0,
+                "target_p99_ms": 3.0,
+                "target_max_ms": 5.0,
+                "live_readiness_sample_count": 100,
+                "benchmark_sample_count": profile.retrieval.target_hot_sample_count,
                 "target_sample_count": profile.retrieval.target_hot_sample_count,
             },
             "hot_benchmark_table": {
@@ -3636,6 +4657,8 @@ fn profile_thresholds_json(profile: &ObservabilityProfile) -> Value {
         },
         "dashboard": {
             "refresh_ms": profile.dashboard.refresh_ms,
+            "exact_client_limit_prewarm_seconds": profile.dashboard.exact_client_limit_prewarm_seconds,
+            "compact_client_budget_prewarm_seconds": profile.dashboard.compact_client_budget_prewarm_seconds,
             "timing_format": {
                 "switch_to_nanoseconds_below_ms": profile.dashboard.timing_format.switch_to_nanoseconds_below_ms,
                 "switch_to_microseconds_below_ms": profile.dashboard.timing_format.switch_to_microseconds_below_ms,
@@ -3656,7 +4679,12 @@ fn profile_thresholds_json(profile: &ObservabilityProfile) -> Value {
 }
 
 async fn maybe_cleanup_observability_snapshots(cfg: &AppConfig) -> Result<()> {
-    let summary = run_retention_cleanup(cfg, true, Some(2048)).await?;
+    let db = postgres::connect_admin(cfg).await?;
+    maybe_cleanup_observability_snapshots_with_db(&db).await
+}
+
+async fn maybe_cleanup_observability_snapshots_with_db(db: &Client) -> Result<()> {
+    let summary = run_retention_cleanup_with_db(db, true, Some(2048)).await?;
     let cleanup = &summary["observability_retention_cleanup"];
     let deleted = cleanup["deleted"].as_u64().unwrap_or(0);
     let expired = cleanup["expired"].as_u64().unwrap_or(0);
@@ -3793,6 +4821,14 @@ fn extract_last_artifact_cleanup_apply(summary: &Value) -> Option<Value> {
 
 async fn run_retention_cleanup(cfg: &AppConfig, apply: bool, limit: Option<i64>) -> Result<Value> {
     let db = postgres::connect_admin(cfg).await?;
+    run_retention_cleanup_with_db(&db, apply, limit).await
+}
+
+async fn run_retention_cleanup_with_db(
+    db: &Client,
+    apply: bool,
+    limit: Option<i64>,
+) -> Result<Value> {
     let now_epoch_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock before unix epoch")?
@@ -3866,7 +4902,23 @@ fn expired_retention_candidates(
 }
 
 async fn metrics_handler(State(state): State<ObserveState>) -> impl IntoResponse {
-    match cached_snapshot_with_meta(&state).await {
+    let snapshot = async {
+        match cached_snapshot_with_meta(&state).await {
+            Ok(snapshot) => Ok(snapshot),
+            Err(_) => {
+                refresh_observe_cache(
+                    state.cache.clone(),
+                    state.cfg.clone(),
+                    state.bind.clone(),
+                    state.dashboard_refresh_ms,
+                )
+                .await?;
+                cached_snapshot_with_meta(&state).await
+            }
+        }
+    }
+    .await;
+    match snapshot {
         Ok(snapshot) => {
             let body = render_prometheus_metrics(&snapshot);
             let headers = [(
@@ -3884,7 +4936,10 @@ async fn metrics_handler(State(state): State<ObserveState>) -> impl IntoResponse
 }
 
 async fn dashboard_page_handler(State(state): State<ObserveState>) -> impl IntoResponse {
-    let html = dashboard::render_html(state.dashboard_refresh_ms);
+    mark_observe_http_activity(&state).await;
+    spawn_client_live_meter_refresh(&state).await;
+    let bootstrap_payload = cached_dashboard_payload(&state).await.ok();
+    let html = dashboard::render_html(state.dashboard_refresh_ms, bootstrap_payload.as_ref());
     (no_store_headers("text/html; charset=utf-8"), Html(html)).into_response()
 }
 
@@ -3978,27 +5033,304 @@ async fn dashboard_api_handler(
     State(state): State<ObserveState>,
     Query(query): Query<ThreadBindingQuery>,
 ) -> impl IntoResponse {
-    refresh_client_live_meter_on_request(&state).await;
-    let response = if let Some(thread_id_hint) =
-        resolved_request_thread_hint(&state, query.thread_id.as_deref()).await
-    {
-        thread_bound_dashboard_payload(&state, &thread_id_hint).await
-    } else {
-        match cached_dashboard_payload(&state).await {
-            Ok(payload) => Ok(payload),
-            Err(_) => match refresh_observe_cache(
-                state.cache.clone(),
-                state.cfg.clone(),
-                state.bind.clone(),
+    mark_observe_http_activity(&state).await;
+    spawn_client_live_meter_refresh(&state).await;
+    let response: Result<Value> = async {
+        let payload = if let Some(thread_id_hint) =
+            normalized_thread_id_hint(query.thread_id.as_deref())
+        {
+            let snapshot = merged_thread_bound_snapshot_with_meta(&state, &thread_id_hint).await?;
+            dashboard::build_payload(
+                &state.cfg,
+                &snapshot,
+                &state.bind,
                 state.dashboard_refresh_ms,
+            )?
+        } else {
+            let snapshot = match cached_snapshot_with_meta(&state).await {
+                Ok(snapshot) => snapshot,
+                Err(_) => {
+                    refresh_observe_cache(
+                        state.cache.clone(),
+                        state.cfg.clone(),
+                        state.bind.clone(),
+                        state.dashboard_refresh_ms,
+                    )
+                    .await?;
+                    cached_snapshot_with_meta(&state).await?
+                }
+            };
+            dashboard::build_payload(
+                &state.cfg,
+                &snapshot,
+                &state.bind,
+                state.dashboard_refresh_ms,
+            )?
+        };
+        let cache = state.cache.read().await;
+        Ok(attach_observe_cache_to_dashboard_payload(
+            payload,
+            &cache,
+            state.dashboard_refresh_ms,
+        ))
+    }
+    .await;
+    match response {
+        Ok(payload) => (
+            StatusCode::OK,
+            no_store_headers("application/json; charset=utf-8"),
+            serde_json::to_string_pretty(&payload).unwrap_or_default(),
+        )
+            .into_response(),
+        Err(error) => dashboard_api_error_response(&state, &error).await,
+    }
+}
+
+async fn dashboard_live_summary_api_handler(
+    State(state): State<ObserveState>,
+    Query(query): Query<ThreadBindingQuery>,
+) -> impl IntoResponse {
+    mark_observe_http_activity(&state).await;
+    let response =
+        dashboard_live_summary_payload_for_request(&state, query.thread_id.as_deref()).await;
+    match response {
+        Ok(payload) => (
+            StatusCode::OK,
+            no_store_headers("application/json; charset=utf-8"),
+            serde_json::to_string_pretty(&payload).unwrap_or_default(),
+        )
+            .into_response(),
+        Err(error) => dashboard_live_summary_error_response(&state, &error).await,
+    }
+}
+
+async fn client_budget_live_api_handler(
+    State(state): State<ObserveState>,
+    Query(query): Query<ThreadBindingQuery>,
+) -> impl IntoResponse {
+    mark_observe_http_activity(&state).await;
+    let resolved_thread_id = resolved_request_thread_hint(&state, query.thread_id.as_deref()).await;
+    {
+        let cache = state.cache.read().await;
+        let same_thread =
+            cache.client_budget_live_thread_id.as_deref() == resolved_thread_id.as_deref();
+        let cache_fresh = cache
+            .client_budget_live_completed_epoch_ms
+            .is_some_and(|completed_at| {
+                now_epoch_ms().saturating_sub(completed_at)
+                    <= CLIENT_BUDGET_LIVE_PAYLOAD_CACHE_TTL_MS
+            });
+        if same_thread
+            && cache_fresh
+            && let Some(payload) = cache.client_budget_live_payload.clone()
+        {
+            return (
+                StatusCode::OK,
+                no_store_headers("application/json; charset=utf-8"),
+                serde_json::to_string_pretty(&payload).unwrap_or_default(),
             )
-            .await
-            {
-                Ok(()) => cached_dashboard_payload(&state).await,
-                Err(error) => Err(error),
-            },
+                .into_response();
         }
+    }
+    if let Some(thread_id) = resolved_thread_id.as_deref() {
+        if let Ok(repo_root) = discover_repo_root(None) {
+            if let Some(snapshot) = load_shared_budget_snapshot_preview(&repo_root, Some(thread_id))
+            {
+                let payload = dashboard::client_budget_live_payload(&snapshot);
+                let mut cache = state.cache.write().await;
+                cache.client_budget_live_payload = Some(payload.clone());
+                cache.client_budget_live_thread_id = Some(thread_id.to_string());
+                cache.client_budget_live_completed_epoch_ms = Some(now_epoch_ms());
+                return (
+                    StatusCode::OK,
+                    no_store_headers("application/json; charset=utf-8"),
+                    serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                )
+                    .into_response();
+            }
+        }
+    }
+    spawn_client_live_meter_refresh(&state).await;
+    let response =
+        compact_client_budget_snapshot_for_request(&state, resolved_thread_id.as_deref()).await;
+    match response {
+        Ok(snapshot) => {
+            let payload = dashboard::client_budget_live_payload(&snapshot);
+            let mut cache = state.cache.write().await;
+            cache.client_budget_live_payload = Some(payload.clone());
+            cache.client_budget_live_thread_id = resolved_thread_id.clone();
+            cache.client_budget_live_completed_epoch_ms = Some(now_epoch_ms());
+            (
+                StatusCode::OK,
+                no_store_headers("application/json; charset=utf-8"),
+                serde_json::to_string_pretty(&payload).unwrap_or_default(),
+            )
+                .into_response()
+        }
+        Err(error) => client_budget_live_error_response(&state, &error).await,
+    }
+}
+
+async fn client_budget_live_error_response(
+    state: &ObserveState,
+    error: &anyhow::Error,
+) -> Response {
+    let (refresh_in_progress, snapshot_age_ms) = {
+        let cache = state.cache.read().await;
+        (cache.refresh_in_progress, cache_snapshot_age_ms(&cache))
     };
+    if refresh_in_progress {
+        return (
+            StatusCode::OK,
+            no_store_headers("application/json; charset=utf-8"),
+            serde_json::to_string_pretty(&json!({
+                "status": "warming_up",
+                "rows": [],
+                "reply_prefix": Value::Null,
+                "global_reply_prefix": Value::Null,
+                "reply_prefix_source": "warmup_pending",
+                "thread_binding_state": "warmup_pending",
+                "current_thread_bound": false,
+                "ended_at_epoch_ms": Value::Null,
+                "warmup_pending": true,
+                "snapshot_age_ms": snapshot_age_ms,
+            }))
+            .unwrap_or_default(),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        no_store_headers("application/json; charset=utf-8"),
+        serde_json::to_string_pretty(&json!({
+            "status": "down",
+            "error": format!("{error:#}"),
+        }))
+        .unwrap_or_default(),
+    )
+        .into_response()
+}
+
+async fn dashboard_api_error_response(state: &ObserveState, error: &anyhow::Error) -> Response {
+    let (refresh_in_progress, snapshot_age_ms) = {
+        let cache = state.cache.read().await;
+        (cache.refresh_in_progress, cache_snapshot_age_ms(&cache))
+    };
+    if refresh_in_progress {
+        return (
+            StatusCode::OK,
+            no_store_headers("application/json; charset=utf-8"),
+            serde_json::to_string_pretty(&dashboard_warmup_payload(snapshot_age_ms))
+                .unwrap_or_default(),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        no_store_headers("application/json; charset=utf-8"),
+        serde_json::to_string_pretty(&json!({
+            "status": "down",
+            "error": format!("{error:#}"),
+        }))
+        .unwrap_or_default(),
+    )
+        .into_response()
+}
+
+async fn dashboard_live_summary_error_response(
+    state: &ObserveState,
+    error: &anyhow::Error,
+) -> Response {
+    let (refresh_in_progress, snapshot_age_ms) = {
+        let cache = state.cache.read().await;
+        (cache.refresh_in_progress, cache_snapshot_age_ms(&cache))
+    };
+    if refresh_in_progress {
+        return (
+            StatusCode::OK,
+            no_store_headers("application/json; charset=utf-8"),
+            serde_json::to_string_pretty(&dashboard_live_summary_warmup_payload(snapshot_age_ms))
+                .unwrap_or_default(),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        no_store_headers("application/json; charset=utf-8"),
+        serde_json::to_string_pretty(&json!({
+            "status": "down",
+            "error": format!("{error:#}"),
+        }))
+        .unwrap_or_default(),
+    )
+        .into_response()
+}
+
+fn dashboard_warmup_payload(snapshot_age_ms: Option<u64>) -> Value {
+    json!({
+        "meta": {
+            "package_version": env!("CARGO_PKG_VERSION"),
+            "cache_stale": true,
+            "cache_snapshot_age_ms": snapshot_age_ms,
+            "observe_refresh_total_ms": Value::Null,
+            "observe_refresh_slowest_stage": Value::Null,
+            "observe_refresh_slowest_stage_ms": Value::Null,
+            "cache_refresh_completed_at_label": Value::Null,
+            "cache_refresh_duration_ms": Value::Null,
+        },
+        "headline": {
+            "status": "waiting",
+            "status_label": "идёт прогрев",
+            "status_tooltip": "Observe cache ещё materialize-ится. Панель вернёт полный live snapshot после завершения первого refresh.",
+            "status_reason": "Первый observe refresh ещё не завершён.",
+            "token_value": "ещё нет данных",
+            "token_scope": Value::Null,
+        },
+        "links": [],
+        "hero_cards": [],
+        "top_cards": [],
+        "benchmark_cards": [],
+        "service_cards": [],
+        "machine_cards": [],
+        "warnings": [
+            "Панель ещё прогревается: первый live snapshot не готов."
+        ],
+        "glossary": []
+    })
+}
+
+fn dashboard_live_summary_warmup_payload(snapshot_age_ms: Option<u64>) -> Value {
+    json!({
+        "meta": {
+            "package_version": env!("CARGO_PKG_VERSION"),
+            "cache_stale": true,
+            "cache_snapshot_age_ms": snapshot_age_ms,
+            "observe_refresh_total_ms": Value::Null,
+            "observe_refresh_slowest_stage": Value::Null,
+            "observe_refresh_slowest_stage_ms": Value::Null,
+            "cache_refresh_completed_at_label": Value::Null,
+            "cache_refresh_duration_ms": Value::Null,
+        },
+        "headline": {
+            "status": "waiting",
+            "status_label": "идёт прогрев",
+            "status_tooltip": "Live summary ещё не готов: observe cache materialize-ится.",
+            "status_reason": "Первый live summary snapshot ещё не готов.",
+            "token_value": "ещё нет данных",
+            "token_scope": Value::Null,
+        },
+        "active_agent_card": Value::Null,
+        "top_cards": [],
+        "warmup_pending": true
+    })
+}
+
+async fn active_agent_budget_live_api_handler(
+    State(state): State<ObserveState>,
+) -> impl IntoResponse {
+    mark_observe_http_activity(&state).await;
+    spawn_client_live_meter_refresh(&state).await;
+    let response = live_active_agent_budget_card_payload(&state).await;
     match response {
         Ok(payload) => (
             StatusCode::OK,
@@ -4008,44 +5340,12 @@ async fn dashboard_api_handler(
             .into_response(),
         Err(error) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            format!("{{\"status\":\"down\",\"error\":\"{error:#}\"}}"),
-        )
-            .into_response(),
-    }
-}
-
-async fn client_budget_live_api_handler(
-    State(state): State<ObserveState>,
-    Query(query): Query<ThreadBindingQuery>,
-) -> impl IntoResponse {
-    if let Some(thread_id) = normalized_thread_id_hint(query.thread_id.as_deref()) {
-        if let Ok(repo_root) = discover_repo_root(None) {
-            if let Some(snapshot) = load_shared_budget_snapshot_preview(&repo_root, Some(thread_id))
-            {
-                return (
-                    StatusCode::OK,
-                    no_store_headers("application/json; charset=utf-8"),
-                    serde_json::to_string_pretty(&dashboard::client_budget_live_payload(&snapshot))
-                        .unwrap_or_default(),
-                )
-                    .into_response();
-            }
-        }
-    }
-    refresh_client_live_meter_on_request(&state).await;
-    let response =
-        compact_client_budget_snapshot_for_request(&state, query.thread_id.as_deref()).await;
-    match response {
-        Ok(snapshot) => (
-            StatusCode::OK,
             no_store_headers("application/json; charset=utf-8"),
-            serde_json::to_string_pretty(&dashboard::client_budget_live_payload(&snapshot))
-                .unwrap_or_default(),
-        )
-            .into_response(),
-        Err(error) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("{{\"status\":\"down\",\"error\":\"{error:#}\"}}"),
+            serde_json::to_string_pretty(&json!({
+                "status": "down",
+                "error": format!("{error:#}"),
+            }))
+            .unwrap_or_default(),
         )
             .into_response(),
     }
@@ -4055,7 +5355,9 @@ async fn client_budget_snapshot_preview_api_handler(
     State(state): State<ObserveState>,
     Query(query): Query<ThreadBindingQuery>,
 ) -> impl IntoResponse {
-    let response = compact_client_budget_snapshot_for_request(&state, query.thread_id.as_deref()).await;
+    let resolved_thread_id = resolved_request_thread_hint(&state, query.thread_id.as_deref()).await;
+    let response =
+        compact_client_budget_snapshot_for_request(&state, resolved_thread_id.as_deref()).await;
     match response {
         Ok(snapshot) => (
             StatusCode::OK,
@@ -4076,22 +5378,26 @@ async fn client_budget_root_cause_api_handler(
     State(state): State<ObserveState>,
     Query(query): Query<ThreadBindingQuery>,
 ) -> impl IntoResponse {
+    let resolved_thread_id = resolved_request_thread_hint(&state, query.thread_id.as_deref()).await;
     let response: Result<Value> = async {
-        if let Some(thread_id) = normalized_thread_id_hint(query.thread_id.as_deref()) {
+        if let Some(thread_id) = resolved_thread_id.as_deref() {
             let repo_root = discover_repo_root(None)?;
-            if let Some(materialized) = try_load_fast_thread_bound_materialized_compact_client_budget_surfaces(
-                &repo_root,
-                thread_id,
-            ) {
+            if let Some(materialized) =
+                try_load_fast_thread_bound_materialized_compact_client_budget_surfaces(
+                    &repo_root, thread_id,
+                )
+            {
                 return Ok(materialized.surfaces.root_cause_payload);
             }
             refresh_client_live_meter_on_request(&state).await;
             let snapshot = thread_bound_snapshot_with_meta(&state, &thread_id).await?;
-            return Ok(
-                compact_client_budget_surfaces_from_snapshot(&repo_root, &snapshot, Some(thread_id))
-                    .surfaces
-                    .root_cause_payload,
-            );
+            return Ok(compact_client_budget_surfaces_from_snapshot(
+                &repo_root,
+                &snapshot,
+                Some(thread_id),
+            )
+            .surfaces
+            .root_cause_payload);
         }
         refresh_client_live_meter_on_request(&state).await;
         Ok(collect_compact_client_budget_surfaces(&state.cfg)
@@ -4125,21 +5431,53 @@ async fn client_budget_gate_api_handler(
             if let Some(cached) =
                 load_shared_compact_client_budget_gate(&repo_root, now_epoch_ms, Some(thread_id))
             {
+                if let Some(launched_gate) = maybe_auto_launch_same_thread_host_control_from_gate(
+                    &state.cfg,
+                    &repo_root,
+                    thread_id,
+                    &cached.gate,
+                )
+                .await?
+                {
+                    return Ok(launched_gate);
+                }
                 return Ok(cached.gate);
             }
-            if let Some(materialized) = try_load_fast_thread_bound_materialized_compact_client_budget_surfaces(
-                &repo_root,
-                thread_id,
-            ) {
+            if let Some(materialized) =
+                try_load_fast_thread_bound_materialized_compact_client_budget_surfaces(
+                    &repo_root, thread_id,
+                )
+            {
+                if let Some(launched_gate) = maybe_auto_launch_same_thread_host_control_from_gate(
+                    &state.cfg,
+                    &repo_root,
+                    thread_id,
+                    &materialized.gate.gate_payload,
+                )
+                .await?
+                {
+                    return Ok(launched_gate);
+                }
                 return Ok(materialized.gate.gate_payload);
             }
             refresh_client_live_meter_on_request(&state).await;
             let snapshot = thread_bound_snapshot_with_meta(&state, &thread_id).await?;
-            return Ok(
-                compact_client_budget_surfaces_from_snapshot(&repo_root, &snapshot, Some(thread_id))
-                    .gate
-                    .gate_payload,
+            let materialized = compact_client_budget_surfaces_from_snapshot(
+                &repo_root,
+                &snapshot,
+                Some(thread_id),
             );
+            if let Some(launched_gate) = maybe_auto_launch_same_thread_host_control_from_gate(
+                &state.cfg,
+                &repo_root,
+                thread_id,
+                &materialized.gate.gate_payload,
+            )
+            .await?
+            {
+                return Ok(launched_gate);
+            }
+            return Ok(materialized.gate.gate_payload);
         }
         refresh_client_live_meter_on_request(&state).await;
         let surfaces = collect_compact_client_budget_surfaces(&state.cfg).await?;
@@ -4151,7 +5489,10 @@ async fn client_budget_gate_api_handler(
         Ok(payload) => (
             StatusCode::OK,
             no_store_headers("application/json; charset=utf-8"),
-            serde_json::to_string(&payload).unwrap_or_default(),
+            serde_json::to_string(&normalize_front_door_client_budget_gate_payload_shape(
+                payload,
+            ))
+            .unwrap_or_default(),
         )
             .into_response(),
         Err(error) => (
@@ -4162,7 +5503,9 @@ async fn client_budget_gate_api_handler(
     }
 }
 
-async fn client_limit_hourly_burn_api_handler(State(state): State<ObserveState>) -> impl IntoResponse {
+async fn client_limit_hourly_burn_api_handler(
+    State(state): State<ObserveState>,
+) -> impl IntoResponse {
     let response: Result<Value> = async {
         let db = postgres::connect_admin(&state.cfg).await?;
         postgres::bootstrap_schema(&db, &state.cfg).await?;
@@ -4184,27 +5527,100 @@ async fn client_limit_hourly_burn_api_handler(State(state): State<ObserveState>)
     }
 }
 
+fn normalize_agent_display_name_input(raw: &str) -> Result<String> {
+    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return Err(anyhow!("agent display_name must not be empty"));
+    }
+    if normalized.chars().count() > 120 {
+        return Err(anyhow!("agent display_name must be at most 120 characters"));
+    }
+    Ok(normalized)
+}
+
+async fn agent_display_name_update_api_handler(
+    State(state): State<ObserveState>,
+    Query(query): Query<ThreadBindingQuery>,
+    Json(request): Json<AgentDisplayNameUpdateRequest>,
+) -> impl IntoResponse {
+    refresh_client_live_meter_on_request(&state).await;
+    let response: Result<Value> = async {
+        let agent_scope = request.agent_scope.trim();
+        if agent_scope.is_empty() {
+            return Err(anyhow!("agent_scope is required"));
+        }
+        let display_name = normalize_agent_display_name_input(&request.display_name)?;
+        let db = postgres::connect_admin(&state.cfg).await?;
+        postgres::bootstrap_schema(&db, &state.cfg).await?;
+        postgres::upsert_agent_display_name_by_code(&db, agent_scope, &display_name).await?;
+        refresh_observe_cache(
+            state.cache.clone(),
+            state.cfg.clone(),
+            state.bind.clone(),
+            state.dashboard_refresh_ms,
+        )
+        .await?;
+        let live_summary =
+            dashboard_live_summary_payload_for_request(&state, query.thread_id.as_deref()).await?;
+        Ok(json!({
+            "status": "ok",
+            "agent_display_name_update": {
+                "agent_scope": agent_scope,
+                "display_name": display_name,
+            },
+            "dashboard_live_summary": live_summary,
+            "chat_notice": {
+                "kind": "agent_display_name_updated",
+                "thread_id": query.thread_id.clone(),
+                "message_text": format!("Имя агента сохранено: {display_name}."),
+                "agent_scope": agent_scope,
+                "display_name": display_name,
+            }
+        }))
+    }
+    .await;
+    match response {
+        Ok(payload) => (
+            StatusCode::OK,
+            no_store_headers("application/json; charset=utf-8"),
+            serde_json::to_string(&payload).unwrap_or_default(),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            no_store_headers("application/json; charset=utf-8"),
+            serde_json::to_string(&json!({
+                "status": "error",
+                "error": format!("{error:#}"),
+            }))
+            .unwrap_or_default(),
+        )
+            .into_response(),
+    }
+}
+
 async fn client_budget_target_update_api_handler(
     State(state): State<ObserveState>,
     Query(query): Query<ThreadBindingQuery>,
     Json(request): Json<ClientBudgetTargetUpdateRequest>,
 ) -> impl IntoResponse {
     refresh_client_live_meter_on_request(&state).await;
-    let repo_root = match discover_repo_root(None) {
-        Ok(path) => path,
-        Err(error) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                no_store_headers("application/json; charset=utf-8"),
-                serde_json::to_string_pretty(&json!({
-                    "status": "down",
-                    "error": format!("{error:#}"),
-                }))
-                .unwrap_or_default(),
-            )
-                .into_response();
-        }
-    };
+    let repo_root =
+        match resolve_request_repo_root_for_project(&state.cfg, request.project.as_deref()).await {
+            Ok(path) => path,
+            Err(error) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    no_store_headers("application/json; charset=utf-8"),
+                    serde_json::to_string_pretty(&json!({
+                        "status": "down",
+                        "error": format!("{error:#}"),
+                    }))
+                    .unwrap_or_default(),
+                )
+                    .into_response();
+            }
+        };
     let response: Result<Value> = async {
         let args = ContinuityClientBudgetTargetArgs {
             project: request.project.clone(),
@@ -4273,16 +5689,43 @@ async fn client_budget_compact_chat_api_handler(
     Query(query): Query<ThreadBindingQuery>,
     Json(request): Json<ClientBudgetCompactChatRequest>,
 ) -> impl IntoResponse {
-    refresh_client_live_meter_on_request(&state).await;
-    let repo_root = match discover_repo_root(None) {
-        Ok(path) => path,
-        Err(error) => {
+    let refresh_state = state.clone();
+    tokio::spawn(async move {
+        if let Err(error) = tokio::time::timeout(
+            std::time::Duration::from_secs(6),
+            refresh_client_live_meter_on_request(&refresh_state),
+        )
+        .await
+        {
+            eprintln!("client_budget_compact_chat preflight refresh timed out: {error:#}");
+        }
+    });
+    let repo_root = match tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        resolve_request_repo_root_for_project(&state.cfg, request.project.as_deref()),
+    )
+    .await
+    {
+        Ok(Ok(path)) => path,
+        Ok(Err(error)) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 no_store_headers("application/json; charset=utf-8"),
                 serde_json::to_string_pretty(&json!({
                     "status": "down",
                     "error": format!("{error:#}"),
+                }))
+                .unwrap_or_default(),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                no_store_headers("application/json; charset=utf-8"),
+                serde_json::to_string_pretty(&json!({
+                    "status": "down",
+                    "error": format!("client_budget_compact_chat repo_root timed out: {error:#}"),
                 }))
                 .unwrap_or_default(),
             )
@@ -4297,40 +5740,66 @@ async fn client_budget_compact_chat_api_handler(
             headline: None,
             next_step: None,
             details_file: None,
-            launch_host: false,
+            launch_host: request.launch_host,
+            runtime_fallback: true,
+            skip_handoff: !request.refresh_handoff,
             json: true,
         };
-        let update =
-            continuity::compact_chat_payload(&state.cfg, &args, query.thread_id.as_deref()).await?;
-        refresh_observe_cache(
-            state.cache.clone(),
-            state.cfg.clone(),
-            state.bind.clone(),
-            state.dashboard_refresh_ms,
+        let mut update = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            continuity::compact_chat_payload(&state.cfg, &args, query.thread_id.as_deref()),
         )
-        .await?;
-        let snapshot = if let Some(thread_id_hint) =
-            resolved_request_thread_hint(&state, query.thread_id.as_deref()).await
-        {
-            thread_bound_snapshot_with_meta(&state, &thread_id_hint).await?
-        } else {
-            cached_snapshot_with_meta(&state).await?
+        .await
+        .map_err(|_| anyhow!("client_budget_compact_chat timed out"))??;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(6),
+            continuity::maybe_launch_compact_chat_host(&mut update, request.launch_host, false),
+        )
+        .await
+        .map_err(|_| anyhow!("client_budget_compact_chat launch timed out"))??;
+        tokio::spawn({
+            let cache = state.cache.clone();
+            let cfg = state.cfg.clone();
+            let bind = state.bind.clone();
+            let refresh_ms = state.dashboard_refresh_ms;
+            async move {
+                if let Err(error) =
+                    refresh_observe_cache(cache, cfg, bind, refresh_ms).await
+                {
+                    eprintln!("client_budget_compact_chat refresh failed: {error:#}");
+                }
+            }
+        });
+        let snapshot = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            cached_snapshot_with_meta(&state),
+        )
+        .await
+        .map_err(|_| anyhow!("client_budget_compact_chat snapshot timed out"))??;
+        let host_launch_status = update["continuity_compact_chat"]["host_launch"]["status"]
+            .as_str()
+            .unwrap_or("unknown");
+        let notice_kind = match host_launch_status {
+            "requested" => "client_budget_compact_chat_launch_requested",
+            "bridge_unavailable" => "client_budget_compact_chat_bridge_unavailable",
+            "launch_failed" => "client_budget_compact_chat_launch_failed",
+            "available_not_requested" => "client_budget_compact_chat_launch_not_requested",
+            _ => "client_budget_compact_chat_requested",
         };
+        let compact_chat_summary = compact_chat_api_summary(&update["continuity_compact_chat"]);
         Ok(json!({
             "status": "ok",
-            "continuity_compact_chat": update["continuity_compact_chat"].clone(),
+            "continuity_compact_chat": compact_chat_summary,
             "client_budget_live": dashboard::client_budget_live_payload(&snapshot),
             "chat_notice": {
-                "kind": "client_budget_compact_chat_requested",
+                "kind": notice_kind,
                 "thread_id": query.thread_id.clone(),
                 "message_text": update["continuity_compact_chat"]["operator_notice"]["message_text"].clone(),
                 "reply_prefix": update["continuity_compact_chat"]["operator_notice"]["reply_prefix"].clone(),
                 "exact_chat_command": update["continuity_compact_chat"]["operator_notice"]["exact_chat_command"].clone(),
-                "prompt_text": update["continuity_compact_chat"]["operator_notice"]["prompt_text"].clone(),
+                "prompt_text": update["continuity_compact_chat"]["chat_start_restore"]["prompt_text"].clone(),
                 "prompt_file": update["continuity_compact_chat"]["operator_notice"]["prompt_file"].clone(),
-                "launch_clean_chat_command": update["continuity_compact_chat"]["operator_notice"]["launch_clean_chat_command"].clone(),
-                "launch_clean_chat_command_kind": update["continuity_compact_chat"]["operator_notice"]["launch_clean_chat_command_kind"].clone(),
-                "host_current_thread_control": update["continuity_compact_chat"]["operator_notice"]["host_current_thread_control"].clone(),
+                "client_surface": update["continuity_compact_chat"]["client_surface"].clone(),
                 "required_host_action": update["continuity_compact_chat"]["operator_notice"]["required_host_action"].clone(),
                 "note": update["continuity_compact_chat"]["operator_notice"]["note"].clone(),
             }
@@ -4344,17 +5813,60 @@ async fn client_budget_compact_chat_api_handler(
             serde_json::to_string(&payload).unwrap_or_default(),
         )
             .into_response(),
-        Err(error) => (
-            StatusCode::BAD_REQUEST,
-            no_store_headers("application/json; charset=utf-8"),
-            serde_json::to_string(&json!({
-                "status": "error",
-                "error": format!("{error:#}"),
-            }))
-            .unwrap_or_default(),
-        )
-            .into_response(),
+        Err(error) => {
+            let message = format!("{error:#}");
+            let status = if message.contains("timed out") {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            let snapshot = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                cached_snapshot_with_meta(&state),
+            )
+            .await
+            .ok()
+            .and_then(|result| result.ok());
+            let fallback_budget_live = snapshot.as_ref().map(dashboard::client_budget_live_payload);
+            (
+                status,
+                no_store_headers("application/json; charset=utf-8"),
+                serde_json::to_string(&json!({
+                    "status": "error",
+                    "error": message,
+                    "client_budget_live": fallback_budget_live,
+                }))
+                .unwrap_or_default(),
+            )
+                .into_response()
+        }
     }
+}
+
+fn compact_chat_api_summary(payload: &Value) -> Value {
+    json!({
+        "project": payload["project"].clone(),
+        "namespace": payload["namespace"].clone(),
+        "chat_start_restore": {
+            "headline": payload["chat_start_restore"]["headline"].clone(),
+            "next_step": payload["chat_start_restore"]["next_step"].clone(),
+            "prompt_text": payload["chat_start_restore"]["prompt_text"].clone(),
+        },
+        "operator_notice": {
+            "message_text": payload["operator_notice"]["message_text"].clone(),
+            "reply_prefix": payload["operator_notice"]["reply_prefix"].clone(),
+            "exact_chat_command": payload["operator_notice"]["exact_chat_command"].clone(),
+            "prompt_file": payload["operator_notice"]["prompt_file"].clone(),
+            "launch_clean_chat_command": payload["operator_notice"]["launch_clean_chat_command"].clone(),
+            "launch_clean_chat_fallback_command": payload["operator_notice"]["launch_clean_chat_fallback_command"].clone(),
+            "launch_clean_chat_command_kind": payload["operator_notice"]["launch_clean_chat_command_kind"].clone(),
+            "manual_fallback_steps": payload["operator_notice"]["manual_fallback_steps"].clone(),
+            "required_host_action": payload["operator_notice"]["required_host_action"].clone(),
+            "note": payload["operator_notice"]["note"].clone(),
+        },
+        "client_surface": payload["client_surface"].clone(),
+        "host_launch": payload["host_launch"].clone(),
+    })
 }
 
 async fn resolve_continuity_project_and_namespace(
@@ -4387,6 +5899,131 @@ async fn resolve_continuity_project_and_namespace(
     )
     .await?;
     Ok((project, namespace))
+}
+
+fn observe_recent_thread_record_has_connected_model(
+    thread: &codex_threads::RecentClientThreadRecord,
+) -> bool {
+    thread
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+}
+
+fn observe_proof_like_runtime_marker(value: Option<&str>) -> bool {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|value| {
+            let lower = value.to_ascii_lowercase();
+            value.starts_with("proof-")
+                || value.starts_with("proof_")
+                || value.starts_with("turn-proof-")
+                || value.starts_with("turn_proof_")
+                || value.contains("::proof_")
+                || value.contains("::proof-")
+                || lower.contains("proof_execctl_restore")
+                || lower.contains("proof-execctl-restore")
+                || lower.contains("execctl_restore_stress")
+                || lower.contains("execctl restore stress")
+        })
+}
+
+fn observe_user_visible_client_thread(thread: &codex_threads::RecentClientThreadRecord) -> bool {
+    observe_recent_thread_record_has_connected_model(thread)
+        && ![
+            Some(thread.thread_id.as_str()),
+            Some(thread.title.as_str()),
+            thread.agent_nickname.as_deref(),
+            thread.agent_role.as_deref(),
+        ]
+        .into_iter()
+        .any(observe_proof_like_runtime_marker)
+}
+
+fn observe_thread_record_matches_repo_root(
+    thread: &codex_threads::RecentClientThreadRecord,
+    repo_root: &Path,
+) -> bool {
+    let repo_root = repo_root.display().to_string();
+    thread.cwd == repo_root || thread.cwd.starts_with(&format!("{repo_root}/"))
+}
+
+fn evaluate_host_current_thread_control_window_targeting(
+    repo_root: &Path,
+    target_thread_id: &str,
+    recent_threads: &[codex_threads::RecentClientThreadRecord],
+) -> Value {
+    let visible_threads = recent_threads
+        .iter()
+        .filter(|thread| observe_user_visible_client_thread(thread))
+        .map(|thread| {
+            json!({
+                "thread_id": thread.thread_id,
+                "cwd": thread.cwd,
+                "title": thread.title,
+                "model": thread.model,
+                "updated_at_epoch_ms": thread.updated_at_epoch_s.saturating_mul(1000),
+            })
+        })
+        .collect::<Vec<_>>();
+    let visible_count = visible_threads.len();
+    let target_thread = visible_threads.iter().find(|thread| {
+        thread["thread_id"]
+            .as_str()
+            .map(str::trim)
+            .is_some_and(|value| value == target_thread_id)
+    });
+    let target_visible = target_thread.is_some();
+    let target_repo_root_match = target_thread.is_some_and(|thread| {
+        let Some(thread_id) = thread["thread_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return false;
+        };
+        let record = recent_threads
+            .iter()
+            .find(|candidate| candidate.thread_id == thread_id);
+        record.is_some_and(|record| observe_thread_record_matches_repo_root(record, repo_root))
+    });
+    let denial_reason = if visible_count == 0 {
+        Some("no_visible_model_bound_threads")
+    } else if visible_count > 1 {
+        Some("ambiguous_multi_window_recent_threads")
+    } else if !target_visible {
+        Some("target_thread_not_visible_in_recent_threads")
+    } else if !target_repo_root_match {
+        Some("target_thread_repo_root_mismatch")
+    } else {
+        None
+    };
+    json!({
+        "status": if denial_reason.is_none() { "allowed" } else { "denied" },
+        "allowed": denial_reason.is_none(),
+        "target_thread_id": target_thread_id,
+        "visible_model_bound_thread_count": visible_count,
+        "recent_window_minutes": 30,
+        "target_thread_visible": target_visible,
+        "target_thread_repo_root_match": target_repo_root_match,
+        "denial_reason": denial_reason,
+        "visible_model_bound_threads": visible_threads,
+    })
+}
+
+fn host_current_thread_control_window_targeting_summary(
+    repo_root: &Path,
+    target_thread_id: &str,
+) -> Result<Value> {
+    let recent_threads = codex_threads::recent_client_thread_records(30 * 60)?;
+    Ok(evaluate_host_current_thread_control_window_targeting(
+        repo_root,
+        target_thread_id,
+        &recent_threads,
+    ))
 }
 
 async fn execute_host_current_thread_control_launch(surface: &Value) -> Result<Value> {
@@ -4468,6 +6105,7 @@ async fn continuity_handoff_api_handler(
             request.details.as_deref().unwrap_or_default(),
             request.resolve_current_goal,
             &request.resolved_headlines,
+            &request.resolved_task_ids,
         )
         .await?;
         Ok(json!({
@@ -4502,7 +6140,7 @@ pub async fn client_budget_host_control_launch_payload(
 ) -> Result<Value> {
     let repo_root = match args.repo_root.as_deref() {
         Some(path) => path.to_path_buf(),
-        None => discover_repo_root(None)?,
+        None => resolve_request_repo_root_for_project(cfg, args.project.as_deref()).await?,
     };
     let thread_id = args.thread_id.trim();
     if thread_id.is_empty() {
@@ -4515,6 +6153,16 @@ pub async fn client_budget_host_control_launch_payload(
     } else {
         args.command_id.as_deref()
     };
+    let launch_targeting =
+        host_current_thread_control_window_targeting_summary(&repo_root, thread_id)?;
+    if !launch_targeting["allowed"].as_bool().unwrap_or(false) {
+        let denial_reason = launch_targeting["denial_reason"]
+            .as_str()
+            .unwrap_or("ambiguous_host_launch_target");
+        return Err(anyhow!(
+            "same-thread host control launch refused: {denial_reason}"
+        ));
+    }
     let surface = working_state::build_host_current_thread_control_surface_for_thread_and_command(
         Some(thread_id),
         command_id,
@@ -4533,11 +6181,12 @@ pub async fn client_budget_host_control_launch_payload(
     let command_id = surface["command_id"]
         .as_str()
         .unwrap_or(working_state::HOST_CURRENT_THREAD_CONTROL_COMMAND_ID);
+    let launched_feedback_kind = working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED;
     working_state::record_host_current_thread_control_feedback_with_thread_hint(
         &db,
         &project,
         &namespace,
-        working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_REQUESTED,
+        launched_feedback_kind,
         Some(command_id),
         Some(thread_id),
     )
@@ -4554,9 +6203,7 @@ pub async fn client_budget_host_control_launch_payload(
     .await
     {
         materialize_shared_thread_bound_client_budget_surfaces_from_snapshot(
-            &repo_root,
-            thread_id,
-            &snapshot,
+            &repo_root, thread_id, &snapshot,
         );
     }
     let client_budget_guard =
@@ -4581,13 +6228,14 @@ pub async fn client_budget_host_control_launch_payload(
             },
             "thread_id": thread_id,
             "command_id": command_id,
+            "launch_targeting": launch_targeting,
             "host_current_thread_control": surface,
             "launch": launch,
             "client_budget_reply_gate": client_budget_reply_gate,
             "operator_notice": {
-                "kind": "host_current_thread_control_launch_requested",
+                "kind": "host_current_thread_control_launch_opened",
                 "message_text": message_text,
-                "feedback_kind": working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_REQUESTED,
+                "feedback_kind": launched_feedback_kind,
                 "command_id": command_id,
                 "thread_id": thread_id,
             }
@@ -4610,21 +6258,22 @@ async fn client_budget_host_control_launch_api_handler(
     Json(request): Json<ClientBudgetHostControlLaunchRequest>,
 ) -> impl IntoResponse {
     refresh_client_live_meter_on_request(&state).await;
-    let repo_root = match discover_repo_root(None) {
-        Ok(path) => path,
-        Err(error) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                no_store_headers("application/json; charset=utf-8"),
-                serde_json::to_string_pretty(&json!({
-                    "status": "down",
-                    "error": format!("{error:#}"),
-                }))
-                .unwrap_or_default(),
-            )
-                .into_response();
-        }
-    };
+    let repo_root =
+        match resolve_request_repo_root_for_project(&state.cfg, request.project.as_deref()).await {
+            Ok(path) => path,
+            Err(error) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    no_store_headers("application/json; charset=utf-8"),
+                    serde_json::to_string_pretty(&json!({
+                        "status": "down",
+                        "error": format!("{error:#}"),
+                    }))
+                    .unwrap_or_default(),
+                )
+                    .into_response();
+            }
+        };
     let response: Result<Value> = async {
         let thread_id = query
             .thread_id
@@ -4648,17 +6297,18 @@ async fn client_budget_host_control_launch_api_handler(
             ["message_text"]
             .as_str()
             .unwrap_or("Запрошен same-thread host control.");
+        let launch_summary =
+            client_budget_host_control_launch_api_summary(&payload["client_budget_host_control_launch"]);
         Ok(json!({
             "status": "ok",
-            "client_budget_host_control_launch":
-                payload["client_budget_host_control_launch"].clone(),
+            "client_budget_host_control_launch": launch_summary,
             "chat_notice": {
-                "kind": "host_current_thread_control_launch_requested",
+                "kind": "host_current_thread_control_launch_opened",
                 "thread_id": query.thread_id.clone(),
                 "message_text": message_text,
                 "reply_prefix":
                     payload["client_budget_host_control_launch"]["client_budget_reply_gate"]["reply_prefix"].clone(),
-                "feedback_kind": working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_REQUESTED,
+                "feedback_kind": working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED,
                 "command_id":
                     payload["client_budget_host_control_launch"]["command_id"].clone(),
                 "thread_id_hint": thread_id,
@@ -4686,27 +6336,45 @@ async fn client_budget_host_control_launch_api_handler(
     }
 }
 
+fn client_budget_host_control_launch_api_summary(payload: &Value) -> Value {
+    json!({
+        "project": payload["project"].clone(),
+        "namespace": payload["namespace"].clone(),
+        "thread_id": payload["thread_id"].clone(),
+        "command_id": payload["command_id"].clone(),
+        "launch_targeting": {
+            "status": payload["launch_targeting"]["status"].clone(),
+            "summary": payload["launch_targeting"]["summary"].clone(),
+        },
+        "client_budget_reply_gate": {
+            "reply_prefix": payload["client_budget_reply_gate"]["reply_prefix"].clone(),
+        },
+        "operator_notice": payload["operator_notice"].clone(),
+    })
+}
+
 async fn client_budget_host_control_feedback_api_handler(
     State(state): State<ObserveState>,
     Query(query): Query<ThreadBindingQuery>,
     Json(request): Json<ClientBudgetHostControlFeedbackRequest>,
 ) -> impl IntoResponse {
     refresh_client_live_meter_on_request(&state).await;
-    let repo_root = match discover_repo_root(None) {
-        Ok(path) => path,
-        Err(error) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                no_store_headers("application/json; charset=utf-8"),
-                serde_json::to_string_pretty(&json!({
-                    "status": "down",
-                    "error": format!("{error:#}"),
-                }))
-                .unwrap_or_default(),
-            )
-                .into_response();
-        }
-    };
+    let repo_root =
+        match resolve_request_repo_root_for_project(&state.cfg, request.project.as_deref()).await {
+            Ok(path) => path,
+            Err(error) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    no_store_headers("application/json; charset=utf-8"),
+                    serde_json::to_string_pretty(&json!({
+                        "status": "down",
+                        "error": format!("{error:#}"),
+                    }))
+                    .unwrap_or_default(),
+                )
+                    .into_response();
+            }
+        };
     let response: Result<Value> = async {
         let db = postgres::connect_admin(&state.cfg).await?;
         postgres::bootstrap_schema(&db, &state.cfg).await?;
@@ -4740,7 +6408,12 @@ async fn client_budget_host_control_feedback_api_handler(
             query.thread_id.as_deref(),
         )
         .await?;
-        if let Some(thread_id) = query.thread_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        if let Some(thread_id) = query
+            .thread_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
             let _ = write_shared_thread_bound_snapshot_invalidation(&repo_root, thread_id);
             let restore = working_state::build_restore_bundle(&db, &project, &namespace).await?;
             if let Ok(snapshot) = collect_client_budget_snapshot_from_db(
@@ -4753,13 +6426,12 @@ async fn client_budget_host_control_feedback_api_handler(
             .await
             {
                 materialize_shared_thread_bound_client_budget_surfaces_from_snapshot(
-                    &repo_root,
-                    thread_id,
-                    &snapshot,
+                    &repo_root, thread_id, &snapshot,
                 );
             }
             let client_budget_guard =
-                token_budget::collect_live_current_session_budget_guard(&db, restore.as_ref()).await?;
+                token_budget::collect_live_current_session_budget_guard(&db, restore.as_ref())
+                    .await?;
             let client_budget_reply_gate =
                 compact_host_control_client_budget_reply_gate(&client_budget_guard);
             let message_text =
@@ -4854,13 +6526,14 @@ async fn snapshot_api_handler(
     State(state): State<ObserveState>,
     Query(query): Query<ThreadBindingQuery>,
 ) -> impl IntoResponse {
-    refresh_client_live_meter_on_request(&state).await;
+    mark_observe_http_activity(&state).await;
+    spawn_client_live_meter_refresh(&state).await;
     let response = if let Some(thread_id_hint) =
         resolved_request_thread_hint(&state, query.thread_id.as_deref()).await
     {
-        thread_bound_snapshot_with_meta(&state, &thread_id_hint).await
+        merged_thread_bound_snapshot_with_meta(&state, &thread_id_hint).await
     } else {
-        cached_snapshot_with_meta(&state).await
+        live_active_agent_snapshot_for_request(&state).await
     };
     match response {
         Ok(snapshot) => (
@@ -4878,8 +6551,11 @@ async fn snapshot_api_handler(
 }
 
 async fn healthz_handler(State(state): State<ObserveState>) -> impl IntoResponse {
-    refresh_client_live_meter_on_request(&state).await;
-    match cached_snapshot_with_meta(&state).await {
+    if let Err(error) = maybe_refresh_stale_observe_cache_for_healthz(&state).await {
+        eprintln!("observe healthz refresh recovery failed: {error:#}");
+    }
+    let snapshot = cached_snapshot_with_meta(&state).await;
+    match snapshot {
         Ok(snapshot) => {
             let summary = &snapshot["sla"]["summary"];
             let critical = summary["critical"].as_u64().unwrap_or(0);
@@ -4890,14 +6566,26 @@ async fn healthz_handler(State(state): State<ObserveState>) -> impl IntoResponse
             } else {
                 StatusCode::SERVICE_UNAVAILABLE
             };
-            let headers = [(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json; charset=utf-8"),
-            )];
+            let status_label = if status == StatusCode::OK {
+                "up"
+            } else {
+                "down"
+            };
+            let headers = no_store_headers("application/json; charset=utf-8");
+            let payload = json!({
+                "status": status_label,
+                "critical": critical,
+                "unknown": unknown,
+                "cache_stale": cache_stale,
+                "refresh_in_progress": snapshot["observe_cache"]["refresh_in_progress"].clone(),
+                "snapshot_age_ms": snapshot["observe_cache"]["snapshot_age_ms"].clone(),
+                "last_refresh_completed_epoch_ms": snapshot["observe_cache"]["last_refresh_completed_epoch_ms"].clone(),
+                "last_error": snapshot["observe_cache"]["last_error"].clone(),
+            });
             (
                 status,
                 headers,
-                serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
+                serde_json::to_string_pretty(&payload).unwrap_or_default(),
             )
                 .into_response()
         }
@@ -4921,6 +6609,20 @@ fn no_store_headers(content_type: &'static str) -> [(header::HeaderName, HeaderV
     ]
 }
 
+async fn mark_observe_http_activity(state: &ObserveState) {
+    let mut cache = state.cache.write().await;
+    cache.last_http_request_epoch_ms = Some(now_epoch_ms());
+}
+
+async fn observe_recent_http_activity(cache: Arc<RwLock<ObserveCache>>) -> bool {
+    let cache = cache.read().await;
+    let Some(last_http_request_epoch_ms) = cache.last_http_request_epoch_ms else {
+        return false;
+    };
+    now_epoch_ms().saturating_sub(last_http_request_epoch_ms)
+        <= OBSERVE_BACKGROUND_REFRESH_IDLE_GRACE_MS
+}
+
 async fn refresh_observe_cache(
     cache: Arc<RwLock<ObserveCache>>,
     cfg: AppConfig,
@@ -4930,59 +6632,134 @@ async fn refresh_observe_cache(
     let started_epoch_ms = now_epoch_ms();
     {
         let mut state = cache.write().await;
+        if state.refresh_in_progress {
+            if !observe_refresh_stuck(&state) {
+                return Ok(());
+            }
+            state.refresh_in_progress = false;
+            state.last_error = Some(
+                "previous observe refresh was declared stuck and recovered by watchdog".to_string(),
+            );
+        }
         state.last_refresh_started_epoch_ms = Some(started_epoch_ms);
         state.refresh_in_progress = true;
     }
-    let started = Instant::now();
-    let result = build_snapshot(&cfg, false).await.and_then(|snapshot| {
-        dashboard::build_payload(&cfg, &snapshot, &bind, refresh_ms)
-            .map(|payload| (snapshot, payload))
-    });
-    let elapsed_ms = started.elapsed().as_millis() as u64;
-    let completed_epoch_ms = now_epoch_ms();
-    let mut state = cache.write().await;
-    state.last_refresh_completed_epoch_ms = Some(completed_epoch_ms);
-    state.last_refresh_duration_ms = Some(elapsed_ms);
-    state.refresh_in_progress = false;
-    match result {
-        Ok((snapshot, payload)) => {
-            state.snapshot = Some(snapshot);
-            state.dashboard_payload = Some(payload);
-            state.last_error = None;
-            if let Some(thread_id) = state
-                .snapshot
-                .as_ref()
-                .and_then(strict_auto_thread_binding_hint_from_snapshot)
-            {
-                let cache_clone = cache.clone();
-                let cfg_clone = cfg.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = prewarm_thread_bound_client_budget_surfaces_for_thread(
-                        cache_clone,
-                        &cfg_clone,
-                        &thread_id,
-                    )
+    let cache_clone = cache.clone();
+    let cfg_clone = cfg.clone();
+    let bind_clone = bind.clone();
+    let refresh_task = tokio::spawn(async move {
+        let started = Instant::now();
+        let result =
+            match tokio::time::timeout(Duration::from_millis(OBSERVE_REFRESH_TIMEOUT_MS), async {
+                build_snapshot(&cfg_clone, false)
                     .await
-                    {
-                        eprintln!("refresh-triggered active thread prewarm failed: {error:#}");
-                    }
-                });
+                    .and_then(|snapshot| {
+                        dashboard::build_payload(&cfg_clone, &snapshot, &bind_clone, refresh_ms)
+                            .map(|payload| (snapshot, payload))
+                    })
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(anyhow!(
+                    "observe refresh exceeded timeout of {} ms",
+                    OBSERVE_REFRESH_TIMEOUT_MS
+                )),
+            };
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let completed_epoch_ms = now_epoch_ms();
+        let mut thread_id_to_prewarm = None;
+        let outcome = {
+            let mut state = cache_clone.write().await;
+            state.refresh_in_progress = false;
+            match result {
+                Ok((snapshot, payload)) => {
+                    state.last_refresh_completed_epoch_ms = Some(completed_epoch_ms);
+                    state.last_refresh_duration_ms = Some(elapsed_ms);
+                    state.snapshot = Some(snapshot);
+                    state.dashboard_payload = Some(payload);
+                    state.last_error = None;
+                    thread_id_to_prewarm = match state.snapshot.as_ref() {
+                        Some(value) => strict_auto_thread_binding_hint_from_snapshot(value.clone()),
+                        None => None,
+                    };
+                    Ok(())
+                }
+                Err(error) => {
+                    state.last_refresh_duration_ms = Some(elapsed_ms);
+                    state.last_error = Some(format!("{error:#}"));
+                    Err(error)
+                }
             }
-            Ok(())
+        };
+        if let Some(thread_id) = thread_id_to_prewarm {
+            if let Err(error) = prewarm_thread_bound_client_budget_surfaces_for_thread(
+                cache_clone,
+                &cfg_clone,
+                &thread_id,
+            )
+            .await
+            {
+                eprintln!("refresh-triggered active thread prewarm failed: {error:#}");
+            }
         }
+        outcome
+    });
+    match refresh_task.await {
+        Ok(outcome) => outcome,
         Err(error) => {
-            state.last_error = Some(format!("{error:#}"));
-            Err(error)
+            let error_message = format!("{error:#}");
+            let error_message_for_task = error_message.clone();
+            let cache_cleanup = cache.clone();
+            tokio::spawn(async move {
+                let mut state = cache_cleanup.write().await;
+                if state.refresh_in_progress {
+                    state.refresh_in_progress = false;
+                    state.last_error = Some(format!(
+                        "observe refresh task aborted before completion: {error_message_for_task}"
+                    ));
+                }
+            });
+            Err(anyhow!("observe refresh task aborted: {error_message}"))
         }
     }
 }
 
+async fn maybe_refresh_stale_observe_cache_for_healthz(state: &ObserveState) -> Result<()> {
+    let should_refresh = {
+        let cache = state.cache.read().await;
+        let cache_stale = observe_cache_stale(&cache, state.dashboard_refresh_ms);
+        let refresh_stuck = observe_refresh_stuck(&cache);
+        cache_stale && (!cache.refresh_in_progress || refresh_stuck)
+    };
+    if !should_refresh {
+        return Ok(());
+    }
+    refresh_observe_cache(
+        state.cache.clone(),
+        state.cfg.clone(),
+        state.bind.clone(),
+        state.dashboard_refresh_ms,
+    )
+    .await
+}
+
 async fn cached_dashboard_payload(state: &ObserveState) -> Result<Value> {
     let cache = state.cache.read().await;
-    let payload = cache
+    let mut payload = cache
         .dashboard_payload
         .clone()
         .ok_or_else(|| anyhow!("dashboard cache not ready"))?;
+    if payload.get("client_budget_live").is_none() {
+        if let Some(snapshot) = cache.snapshot.as_ref() {
+            if let Some(root) = payload.as_object_mut() {
+                root.insert(
+                    "client_budget_live".to_string(),
+                    dashboard::client_budget_live_payload(snapshot),
+                );
+            }
+        }
+    }
     Ok(attach_observe_cache_to_dashboard_payload(
         payload,
         &cache,
@@ -5003,6 +6780,220 @@ async fn cached_snapshot_with_meta(state: &ObserveState) -> Result<Value> {
     ))
 }
 
+async fn live_active_agent_snapshot_for_request(state: &ObserveState) -> Result<Value> {
+    let snapshot = if let Some(thread_id) = auto_thread_binding_hint_from_cache(state).await {
+        merged_thread_bound_snapshot_with_meta(state, &thread_id).await?
+    } else {
+        cached_snapshot_with_meta(state).await?
+    };
+    let cached_activity = snapshot["agent_scope_activity"].clone();
+    if !cached_activity.is_object() {
+        return Ok(snapshot);
+    }
+    let db = postgres::connect_admin(&state.cfg).await?;
+    postgres::bootstrap_schema(&db, &state.cfg).await?;
+    let repo_root = discover_repo_root(None)?;
+    let active_agent_budget =
+        token_budget::collect_active_agent_live_budget_surface(&db, &repo_root, &cached_activity)
+            .await?;
+    Ok(overlay_live_active_agent_surfaces(
+        snapshot,
+        cached_activity,
+        active_agent_budget,
+    ))
+}
+
+fn active_agent_budget_card_payload_from_snapshot(snapshot: &Value) -> Result<Value> {
+    let surface = &snapshot["active_agent_budget"];
+    let card = dashboard::build_active_agent_budget_session_card_from_surface(surface)
+        .ok_or_else(|| anyhow!("active agent budget card not ready"))?;
+    Ok(json!({
+        "card": card,
+        "captured_at_epoch_ms": surface["captured_at_epoch_ms"].clone(),
+        "source": surface["source"].clone(),
+    }))
+}
+
+async fn live_active_agent_budget_card_payload(state: &ObserveState) -> Result<Value> {
+    let snapshot = live_dashboard_summary_snapshot_for_request(state, None).await?;
+    active_agent_budget_card_payload_from_snapshot(&snapshot)
+}
+
+async fn live_active_agent_dashboard_payload(state: &ObserveState) -> Result<Value> {
+    let snapshot = live_active_agent_snapshot_for_request(state).await?;
+    let mut payload = dashboard::build_payload(
+        &state.cfg,
+        &snapshot,
+        &state.bind,
+        state.dashboard_refresh_ms,
+    )?;
+    if payload.get("client_budget_live").is_none() {
+        if let Some(root) = payload.as_object_mut() {
+            root.insert(
+                "client_budget_live".to_string(),
+                dashboard::client_budget_live_payload(&snapshot),
+            );
+        }
+    }
+    let cache = state.cache.read().await;
+    Ok(attach_observe_cache_to_dashboard_payload(
+        payload,
+        &cache,
+        state.dashboard_refresh_ms,
+    ))
+}
+
+async fn dashboard_live_summary_payload_for_request(
+    state: &ObserveState,
+    explicit_thread_id: Option<&str>,
+) -> Result<Value> {
+    let resolved_thread_id = resolved_request_thread_hint(state, explicit_thread_id).await;
+    {
+        let cache = state.cache.read().await;
+        let cache_age_ms = cache
+            .dashboard_live_summary_completed_epoch_ms
+            .map(|completed_at| now_epoch_ms().saturating_sub(completed_at));
+        if cache.dashboard_live_summary_refresh_in_progress {
+            if let Some(payload) = cache.dashboard_live_summary_payload.clone() {
+                return Ok(attach_observe_cache_to_dashboard_payload(
+                    payload,
+                    &cache,
+                    state.dashboard_refresh_ms,
+                ));
+            }
+            return Ok(dashboard_live_summary_warmup_payload(
+                cache_snapshot_age_ms(&cache),
+            ));
+        }
+        if let Some(payload) = cache.dashboard_live_summary_payload.clone() {
+            let cache_stale = cache_age_ms
+                .map(|age_ms| age_ms > DASHBOARD_LIVE_SUMMARY_CACHE_TTL_MS)
+                .unwrap_or(true);
+            let refresh_needed = cache_stale && !cache.dashboard_live_summary_refresh_in_progress;
+            drop(cache);
+            if refresh_needed {
+                spawn_dashboard_live_summary_refresh(state, resolved_thread_id.clone()).await;
+            }
+            let cache = state.cache.read().await;
+            return Ok(attach_observe_cache_to_dashboard_payload(
+                payload,
+                &cache,
+                state.dashboard_refresh_ms,
+            ));
+        }
+    }
+
+    let payload = refresh_dashboard_live_summary_cache(state, resolved_thread_id.clone()).await?;
+    let cache = state.cache.read().await;
+    Ok(attach_observe_cache_to_dashboard_payload(
+        payload,
+        &cache,
+        state.dashboard_refresh_ms,
+    ))
+}
+
+async fn spawn_dashboard_live_summary_refresh(
+    state: &ObserveState,
+    resolved_thread_id: Option<String>,
+) {
+    {
+        let mut cache = state.cache.write().await;
+        if cache.dashboard_live_summary_refresh_in_progress {
+            return;
+        }
+        cache.dashboard_live_summary_refresh_in_progress = true;
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        if let Err(error) = refresh_dashboard_live_summary_cache(&state, resolved_thread_id).await {
+            eprintln!("dashboard live summary refresh failed: {error:#}");
+            let mut cache = state.cache.write().await;
+            cache.dashboard_live_summary_refresh_in_progress = false;
+        }
+    });
+}
+
+async fn refresh_dashboard_live_summary_cache(
+    state: &ObserveState,
+    resolved_thread_id: Option<String>,
+) -> Result<Value> {
+    let snapshot =
+        live_dashboard_summary_snapshot_for_request(state, resolved_thread_id.as_deref()).await?;
+    let payload = dashboard::build_live_summary_payload(
+        &state.cfg,
+        &snapshot,
+        &state.bind,
+        state.dashboard_refresh_ms,
+    )?;
+    let mut cache = state.cache.write().await;
+    cache.dashboard_live_summary_payload = Some(payload.clone());
+    cache.dashboard_live_summary_thread_id = resolved_thread_id;
+    cache.dashboard_live_summary_completed_epoch_ms = Some(now_epoch_ms());
+    cache.dashboard_live_summary_refresh_in_progress = false;
+    Ok(payload)
+}
+
+fn overlay_live_active_agent_surfaces(
+    mut snapshot: Value,
+    activity: Value,
+    active_agent_budget: Value,
+) -> Value {
+    if let Some(root) = snapshot.as_object_mut() {
+        root.insert("agent_scope_activity".to_string(), activity);
+        root.insert("active_agent_budget".to_string(), active_agent_budget);
+    }
+    snapshot
+}
+
+fn overlay_dashboard_live_summary_surfaces(
+    mut snapshot: Value,
+    activity: Value,
+    latest_repo_working_state_restore: Value,
+    active_agent_budget: Value,
+) -> Value {
+    if let Some(root) = snapshot.as_object_mut() {
+        root.insert("agent_scope_activity".to_string(), activity);
+        root.insert(
+            "latest_repo_working_state_restore".to_string(),
+            latest_repo_working_state_restore,
+        );
+        root.insert("active_agent_budget".to_string(), active_agent_budget);
+    }
+    snapshot
+}
+
+async fn live_dashboard_summary_snapshot_for_request(
+    state: &ObserveState,
+    explicit_thread_id: Option<&str>,
+) -> Result<Value> {
+    let base_snapshot =
+        if let Some(thread_id) = resolved_request_thread_hint(state, explicit_thread_id).await {
+            merged_thread_bound_snapshot_with_meta(state, &thread_id).await?
+        } else {
+            cached_snapshot_with_meta(state).await?
+        };
+    let db = postgres::connect_admin(&state.cfg).await?;
+    postgres::bootstrap_schema(&db, &state.cfg).await?;
+    let repo_root = discover_repo_root(None)?;
+    let agent_scope_activity = token_budget::collect_agent_scope_activity(&db).await?;
+    let active_agent_budget = token_budget::collect_active_agent_live_budget_surface(
+        &db,
+        &repo_root,
+        &agent_scope_activity,
+    )
+    .await?;
+    let latest_repo_working_state_restore =
+        latest_repo_working_state_restore_payload(&db, &repo_root)
+            .await?
+            .unwrap_or_else(|| json!({ "working_state_restore": {} }));
+    Ok(overlay_dashboard_live_summary_surfaces(
+        base_snapshot,
+        agent_scope_activity,
+        latest_repo_working_state_restore,
+        active_agent_budget,
+    ))
+}
+
 fn normalized_thread_id_hint(thread_id: Option<&str>) -> Option<&str> {
     thread_id.map(str::trim).filter(|value| !value.is_empty())
 }
@@ -5020,15 +7011,17 @@ async fn resolved_request_thread_hint(
 
 async fn auto_thread_binding_hint_from_cache(state: &ObserveState) -> Option<String> {
     let cache = state.cache.read().await;
-    let snapshot = cache.snapshot.as_ref()?;
+    let snapshot = cache.snapshot.clone()?;
     strict_auto_thread_binding_hint_from_snapshot(snapshot)
 }
 
-fn strict_auto_thread_binding_hint_from_snapshot(snapshot: &Value) -> Option<String> {
-    strict_auto_thread_binding_hint_from_agent_scope_activity(&snapshot["agent_scope_activity"])
+fn strict_auto_thread_binding_hint_from_snapshot(snapshot: Value) -> Option<String> {
+    strict_auto_thread_binding_hint_from_agent_scope_activity(
+        snapshot["agent_scope_activity"].clone(),
+    )
 }
 
-fn strict_auto_thread_binding_hint_from_agent_scope_activity(activity: &Value) -> Option<String> {
+fn strict_auto_thread_binding_hint_from_agent_scope_activity(activity: Value) -> Option<String> {
     let recent_thread_ids = activity["client_recent_threads"]
         .as_array()
         .into_iter()
@@ -5066,19 +7059,145 @@ fn strict_auto_thread_binding_hint_from_agent_scope_activity(activity: &Value) -
 }
 
 async fn thread_bound_dashboard_payload(state: &ObserveState, thread_id: &str) -> Result<Value> {
-    let snapshot = thread_bound_snapshot_with_meta(state, thread_id).await?;
-    let payload = dashboard::build_payload(
+    let snapshot = merged_thread_bound_snapshot_with_meta(state, thread_id).await?;
+    let mut payload = dashboard::build_payload(
         &state.cfg,
         &snapshot,
         &state.bind,
         state.dashboard_refresh_ms,
     )?;
+    if payload.get("client_budget_live").is_none() {
+        if let Some(root) = payload.as_object_mut() {
+            root.insert(
+                "client_budget_live".to_string(),
+                dashboard::client_budget_live_payload(&snapshot),
+            );
+        }
+    }
     let cache = state.cache.read().await;
     Ok(attach_observe_cache_to_dashboard_payload(
         payload,
         &cache,
         state.dashboard_refresh_ms,
     ))
+}
+
+async fn merged_thread_bound_snapshot_with_meta(
+    state: &ObserveState,
+    thread_id: &str,
+) -> Result<Value> {
+    let thread_bound_snapshot = thread_bound_snapshot_with_meta(state, thread_id).await?;
+    let base_snapshot = match cached_snapshot_with_meta(state).await {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            refresh_observe_cache(
+                state.cache.clone(),
+                state.cfg.clone(),
+                state.bind.clone(),
+                state.dashboard_refresh_ms,
+            )
+            .await?;
+            cached_snapshot_with_meta(state).await?
+        }
+    };
+    let snapshot = merge_thread_bound_client_budget_snapshot_into_base_snapshot(
+        &base_snapshot,
+        &thread_bound_snapshot,
+    );
+    Ok(snapshot)
+}
+
+fn merge_thread_bound_client_budget_snapshot_into_base_snapshot(
+    base_snapshot: &Value,
+    thread_bound_snapshot: &Value,
+) -> Value {
+    let mut merged = base_snapshot.clone();
+    let token_budget_report = &thread_bound_snapshot["token_budget_report"];
+    if token_budget_report.is_object() {
+        let base_outer = &base_snapshot["token_budget_report"];
+        if base_outer.is_object()
+            && base_outer["token_budget_report"].is_object()
+            && token_budget_report["token_budget_report"].is_object()
+        {
+            let mut merged_outer = base_outer.clone();
+            let mut merged_inner = base_outer["token_budget_report"].clone();
+            if let Some(merged_inner_object) = merged_inner.as_object_mut() {
+                for key in [
+                    "current_session",
+                    "live_response_latency",
+                    "client_live_meter",
+                    "personal_agent_kpi",
+                    "client_limit_hourly_burn",
+                    "current_live_turn",
+                    "client_budget_target_percent",
+                    "filters",
+                ] {
+                    if token_budget_report["token_budget_report"][key].is_null() {
+                        continue;
+                    }
+                    if key == "live_response_latency"
+                        && should_keep_base_live_response_latency(
+                            &base_outer["token_budget_report"][key],
+                            &token_budget_report["token_budget_report"][key],
+                        )
+                    {
+                        continue;
+                    }
+                    merged_inner_object.insert(
+                        key.to_string(),
+                        token_budget_report["token_budget_report"][key].clone(),
+                    );
+                }
+                if base_outer["token_budget_report"]["statement_previews"].is_object()
+                    || token_budget_report["token_budget_report"]["statement_previews"].is_object()
+                {
+                    let mut merged_statement_previews =
+                        base_outer["token_budget_report"]["statement_previews"].clone();
+                    if let Some(statement_previews_object) =
+                        merged_statement_previews.as_object_mut()
+                    {
+                        if token_budget_report["token_budget_report"]["statement_previews"]
+                            ["current_session"]
+                            .is_object()
+                        {
+                            statement_previews_object.insert(
+                                "current_session".to_string(),
+                                token_budget_report["token_budget_report"]["statement_previews"]
+                                    ["current_session"]
+                                    .clone(),
+                            );
+                        }
+                    }
+                    merged_inner_object
+                        .insert("statement_previews".to_string(), merged_statement_previews);
+                }
+            }
+            if let Some(merged_outer_object) = merged_outer.as_object_mut() {
+                merged_outer_object.insert("token_budget_report".to_string(), merged_inner);
+            }
+            merged["token_budget_report"] = merged_outer;
+        } else {
+            merged["token_budget_report"] = token_budget_report.clone();
+        }
+    }
+    let latest_repo_restore = &thread_bound_snapshot["latest_repo_working_state_restore"];
+    if latest_repo_restore.is_object() {
+        merged["latest_repo_working_state_restore"] = latest_repo_restore.clone();
+    }
+    merged
+}
+
+fn live_response_latency_total_sample_count(surface: &Value) -> u64 {
+    ["current_session", "rolling_window"]
+        .into_iter()
+        .filter_map(|scope| surface[scope]["sample_count"].as_u64())
+        .sum()
+}
+
+fn should_keep_base_live_response_latency(base_surface: &Value, thread_surface: &Value) -> bool {
+    let base_count = live_response_latency_total_sample_count(base_surface);
+    let thread_count = live_response_latency_total_sample_count(thread_surface);
+    base_count > 0 && thread_count == 0
 }
 
 async fn thread_bound_snapshot_with_meta(state: &ObserveState, thread_id: &str) -> Result<Value> {
@@ -5125,12 +7244,12 @@ fn materialize_shared_thread_bound_client_budget_surfaces_from_snapshot(
 ) {
     let _ = write_shared_thread_bound_budget_snapshot(repo_root, thread_id, snapshot);
     let guard = dashboard::current_session_budget_guard(snapshot);
-    let root_cause_payload = dashboard::client_budget_root_cause_payload_with_guard(snapshot, &guard);
+    let root_cause_payload =
+        dashboard::client_budget_root_cause_payload_with_guard(snapshot, &guard);
     let compact_root_cause =
         compact_client_budget_root_cause_payload(&root_cause_payload, Some(&guard));
-    let compact_gate = json!({
-        "client_budget_reply_gate": compact_cli_client_budget_gate_payload(&guard)
-    });
+    let compact_gate =
+        front_door_client_budget_gate_payload(compact_cli_client_budget_gate_payload(&guard));
     let compact_guard = compact_current_session_budget_guard_payload(&guard);
     let surfaces_cache = build_compact_client_budget_surfaces_cache(
         &compact_root_cause,
@@ -5138,11 +7257,8 @@ fn materialize_shared_thread_bound_client_budget_surfaces_from_snapshot(
         &compact_guard,
         Some(thread_id),
     );
-    let _ = write_shared_compact_client_budget_surfaces(
-        repo_root,
-        Some(thread_id),
-        &surfaces_cache,
-    );
+    let _ =
+        write_shared_compact_client_budget_surfaces(repo_root, Some(thread_id), &surfaces_cache);
     let gate_cache =
         build_compact_client_budget_gate_cache(&compact_gate, &compact_guard, Some(thread_id));
     let _ = write_shared_compact_client_budget_gate(repo_root, Some(thread_id), &gate_cache);
@@ -5155,9 +7271,7 @@ async fn populate_thread_bound_client_budget_surfaces_from_snapshot(
     snapshot: Value,
 ) {
     materialize_shared_thread_bound_client_budget_surfaces_from_snapshot(
-        repo_root,
-        thread_id,
-        &snapshot,
+        repo_root, thread_id, &snapshot,
     );
 
     let completed_epoch_ms = now_epoch_ms();
@@ -5179,9 +7293,14 @@ async fn cached_thread_bound_snapshot_with_meta(
             cache.thread_bound_snapshot_completed_epoch_ms,
             cache.thread_bound_snapshot.clone(),
         ) {
+            let now_epoch_ms_value = now_epoch_ms();
             if cached_thread_id == thread_id
-                && now_epoch_ms().saturating_sub(completed_at)
+                && now_epoch_ms_value.saturating_sub(completed_at)
                     <= COMPACT_CLIENT_BUDGET_REQUEST_MAX_CACHE_AGE_MS
+                && thread_bound_budget_snapshot_has_fresh_exact_limit_surfaces(
+                    &snapshot,
+                    now_epoch_ms_value,
+                )
                 && !load_shared_thread_bound_snapshot_invalidation(&repo_root, thread_id)
                     .is_some_and(|invalidated_at_epoch_ms| invalidated_at_epoch_ms >= completed_at)
             {
@@ -5222,9 +7341,7 @@ fn cached_latest_repo_working_state_restore_snapshot(cache: &ObserveCache) -> Op
 fn cached_token_budget_report_snapshot(cache: &ObserveCache) -> Option<Value> {
     let snapshot = cache.snapshot.as_ref()?;
     let report = snapshot["token_budget_report"]["token_budget_report"].clone();
-    report["current_session"]
-        .is_object()
-        .then_some(report)
+    report["current_session"].is_object().then_some(report)
 }
 
 async fn compact_client_budget_snapshot_for_request(
@@ -5278,23 +7395,47 @@ async fn refresh_client_live_meter_on_request(state: &ObserveState) {
     if let Err(error) = maybe_refresh_client_live_meter(state).await {
         eprintln!("observe request-side client meter refresh failed: {error:#}");
     }
+    let mut cache = state.cache.write().await;
+    cache.client_live_meter_refresh_in_progress = false;
+}
+
+async fn spawn_client_live_meter_refresh(state: &ObserveState) {
+    let now = now_epoch_ms();
+    {
+        let mut cache = state.cache.write().await;
+        if cache.client_live_meter_refresh_in_progress {
+            return;
+        }
+        if cache
+            .client_live_meter_refresh_started_epoch_ms
+            .is_some_and(|started_at| {
+                now.saturating_sub(started_at) < CLIENT_LIMIT_LIVE_SOURCE_TTL_MS
+            })
+        {
+            return;
+        }
+        cache.client_live_meter_refresh_in_progress = true;
+        cache.client_live_meter_refresh_started_epoch_ms = Some(now);
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        refresh_client_live_meter_on_request(&state).await;
+    });
 }
 
 async fn maybe_refresh_client_live_meter(state: &ObserveState) -> Result<()> {
     let cache_snapshot = {
         let cache = state.cache.read().await;
-        if observe_cache_stale(&cache, state.dashboard_refresh_ms) {
-            None
-        } else {
-            Some((
-                cache.snapshot.clone(),
-                cache.last_refresh_completed_epoch_ms,
-                cache.refresh_in_progress,
-            ))
-        }
+        Some((
+            cache.snapshot.clone(),
+            cache.last_refresh_completed_epoch_ms,
+            cache.refresh_in_progress,
+            observe_cache_stale(&cache, state.dashboard_refresh_ms),
+        ))
     };
 
-    let Some((snapshot, _last_refresh_completed_epoch_ms, refresh_in_progress)) = cache_snapshot
+    let Some((snapshot, _last_refresh_completed_epoch_ms, refresh_in_progress, cache_stale)) =
+        cache_snapshot
     else {
         return refresh_observe_cache(
             state.cache.clone(),
@@ -5305,7 +7446,23 @@ async fn maybe_refresh_client_live_meter(state: &ObserveState) -> Result<()> {
         .await;
     };
 
+    if cache_stale {
+        if refresh_in_progress {
+            return Ok(());
+        }
+        return refresh_observe_cache(
+            state.cache.clone(),
+            state.cfg.clone(),
+            state.bind.clone(),
+            state.dashboard_refresh_ms,
+        )
+        .await;
+    }
+
     let Some(snapshot) = snapshot else {
+        if refresh_in_progress {
+            return Ok(());
+        }
         return refresh_observe_cache(
             state.cache.clone(),
             state.cfg.clone(),
@@ -5327,13 +7484,16 @@ async fn maybe_refresh_client_live_meter(state: &ObserveState) -> Result<()> {
         if refresh_in_progress {
             return Ok(());
         }
-        return refresh_observe_cache(
-            state.cache.clone(),
-            state.cfg.clone(),
-            state.bind.clone(),
-            state.dashboard_refresh_ms,
-        )
-        .await;
+        return prewarm_active_thread_bound_client_budget_surfaces(state.cache.clone(), &state.cfg)
+            .await;
+    }
+
+    if active_agent_budget_refresh_needed(&snapshot, ACTIVE_AGENT_CARD_MAX_SOURCE_DRIFT_MS)? {
+        if refresh_in_progress {
+            return Ok(());
+        }
+        return prewarm_active_thread_bound_client_budget_surfaces(state.cache.clone(), &state.cfg)
+            .await;
     }
 
     let cached_meter = cached_client_live_meter_state(&snapshot);
@@ -5351,13 +7511,56 @@ async fn maybe_refresh_client_live_meter(state: &ObserveState) -> Result<()> {
     if refresh_in_progress {
         return Ok(());
     }
-    refresh_observe_cache(
+    prewarm_thread_bound_client_budget_surfaces_for_thread(
         state.cache.clone(),
-        state.cfg.clone(),
-        state.bind.clone(),
-        state.dashboard_refresh_ms,
+        &state.cfg,
+        &thread_id,
     )
     .await
+}
+
+fn active_agent_budget_refresh_needed(snapshot: &Value, max_source_drift_ms: i64) -> Result<bool> {
+    let Some(agents) = snapshot["active_agent_budget"]["agents"].as_array() else {
+        return Ok(false);
+    };
+
+    for agent in agents {
+        let Some(thread_id) = agent["thread_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let card_ended_at_epoch_ms = agent["client_live_meter"]["ended_at_epoch_ms"]
+            .as_i64()
+            .unwrap_or_default();
+        let latest_rollout =
+            codex_threads::latest_rollout_client_meter_observation_for_thread(thread_id)?;
+        let Some(latest_rollout) = latest_rollout else {
+            continue;
+        };
+        if active_agent_card_refresh_needed_against_rollout(
+            card_ended_at_epoch_ms,
+            &latest_rollout,
+            max_source_drift_ms,
+        ) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn active_agent_card_refresh_needed_against_rollout(
+    card_ended_at_epoch_ms: i64,
+    rollout: &codex_threads::RolloutClientMeterObservation,
+    max_source_drift_ms: i64,
+) -> bool {
+    if card_ended_at_epoch_ms <= 0 {
+        return true;
+    }
+    rollout.ended_at_epoch_ms > card_ended_at_epoch_ms.saturating_add(max_source_drift_ms.max(0))
 }
 
 fn cached_exact_client_limit_refresh_needed(
@@ -5505,6 +7708,17 @@ fn observe_cache_meta(cache: &ObserveCache, refresh_ms: u64) -> Value {
         "stale": observe_cache_stale(cache, refresh_ms),
         "last_error": cache.last_error.clone(),
     })
+}
+
+fn observe_refresh_stuck(cache: &ObserveCache) -> bool {
+    if !cache.refresh_in_progress {
+        return false;
+    }
+    let Some(started_at_epoch_ms) = cache.last_refresh_started_epoch_ms else {
+        return true;
+    };
+    now_epoch_ms().saturating_sub(started_at_epoch_ms)
+        > OBSERVE_REFRESH_TIMEOUT_MS.saturating_add(OBSERVE_REFRESH_STUCK_GRACE_MS)
 }
 
 fn cache_snapshot_age_ms(cache: &ObserveCache) -> Option<u64> {
@@ -5675,17 +7889,8 @@ async fn collect_qdrant_live_from(
         .await
         .context("failed to read qdrant metrics response")?;
     let metrics = parse_prometheus_sums(&metrics_text);
-    let collection: Value = http
-        .get(format!(
-            "{}/collections/{}",
-            qdrant_http_url, collection_code
-        ))
-        .send()
-        .await
-        .context("failed to query qdrant collection endpoint")?
-        .json()
-        .await
-        .context("failed to decode qdrant collection response")?;
+    let (resolved_collection_code, collection) =
+        resolve_qdrant_collection_live(qdrant_http_url, collection_code, http).await?;
     let result = &collection["result"];
     Ok(json!({
         "collections_total": metric_value(&metrics, "collections_total"),
@@ -5693,12 +7898,108 @@ async fn collect_qdrant_live_from(
         "index_optimize_queue": metric_value(&metrics, "collection_update_queue_length"),
         "running_optimizations": metric_value(&metrics, "collection_running_optimizations"),
         "update_queue_length": metric_value(&metrics, "collection_update_queue_length"),
-        "memory_resident_bytes": metric_value(&metrics, "memory_resident_bytes"),
+        "memory_resident_bytes": metric_value_optional(&metrics, "memory_resident_bytes"),
         "optimizer_status": result["optimizer_status"].clone(),
         "indexed_vectors_count": result["indexed_vectors_count"].clone(),
         "points_count": result["points_count"].clone(),
         "segments_count": result["segments_count"].clone(),
+        "effective_collection_code": resolved_collection_code,
     }))
+}
+
+async fn resolve_qdrant_collection_live(
+    qdrant_http_url: &str,
+    collection_code: &str,
+    http: &reqwest::Client,
+) -> Result<(String, Value)> {
+    if let Some(collection) =
+        fetch_qdrant_collection_json(qdrant_http_url, collection_code, http).await?
+    {
+        return Ok((collection_code.to_string(), collection));
+    }
+    let Some(discovered_collection_code) =
+        discover_single_qdrant_collection_code(qdrant_http_url, http).await?
+    else {
+        bail!(
+            "qdrant collection {} is unavailable and no single fallback collection could be discovered",
+            collection_code
+        );
+    };
+    let discovered_collection =
+        fetch_qdrant_collection_json(qdrant_http_url, &discovered_collection_code, http)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "qdrant fallback collection {} disappeared before it could be queried",
+                    discovered_collection_code
+                )
+            })?;
+    Ok((discovered_collection_code, discovered_collection))
+}
+
+async fn fetch_qdrant_collection_json(
+    qdrant_http_url: &str,
+    collection_code: &str,
+    http: &reqwest::Client,
+) -> Result<Option<Value>> {
+    let response = http
+        .get(format!(
+            "{}/collections/{}",
+            qdrant_http_url, collection_code
+        ))
+        .send()
+        .await
+        .context("failed to query qdrant collection endpoint")?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        bail!(
+            "qdrant collection endpoint {} returned HTTP {}",
+            collection_code,
+            response.status()
+        );
+    }
+    let collection = response
+        .json()
+        .await
+        .context("failed to decode qdrant collection response")?;
+    Ok(Some(collection))
+}
+
+async fn discover_single_qdrant_collection_code(
+    qdrant_http_url: &str,
+    http: &reqwest::Client,
+) -> Result<Option<String>> {
+    let response = http
+        .get(format!("{}/collections", qdrant_http_url))
+        .send()
+        .await
+        .context("failed to query qdrant collections endpoint")?;
+    if !response.status().is_success() {
+        bail!(
+            "qdrant collections endpoint returned HTTP {}",
+            response.status()
+        );
+    }
+    let collections: Value = response
+        .json()
+        .await
+        .context("failed to decode qdrant collections response")?;
+    let mut names = collections["result"]["collections"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["name"].as_str())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    if names.len() == 1 {
+        Ok(names.into_iter().next())
+    } else {
+        Ok(None)
+    }
 }
 
 async fn collect_qdrant_live(cfg: &AppConfig, http: &reqwest::Client) -> Result<Value> {
@@ -5729,6 +8030,9 @@ async fn collect_optional_benchmark_qdrant_live(cfg: &AppConfig, http: &reqwest:
             )
         })
         .unwrap_or(false);
+    let benchmark_run_summary = discover_repo_root(None).ok().and_then(|repo_root| {
+        external_benchmark::benchmark_run_summary_for_qdrant_http_url(&repo_root, qdrant_http_url)
+    });
     match collect_qdrant_live_from(qdrant_http_url, collection_code, http).await {
         Ok(mut value) => {
             if let Some(object) = value.as_object_mut() {
@@ -5748,6 +8052,16 @@ async fn collect_optional_benchmark_qdrant_live(cfg: &AppConfig, http: &reqwest:
                     "captured_at_epoch_ms".to_string(),
                     Value::from(now_epoch_ms()),
                 );
+                if let Some(run_summary) = benchmark_run_summary.clone() {
+                    let mut run_summary = run_summary;
+                    if let Ok(repo_root) = discover_repo_root(None) {
+                        external_benchmark::enrich_untracked_ann_run_summary(
+                            &repo_root,
+                            &mut run_summary,
+                        );
+                    }
+                    object.insert("run_summary".to_string(), run_summary);
+                }
             }
             persist_last_successful_benchmark_qdrant_snapshot(&value);
             value
@@ -5767,6 +8081,16 @@ async fn collect_optional_benchmark_qdrant_live(cfg: &AppConfig, http: &reqwest:
                         "collection_code".to_string(),
                         Value::String(collection_code.to_string()),
                     );
+                    if let Some(run_summary) = benchmark_run_summary.clone() {
+                        let mut run_summary = run_summary;
+                        if let Ok(repo_root) = discover_repo_root(None) {
+                            external_benchmark::enrich_untracked_ann_run_summary(
+                                &repo_root,
+                                &mut run_summary,
+                            );
+                        }
+                        object.insert("run_summary".to_string(), run_summary);
+                    }
                 }
                 cached
             })
@@ -5778,6 +8102,7 @@ async fn collect_optional_benchmark_qdrant_live(cfg: &AppConfig, http: &reqwest:
                     "from_last_success": false,
                     "http_url": qdrant_http_url,
                     "collection_code": collection_code,
+                    "run_summary": benchmark_run_summary,
                 })
             }),
     }
@@ -6346,6 +8671,10 @@ fn parse_prometheus_sums(body: &str) -> HashMap<String, f64> {
 
 fn metric_value(metrics: &HashMap<String, f64>, key: &str) -> f64 {
     metrics.get(key).copied().unwrap_or(0.0)
+}
+
+fn metric_value_optional(metrics: &HashMap<String, f64>, key: &str) -> Option<f64> {
+    metrics.get(key).copied()
 }
 
 fn extract_nats_consumer_lag(jsz: &Value) -> u64 {
@@ -7015,19 +9344,707 @@ fn push_metric(output: &mut String, name: &str, help: &str, value: Option<f64>) 
 #[cfg(test)]
 mod tests {
     use super::{
-        COMPACT_CLIENT_BUDGET_REQUEST_MAX_CACHE_AGE_MS, ObserveCache,
+        COMPACT_CLIENT_BUDGET_REQUEST_MAX_CACHE_AGE_MS, ObserveCache, ObserveState,
         benchmark_contamination_value, build_continuity_correctness_model, build_degradation_model,
         cache_snapshot_age_ms, cached_client_live_meter_state, client_live_meter_refresh_needed,
-        compact_client_budget_snapshot_cache_too_old, evaluate_sla, expired_retention_candidates,
-        load_profile, normalized_thread_id_hint, profile_thresholds_json,
-        render_prometheus_metrics, select_latest_clean_benchmark_snapshot,
+        compact_client_budget_snapshot_cache_too_old, dashboard_live_summary_api_handler,
+        dashboard_page_handler, evaluate_sla, expired_retention_candidates, load_profile,
+        merge_thread_bound_client_budget_snapshot_into_base_snapshot, normalized_thread_id_hint,
+        profile_thresholds_json, render_prometheus_metrics, select_latest_clean_benchmark_snapshot,
     };
-    use crate::codex_threads::RolloutClientMeterObservation;
+    use crate::codex_threads::{
+        RecentClientThreadRecord, RolloutClientMeterObservation, RolloutJsonlToleranceSummary,
+    };
+    use crate::config::AppConfig;
     use crate::postgres::ObservabilityRetentionCandidate;
     use crate::working_state;
-    use serde_json::json;
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+        routing::{get, post},
+    };
+    use reqwest::Client;
+    use serde_json::{Value, json};
     use std::fs;
+    use std::path::Path;
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
+    use tokio::sync::RwLock;
+    use tower::util::ServiceExt;
     use uuid::Uuid;
+
+    fn test_config() -> AppConfig {
+        AppConfig {
+            stack_name: "amai".to_string(),
+            pg_db: "amai".to_string(),
+            app_db_user: "amai".to_string(),
+            app_db_password: "amai".to_string(),
+            postgres_dsn: "postgres://127.0.0.1:1/unused".to_string(),
+            app_postgres_dsn: "postgres://127.0.0.1:1/unused".to_string(),
+            qdrant_url: "http://127.0.0.1:1".to_string(),
+            qdrant_http_url: "http://127.0.0.1:1".to_string(),
+            qdrant_collection_code: "test".to_string(),
+            benchmark_qdrant_http_url: None,
+            benchmark_qdrant_collection_code: None,
+            qdrant_alias_code: "test".to_string(),
+            qdrant_collection_memory: "memory".to_string(),
+            qdrant_alias_memory: "memory".to_string(),
+            qdrant_code_dim: 384,
+            qdrant_memory_dim: 384,
+            qdrant_distance: "Cosine".to_string(),
+            s3_endpoint: "http://127.0.0.1:1".to_string(),
+            s3_region: "us-east-1".to_string(),
+            s3_access_key: "test".to_string(),
+            s3_secret_key: "test".to_string(),
+            s3_bucket_artifacts: "artifacts".to_string(),
+            s3_bucket_transcripts: "transcripts".to_string(),
+            s3_bucket_context: "context".to_string(),
+            nats_url: "nats://127.0.0.1:1".to_string(),
+            nats_http_url: "http://127.0.0.1:1".to_string(),
+            code_embed_model: "multilingual_e5_small".to_string(),
+            memory_embed_model: "multilingual_e5_small".to_string(),
+            chunk_max_bytes: 512,
+            fallback_chunk_lines: 40,
+            fallback_chunk_overlap_lines: 5,
+            edge_cache_path: "/tmp/observe-test-edge-cache.db".into(),
+            default_retrieval_mode: "local_strict".to_string(),
+            local_fast_cache_ttl_ms: 5_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_qdrant_live_falls_back_to_single_discovered_collection() {
+        async fn metrics_handler() -> &'static str {
+            "# HELP collections_total number of collections\n# TYPE collections_total gauge\ncollections_total 1\n# HELP collections_vector_total total number of vectors in all collections\n# TYPE collections_vector_total gauge\ncollections_vector_total 860484\n# HELP memory_resident_bytes resident memory\n# TYPE memory_resident_bytes gauge\nmemory_resident_bytes 12345\n"
+        }
+
+        async fn collections_handler() -> axum::Json<Value> {
+            axum::Json(json!({
+                "result": {
+                    "collections": [
+                        {"name": "ann_benchmarks_test"}
+                    ]
+                },
+                "status": "ok"
+            }))
+        }
+
+        async fn missing_collection_handler() -> (StatusCode, axum::Json<Value>) {
+            (
+                StatusCode::NOT_FOUND,
+                axum::Json(json!({
+                    "status": "error",
+                    "result": null
+                })),
+            )
+        }
+
+        async fn discovered_collection_handler() -> axum::Json<Value> {
+            axum::Json(json!({
+                "result": {
+                    "optimizer_status": "ok",
+                    "indexed_vectors_count": 0,
+                    "points_count": 859520,
+                    "segments_count": 30
+                },
+                "status": "ok"
+            }))
+        }
+
+        let app = Router::new()
+            .route("/metrics", get(metrics_handler))
+            .route("/collections", get(collections_handler))
+            .route(
+                "/collections/QdrantLocalCollection",
+                get(missing_collection_handler),
+            )
+            .route(
+                "/collections/ann_benchmarks_test",
+                get(discovered_collection_handler),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let http = Client::new();
+        let live = super::collect_qdrant_live_from(
+            &format!("http://{}", addr),
+            "QdrantLocalCollection",
+            &http,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            live["effective_collection_code"].as_str(),
+            Some("ann_benchmarks_test")
+        );
+        assert_eq!(live["points_count"].as_u64(), Some(859520));
+        assert_eq!(live["segments_count"].as_u64(), Some(30));
+        assert_eq!(live["collections_vector_total"].as_f64(), Some(860484.0));
+        server.abort();
+    }
+
+    #[test]
+    fn merge_keeps_richer_base_live_response_latency_when_thread_surface_is_empty() {
+        let base_snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "live_response_latency": {
+                        "current_session": {
+                            "sample_count": 91,
+                            "latency_slices": [
+                                {"state": "hot", "sample_count": 47},
+                                {"state": "cold", "sample_count": 44}
+                            ]
+                        },
+                        "rolling_window": {
+                            "sample_count": 92,
+                            "latency_slices": [
+                                {"state": "hot", "sample_count": 48},
+                                {"state": "cold", "sample_count": 44}
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+        let thread_bound_snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "live_response_latency": {
+                        "current_session": {
+                            "sample_count": 0,
+                            "latency_slices": []
+                        },
+                        "rolling_window": {
+                            "sample_count": 0,
+                            "latency_slices": []
+                        }
+                    }
+                }
+            }
+        });
+
+        let merged = merge_thread_bound_client_budget_snapshot_into_base_snapshot(
+            &base_snapshot,
+            &thread_bound_snapshot,
+        );
+
+        assert_eq!(
+            merged["token_budget_report"]["token_budget_report"]["live_response_latency"]
+                ["current_session"]["sample_count"]
+                .as_u64(),
+            Some(91)
+        );
+        assert_eq!(
+            merged["token_budget_report"]["token_budget_report"]["live_response_latency"]
+                ["rolling_window"]["sample_count"]
+                .as_u64(),
+            Some(92)
+        );
+    }
+
+    fn test_observe_state(cache: ObserveCache) -> ObserveState {
+        ObserveState {
+            dashboard_refresh_ms: 1000,
+            cfg: test_config(),
+            bind: "127.0.0.1:9464".to_string(),
+            cache: Arc::new(RwLock::new(cache)),
+        }
+    }
+
+    #[test]
+    fn host_current_thread_control_window_targeting_allows_single_visible_target_thread() {
+        let repo_root = Path::new("/home/art/agent-memory-index");
+        let threads = vec![RecentClientThreadRecord {
+            thread_id: "thread-amai".to_string(),
+            cwd: "/home/art/agent-memory-index".to_string(),
+            rollout_path: "/tmp/rollout.jsonl".to_string(),
+            title: "Amai".to_string(),
+            agent_nickname: None,
+            agent_role: None,
+            model_provider: Some("openai".to_string()),
+            model: Some("gpt-5.4".to_string()),
+            reasoning_effort: Some("medium".to_string()),
+            updated_at_epoch_s: 1_775_118_000,
+        }];
+
+        let summary = super::evaluate_host_current_thread_control_window_targeting(
+            repo_root,
+            "thread-amai",
+            &threads,
+        );
+
+        assert_eq!(summary["status"], json!("allowed"));
+        assert_eq!(summary["allowed"], json!(true));
+        assert_eq!(summary["visible_model_bound_thread_count"], json!(1));
+        assert_eq!(summary["target_thread_visible"], json!(true));
+        assert_eq!(summary["target_thread_repo_root_match"], json!(true));
+        assert!(summary["denial_reason"].is_null());
+    }
+
+    #[tokio::test]
+    async fn dashboard_page_route_keeps_live_summary_contract_without_cached_bootstrap_payload() {
+        let payload = json!({
+            "meta": {
+                "package_version": "0.1.0"
+            },
+            "headline": {
+                "status": "pass",
+                "status_label": "ok",
+                "status_reason": "cached payload",
+                "token_value": "5ч KPI: 1:1",
+                "token_scope": ""
+            },
+            "hero_cards": [],
+            "top_cards": [],
+            "benchmark_cards": [],
+            "machine_cards": [],
+            "service_cards": [],
+            "warnings": [],
+            "glossary": [],
+            "links": []
+        });
+        let mut cache = ObserveCache::default();
+        cache.dashboard_payload = Some(payload);
+        let app = Router::new()
+            .route("/", get(dashboard_page_handler))
+            .with_state(test_observe_state(cache));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let html = String::from_utf8(body.to_vec()).expect("html");
+        assert!(html.contains("/api/dashboard-live-summary"));
+        assert!(html.contains("syncDashboardLiveSummary"));
+        assert!(!html.contains("/api/active-agent-budget-live"));
+        assert!(!html.contains("syncActiveAgentBudgetLiveCard"));
+        assert!(!html.contains("fetchActiveAgentBudgetLivePayload"));
+        assert!(html.contains("const DASHBOARD_BOOTSTRAP_PAYLOAD = null;"));
+        assert!(!html.contains("cached payload"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_live_summary_route_is_mounted_and_not_404() {
+        let app = Router::new()
+            .route(
+                "/api/dashboard-live-summary",
+                get(dashboard_live_summary_api_handler),
+            )
+            .with_state(test_observe_state(ObserveCache::default()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/dashboard-live-summary")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let text = String::from_utf8(body.to_vec()).expect("body text");
+        assert!(text.contains("\"status\":\"down\""));
+    }
+
+    #[tokio::test]
+    async fn client_budget_live_route_returns_warmup_envelope_while_refresh_in_progress() {
+        let mut cache = ObserveCache::default();
+        cache.refresh_in_progress = true;
+
+        let app = Router::new()
+            .route(
+                "/api/client-budget-live",
+                get(super::client_budget_live_api_handler),
+            )
+            .with_state(test_observe_state(cache));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/client-budget-live")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let payload: Value = serde_json::from_slice(&body).expect("warmup payload");
+        assert_eq!(payload["status"], json!("warming_up"));
+        assert_eq!(payload["warmup_pending"], json!(true));
+        assert_eq!(payload["rows"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn dashboard_live_summary_route_returns_warmup_envelope_while_refresh_in_progress() {
+        let mut cache = ObserveCache::default();
+        cache.refresh_in_progress = true;
+
+        let app = Router::new()
+            .route(
+                "/api/dashboard-live-summary",
+                get(super::dashboard_live_summary_api_handler),
+            )
+            .with_state(test_observe_state(cache));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/dashboard-live-summary")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let payload: Value = serde_json::from_slice(&body).expect("warmup payload");
+        assert_eq!(payload["headline"]["status"], json!("waiting"));
+        assert_eq!(payload["warmup_pending"], json!(true));
+        assert_eq!(payload["top_cards"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn dashboard_route_returns_warmup_envelope_while_refresh_in_progress() {
+        let mut cache = ObserveCache::default();
+        cache.refresh_in_progress = true;
+
+        let app = Router::new()
+            .route("/api/dashboard", get(super::dashboard_api_handler))
+            .with_state(test_observe_state(cache));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/dashboard")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let payload: Value = serde_json::from_slice(&body).expect("warmup payload");
+        assert_eq!(payload["headline"]["status"], json!("waiting"));
+        assert_eq!(payload["service_cards"], json!([]));
+        assert_eq!(
+            payload["warnings"][0],
+            json!("Панель ещё прогревается: первый live snapshot не готов.")
+        );
+    }
+
+    #[tokio::test]
+    async fn healthz_route_returns_up_envelope_for_ready_cache() {
+        let mut cache = ObserveCache::default();
+        cache.snapshot = Some(json!({
+            "sla": {
+                "summary": {
+                    "critical": 0,
+                    "unknown": 0
+                }
+            }
+        }));
+        cache.last_refresh_completed_epoch_ms = Some(super::now_epoch_ms());
+
+        let app = Router::new()
+            .route("/healthz", get(super::healthz_handler))
+            .with_state(test_observe_state(cache));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let payload: Value = serde_json::from_slice(&body).expect("health payload");
+        assert_eq!(payload["status"], json!("up"));
+        assert_eq!(payload["critical"], json!(0));
+        assert_eq!(payload["unknown"], json!(0));
+        assert_eq!(payload["cache_stale"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn healthz_route_returns_down_envelope_when_cache_is_stale() {
+        let mut cache = ObserveCache::default();
+        cache.snapshot = Some(json!({
+            "sla": {
+                "summary": {
+                    "critical": 0,
+                    "unknown": 0
+                }
+            }
+        }));
+
+        let app = Router::new()
+            .route("/healthz", get(super::healthz_handler))
+            .with_state(test_observe_state(cache));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let payload: Value = serde_json::from_slice(&body).expect("health payload");
+        assert_eq!(payload["status"], json!("down"));
+        assert_eq!(payload["cache_stale"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn agent_display_name_route_rejects_empty_scope_before_db_lookup() {
+        let app = Router::new()
+            .route(
+                "/api/agent-display-name",
+                post(super::agent_display_name_update_api_handler),
+            )
+            .with_state(test_observe_state(ObserveCache::default()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/agent-display-name")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"agent_scope":"   ","display_name":"Новый агент"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let text = String::from_utf8(body.to_vec()).expect("body text");
+        assert!(text.contains("agent_scope is required"));
+    }
+
+    #[test]
+    fn legacy_active_agent_payload_matches_live_summary_bundle_on_same_snapshot() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1774239286880u64,
+            "observe_refresh": {
+                "total_ms": 321u64,
+                "stage_ms": {
+                    "active_agent_budget": 44u64
+                }
+            },
+            "sla": {
+                "summary": {
+                    "pass": 19,
+                    "alert": 0,
+                    "critical": 0,
+                    "unknown": 0
+                }
+            },
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 1.0,
+                        "target_p99_ms": 2.0,
+                        "target_max_ms": 5.0,
+                        "target_sample_count": 100000
+                    },
+                    "cold_live_table": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 12.0,
+                        "target_p99_ms": 13.0,
+                        "target_max_ms": 15.0,
+                        "target_sample_count": 10000
+                    }
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "headline": {
+                        "title": "global fallback",
+                        "value_percent": 12.0,
+                        "scope_label": "fallback"
+                    },
+                    "current_session": {
+                        "latency_slices": []
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": null
+            },
+            "agent_scope_activity": {
+                "client_recent_window_minutes": 30,
+                "client_recent_thread_count": 2,
+                "client_recent_threads": [],
+                "active_now_count": 2,
+                "active_now_scopes": [],
+                "recent_scope_window_hours": 24,
+                "recent_scope_count": 2,
+                "recent_scopes": []
+            },
+            "active_agent_budget": {
+                "captured_at_epoch_ms": 1774239286000u64,
+                "source": "live_active_agent_budget_surface",
+                "headline": {
+                    "title": "Средний KPI активных агентов",
+                    "value_text": "5ч KPI: экономия 40.00%",
+                    "scope_label": "среднее по 2 активным агентам"
+                },
+                "aggregate": {
+                    "status": "observed",
+                    "classification": "saving",
+                    "reply_prefix": "5ч KPI: экономия 40.00%"
+                },
+                "agents": [
+                    {
+                        "agent_label": "Amai",
+                        "agent_scope": "amai::continuity::default",
+                        "thread_title": "Amai dashboard",
+                        "cwd": "/home/art/agent-memory-index",
+                        "personal_agent_kpi": {
+                            "reply_prefix": "5ч KPI: экономия 60.00%",
+                            "summary": "agent one"
+                        },
+                        "personal_client_limit": {
+                            "value_text": "5ч остаётся 43.00%, 7д остаётся 72.00%",
+                            "tooltip": "personal limit one"
+                        }
+                    },
+                    {
+                        "agent_label": "Hunter",
+                        "agent_scope": "bug_bounty::continuity::default",
+                        "thread_title": "Bug bounty",
+                        "cwd": "/home/art/Bug-Bounty",
+                        "personal_agent_kpi": {
+                            "reply_prefix": "5ч KPI: экономия 20.00%",
+                            "summary": "agent two"
+                        },
+                        "personal_client_limit": {
+                            "value_text": "5ч остаётся 88.00%, 7д остаётся 91.00%",
+                            "tooltip": "personal limit two"
+                        }
+                    }
+                ]
+            }
+        });
+
+        let legacy_payload = super::active_agent_budget_card_payload_from_snapshot(&snapshot)
+            .expect("legacy active agent payload");
+        let live_summary = crate::dashboard::build_live_summary_payload(
+            &test_config(),
+            &snapshot,
+            "127.0.0.1:9464",
+            1000,
+        )
+        .expect("live summary payload");
+
+        assert_eq!(
+            legacy_payload["card"]["value"].as_str(),
+            live_summary["active_agent_card"]["value"].as_str()
+        );
+        assert_eq!(
+            legacy_payload["card"]["agent_blocks"],
+            live_summary["active_agent_card"]["agent_blocks"]
+        );
+    }
+
+    #[test]
+    fn host_current_thread_control_window_targeting_denies_ambiguous_multi_window_state() {
+        let repo_root = Path::new("/home/art/agent-memory-index");
+        let threads = vec![
+            RecentClientThreadRecord {
+                thread_id: "thread-amai".to_string(),
+                cwd: "/home/art/agent-memory-index".to_string(),
+                rollout_path: "/tmp/rollout-amai.jsonl".to_string(),
+                title: "Amai".to_string(),
+                agent_nickname: None,
+                agent_role: None,
+                model_provider: Some("openai".to_string()),
+                model: Some("gpt-5.4".to_string()),
+                reasoning_effort: Some("medium".to_string()),
+                updated_at_epoch_s: 1_775_118_000,
+            },
+            RecentClientThreadRecord {
+                thread_id: "thread-bounty".to_string(),
+                cwd: "/home/art/Bug-Bounty".to_string(),
+                rollout_path: "/tmp/rollout-bounty.jsonl".to_string(),
+                title: "Bug Bounty".to_string(),
+                agent_nickname: None,
+                agent_role: None,
+                model_provider: Some("openai".to_string()),
+                model: Some("gpt-5.4".to_string()),
+                reasoning_effort: Some("medium".to_string()),
+                updated_at_epoch_s: 1_775_118_001,
+            },
+        ];
+
+        let summary = super::evaluate_host_current_thread_control_window_targeting(
+            repo_root,
+            "thread-amai",
+            &threads,
+        );
+
+        assert_eq!(summary["status"], json!("denied"));
+        assert_eq!(summary["allowed"], json!(false));
+        assert_eq!(summary["visible_model_bound_thread_count"], json!(2));
+        assert_eq!(
+            summary["denial_reason"],
+            json!("ambiguous_multi_window_recent_threads")
+        );
+    }
 
     #[test]
     fn prometheus_token_rollups_export_verified_values_by_default() {
@@ -7117,6 +10134,181 @@ mod tests {
     }
 
     #[test]
+    fn merge_thread_bound_snapshot_preserves_full_dashboard_thresholds() {
+        let base_snapshot = json!({
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001
+                    }
+                }
+            },
+            "sla": {
+                "summary": {
+                    "critical": 0
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "headline": {
+                        "title": "5ч KPI: экономия",
+                        "value_percent": 42.0
+                    },
+                    "current_session": {
+                        "savings_percent": 25.0
+                    },
+                    "rolling_window": {
+                        "verified_effective_saved_tokens": 7154
+                    },
+                    "lifetime": {
+                        "verified_effective_saved_tokens": 13844711
+                    },
+                    "statement_previews": {
+                        "current_session": {
+                            "client_limit_meter_alignment": {
+                                "alignment_state": "same_meter_equivalent"
+                            }
+                        },
+                        "rolling_window": {
+                            "scope_label": "окно"
+                        },
+                        "lifetime": {
+                            "scope_label": "всё время"
+                        }
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "current_goal": "full snapshot"
+                }
+            }
+        });
+        let thread_bound_snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "surface": "dashboard_current_session_budget_only",
+                    "current_session": {
+                        "savings_percent": 70.0
+                    },
+                    "statement_previews": {
+                        "current_session": {
+                            "client_limit_meter_alignment": {
+                                "alignment_state": "same_meter_equivalent"
+                            }
+                        }
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "current_goal": "thread bound snapshot"
+                }
+            }
+        });
+
+        let merged = merge_thread_bound_client_budget_snapshot_into_base_snapshot(
+            &base_snapshot,
+            &thread_bound_snapshot,
+        );
+
+        assert_eq!(
+            merged["thresholds"]["dashboard"]["timing_format"]["switch_to_nanoseconds_below_ms"]
+                .as_f64(),
+            Some(0.001)
+        );
+        assert_eq!(merged["sla"]["summary"]["critical"].as_u64(), Some(0));
+        assert_eq!(
+            merged["token_budget_report"]["token_budget_report"]["current_session"]
+                ["savings_percent"]
+                .as_f64(),
+            Some(70.0)
+        );
+        assert_eq!(
+            merged["token_budget_report"]["token_budget_report"]["headline"]["value_percent"]
+                .as_f64(),
+            Some(42.0)
+        );
+        assert_eq!(
+            merged["token_budget_report"]["token_budget_report"]["rolling_window"]
+                ["verified_effective_saved_tokens"]
+                .as_i64(),
+            Some(7154)
+        );
+        assert_eq!(
+            merged["token_budget_report"]["token_budget_report"]["lifetime"]
+                ["verified_effective_saved_tokens"]
+                .as_i64(),
+            Some(13844711)
+        );
+        assert_eq!(
+            merged["token_budget_report"]["token_budget_report"]["statement_previews"]
+                ["rolling_window"]["scope_label"]
+                .as_str(),
+            Some("окно")
+        );
+        assert_eq!(
+            merged["token_budget_report"]["token_budget_report"]["statement_previews"]["lifetime"]
+                ["scope_label"]
+                .as_str(),
+            Some("всё время")
+        );
+        assert_eq!(
+            merged["latest_repo_working_state_restore"]["working_state_restore"]["current_goal"]
+                .as_str(),
+            Some("thread bound snapshot")
+        );
+    }
+
+    #[test]
+    fn overlay_live_active_agent_surfaces_replaces_cached_agent_card_data() {
+        let snapshot = json!({
+            "agent_scope_activity": {
+                "active_now_scopes": []
+            },
+            "active_agent_budget": {
+                "agents": [
+                    {
+                        "agent_label": "Amai",
+                        "personal_client_limit": {
+                            "value_text": "5ч остаётся 44.00%, 7д остаётся 23.00%"
+                        }
+                    }
+                ]
+            }
+        });
+
+        let merged = super::overlay_live_active_agent_surfaces(
+            snapshot,
+            json!({
+                "active_now_scopes": [
+                    { "owner_thread_id": "thread-amai" }
+                ]
+            }),
+            json!({
+                "agents": [
+                    {
+                        "agent_label": "Amai",
+                        "personal_client_limit": {
+                            "value_text": "5ч остаётся 42.00%, 7д остаётся 22.00%"
+                        }
+                    }
+                ]
+            }),
+        );
+
+        assert_eq!(
+            merged["active_agent_budget"]["agents"][0]["personal_client_limit"]["value_text"]
+                .as_str(),
+            Some("5ч остаётся 42.00%, 7д остаётся 22.00%")
+        );
+        assert_eq!(
+            merged["agent_scope_activity"]["active_now_scopes"][0]["owner_thread_id"].as_str(),
+            Some("thread-amai")
+        );
+    }
+
+    #[test]
     fn normalized_thread_id_hint_rejects_empty_values() {
         assert_eq!(normalized_thread_id_hint(None), None);
         assert_eq!(normalized_thread_id_hint(Some("")), None);
@@ -7147,7 +10339,7 @@ mod tests {
         });
 
         assert_eq!(
-            super::strict_auto_thread_binding_hint_from_snapshot(&snapshot).as_deref(),
+            super::strict_auto_thread_binding_hint_from_snapshot(snapshot).as_deref(),
             Some("thread-live")
         );
     }
@@ -7168,7 +10360,7 @@ mod tests {
         });
 
         assert_eq!(
-            super::strict_auto_thread_binding_hint_from_snapshot(&snapshot),
+            super::strict_auto_thread_binding_hint_from_snapshot(snapshot),
             None
         );
     }
@@ -7187,7 +10379,7 @@ mod tests {
         });
 
         assert_eq!(
-            super::strict_auto_thread_binding_hint_from_snapshot(&snapshot),
+            super::strict_auto_thread_binding_hint_from_snapshot(snapshot),
             None
         );
     }
@@ -7260,6 +10452,7 @@ mod tests {
             turn_id: "turn-1".to_string(),
             started_at_epoch_ms: 900,
             ended_at_epoch_ms: 1100,
+            first_assistant_response_at_epoch_ms: None,
             client_turn_total_tokens: 122000,
             client_turn_input_tokens: 0,
             client_turn_cached_input_tokens: 0,
@@ -7269,6 +10462,11 @@ mod tests {
             latest_model_context_window: 258400,
             latest_primary_limit_used_percent: 93,
             latest_secondary_limit_used_percent: 29,
+            latest_primary_window_duration_mins: None,
+            latest_primary_resets_at_epoch_seconds: None,
+            latest_secondary_window_duration_mins: None,
+            latest_secondary_resets_at_epoch_seconds: None,
+            rollout_jsonl_tolerance_summary: RolloutJsonlToleranceSummary::default(),
             observation_source: "codex_rollout_client_meter_v1".to_string(),
         };
 
@@ -7297,6 +10495,68 @@ mod tests {
         let cached = cached_client_live_meter_state(&snapshot);
 
         assert!(client_live_meter_refresh_needed(&cached, None));
+    }
+
+    #[test]
+    fn active_agent_card_refresh_needed_when_rollout_drift_exceeds_10_seconds() {
+        let rollout = RolloutClientMeterObservation {
+            thread_id: "thread-bounty".to_string(),
+            rollout_path: "/tmp/rollout.jsonl".to_string(),
+            turn_id: "turn-2".to_string(),
+            started_at_epoch_ms: 1_000,
+            ended_at_epoch_ms: 25_001,
+            first_assistant_response_at_epoch_ms: None,
+            client_turn_total_tokens: 150_000,
+            client_turn_input_tokens: 0,
+            client_turn_cached_input_tokens: 0,
+            client_turn_output_tokens: 0,
+            client_turn_reasoning_output_tokens: 0,
+            latest_cumulative_total_tokens: 200_000,
+            latest_model_context_window: 258400,
+            latest_primary_limit_used_percent: 74,
+            latest_secondary_limit_used_percent: 22,
+            latest_primary_window_duration_mins: Some(300),
+            latest_primary_resets_at_epoch_seconds: Some(123),
+            latest_secondary_window_duration_mins: Some(10080),
+            latest_secondary_resets_at_epoch_seconds: Some(456),
+            rollout_jsonl_tolerance_summary: RolloutJsonlToleranceSummary::default(),
+            observation_source: "codex_rollout_client_meter_v2".to_string(),
+        };
+
+        assert!(super::active_agent_card_refresh_needed_against_rollout(
+            15_000, &rollout, 10_000,
+        ));
+    }
+
+    #[test]
+    fn active_agent_card_refresh_not_needed_within_10_second_drift_budget() {
+        let rollout = RolloutClientMeterObservation {
+            thread_id: "thread-amai".to_string(),
+            rollout_path: "/tmp/rollout.jsonl".to_string(),
+            turn_id: "turn-2".to_string(),
+            started_at_epoch_ms: 1_000,
+            ended_at_epoch_ms: 25_000,
+            first_assistant_response_at_epoch_ms: None,
+            client_turn_total_tokens: 150_000,
+            client_turn_input_tokens: 0,
+            client_turn_cached_input_tokens: 0,
+            client_turn_output_tokens: 0,
+            client_turn_reasoning_output_tokens: 0,
+            latest_cumulative_total_tokens: 200_000,
+            latest_model_context_window: 258400,
+            latest_primary_limit_used_percent: 55,
+            latest_secondary_limit_used_percent: 77,
+            latest_primary_window_duration_mins: Some(300),
+            latest_primary_resets_at_epoch_seconds: Some(123),
+            latest_secondary_window_duration_mins: Some(10080),
+            latest_secondary_resets_at_epoch_seconds: Some(456),
+            rollout_jsonl_tolerance_summary: RolloutJsonlToleranceSummary::default(),
+            observation_source: "codex_rollout_client_meter_v2".to_string(),
+        };
+
+        assert!(!super::active_agent_card_refresh_needed_against_rollout(
+            15_000, &rollout, 10_000,
+        ));
     }
 
     #[test]
@@ -7730,6 +10990,13 @@ mod tests {
         ));
         let observed_at_epoch_ms = super::current_epoch_ms_u64();
         let root_cause = json!({
+            "thread_binding_state": "current_thread_bound",
+            "current_live_turn": {
+                "status": "observed"
+            },
+            "host_current_thread_control_effect": {
+                "effect_verdict": "same_thread_host_control_not_requested"
+            },
             "client_budget_reply_gate": {
                 "observed_at_epoch_ms": observed_at_epoch_ms,
                 "reply_execution_gate": {
@@ -7771,7 +11038,8 @@ mod tests {
         )
         .expect("fast thread-bound surfaces");
         assert_eq!(
-            loaded.surfaces.root_cause_payload["client_budget_reply_gate"]["reply_execution_gate"]["reply_prefix"],
+            loaded.surfaces.root_cause_payload["client_budget_reply_gate"]["reply_execution_gate"]
+                ["reply_prefix"],
             json!("5ч KPI: переплата 10.00%")
         );
         assert_eq!(
@@ -7836,11 +11104,9 @@ mod tests {
         ));
         super::write_shared_thread_bound_snapshot_invalidation(&temp_root, "thread-current")
             .expect("write invalidation");
-        let invalidated_at = super::load_shared_thread_bound_snapshot_invalidation(
-            &temp_root,
-            "thread-current",
-        )
-        .expect("load invalidation");
+        let invalidated_at =
+            super::load_shared_thread_bound_snapshot_invalidation(&temp_root, "thread-current")
+                .expect("load invalidation");
         assert!(invalidated_at > 0);
         assert!(
             super::load_shared_thread_bound_snapshot_invalidation(&temp_root, "thread-other")
@@ -7855,19 +11121,38 @@ mod tests {
             "amai-thread-bound-budget-snapshot-{}",
             Uuid::new_v4()
         ));
+        let observed_at_epoch_ms = super::current_epoch_ms_u64();
         let snapshot = json!({
             "token_budget_report": {
                 "token_budget_report": {
-                    "surface": "dashboard_current_session_budget_only"
+                    "surface": "dashboard_current_session_budget_only",
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "latest_observed_at_epoch_ms": observed_at_epoch_ms
+                    },
+                    "client_live_meter": {
+                        "status_bar_rate_limits": {
+                            "status": "observed",
+                            "observed_at_epoch_ms": observed_at_epoch_ms
+                        }
+                    },
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn",
+                        "exact_pair_available": true,
+                        "exact_pair": {
+                            "without_amai_tokens": 0,
+                            "with_amai_tokens": 0,
+                            "saved_tokens": 0,
+                            "saved_pct": 0.0
+                        },
+                        "matched_events_count": 0,
+                        "retrieval_context_pack_count": 0
+                    }
                 }
             }
         });
-        super::write_shared_thread_bound_budget_snapshot(
-            &temp_root,
-            "thread-current",
-            &snapshot,
-        )
-        .expect("write thread-bound snapshot");
+        super::write_shared_thread_bound_budget_snapshot(&temp_root, "thread-current", &snapshot)
+            .expect("write thread-bound snapshot");
         let loaded = super::load_shared_thread_bound_budget_snapshot(
             &temp_root,
             super::current_epoch_ms_u64(),
@@ -7887,19 +11172,38 @@ mod tests {
             "amai-thread-bound-budget-snapshot-invalidated-{}",
             Uuid::new_v4()
         ));
+        let observed_at_epoch_ms = super::current_epoch_ms_u64();
         let snapshot = json!({
             "token_budget_report": {
                 "token_budget_report": {
-                    "surface": "dashboard_current_session_budget_only"
+                    "surface": "dashboard_current_session_budget_only",
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "latest_observed_at_epoch_ms": observed_at_epoch_ms
+                    },
+                    "client_live_meter": {
+                        "status_bar_rate_limits": {
+                            "status": "observed",
+                            "observed_at_epoch_ms": observed_at_epoch_ms
+                        }
+                    },
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn",
+                        "exact_pair_available": true,
+                        "exact_pair": {
+                            "without_amai_tokens": 0,
+                            "with_amai_tokens": 0,
+                            "saved_tokens": 0,
+                            "saved_pct": 0.0
+                        },
+                        "matched_events_count": 0,
+                        "retrieval_context_pack_count": 0
+                    }
                 }
             }
         });
-        super::write_shared_thread_bound_budget_snapshot(
-            &temp_root,
-            "thread-current",
-            &snapshot,
-        )
-        .expect("write thread-bound snapshot");
+        super::write_shared_thread_bound_budget_snapshot(&temp_root, "thread-current", &snapshot)
+            .expect("write thread-bound snapshot");
         let cache_path =
             super::thread_bound_budget_snapshot_shared_cache_path(&temp_root, "thread-current");
         let mut persisted: serde_json::Value =
@@ -7939,24 +11243,171 @@ mod tests {
             "amai-budget-snapshot-preview-cache-{}",
             Uuid::new_v4()
         ));
+        let observed_at_epoch_ms = super::current_epoch_ms_u64();
         let snapshot = json!({
             "token_budget_report": {
                 "token_budget_report": {
-                    "surface": "dashboard_current_session_budget_only"
+                    "surface": "dashboard_current_session_budget_only",
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "latest_observed_at_epoch_ms": observed_at_epoch_ms
+                    },
+                    "client_live_meter": {
+                        "status_bar_rate_limits": {
+                            "status": "observed",
+                            "observed_at_epoch_ms": observed_at_epoch_ms
+                        }
+                    }
                 }
             }
         });
-        super::write_shared_thread_bound_budget_snapshot(
-            &temp_root,
-            "thread-current",
-            &snapshot,
-        )
-        .expect("write thread-bound snapshot");
+        super::write_shared_thread_bound_budget_snapshot(&temp_root, "thread-current", &snapshot)
+            .expect("write thread-bound snapshot");
         let loaded = super::load_shared_budget_snapshot_preview(&temp_root, Some("thread-current"))
             .expect("load shared budget snapshot preview");
         assert_eq!(
             loaded["token_budget_report"]["token_budget_report"]["surface"],
             json!("dashboard_current_session_budget_only")
+        );
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn shared_thread_bound_budget_snapshot_rejects_stale_exact_limit_surfaces() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "amai-thread-bound-budget-snapshot-stale-exact-limits-{}",
+            Uuid::new_v4()
+        ));
+        let stale_observed_at_epoch_ms =
+            20_000u64.saturating_sub(super::COMPACT_CLIENT_BUDGET_REQUEST_MAX_CACHE_AGE_MS + 1);
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "surface": "dashboard_current_session_budget_only",
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "latest_observed_at_epoch_ms": stale_observed_at_epoch_ms
+                    },
+                    "client_live_meter": {
+                        "status_bar_rate_limits": {
+                            "status": "observed",
+                            "observed_at_epoch_ms": stale_observed_at_epoch_ms
+                        }
+                    }
+                }
+            }
+        });
+        super::write_shared_thread_bound_budget_snapshot(&temp_root, "thread-current", &snapshot)
+            .expect("write thread-bound snapshot");
+        let cache_path =
+            super::thread_bound_budget_snapshot_shared_cache_path(&temp_root, "thread-current");
+        let mut persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&cache_path).expect("read cache file"))
+                .expect("parse cache file");
+        persisted["fetched_at_epoch_ms"] = json!(20_000u64);
+        fs::write(
+            &cache_path,
+            serde_json::to_vec(&persisted).expect("serialize cache"),
+        )
+        .expect("rewrite cache");
+
+        assert!(
+            super::load_shared_thread_bound_budget_snapshot(&temp_root, 20_000, "thread-current")
+                .is_none()
+        );
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn shared_thread_bound_budget_snapshot_rejects_unmaterialized_current_live_turn_exact_pair() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "amai-thread-bound-budget-snapshot-exact-pair-gap-{}",
+            Uuid::new_v4()
+        ));
+        let observed_at_epoch_ms = super::current_epoch_ms_u64();
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "surface": "dashboard_current_session_budget_only",
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "latest_observed_at_epoch_ms": observed_at_epoch_ms
+                    },
+                    "client_live_meter": {
+                        "status_bar_rate_limits": {
+                            "status": "observed",
+                            "observed_at_epoch_ms": observed_at_epoch_ms
+                        }
+                    },
+                    "current_live_turn": {
+                        "status": "activity_observed_exact_pair_unavailable",
+                        "exact_pair_available": false,
+                        "matched_events_count": 1,
+                        "retrieval_context_pack_count": 1
+                    }
+                }
+            }
+        });
+        super::write_shared_thread_bound_budget_snapshot(&temp_root, "thread-current", &snapshot)
+            .expect("write thread-bound snapshot");
+        assert!(
+            super::load_shared_thread_bound_budget_snapshot(
+                &temp_root,
+                super::current_epoch_ms_u64(),
+                "thread-current",
+            )
+            .is_none()
+        );
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn shared_thread_bound_budget_snapshot_accepts_no_amai_activity_exact_pair() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "amai-thread-bound-budget-snapshot-no-amai-activity-{}",
+            Uuid::new_v4()
+        ));
+        let observed_at_epoch_ms = super::current_epoch_ms_u64();
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "surface": "dashboard_current_session_budget_only",
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "latest_observed_at_epoch_ms": observed_at_epoch_ms
+                    },
+                    "client_live_meter": {
+                        "status_bar_rate_limits": {
+                            "status": "observed",
+                            "observed_at_epoch_ms": observed_at_epoch_ms
+                        }
+                    },
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn",
+                        "exact_pair_available": true,
+                        "exact_pair": {
+                            "without_amai_tokens": 0,
+                            "with_amai_tokens": 0,
+                            "saved_tokens": 0,
+                            "saved_pct": 0.0
+                        },
+                        "matched_events_count": 0,
+                        "retrieval_context_pack_count": 0
+                    }
+                }
+            }
+        });
+        super::write_shared_thread_bound_budget_snapshot(&temp_root, "thread-current", &snapshot)
+            .expect("write thread-bound snapshot");
+        let loaded = super::load_shared_thread_bound_budget_snapshot(
+            &temp_root,
+            super::current_epoch_ms_u64(),
+            "thread-current",
+        )
+        .expect("load thread-bound snapshot");
+        assert_eq!(
+            loaded["token_budget_report"]["token_budget_report"]["current_live_turn"]["status"],
+            json!("no_amai_activity_in_current_live_turn")
         );
         let _ = fs::remove_dir_all(&temp_root);
     }
@@ -8031,10 +11482,8 @@ mod tests {
 
     #[test]
     fn shared_active_thread_hint_roundtrips_when_fresh() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "amai-active-thread-hint-cache-{}",
-            Uuid::new_v4()
-        ));
+        let temp_root =
+            std::env::temp_dir().join(format!("amai-active-thread-hint-cache-{}", Uuid::new_v4()));
         super::write_shared_active_thread_hint(&temp_root, "thread-current")
             .expect("write active thread hint");
         let loaded =
@@ -8053,10 +11502,9 @@ mod tests {
         super::write_shared_active_thread_hint(&temp_root, "thread-current")
             .expect("write active thread hint");
         let cache_path = super::active_thread_hint_shared_cache_path(&temp_root);
-        let mut persisted: super::PersistedActiveThreadHint = serde_json::from_slice(
-            &fs::read(&cache_path).expect("read active thread hint"),
-        )
-        .expect("decode active thread hint");
+        let mut persisted: super::PersistedActiveThreadHint =
+            serde_json::from_slice(&fs::read(&cache_path).expect("read active thread hint"))
+                .expect("decode active thread hint");
         persisted.updated_at_epoch_ms = 1;
         fs::write(
             &cache_path,
@@ -8075,10 +11523,8 @@ mod tests {
 
     #[test]
     fn shared_client_budget_gate_cache_reuses_fresh_bundle() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "amai-client-budget-gate-cache-{}",
-            Uuid::new_v4()
-        ));
+        let temp_root =
+            std::env::temp_dir().join(format!("amai-client-budget-gate-cache-{}", Uuid::new_v4()));
         let gate = json!({
             "client_budget_reply_gate": {
                 "observed_at_epoch_ms": 9_500,
@@ -8107,6 +11553,70 @@ mod tests {
             json!("5ч KPI: переплата 10.00%")
         );
         let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn thread_bound_gate_payload_rejects_other_thread_feedback_confirmation() {
+        let payload = json!({
+            "client_budget_reply_gate": {
+                "reply_execution_gate": {
+                    "action_kind": "confirm_same_thread_host_control_feedback",
+                    "must_confirm_same_thread_host_control_feedback_before_reply": true,
+                    "action_bundle": {
+                        "host_current_thread_control": {
+                            "effect_verdict": "other_thread",
+                            "feedback_pending": true
+                        }
+                    }
+                }
+            }
+        });
+
+        assert!(
+            !super::compact_thread_bound_client_budget_gate_payload_is_consistent(
+                Some("thread-current"),
+                &payload,
+            )
+        );
+        assert!(
+            super::compact_thread_bound_client_budget_gate_payload_is_consistent(None, &payload,)
+        );
+    }
+
+    #[test]
+    fn thread_bound_root_cause_payload_rejects_other_thread_feedback_confirmation() {
+        let payload = json!({
+            "thread_binding_state": "current_thread_bound",
+            "current_live_turn": {
+                "status": "no_amai_activity_in_current_live_turn"
+            },
+            "host_current_thread_control_effect": {
+                "effect_verdict": "other_thread"
+            },
+            "client_budget_reply_gate": {
+                "reply_execution_gate": {
+                    "action_kind": "confirm_same_thread_host_control_feedback",
+                    "must_confirm_same_thread_host_control_feedback_before_reply": true,
+                    "action_bundle": {
+                        "host_current_thread_control": {
+                            "feedback_pending": true
+                        }
+                    }
+                }
+            }
+        });
+
+        assert!(
+            !super::compact_thread_bound_client_budget_root_cause_payload_is_consistent(
+                Some("thread-current"),
+                &payload,
+            )
+        );
+        assert!(
+            super::compact_thread_bound_client_budget_root_cause_payload_is_consistent(
+                None, &payload,
+            )
+        );
     }
 
     #[test]
@@ -8165,12 +11675,8 @@ mod tests {
         });
         let cache =
             super::build_compact_client_budget_gate_cache(&gate, &guard, Some("thread-current"));
-        super::write_shared_compact_client_budget_gate(
-            &temp_root,
-            Some("thread-current"),
-            &cache,
-        )
-        .expect("write gate cache");
+        super::write_shared_compact_client_budget_gate(&temp_root, Some("thread-current"), &cache)
+            .expect("write gate cache");
         let cache_path =
             super::client_budget_gate_shared_cache_path(&temp_root, Some("thread-current"));
         let mut persisted: serde_json::Value =
@@ -8305,13 +11811,13 @@ mod tests {
     }
 
     #[test]
-    fn client_budget_guard_blocks_reply_when_reply_execution_gate_requires_rotate() {
+    fn client_budget_guard_keeps_rotate_requirements_advisory() {
         let guard = json!({
             "reply_execution_gate": {
                 "must_rotate_before_reply": true
             }
         });
-        assert!(super::client_budget_guard_blocks_reply(&guard));
+        assert!(!super::client_budget_guard_blocks_reply(&guard));
     }
 
     #[test]
@@ -8342,7 +11848,7 @@ mod tests {
     }
 
     #[test]
-    fn client_budget_guard_blocks_reply_when_waiting_for_global_budget_recovery() {
+    fn client_budget_guard_keeps_global_budget_wait_advisory() {
         let guard = json!({
             "reply_execution_gate": {
                 "action_kind": "wait_for_global_client_budget_recovery",
@@ -8351,7 +11857,7 @@ mod tests {
             },
             "requires_global_budget_recovery_before_reply": true
         });
-        assert!(super::client_budget_guard_blocks_reply(&guard));
+        assert!(!super::client_budget_guard_blocks_reply(&guard));
     }
 
     #[test]
@@ -8502,7 +12008,7 @@ mod tests {
     fn compact_client_budget_gate_payload_keeps_compact_rotate_action_bundle() {
         let guard = json!({
             "status": "critical",
-            "status_label": "новый чат нужен сейчас",
+            "status_label": "сожми текущий чат сейчас",
             "reply_prefix": "5ч KPI: экономия 39.49%",
             "observed_at_epoch_ms": 1774789858128u64,
             "max_guard_age_seconds": 10,
@@ -8816,8 +12322,9 @@ mod tests {
         );
         assert!(
             payload["reply_execution_gate"]["action_bundle"]
-                .get("host_current_thread_control")
-                .is_none()
+                ["host_current_thread_control"]["command_id"]
+                .as_str()
+                == Some("hotkey-window-open-current")
         );
         assert!(
             payload["reply_execution_gate"]["action_bundle"]
@@ -8831,7 +12338,7 @@ mod tests {
      {
         let guard = json!({
             "status": "critical",
-            "status_label": "новый чат нужен сейчас",
+            "status_label": "сожми текущий чат сейчас",
             "reply_prefix": "5ч KPI: переплата 204.20%",
             "host_context_compaction": {
                 "stage": "preserve",
@@ -8897,9 +12404,13 @@ mod tests {
             }
         });
         let payload = super::compact_cli_client_budget_gate_payload(&guard);
+        assert_eq!(
+            payload["reply_execution_gate"]["action_bundle"]["host_current_thread_control"]["availability_state"],
+            json!("exhausted_after_verified_failure")
+        );
         assert!(
-            payload["reply_execution_gate"]["action_bundle"]
-                .get("host_current_thread_control")
+            payload["reply_execution_gate"]["action_bundle"]["host_current_thread_control"]
+                .get("effect_summary")
                 .is_none()
         );
     }
@@ -8909,7 +12420,7 @@ mod tests {
      {
         let guard = json!({
             "status": "critical",
-            "status_label": "новый чат нужен сейчас",
+            "status_label": "сожми текущий чат сейчас",
             "reply_prefix": "5ч KPI: переплата 50.00%",
             "host_context_compaction": {
                 "stage": "preserve",
@@ -9067,17 +12578,16 @@ mod tests {
                 .get("order")
                 .is_none()
         );
-        assert!(
-            payload["reply_execution_gate"]["action_bundle"]
-                .get("host_current_thread_control")
-                .is_none()
+        assert_eq!(
+            payload["reply_execution_gate"]["action_bundle"]["host_current_thread_control"]["command_id"],
+            json!("hotkey-window-open-current")
         );
     }
 
     #[test]
     fn compact_current_session_budget_guard_payload_drops_prose_and_operator_flow() {
         let guard = json!({
-            "status_label": "новый чат нужен сейчас",
+            "status_label": "сожми текущий чат сейчас",
             "status_tooltip": "long prose",
             "reason": "long prose",
             "note": "long prose",
@@ -9119,7 +12629,7 @@ mod tests {
         let payload = super::compact_current_session_budget_guard_payload(&guard);
         assert_eq!(
             payload["status_label"].as_str(),
-            Some("новый чат нужен сейчас")
+            Some("сожми текущий чат сейчас")
         );
         assert_eq!(payload["full_turn_savings_percent"].as_str(), Some("0.00%"));
         assert_eq!(payload["last_request"].as_str(), Some("154048 из 258400"));
@@ -9146,11 +12656,24 @@ mod tests {
                 "status": "no_amai_activity_in_current_live_turn",
                 "saved_pct": 0.0
             },
+            "same_meter_economics": {
+                "strict_lower_bound_tokens": 182,
+                "same_meter_without_amai_tokens": 182,
+                "same_meter_with_amai_tokens": 72,
+                "same_meter_saved_tokens": 110,
+                "same_meter_saved_pct": 60.43956043956044,
+                "continuity_restore_baseline_tokens": 178,
+                "continuity_restore_observed_tokens": 68,
+                "continuity_restore_delta_tokens": -110,
+                "full_turn_overhang_tokens": 169691,
+                "full_turn_vs_strict_ratio": 933.3681318681319,
+                "dominant_cost_surface": "giant_thread_context_outside_same_meter_slice"
+            },
             "exact_pair_status": {
                 "state": "not_applicable_current_live_turn_has_no_amai_activity"
             },
             "guard": {
-                "status_label": "новый чат нужен сейчас",
+                "status_label": "сожми текущий чат сейчас",
                 "action_kind": "rotate_chat_for_client_budget"
             },
             "host_context_compaction": {
@@ -9189,7 +12712,7 @@ mod tests {
         });
 
         let guard = json!({
-            "status_label": "новый чат нужен сейчас",
+            "status_label": "сожми текущий чат сейчас",
             "observed_at_epoch_ms": 1774862518426u64,
             "max_guard_age_seconds": 10,
             "reply_execution_gate": {
@@ -9264,6 +12787,22 @@ mod tests {
                 .get("exact_pair_available")
                 .is_none()
         );
+        assert_eq!(
+            compact["same_meter_economics"]["strict_lower_bound_tokens"],
+            json!(182)
+        );
+        assert_eq!(
+            compact["same_meter_economics"]["same_meter_saved_pct"],
+            json!(60.44)
+        );
+        assert_eq!(
+            compact["same_meter_economics"]["full_turn_vs_strict_ratio"],
+            json!(933.37)
+        );
+        assert_eq!(
+            compact["same_meter_economics"]["dominant_cost_surface"],
+            json!("giant_thread_context_outside_same_meter_slice")
+        );
         assert!(compact.get("exact_pair_status").is_none());
         assert!(
             compact["current_live_meter"]
@@ -9298,19 +12837,23 @@ mod tests {
                     .is_none()
         );
         assert_eq!(
-            compact["client_budget_reply_gate"]["reply_execution_gate"]["action_bundle"]["operator_flow"]["primary_command_kind"],
+            compact["client_budget_reply_gate"]["reply_execution_gate"]["action_bundle"]["operator_flow"]
+                ["primary_command_kind"],
             json!("rotate_helper_command")
         );
         assert_eq!(
-            compact["client_budget_reply_gate"]["reply_execution_gate"]["action_bundle"]["operator_flow"]["rotate_helper_command"],
+            compact["client_budget_reply_gate"]["reply_execution_gate"]["action_bundle"]["operator_flow"]
+                ["rotate_helper_command"],
             json!("amai continuity rotate-chat")
         );
         assert_eq!(
-            compact["client_budget_reply_gate"]["reply_execution_gate"]["action_bundle"]["host_current_thread_control"]["command_id"],
+            compact["client_budget_reply_gate"]["reply_execution_gate"]["action_bundle"]["host_current_thread_control"]
+                ["command_id"],
             json!("hotkey-window-open-current")
         );
         assert_eq!(
-            compact["client_budget_reply_gate"]["reply_execution_gate"]["action_bundle"]["host_current_thread_control"]["button_label"],
+            compact["client_budget_reply_gate"]["reply_execution_gate"]["action_bundle"]["host_current_thread_control"]
+                ["button_label"],
             json!("Open compact window")
         );
         assert!(
@@ -9375,6 +12918,12 @@ mod tests {
                 "code": "continuity",
                 "display_name": "Continuity"
             },
+            "state_lineage": {
+                "authoritative_event_id": "handoff-1",
+                "authoritative_source_kind": "continuity_handoff",
+                "authoritative_local_path": "/tmp/HANDOFF.md",
+                "drop_me": "nope"
+            },
             "recent_actions": [
                 {
                     "source_kind": working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_SOURCE_KIND,
@@ -9417,13 +12966,30 @@ mod tests {
         assert_eq!(compact["client_budget_target_percent"], json!(50));
         assert_eq!(compact["thread_id"], json!("thread-1"));
         assert_eq!(compact["project"]["code"], json!("amai"));
-        assert_eq!(compact["project"]["repo_root"], json!("/home/art/agent-memory-index"));
+        assert_eq!(
+            compact["project"]["repo_root"],
+            json!("/home/art/agent-memory-index")
+        );
         assert!(compact["project"].get("display_name").is_none());
         assert_eq!(compact["namespace"]["code"], json!("continuity"));
         assert!(compact["namespace"].get("display_name").is_none());
+        assert_eq!(
+            compact["state_lineage"]["authoritative_event_id"],
+            json!("handoff-1")
+        );
+        assert_eq!(
+            compact["state_lineage"]["authoritative_source_kind"],
+            json!("continuity_handoff")
+        );
+        assert_eq!(
+            compact["state_lineage"]["authoritative_local_path"],
+            json!("/tmp/HANDOFF.md")
+        );
+        assert!(compact["state_lineage"].get("drop_me").is_none());
         assert_eq!(compact["recent_actions"].as_array().unwrap().len(), 1);
         assert_eq!(
-            compact["recent_actions"][0]["host_current_thread_control_feedback"]["feedback_snapshot"]["client_live_meter"]["client_turn_total_tokens"],
+            compact["recent_actions"][0]["host_current_thread_control_feedback"]["feedback_snapshot"]
+                ["client_live_meter"]["client_turn_total_tokens"],
             json!(100)
         );
         assert!(
@@ -9441,7 +13007,8 @@ mod tests {
     }
 
     #[test]
-    fn compact_budget_snapshot_preview_payload_trims_hourly_burn_and_alignment_to_essential_fields() {
+    fn compact_budget_snapshot_preview_payload_trims_hourly_burn_and_alignment_to_essential_fields()
+    {
         let snapshot = json!({
             "token_budget_report": {
                 "token_budget_report": {
@@ -9468,6 +13035,28 @@ mod tests {
                                 "alignment_state": "same_meter_equivalent",
                                 "same_meter_as_client_limit": true,
                                 "exact_pair_status": "exact_pair_materialized",
+                                "strict_client_meter_slice": {
+                                    "lower_bound_tokens": 182
+                                },
+                                "baseline_equivalence": {
+                                    "measured_baseline_tokens_lower_bound": 182,
+                                    "component_semantics": [
+                                        {
+                                            "code": "client_prompt",
+                                            "baseline_measured_tokens": 4,
+                                            "observed_tokens": 4,
+                                            "whole_cycle_observed_complete": true,
+                                            "note": "drop me"
+                                        },
+                                        {
+                                            "code": "continuity_restore_outside_retrieval",
+                                            "baseline_measured_tokens": 178,
+                                            "observed_tokens": 68,
+                                            "whole_cycle_observed_complete": true,
+                                            "note": "drop me"
+                                        }
+                                    ]
+                                },
                                 "blocking_reasons": ["x"],
                                 "measured_components": ["client_prompt"],
                                 "missing_components": ["tool_overhead"],
@@ -9475,7 +13064,11 @@ mod tests {
                                 "note": "drop me",
                                 "model_version": "drop me",
                                 "surface_kind": "drop me"
-                            }
+                            },
+                            "observed_whole_cycle_with_amai_tokens": 72,
+                            "verified_observed_whole_cycle_with_amai_tokens": 70,
+                            "with_amai_measured_tokens": 72,
+                            "verified_with_amai_measured_tokens": 70
                         }
                     },
                     "client_limit_hourly_burn": {
@@ -9551,7 +13144,10 @@ mod tests {
             report["client_limit_hourly_burn"]["reply_prefix"],
             json!("5ч KPI: переплата 12.34%")
         );
-        assert_eq!(report["client_limit_hourly_burn"]["kpi_percent"], json!(12.35));
+        assert_eq!(
+            report["client_limit_hourly_burn"]["kpi_percent"],
+            json!(12.35)
+        );
         assert!(report["client_limit_hourly_burn"].get("summary").is_none());
         assert!(
             report["client_limit_hourly_burn"]
@@ -9569,9 +13165,32 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            report["statement_previews"]["current_session"]["client_limit_meter_alignment"]
-                ["alignment_state"],
+            report["statement_previews"]["current_session"]["client_limit_meter_alignment"]["alignment_state"],
             json!("same_meter_equivalent")
+        );
+        assert_eq!(
+            report["statement_previews"]["current_session"]["client_limit_meter_alignment"]["strict_client_meter_slice"]
+                ["lower_bound_tokens"],
+            json!(182)
+        );
+        assert_eq!(
+            report["statement_previews"]["current_session"]["client_limit_meter_alignment"]["baseline_equivalence"]
+                ["measured_baseline_tokens_lower_bound"],
+            json!(182)
+        );
+        assert_eq!(
+            report["statement_previews"]["current_session"]["client_limit_meter_alignment"]["baseline_equivalence"]
+                ["component_semantics"][1]["code"],
+            json!("continuity_restore_outside_retrieval")
+        );
+        assert!(
+            report["statement_previews"]["current_session"]["client_limit_meter_alignment"]["baseline_equivalence"]["component_semantics"][1]
+                .get("note")
+                .is_none()
+        );
+        assert_eq!(
+            report["statement_previews"]["current_session"]["observed_whole_cycle_with_amai_tokens"],
+            json!(72)
         );
     }
 
@@ -9597,15 +13216,20 @@ mod tests {
         let payload = json!({
             "client_budget_reply_gate": {
                 "status_label": "ok",
+                "observed_at_epoch_ms": 1234,
+                "max_guard_age_seconds": 10,
+                "global_reply_prefix": "5ч KPI: экономия 8.00%",
+                "reply_prefix_source": "personal_agent_5h_kpi",
                 "reply_execution_gate": {
                     "action_kind": "rotate_chat_for_client_budget",
-                    "reply_prefix": "5ч KPI: переплата 1.00%"
+                    "reply_prefix": "5ч KPI: переплата 1.00%",
+                    "global_reply_prefix": "5ч KPI: экономия 8.00%",
+                    "reply_prefix_source": "personal_agent_5h_kpi"
                 }
             }
         });
-        let compact =
-            super::compact_cli_client_budget_gate_from_root_cause_payload(&payload)
-                .expect("gate payload");
+        let compact = super::compact_cli_client_budget_gate_from_root_cause_payload(&payload)
+            .expect("gate payload");
         assert_eq!(
             compact["client_budget_reply_gate"]["reply_execution_gate"]["action_kind"],
             json!("rotate_chat_for_client_budget")
@@ -9613,6 +13237,68 @@ mod tests {
         assert_eq!(
             compact["client_budget_reply_gate"]["reply_execution_gate"]["reply_prefix"],
             json!("5ч KPI: переплата 1.00%")
+        );
+        assert_eq!(compact["reply_prefix"], json!("5ч KPI: переплата 1.00%"));
+        assert_eq!(
+            compact["global_reply_prefix"],
+            json!("5ч KPI: экономия 8.00%")
+        );
+        assert_eq!(
+            compact["reply_prefix_source"],
+            json!("personal_agent_5h_kpi")
+        );
+    }
+
+    #[test]
+    fn front_door_client_budget_gate_payload_surfaces_top_level_reply_prefix_fields() {
+        let gate = json!({
+            "status_label": "ok",
+            "observed_at_epoch_ms": 1234,
+            "max_guard_age_seconds": 10,
+            "reply_execution_gate": {
+                "reply_prefix": "5ч KPI: переплата 7.00%",
+                "global_reply_prefix": "5ч KPI: переплата 7.00%",
+                "reply_prefix_source": "global_client_limit_hourly_burn"
+            }
+        });
+
+        let payload = super::front_door_client_budget_gate_payload(gate.clone());
+        assert_eq!(payload["reply_prefix"], json!("5ч KPI: переплата 7.00%"));
+        assert_eq!(
+            payload["global_reply_prefix"],
+            json!("5ч KPI: переплата 7.00%")
+        );
+        assert_eq!(
+            payload["reply_prefix_source"],
+            json!("global_client_limit_hourly_burn")
+        );
+        assert_eq!(payload["client_budget_reply_gate"], gate);
+    }
+
+    #[test]
+    fn normalize_front_door_client_budget_gate_payload_shape_backfills_top_level_fields() {
+        let payload = json!({
+            "client_budget_reply_gate": {
+                "status_label": "ok",
+                "observed_at_epoch_ms": 1234,
+                "max_guard_age_seconds": 10,
+                "reply_execution_gate": {
+                    "reply_prefix": "5ч KPI: переплата 7.00%",
+                    "global_reply_prefix": "5ч KPI: переплата 7.00%",
+                    "reply_prefix_source": "global_client_limit_hourly_burn"
+                }
+            }
+        });
+
+        let normalized = super::normalize_front_door_client_budget_gate_payload_shape(payload);
+        assert_eq!(normalized["reply_prefix"], json!("5ч KPI: переплата 7.00%"));
+        assert_eq!(
+            normalized["global_reply_prefix"],
+            json!("5ч KPI: переплата 7.00%")
+        );
+        assert_eq!(
+            normalized["reply_prefix_source"],
+            json!("global_client_limit_hourly_burn")
         );
     }
 
@@ -9624,6 +13310,311 @@ mod tests {
             }
         });
         assert!(super::compact_cli_client_budget_gate_from_root_cause_payload(&payload).is_none());
+    }
+
+    #[test]
+    fn compact_chat_api_summary_drops_heavy_runtime_fields() {
+        let payload = json!({
+            "project": {
+                "code": "amai",
+                "display_name": "Amai",
+                "repo_root": "/home/art/agent-memory-index"
+            },
+            "namespace": {
+                "code": "continuity",
+                "display_name": "Continuity"
+            },
+            "chat_start_restore": {
+                "headline": "headline",
+                "next_step": "next",
+                "prompt_text": "PROMPT",
+                "project_task_tree": {"drop_me": true},
+                "pending_return_queue": [{"drop_me": true}]
+            },
+            "operator_notice": {
+                "message_text": "message",
+                "reply_prefix": "5ч KPI: переплата 1.00%",
+                "exact_chat_command": "компакт_чат",
+                "prompt_file": "/tmp/prompt.txt",
+                "required_host_action": "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable",
+                "note": "note",
+                "launch_clean_chat_command": "code chat ...",
+                "launch_clean_chat_fallback_command": "code chat --reuse-window ...",
+                "launch_clean_chat_command_kind": "vscode_code_chat_cli",
+                "manual_fallback_steps": ["Codex: New Thread in Codex Sidebar (chatgpt.newChat)"]
+            },
+            "client_surface": {
+                "client_key": "vscode"
+            },
+            "host_launch": {
+                "status": "available_not_requested"
+            },
+            "host_current_thread_control": {
+                "command_id": "thread-overlay-open-current"
+            },
+            "client_budget_guard": {
+                "drop_me": true
+            }
+        });
+
+        let compact = super::compact_chat_api_summary(&payload);
+
+        assert_eq!(compact["project"]["code"], json!("amai"));
+        assert_eq!(
+            compact["chat_start_restore"]["prompt_text"],
+            json!("PROMPT")
+        );
+        assert_eq!(
+            compact["operator_notice"]["exact_chat_command"],
+            json!("компакт_чат")
+        );
+        assert_eq!(compact["client_surface"]["client_key"], json!("vscode"));
+        assert_eq!(
+            compact["host_launch"]["status"],
+            json!("available_not_requested")
+        );
+        assert!(compact.get("host_current_thread_control").is_none());
+        assert!(compact.get("client_budget_guard").is_none());
+        assert_eq!(
+            compact["operator_notice"]["launch_clean_chat_command"],
+            json!("code chat ...")
+        );
+        assert_eq!(
+            compact["operator_notice"]["launch_clean_chat_fallback_command"],
+            json!("code chat --reuse-window ...")
+        );
+        assert_eq!(
+            compact["operator_notice"]["launch_clean_chat_command_kind"],
+            json!("vscode_code_chat_cli")
+        );
+        assert!(
+            compact["operator_notice"]["manual_fallback_steps"]
+                .as_array()
+                .is_some()
+        );
+        assert!(
+            compact["chat_start_restore"]
+                .get("project_task_tree")
+                .is_none()
+        );
+        assert!(
+            compact["chat_start_restore"]
+                .get("pending_return_queue")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn client_budget_host_control_launch_api_summary_drops_launch_detail_echo() {
+        let payload = json!({
+            "project": {
+                "code": "amai",
+                "display_name": "Amai",
+                "repo_root": "/home/art/agent-memory-index"
+            },
+            "namespace": {
+                "code": "continuity",
+                "display_name": "Continuity"
+            },
+            "thread_id": "thread-current",
+            "command_id": "hotkey-window-open-current",
+            "launch_targeting": {
+                "status": "ok",
+                "summary": "single target",
+                "window_count": 1
+            },
+            "host_current_thread_control": {
+                "command_id": "hotkey-window-open-current"
+            },
+            "launch": {
+                "status": "opened"
+            },
+            "client_budget_reply_gate": {
+                "reply_prefix": "5ч KPI: переплата 1.00%",
+                "blocking": false
+            },
+            "operator_notice": {
+                "kind": "host_current_thread_control_launch_opened",
+                "message_text": "opened",
+                "feedback_kind": "opened",
+                "command_id": "hotkey-window-open-current",
+                "thread_id": "thread-current"
+            }
+        });
+
+        let compact = super::client_budget_host_control_launch_api_summary(&payload);
+
+        assert_eq!(
+            compact["launch_targeting"]["summary"],
+            json!("single target")
+        );
+        assert_eq!(
+            compact["client_budget_reply_gate"]["reply_prefix"],
+            json!("5ч KPI: переплата 1.00%")
+        );
+        assert_eq!(
+            compact["operator_notice"]["kind"],
+            json!("host_current_thread_control_launch_opened")
+        );
+        assert!(compact["launch_targeting"].get("window_count").is_none());
+        assert!(compact.get("host_current_thread_control").is_none());
+        assert!(compact.get("launch").is_none());
+        assert!(
+            compact["client_budget_reply_gate"]
+                .get("blocking")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn thread_bound_host_control_feedback_payload_stays_summary_first() {
+        let payload = json!({
+            "status": "ok",
+            "client_budget_host_control_feedback": {
+                "project": {
+                    "code": "amai",
+                    "display_name": "Amai",
+                    "repo_root": "/home/art/agent-memory-index"
+                },
+                "namespace": {
+                    "code": "continuity",
+                    "display_name": "Continuity"
+                },
+                "thread_id": "thread-current",
+                "command_id": "hotkey-window-open-current",
+                "feedback_kind": "opened",
+                "message_text": "Подтверждено: same-thread host control открылся.",
+                "client_budget_reply_gate": {
+                    "reply_prefix": "5ч KPI: переплата 1.00%"
+                }
+            }
+        });
+
+        let feedback = &payload["client_budget_host_control_feedback"];
+        assert_eq!(feedback["thread_id"], json!("thread-current"));
+        assert_eq!(feedback["feedback_kind"], json!("opened"));
+        assert_eq!(
+            feedback["client_budget_reply_gate"]["reply_prefix"],
+            json!("5ч KPI: переплата 1.00%")
+        );
+        assert!(payload.get("chat_notice").is_none());
+        assert!(feedback.get("operator_notice").is_none());
+        assert!(feedback.get("host_current_thread_control").is_none());
+        assert!(feedback.get("launch").is_none());
+        assert!(feedback.get("launch_targeting").is_none());
+    }
+
+    #[test]
+    fn non_thread_host_control_feedback_payload_stays_summary_first() {
+        let payload = json!({
+            "status": "ok",
+            "client_budget_host_control_feedback": {
+                "project": {
+                    "code": "amai",
+                    "display_name": "Amai",
+                    "repo_root": "/home/art/agent-memory-index"
+                },
+                "namespace": {
+                    "code": "continuity",
+                    "display_name": "Continuity"
+                },
+                "feedback_kind": "failed",
+                "command_id": "hotkey-window-open-current",
+                "client_budget_reply_gate": {
+                    "reply_prefix": "5ч KPI: переплата 1.00%"
+                },
+                "operator_notice": {
+                    "kind": "host_current_thread_control_feedback_failed",
+                    "message_text": "Зафиксировано: same-thread host control не открылся.",
+                    "feedback_kind": "failed",
+                    "command_id": "hotkey-window-open-current"
+                }
+            },
+            "chat_notice": {
+                "kind": "host_current_thread_control_feedback_failed",
+                "thread_id": null,
+                "message_text": "Зафиксировано: same-thread host control не открылся.",
+                "reply_prefix": "5ч KPI: переплата 1.00%",
+                "feedback_kind": "failed",
+                "command_id": "hotkey-window-open-current"
+            }
+        });
+
+        let feedback = &payload["client_budget_host_control_feedback"];
+        assert_eq!(feedback["feedback_kind"], json!("failed"));
+        assert_eq!(
+            feedback["operator_notice"]["kind"],
+            json!("host_current_thread_control_feedback_failed")
+        );
+        assert_eq!(
+            payload["chat_notice"]["reply_prefix"],
+            json!("5ч KPI: переплата 1.00%")
+        );
+        assert!(feedback.get("message_text").is_none());
+        assert!(feedback.get("host_current_thread_control").is_none());
+        assert!(feedback.get("launch").is_none());
+        assert!(feedback.get("launch_targeting").is_none());
+        assert!(payload["chat_notice"].get("host_launch").is_none());
+        assert!(
+            payload["chat_notice"]
+                .get("host_current_thread_control")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn compact_cli_client_budget_gate_payload_keeps_personal_kpi_metadata() {
+        let guard = json!({
+            "status_label": "ok",
+            "reply_prefix": "5ч KPI: н/д",
+            "global_reply_prefix": "5ч KPI: экономия 8.00%",
+            "reply_prefix_source": "personal_agent_5h_kpi",
+            "observed_at_epoch_ms": 1_000,
+            "max_guard_age_seconds": 10,
+            "reply_execution_gate": {
+                "action_kind": "continue_current_chat",
+                "blocking": false,
+                "must_rotate_before_reply": false,
+                "must_wait_for_budget_recovery_before_reply": false,
+                "reply_budget_mode": "compact_high_signal",
+                "reply_prefix": "5ч KPI: н/д",
+                "global_reply_prefix": "5ч KPI: экономия 8.00%",
+                "reply_prefix_source": "personal_agent_5h_kpi",
+                "host_context_compaction_stage": "preserve",
+                "host_context_compaction_preserve_active": true,
+                "host_context_compaction_critical_regrowth_active": false,
+                "preserves_return_obligation": false,
+                "same_meter_pure_burn_turn_active": true,
+                "action_bundle": {
+                    "operator_flow": {
+                        "primary_command_kind": "rotate_helper_command"
+                    },
+                    "host_current_thread_control": {
+                        "command_id": "thread-overlay-open-current",
+                        "button_label": "Open thread overlay"
+                    }
+                }
+            }
+        });
+
+        let compact = super::compact_cli_client_budget_gate_payload(&guard);
+        assert_eq!(compact["reply_prefix"], json!("5ч KPI: н/д"));
+        assert_eq!(
+            compact["global_reply_prefix"],
+            json!("5ч KPI: экономия 8.00%")
+        );
+        assert_eq!(
+            compact["reply_prefix_source"],
+            json!("personal_agent_5h_kpi")
+        );
+        assert_eq!(
+            compact["reply_execution_gate"]["global_reply_prefix"],
+            json!("5ч KPI: экономия 8.00%")
+        );
+        assert_eq!(
+            compact["reply_execution_gate"]["reply_prefix_source"],
+            json!("personal_agent_5h_kpi")
+        );
     }
 
     #[test]
@@ -9684,14 +13675,43 @@ mod tests {
     }
 
     #[test]
+    fn observe_refresh_stuck_when_refresh_in_progress_exceeds_timeout() {
+        let cache = ObserveCache {
+            refresh_in_progress: true,
+            last_refresh_started_epoch_ms: Some(super::now_epoch_ms().saturating_sub(
+                super::OBSERVE_REFRESH_TIMEOUT_MS + super::OBSERVE_REFRESH_STUCK_GRACE_MS + 1,
+            )),
+            ..ObserveCache::default()
+        };
+
+        assert!(super::observe_refresh_stuck(&cache));
+    }
+
+    #[test]
+    fn observe_refresh_not_stuck_when_not_in_progress() {
+        let cache = ObserveCache {
+            last_refresh_started_epoch_ms: Some(super::now_epoch_ms().saturating_sub(
+                super::OBSERVE_REFRESH_TIMEOUT_MS + super::OBSERVE_REFRESH_STUCK_GRACE_MS + 1,
+            )),
+            ..ObserveCache::default()
+        };
+
+        assert!(!super::observe_refresh_stuck(&cache));
+    }
+
+    #[test]
     fn artifact_cleanup_summary_is_fresh_within_interval() {
         let summary = json!({
             "artifact_cleanup": {
                 "captured_at_epoch_ms": 9_500
             }
         });
-        assert!(super::artifact_cleanup_summary_is_fresh(&summary, 10_000, 1_000));
-        assert!(!super::artifact_cleanup_summary_is_fresh(&summary, 10_501, 1_000));
+        assert!(super::artifact_cleanup_summary_is_fresh(
+            &summary, 10_000, 1_000
+        ));
+        assert!(!super::artifact_cleanup_summary_is_fresh(
+            &summary, 10_501, 1_000
+        ));
     }
 
     #[test]
@@ -9699,6 +13719,8 @@ mod tests {
         let summary = json!({
             "artifact_cleanup": {}
         });
-        assert!(!super::artifact_cleanup_summary_is_fresh(&summary, 10_000, 1_000));
+        assert!(!super::artifact_cleanup_summary_is_fresh(
+            &summary, 10_000, 1_000
+        ));
     }
 }

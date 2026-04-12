@@ -1,17 +1,25 @@
 use crate::bootstrap;
-use crate::cli::VerifyMemoryMatrixArgs;
+use crate::cli::{
+    ContextPackArgs, ContinuityImportArgs, ContinuityStartupArgs,
+    DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND, VerifyMemoryMatrixArgs,
+};
 use crate::config::AppConfig;
+use crate::continuity;
 use crate::eval_verdict::{self, EvalPattern, EvalSignals};
 use crate::postgres;
+use crate::retrieval;
 use crate::retrieval_science;
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
-use tokio::process::Command as ProcessCommand;
+use std::sync::OnceLock;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
@@ -20,6 +28,8 @@ struct MatrixRegistry {
     matrices: BTreeMap<String, MatrixEntry>,
     tasks: BTreeMap<String, MatrixTask>,
 }
+
+static AGENT_SCOPE_ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 struct MatrixSource {
@@ -187,10 +197,10 @@ async fn run_matrix_inner(
     ordered_tasks: &[(String, MatrixTask)],
     temp_root: &Path,
 ) -> Result<Value> {
-    let db = postgres::connect_admin(cfg).await?;
+    let mut db = postgres::connect_admin(cfg).await?;
     let mut task_results = Vec::with_capacity(ordered_tasks.len());
     for (task_code, task) in ordered_tasks {
-        task_results.push(run_task(cfg, &db, args, task_code, task, temp_root).await?);
+        task_results.push(run_task(cfg, &mut db, args, task_code, task, temp_root).await?);
     }
 
     let latencies = task_results
@@ -316,7 +326,7 @@ fn gate_failures_from_payload(payload: &Value) -> Vec<String> {
 
 async fn run_task(
     cfg: &AppConfig,
-    db: &tokio_postgres::Client,
+    db: &mut tokio_postgres::Client,
     args: &VerifyMemoryMatrixArgs,
     task_code: &str,
     task: &MatrixTask,
@@ -407,22 +417,15 @@ async fn run_task(
 
 async fn run_core_read_task(
     cfg: &AppConfig,
-    db: &tokio_postgres::Client,
+    db: &mut tokio_postgres::Client,
     task: &MatrixTask,
     project: &str,
     display_name: &str,
     temp_root: &Path,
 ) -> Result<Value> {
     ensure_namespace(db, cfg, project, display_name, &task.namespace, temp_root).await?;
-    import_bootstrap(
-        project,
-        display_name,
-        &task.namespace,
-        &task.bootstrap_lines,
-        temp_root,
-    )
-    .await?;
-    run_handoff_cli(
+    run_core_handoff_fast(
+        db,
         project,
         &task.namespace,
         task.headline.as_deref().unwrap_or("Core memory read"),
@@ -434,7 +437,8 @@ async fn run_core_read_task(
         temp_root,
     )
     .await?;
-    let restore = run_restore_json(project, &task.namespace, task.agent_scope.as_deref()).await?;
+    let restore =
+        run_restore_json(db, project, &task.namespace, task.agent_scope.as_deref()).await?;
     let answer_ok = value_contains(
         &restore["working_state_restore"]["materialized_notes"],
         task.expected_answer.as_deref().unwrap_or_default(),
@@ -453,22 +457,15 @@ async fn run_core_read_task(
 
 async fn run_core_write_task(
     cfg: &AppConfig,
-    db: &tokio_postgres::Client,
+    db: &mut tokio_postgres::Client,
     task: &MatrixTask,
     project: &str,
     display_name: &str,
     temp_root: &Path,
 ) -> Result<Value> {
     ensure_namespace(db, cfg, project, display_name, &task.namespace, temp_root).await?;
-    import_bootstrap(
-        project,
-        display_name,
-        &task.namespace,
-        &task.bootstrap_lines,
-        temp_root,
-    )
-    .await?;
-    run_handoff_cli(
+    run_core_handoff_fast(
+        db,
         project,
         &task.namespace,
         task.headline.as_deref().unwrap_or("Core memory write"),
@@ -480,7 +477,8 @@ async fn run_core_write_task(
         temp_root,
     )
     .await?;
-    let restore = run_restore_json(project, &task.namespace, task.agent_scope.as_deref()).await?;
+    let restore =
+        run_restore_json(db, project, &task.namespace, task.agent_scope.as_deref()).await?;
     let answer_ok = value_contains(
         &restore["chat_start_restore"]["prompt_text"],
         task.expected_answer.as_deref().unwrap_or_default(),
@@ -498,22 +496,15 @@ async fn run_core_write_task(
 
 async fn run_core_update_task(
     cfg: &AppConfig,
-    db: &tokio_postgres::Client,
+    db: &mut tokio_postgres::Client,
     task: &MatrixTask,
     project: &str,
     display_name: &str,
     temp_root: &Path,
 ) -> Result<Value> {
     ensure_namespace(db, cfg, project, display_name, &task.namespace, temp_root).await?;
-    import_bootstrap(
-        project,
-        display_name,
-        &task.namespace,
-        &task.bootstrap_lines,
-        temp_root,
-    )
-    .await?;
-    run_handoff_cli(
+    run_core_handoff_fast(
+        db,
         project,
         &task.namespace,
         task.headline
@@ -527,7 +518,8 @@ async fn run_core_update_task(
         temp_root,
     )
     .await?;
-    run_handoff_cli(
+    run_core_handoff_fast(
+        db,
         project,
         &task.namespace,
         task.updated_headline
@@ -541,7 +533,8 @@ async fn run_core_update_task(
         temp_root,
     )
     .await?;
-    let restore = run_restore_json(project, &task.namespace, task.agent_scope.as_deref()).await?;
+    let restore =
+        run_restore_json(db, project, &task.namespace, task.agent_scope.as_deref()).await?;
     let current_goal = restore["working_state_restore"]["current_goal"]
         .as_str()
         .unwrap_or_default()
@@ -567,27 +560,20 @@ async fn run_core_update_task(
 
 async fn run_core_scope_isolation_task(
     cfg: &AppConfig,
-    db: &tokio_postgres::Client,
+    db: &mut tokio_postgres::Client,
     task: &MatrixTask,
     project: &str,
     display_name: &str,
     temp_root: &Path,
 ) -> Result<Value> {
     ensure_namespace(db, cfg, project, display_name, &task.namespace, temp_root).await?;
-    import_bootstrap(
-        project,
-        display_name,
-        &task.namespace,
-        &task.bootstrap_lines,
-        temp_root,
-    )
-    .await?;
     let owner_scope = task.agent_scope.as_deref().unwrap_or("shared");
     let isolated_scope = task
         .isolated_agent_scope
         .as_deref()
         .ok_or_else(|| anyhow!("core scope isolation task requires isolated_agent_scope"))?;
-    run_handoff_cli(
+    run_core_handoff_fast(
+        db,
         project,
         &task.namespace,
         task.headline.as_deref().unwrap_or("Core scope isolation"),
@@ -599,12 +585,12 @@ async fn run_core_scope_isolation_task(
         temp_root,
     )
     .await?;
-    let owner_restore = run_restore_json(project, &task.namespace, Some(owner_scope)).await?;
+    let owner_restore = run_restore_json(db, project, &task.namespace, Some(owner_scope)).await?;
     let owner_ok = value_contains(
         &owner_restore["working_state_restore"]["materialized_notes"],
         task.expected_answer.as_deref().unwrap_or_default(),
     );
-    let isolated = run_restore_error(project, &task.namespace, Some(isolated_scope)).await?;
+    let isolated = run_restore_error(db, project, &task.namespace, Some(isolated_scope)).await?;
     let expected_error = task
         .expected_error_contains
         .as_deref()
@@ -626,13 +612,14 @@ async fn run_core_scope_isolation_task(
 }
 
 async fn run_archival_read_task(
-    _cfg: &AppConfig,
+    cfg: &AppConfig,
     task: &MatrixTask,
     project: &str,
     display_name: &str,
     temp_root: &Path,
 ) -> Result<Value> {
     import_bootstrap(
+        cfg,
         project,
         display_name,
         &task.namespace,
@@ -641,6 +628,7 @@ async fn run_archival_read_task(
     )
     .await?;
     let response = run_context_pack_json(
+        cfg,
         project,
         &task.namespace,
         task.question.as_deref().unwrap_or_default(),
@@ -662,13 +650,14 @@ async fn run_archival_read_task(
 }
 
 async fn run_archival_write_task(
-    _cfg: &AppConfig,
+    cfg: &AppConfig,
     task: &MatrixTask,
     project: &str,
     display_name: &str,
     temp_root: &Path,
 ) -> Result<Value> {
     import_bootstrap(
+        cfg,
         project,
         display_name,
         &task.namespace,
@@ -677,6 +666,7 @@ async fn run_archival_write_task(
     )
     .await?;
     let response = run_context_pack_json(
+        cfg,
         project,
         &task.namespace,
         task.question.as_deref().unwrap_or_default(),
@@ -698,13 +688,14 @@ async fn run_archival_write_task(
 }
 
 async fn run_archival_update_task(
-    _cfg: &AppConfig,
+    cfg: &AppConfig,
     task: &MatrixTask,
     project: &str,
     display_name: &str,
     temp_root: &Path,
 ) -> Result<Value> {
     import_bootstrap(
+        cfg,
         project,
         display_name,
         &task.namespace,
@@ -713,6 +704,7 @@ async fn run_archival_update_task(
     )
     .await?;
     import_bootstrap(
+        cfg,
         project,
         display_name,
         &task.namespace,
@@ -721,6 +713,7 @@ async fn run_archival_update_task(
     )
     .await?;
     let response = run_context_pack_json(
+        cfg,
         project,
         &task.namespace,
         task.question.as_deref().unwrap_or_default(),
@@ -745,7 +738,7 @@ async fn run_archival_update_task(
 }
 
 async fn run_archival_project_isolation_task(
-    _cfg: &AppConfig,
+    cfg: &AppConfig,
     task: &MatrixTask,
     project: &str,
     display_name: &str,
@@ -762,6 +755,7 @@ async fn run_archival_project_isolation_task(
     let related_namespace = task.related_namespace.as_deref().unwrap_or(&task.namespace);
     let related_project_code = format!("{}_{}", project, related_project);
     import_bootstrap(
+        cfg,
         project,
         display_name,
         &task.namespace,
@@ -770,6 +764,7 @@ async fn run_archival_project_isolation_task(
     )
     .await?;
     import_bootstrap(
+        cfg,
         &related_project_code,
         &related_display_name,
         related_namespace,
@@ -778,6 +773,7 @@ async fn run_archival_project_isolation_task(
     )
     .await?;
     let response = run_context_pack_json(
+        cfg,
         &related_project_code,
         related_namespace,
         task.question.as_deref().unwrap_or_default(),
@@ -817,6 +813,8 @@ async fn ensure_namespace(
         display_name,
         &repo_root.display().to_string(),
         Some("main"),
+        "default",
+        "project_shared",
         &cfg.default_retrieval_mode,
     )
     .await?;
@@ -832,6 +830,7 @@ async fn ensure_namespace(
 }
 
 async fn import_bootstrap(
+    cfg: &AppConfig,
     project: &str,
     display_name: &str,
     namespace: &str,
@@ -840,32 +839,21 @@ async fn import_bootstrap(
 ) -> Result<()> {
     let path = write_temp_markdown("memory-bootstrap", lines)?;
     let repo_root = ensure_project_repo_root(temp_root, project)?;
-    let output = ProcessCommand::new(std::env::current_exe()?)
-        .arg("continuity")
-        .arg("import")
-        .arg("--project")
-        .arg(project)
-        .arg("--display-name")
-        .arg(display_name)
-        .arg("--repo-root")
-        .arg(&repo_root)
-        .arg("--namespace")
-        .arg(namespace)
-        .arg("--bootstrap-file")
-        .arg(&path)
-        .arg("--transcript-limit")
-        .arg("0")
-        .output()
-        .await
-        .context("failed to run continuity import command")?;
+    let args = ContinuityImportArgs {
+        project: project.to_string(),
+        display_name: display_name.to_string(),
+        repo_root,
+        namespace: namespace.to_string(),
+        bootstrap_file: path.clone(),
+        thread_index_file: None,
+        active_workline_file: None,
+        memory_dir: None,
+        transcript_limit: Some(0),
+    };
+    let import_result = continuity::import_sources_payload(cfg, &args).await;
     let cleanup_result =
         fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()));
-    if !output.status.success() {
-        return Err(anyhow!(
-            "continuity import failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
+    import_result?;
     cleanup_result?;
     Ok(())
 }
@@ -877,7 +865,8 @@ fn ensure_project_repo_root(temp_root: &Path, project: &str) -> Result<PathBuf> 
     Ok(repo_root)
 }
 
-async fn run_handoff_cli(
+async fn run_core_handoff_fast(
+    db: &mut tokio_postgres::Client,
     project: &str,
     namespace: &str,
     headline: &str,
@@ -886,125 +875,203 @@ async fn run_handoff_cli(
     agent_scope: Option<&str>,
     temp_root: &Path,
 ) -> Result<()> {
-    let details_path = temp_root.join(format!("handoff-{}.md", Uuid::new_v4().simple()));
-    if !details_lines.is_empty() {
-        fs::write(&details_path, render_lines(details_lines))
-            .with_context(|| format!("failed to write {}", details_path.display()))?;
-    }
-    let mut command = ProcessCommand::new(std::env::current_exe()?);
-    command
-        .arg("continuity")
-        .arg("handoff")
-        .arg("--project")
-        .arg(project)
-        .arg("--namespace")
-        .arg(namespace)
-        .arg("--headline")
-        .arg(headline)
-        .arg("--next-step")
-        .arg(next_step);
-    if !details_lines.is_empty() {
-        command.arg("--details-file").arg(&details_path);
-    }
-    if let Some(agent_scope) = agent_scope {
-        command.env("AMAI_AGENT_SCOPE", agent_scope);
-    }
-    let output = command
-        .output()
-        .await
-        .context("failed to run continuity handoff command")?;
-    if details_path.exists() {
-        let _ = fs::remove_file(&details_path);
-    }
-    if !output.status.success() {
-        return Err(anyhow!(
-            "continuity handoff failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
+    let details = render_lines(details_lines);
+    let project_record = postgres::get_project_by_code(db, project).await?;
+    let namespace_record =
+        postgres::get_namespace_by_code(db, project_record.project_id, namespace).await?;
+    let local_path = ensure_project_repo_root(temp_root, project)?.join("live-handoff.md");
+    let local_body = format!("# {headline}\n\n{next_step}\n\n{details}");
+    fs::write(&local_path, local_body)
+        .with_context(|| format!("failed to write {}", local_path.display()))?;
+    let captured_at_epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_millis() as u64;
+    let payload = json!({
+        "continuity_handoff": {
+            "project": {
+                "code": project_record.code.clone(),
+                "display_name": project_record.display_name.clone(),
+                "repo_root": project_record.repo_root.clone(),
+            },
+            "namespace": {
+                "code": namespace_record.code.clone(),
+                "display_name": namespace_record.display_name.clone(),
+            },
+            "captured_at_epoch_ms": captured_at_epoch_ms,
+            "headline": headline,
+            "next_step": next_step,
+            "details": details,
+            "resolve_current_goal": false,
+            "resolved_pending_return_headlines": Vec::<String>::new(),
+            "resolved_pending_return_task_ids": Vec::<String>::new(),
+            "relative_path": ".amai-continuity/live-handoff/HANDOFF.md",
+            "local_path": local_path.display().to_string(),
+            "document_index_refresh_performed": false,
+        }
+    });
+    let _ = postgres::insert_observability_snapshot(db, "continuity_handoff", &payload).await?;
+    let event_agent_scope = agent_scope.unwrap_or("shared");
+    let materialized_notes = details_lines
+        .iter()
+        .map(|line| line.trim().trim_start_matches('-').trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let working_state_payload = json!({
+        "working_state_event": {
+            "event_id": Uuid::new_v4().to_string(),
+            "project": {
+                "code": project_record.code,
+                "display_name": project_record.display_name,
+                "repo_root": project_record.repo_root,
+            },
+            "namespace": {
+                "code": namespace_record.code,
+                "display_name": namespace_record.display_name,
+            },
+            "recorded_at_epoch_ms": captured_at_epoch_ms,
+            "event_kind": "continuity_handoff",
+            "session_id": format!("memory-matrix::{project}::{namespace}::{event_agent_scope}"),
+            "agent_scope": event_agent_scope,
+            "thread_id": Value::Null,
+            "source_kind": "continuity_handoff",
+            "headline": headline,
+            "next_step_hint": next_step,
+            "summary": format!("{headline} -> {next_step}"),
+            "active_files": Vec::<String>::new(),
+            "recent_paths": Vec::<String>::new(),
+            "visible_projects": vec![project.to_string()],
+            "query": Value::Null,
+            "query_type": Value::Null,
+            "target_kind": "handoff",
+            "current_hypothesis": Value::Null,
+            "rejected_hypotheses": Vec::<String>::new(),
+            "open_questions": Vec::<String>::new(),
+            "materialized_notes": materialized_notes,
+            "pending_return_queue": Value::Null,
+            "client_budget_target_percent": Value::Null,
+            "resolve_current_goal": false,
+            "resolved_pending_return_headlines": Vec::<String>::new(),
+            "resolved_pending_return_task_ids": Vec::<String>::new(),
+            "last_command": "memory_task_matrix core handoff",
+            "last_results_summary": format!("Synthetic core handoff for {project} :: {namespace}"),
+            "local_path": local_path.display().to_string(),
+        }
+    });
+    let _ =
+        postgres::insert_observability_snapshot(db, "working_state_event", &working_state_payload)
+            .await?;
     Ok(())
 }
 
 async fn run_restore_json(
+    db: &tokio_postgres::Client,
     project: &str,
     namespace: &str,
     agent_scope: Option<&str>,
 ) -> Result<Value> {
-    let mut command = ProcessCommand::new(std::env::current_exe()?);
-    command
-        .arg("continuity")
-        .arg("restore")
-        .arg("--project")
-        .arg(project)
-        .arg("--namespace")
-        .arg(namespace);
-    if let Some(agent_scope) = agent_scope {
-        command.env("AMAI_AGENT_SCOPE", agent_scope);
-    }
-    let output = command
-        .output()
-        .await
-        .context("failed to run continuity restore command")?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "continuity restore failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    serde_json::from_slice(&output.stdout).context("continuity restore did not return valid JSON")
+    let args = ContinuityStartupArgs {
+        project: Some(project.to_string()),
+        repo_root: None,
+        namespace: namespace.to_string(),
+        json: false,
+        runtime_state_json: false,
+        token_source_kind: DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND.to_string(),
+    };
+    with_agent_scope_env(agent_scope, continuity::restore_payload_with_db(db, &args)).await
 }
 
 async fn run_restore_error(
+    db: &tokio_postgres::Client,
     project: &str,
     namespace: &str,
     agent_scope: Option<&str>,
 ) -> Result<String> {
-    let mut command = ProcessCommand::new(std::env::current_exe()?);
-    command
-        .arg("continuity")
-        .arg("restore")
-        .arg("--project")
-        .arg(project)
-        .arg("--namespace")
-        .arg(namespace);
-    if let Some(agent_scope) = agent_scope {
-        command.env("AMAI_AGENT_SCOPE", agent_scope);
+    let args = ContinuityStartupArgs {
+        project: Some(project.to_string()),
+        repo_root: None,
+        namespace: namespace.to_string(),
+        json: false,
+        runtime_state_json: false,
+        token_source_kind: DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND.to_string(),
+    };
+    let result =
+        with_agent_scope_env(agent_scope, continuity::restore_payload_with_db(db, &args)).await;
+    match result {
+        Ok(_) => Err(anyhow!("continuity restore unexpectedly succeeded")),
+        Err(error) => Ok(format!("{error:#}")),
     }
-    let output = command
-        .output()
-        .await
-        .context("failed to run continuity restore command")?;
-    if output.status.success() {
-        return Err(anyhow!("continuity restore unexpectedly succeeded"));
-    }
-    Ok(String::from_utf8_lossy(&output.stderr).to_string())
 }
 
-async fn run_context_pack_json(project: &str, namespace: &str, question: &str) -> Result<Value> {
-    let output = ProcessCommand::new(std::env::current_exe()?)
-        .arg("context")
-        .arg("pack")
-        .arg("--project")
-        .arg(project)
-        .arg("--namespace")
-        .arg(namespace)
-        .arg("--query")
-        .arg(question)
-        .arg("--retrieval-mode")
-        .arg("local_strict")
-        .arg("--token-source-kind")
-        .arg("verify_memory_matrix_context_pack")
-        .arg("--disable-cache")
-        .output()
-        .await
-        .context("failed to run context pack command")?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "context pack failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+async fn with_agent_scope_env<T, F>(agent_scope: Option<&str>, future: F) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    let env_mutex = AGENT_SCOPE_ENV_MUTEX.get_or_init(|| Mutex::new(()));
+    let _env_guard = env_mutex.lock().await;
+    let previous = std::env::var_os("AMAI_AGENT_SCOPE");
+    set_agent_scope_env(agent_scope);
+    let result = future.await;
+    restore_agent_scope_env(previous);
+    result
+}
+
+fn set_agent_scope_env(agent_scope: Option<&str>) {
+    match agent_scope {
+        Some(agent_scope) => {
+            // SAFETY: process environment mutation is serialized by AGENT_SCOPE_ENV_MUTEX,
+            // and this benchmark helper restores the previous value before releasing the lock.
+            unsafe { std::env::set_var("AMAI_AGENT_SCOPE", agent_scope) };
+        }
+        None => {
+            // SAFETY: process environment mutation is serialized by AGENT_SCOPE_ENV_MUTEX,
+            // and this benchmark helper restores the previous value before releasing the lock.
+            unsafe { std::env::remove_var("AMAI_AGENT_SCOPE") };
+        }
     }
-    serde_json::from_slice(&output.stdout).context("context pack did not return valid JSON")
+}
+
+fn restore_agent_scope_env(previous: Option<OsString>) {
+    match previous {
+        Some(previous) => {
+            // SAFETY: process environment mutation is serialized by AGENT_SCOPE_ENV_MUTEX,
+            // and this restores the exact pre-call value for AMAI_AGENT_SCOPE.
+            unsafe { std::env::set_var("AMAI_AGENT_SCOPE", previous) };
+        }
+        None => {
+            // SAFETY: process environment mutation is serialized by AGENT_SCOPE_ENV_MUTEX,
+            // and this restores the exact pre-call absence for AMAI_AGENT_SCOPE.
+            unsafe { std::env::remove_var("AMAI_AGENT_SCOPE") };
+        }
+    }
+}
+
+async fn run_context_pack_json(
+    cfg: &AppConfig,
+    project: &str,
+    namespace: &str,
+    question: &str,
+) -> Result<Value> {
+    let mut db = postgres::connect_admin(cfg).await?;
+    let args = ContextPackArgs {
+        project: project.to_string(),
+        namespace: namespace.to_string(),
+        query: question.to_string(),
+        retrieval_mode: Some("local_strict".to_string()),
+        disable_cache: true,
+        limit_documents: 5,
+        limit_symbols: 8,
+        limit_chunks: 8,
+        limit_semantic_chunks: 8,
+        at_epoch_ms: None,
+        token_source_kind: "verify_memory_matrix_context_pack".to_string(),
+        client_prompt_tokens: None,
+        assistant_generation_tokens: None,
+        tool_overhead_tokens: None,
+        continuity_restore_tokens: None,
+    };
+    let result = retrieval::execute_context_pack_capture(cfg, &mut db, &args, true).await?;
+    Ok(result.payload)
 }
 
 fn summarize_subset(tasks: &[&TaskResult]) -> Value {

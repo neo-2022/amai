@@ -28,3 +28,13 @@ while IFS= read -r line; do
     export "${key}=${value}"
   fi
 done < .env
+
+amai_unique_suffix() {
+  local epoch_nanos=""
+  epoch_nanos="$(date +%s%N 2>/dev/null || true)"
+  if [[ -n "${epoch_nanos}" && "${epoch_nanos}" != *N* ]]; then
+    printf '%s\n' "${epoch_nanos}"
+    return 0
+  fi
+  printf '%s%s%05d\n' "$(date +%s)" "$$" "${RANDOM}"
+}

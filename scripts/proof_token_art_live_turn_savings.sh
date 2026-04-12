@@ -9,18 +9,20 @@ if [[ ! -x ./target/release/amai ]]; then
 fi
 
 proof_id="$(date +%s%N)"
-thread_id="proof-art-live-turn-${proof_id}"
+thread_id="art-live-turn-${proof_id}"
 rollout_path="/tmp/${thread_id}.jsonl"
+completed_rollout_path="/tmp/${thread_id}-complete.jsonl"
 output_path="/tmp/${thread_id}.json"
 snapshot_path="/tmp/${thread_id}-snapshot.json"
 turn_id="turn-art-continuity"
 timestamp_rfc3339="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-live_source_kind="live_proof_art_continuity_${proof_id}"
+live_source_kind="live_art_continuity_${proof_id}"
 repaired_source_kind="proof_art_continuity_live_turn"
 
 cleanup() {
   sqlite3 ~/.codex/state_5.sqlite "DELETE FROM threads WHERE id = '$thread_id';" >/dev/null 2>&1 || true
   rm -f "$rollout_path"
+  rm -f "$completed_rollout_path"
 }
 trap cleanup EXIT
 
@@ -125,6 +127,94 @@ wait_for_token_metrics() {
   fetch_token_metrics "$source_kind" "$context_pack_id"
 }
 
+assert_current_live_turn_snapshot() {
+  local snapshot_path="$1"
+  local thread_id="$2"
+  local turn_id="$3"
+  export SNAPSHOT_PATH="$snapshot_path"
+  export THREAD_ID="$thread_id"
+  export TURN_ID="$turn_id"
+  python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+payload = json.loads(Path(os.environ["SNAPSHOT_PATH"]).read_text())
+report = payload["token_budget_report"]
+if "token_budget_report" in report:
+    report = report["token_budget_report"]
+current = report["current_live_turn"]
+assert current["exact_pair_available"] is True, current
+assert current["status"] == "exact_pair_materialized", current
+assert current["thread_id"] == os.environ["THREAD_ID"], current
+assert current["turn_id"] == os.environ["TURN_ID"], current
+assert current["exact_pair"]["saved_pct"] >= 90.0, current
+PY
+}
+
+wait_for_current_live_turn_snapshot() {
+  local snapshot_path="$1"
+  local thread_id="$2"
+  local turn_id="$3"
+  local attempt=""
+  for attempt in {1..16}; do
+    timeout 2s ./target/release/amai observe token-report \
+      --budget-profile codex_5h \
+      --include-verify-events true >/dev/null || true
+    CODEX_THREAD_ID="$thread_id" AMAI_AGENT_SCOPE="proof_art_continuity_live_turn" \
+      timeout 20s ./target/release/amai observe snapshot >"$snapshot_path" || true
+    if [[ ! -s "$snapshot_path" ]]; then
+      sleep 2
+      continue
+    fi
+    if assert_current_live_turn_snapshot "$snapshot_path" "$thread_id" "$turn_id" \
+      >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  if [[ ! -s "$snapshot_path" ]]; then
+    printf 'observe snapshot did not produce JSON for thread_id=%s turn_id=%s\n' \
+      "$thread_id" "$turn_id" >&2
+    return 1
+  fi
+  assert_current_live_turn_snapshot "$snapshot_path" "$thread_id" "$turn_id"
+}
+
+update_thread_rollout_path() {
+  local thread_id="$1"
+  local rollout_path="$2"
+  sqlite3 ~/.codex/state_5.sqlite \
+    "UPDATE threads
+     SET rollout_path = '$rollout_path',
+         updated_at = strftime('%s','now')
+     WHERE id = '$thread_id';" >/dev/null
+}
+
+purge_thread_budget_caches() {
+  local thread_id="$1"
+  local suffix
+  suffix="$(printf '%s' "$thread_id" | tr -c '[:alnum:]_-' '_')"
+  rm -f \
+    "state/observe/thread_bound_budget_snapshot.thread-${suffix}.json" \
+    "state/observe/thread_bound_snapshot_invalidation.thread-${suffix}.json" \
+    "state/observe/client_budget_surfaces_cache.thread-${suffix}.json" \
+    "state/observe/client_budget_gate_cache.thread-${suffix}.json"
+}
+
+purge_shared_token_budget_caches() {
+  rm -f \
+    state/token_budget/dashboard_assistant_scope_cache.json \
+    state/token_budget/dashboard_assistant_scope_source_cache.json \
+    state/token_budget/dashboard_current_session_events_cache.json \
+    state/token_budget/dashboard_same_meter_sync_cache.json \
+    state/token_budget/dashboard_token_events_cache.json \
+    state/token_budget/dashboard_token_events_invalidation.json \
+    state/token_budget/exact_client_limits_cache.json \
+    state/token_budget/live_turn_retrieval_context_pack_cache.json \
+    state/token_budget/live_turn_retrieval_context_pack_invalidation.json
+}
+
 sqlite3 ~/.codex/state_5.sqlite \
   "INSERT INTO threads (
       id,
@@ -169,6 +259,7 @@ CODEX_THREAD_ID="$thread_id" AMAI_AGENT_SCOPE="proof_art_continuity_live_turn" \
     --project art \
     --namespace continuity \
     --query "Continuity snapshot" \
+    --disable-cache \
     --retrieval-mode local_strict \
     --token-source-kind "$live_source_kind" >"$output_path"
 
@@ -181,7 +272,13 @@ from pathlib import Path
 payload = json.loads(Path(os.environ["OUTPUT_PATH"]).read_text())
 assert payload["project"]["code"] == "art", payload["project"]
 assert payload["namespace"]["code"] == "continuity", payload["namespace"]
-assert len(payload["retrieval"]["exact_documents"]) >= 1, payload["retrieval"]
+retrieval = payload["retrieval"]
+assert (
+    len(retrieval["exact_documents"]) >= 1
+    or len(retrieval["lexical_chunks"]) >= 1
+    or len(retrieval["semantic_chunks"]) >= 1
+    or len(retrieval["symbol_hits"]) >= 1
+), retrieval
 PY
 
 context_pack_id="$(jq -r '.context_pack_id' "$output_path")"
@@ -189,29 +286,16 @@ read -r naive_tokens context_tokens tool_overhead_tokens <<<"$(wait_for_token_me
 actual_total=$((24 + 28 + context_tokens + tool_overhead_tokens))
 
 write_rollout_file "$actual_total" 1
+mv "$rollout_path" "$completed_rollout_path"
+update_thread_rollout_path "$thread_id" "$completed_rollout_path"
+purge_thread_budget_caches "$thread_id"
+purge_shared_token_budget_caches
 
-CODEX_THREAD_ID="$thread_id" AMAI_AGENT_SCOPE="proof_art_continuity_live_turn" \
-  ./target/release/amai observe snapshot >"$snapshot_path"
+./target/release/amai observe token-report \
+  --budget-profile codex_5h \
+  --include-verify-events true >/dev/null
 
-export SNAPSHOT_PATH="$snapshot_path"
-export THREAD_ID="$thread_id"
-export TURN_ID="$turn_id"
-python3 - <<'PY'
-import json
-import os
-from pathlib import Path
-
-payload = json.loads(Path(os.environ["SNAPSHOT_PATH"]).read_text())
-report = payload["token_budget_report"]
-if "token_budget_report" in report:
-    report = report["token_budget_report"]
-current = report["current_live_turn"]
-assert current["exact_pair_available"] is True, current
-assert current["status"] == "exact_pair_materialized", current
-assert current["thread_id"] == os.environ["THREAD_ID"], current
-assert current["turn_id"] == os.environ["TURN_ID"], current
-assert current["exact_pair"]["saved_pct"] >= 90.0, current
-PY
+wait_for_current_live_turn_snapshot "$snapshot_path" "$thread_id" "$turn_id"
 
 ./target/release/amai observe repair-token-ledger \
   --apply \

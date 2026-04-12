@@ -1,5 +1,6 @@
 use crate::cli::{
-    BootstrapDisconnectArgs, BootstrapOnboardingArgs, BootstrapReconnectArgs, McpConfigArgs,
+    BootstrapAgentPreflightArgs, BootstrapDisconnectArgs, BootstrapOnboardingArgs,
+    BootstrapReconnectArgs, McpConfigArgs,
 };
 use crate::config;
 use crate::continuity;
@@ -44,6 +45,16 @@ struct InstallState {
     startup_contract_status: Option<String>,
     #[serde(default)]
     startup_contract_sha256: Option<String>,
+    #[serde(default)]
+    agent_preflight_contract_path: Option<String>,
+    #[serde(default)]
+    agent_preflight_agent_contract_path: Option<String>,
+    #[serde(default)]
+    agent_preflight_state_path: Option<String>,
+    #[serde(default)]
+    agent_preflight_contract_status: Option<String>,
+    #[serde(default)]
+    agent_preflight_contract_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +164,7 @@ struct MemoryBridgeInstallSummary {
 
 pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     let repo_root = discover_repo_root(args.cwd.as_deref())?;
+    let workspace_root = resolve_workspace_root(&repo_root, args.workspace_root.as_deref())?;
     best_effort_cleanup_mcp_orphans(&repo_root).await;
     let remote_mode = args.ssh_destination.is_some();
     if cfg!(windows) && !remote_mode {
@@ -171,7 +183,7 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     let mut local_memory_bridge_summary: Option<MemoryBridgeInstallSummary> = None;
 
     let target = client_resolution.target.clone();
-    let output = resolve_output_path(&repo_root, &target, args.output.as_ref())?;
+    let output = resolve_output_path(&workspace_root, &target, args.output.as_ref())?;
     let config_args = McpConfigArgs {
         client: client_resolution.client_key.clone(),
         server_name: "amai".to_string(),
@@ -230,9 +242,10 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     }
     let backup = maybe_backup_user_global(&output, &target.install_scope)?;
     mcp::write_client_config(&config_args)?;
-    let startup_contract_summary = install_startup_contract_artifact(&repo_root)?;
+    let startup_contract_summary = install_startup_contract_artifact(&workspace_root, &repo_root)?;
+    let agent_preflight_summary = install_agent_preflight_artifacts(&workspace_root, &repo_root)?;
     let startup_instructions_summary =
-        install_startup_instructions(&repo_root, &client_resolution)?;
+        install_startup_instructions(&workspace_root, &repo_root, &client_resolution)?;
     let install_status = build_install_status(
         install_state_before.as_ref(),
         config_existed_before,
@@ -270,6 +283,21 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
                 .as_ref()
                 .map(|summary| summary.status.clone()),
             startup_contract_sha256: startup_contract_summary
+                .as_ref()
+                .map(|summary| summary.sha256.clone()),
+            agent_preflight_contract_path: agent_preflight_summary
+                .as_ref()
+                .map(|summary| summary.contract_output_path.display().to_string()),
+            agent_preflight_agent_contract_path: agent_preflight_summary
+                .as_ref()
+                .map(|summary| summary.agent_output_path.display().to_string()),
+            agent_preflight_state_path: agent_preflight_summary
+                .as_ref()
+                .map(|summary| summary.state_output_path.display().to_string()),
+            agent_preflight_contract_status: agent_preflight_summary
+                .as_ref()
+                .map(|summary| summary.status.clone()),
+            agent_preflight_contract_sha256: agent_preflight_summary
                 .as_ref()
                 .map(|summary| summary.sha256.clone()),
         },
@@ -355,6 +383,31 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
             install_scope_status(&summary.install_scope)
         );
         println!("Startup contract SHA-256: {}", summary.sha256);
+        println!("Почему contract materialized: {}", summary.reason);
+    }
+    if let Some(summary) = &agent_preflight_summary {
+        println!("Machine-readable agent preflight: {}", summary.status);
+        println!(
+            "Где лежит agent preflight contract JSON: {}",
+            summary.contract_output_path.display()
+        );
+        println!(
+            "Где лежит compact agent preflight JSON: {}",
+            summary.agent_output_path.display()
+        );
+        println!(
+            "Где лежит agent preflight runtime state JSON: {}",
+            summary.state_output_path.display()
+        );
+        println!(
+            "Где лежит agent preflight по scope: {}",
+            install_scope_status(&summary.install_scope)
+        );
+        println!("Agent preflight SHA-256: {}", summary.sha256);
+        println!(
+            "Как обновить preflight snapshot: {}",
+            summary.refresh_shell_command
+        );
         println!("Почему contract materialized: {}", summary.reason);
     }
     if let Some(summary) = &local_memory_bridge_summary {
@@ -536,6 +589,62 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     Ok(())
 }
 
+pub fn print_agent_preflight(args: &BootstrapAgentPreflightArgs) -> Result<()> {
+    let repo_root = discover_repo_root(args.cwd.as_deref())?;
+    let workspace_root = resolve_workspace_root(&repo_root, args.workspace_root.as_deref())?;
+    let Some(summary) = install_agent_preflight_artifacts(&workspace_root, &repo_root)? else {
+        bail!(
+            "workspace {} does not expose the required Amai onboarding/status docs for agent preflight",
+            workspace_root.display()
+        );
+    };
+    let state_text = fs::read_to_string(&summary.state_output_path)
+        .with_context(|| format!("failed to read {}", summary.state_output_path.display()))?;
+    if args.json {
+        println!("{state_text}");
+        return Ok(());
+    }
+
+    let payload: Value =
+        serde_json::from_str(&state_text).context("failed to parse agent preflight state json")?;
+    println!("Amai agent preflight готов");
+    println!("Workspace: {}", workspace_root.display());
+    println!(
+        "Machine-readable contract: {}",
+        summary.contract_output_path.display()
+    );
+    println!("Compact contract: {}", summary.agent_output_path.display());
+    println!(
+        "Runtime state artifact: {}",
+        summary.state_output_path.display()
+    );
+    if let Some(next_stage) =
+        payload["agent_preflight_summary"]["next_required_stage"]["label"].as_str()
+    {
+        println!("Следующий обязательный этап: {next_stage}");
+    }
+    if let Some(focus) = payload["agent_preflight_summary"]["active_focus"].as_array() {
+        if !focus.is_empty() {
+            println!("Что сейчас в работе:");
+            for item in focus.iter().filter_map(Value::as_str) {
+                println!("- {item}");
+            }
+        }
+    }
+    if let Some(mechanisms) =
+        payload["agent_preflight_summary"]["next_stage_ready_mechanisms"].as_array()
+    {
+        if !mechanisms.is_empty() {
+            println!("Готовые механизмы для следующего этапа:");
+            for item in mechanisms.iter().filter_map(Value::as_str) {
+                println!("- {item}");
+            }
+        }
+    }
+    println!("Как обновить snapshot: {}", summary.refresh_shell_command);
+    Ok(())
+}
+
 pub async fn reconnect(args: &BootstrapReconnectArgs) -> Result<()> {
     let reconnect_args = BootstrapOnboardingArgs {
         client: args.client.clone(),
@@ -546,10 +655,34 @@ pub async fn reconnect(args: &BootstrapReconnectArgs) -> Result<()> {
         remote_repo_root: args.remote_repo_root.clone(),
         output: args.output.clone(),
         cwd: args.cwd.clone(),
+        workspace_root: args.workspace_root.clone(),
         skip_release_build: true,
         skip_stack: true,
     };
     run(&reconnect_args).await
+}
+
+fn resolve_workspace_root(source_repo_root: &Path, explicit: Option<&Path>) -> Result<PathBuf> {
+    let Some(path) = explicit else {
+        return Ok(source_repo_root.to_path_buf());
+    };
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .context("failed to resolve current directory for workspace_root")?
+            .join(path)
+    };
+    let canonical = resolved
+        .canonicalize()
+        .with_context(|| format!("failed to resolve workspace_root {}", resolved.display()))?;
+    if !canonical.is_dir() {
+        bail!(
+            "workspace_root must resolve to an existing directory: {}",
+            canonical.display()
+        );
+    }
+    Ok(canonical)
 }
 
 fn current_epoch_seconds() -> u64 {
@@ -598,7 +731,27 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
     let Some(state) = load_install_state(repo_root)? else {
         return Ok(None);
     };
-    let expected_contract_sha = startup_contract_sha256(&mcp::project_chat_startup_contract())?;
+    let startup_contract_path = state.startup_contract_path.as_ref().map(PathBuf::from);
+    let startup_contract_exists = startup_contract_path
+        .as_ref()
+        .map(|path| path.is_file())
+        .unwrap_or(false);
+    let expected_contract_sha = if startup_contract_exists {
+        let path = startup_contract_path
+            .as_ref()
+            .expect("startup contract path must exist when marked present");
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let payload: Value = serde_json::from_str(&content)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let workspace_root = payload["repo_root"]
+            .as_str()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| repo_root.to_path_buf());
+        startup_contract_for_workspace(&workspace_root, repo_root)?.1
+    } else {
+        startup_contract_sha256(&mcp::project_chat_startup_contract())?
+    };
     let startup_instruction_path = state.startup_instruction_path.as_ref().map(PathBuf::from);
     let startup_instruction_exists = startup_instruction_path
         .as_ref()
@@ -705,7 +858,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
                     || instruction_references_restored_obligations,
             ),
             Some(content.contains("startup_execution_gate")),
-            Some(content.contains("./scripts/continuity_startup_state.sh --repo-root")),
+            Some(content.contains("continuity_startup_state.sh --repo-root")),
             Some(
                 content.contains("startup_execution_gate.must_follow_startup_next_action")
                     && content.contains("startup_execution_gate.unrelated_work_allowed")
@@ -723,12 +876,6 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
             None, None, None, None, None, None, None, None, None, None, None, None,
         )
     };
-
-    let startup_contract_path = state.startup_contract_path.as_ref().map(PathBuf::from);
-    let startup_contract_exists = startup_contract_path
-        .as_ref()
-        .map(|path| path.is_file())
-        .unwrap_or(false);
     let (
         startup_contract_sha_matches_current_contract,
         startup_contract_enforces_fail_closed,
@@ -1844,6 +1991,18 @@ struct StartupContractInstallSummary {
 }
 
 #[derive(Debug, Clone)]
+struct AgentPreflightInstallSummary {
+    status: String,
+    contract_output_path: PathBuf,
+    agent_output_path: PathBuf,
+    state_output_path: PathBuf,
+    install_scope: String,
+    reason: String,
+    sha256: String,
+    refresh_shell_command: String,
+}
+
+#[derive(Debug, Clone)]
 struct ClientResolution {
     client_key: String,
     target: ClientTarget,
@@ -1980,6 +2139,48 @@ fn interactive_prompt_allowed() -> bool {
         || (io::stdin().is_terminal() && io::stdout().is_terminal())
 }
 
+pub(crate) fn describe_client_surface(
+    repo_root: &Path,
+    requested_client: Option<&str>,
+) -> Result<Value> {
+    let resolution = resolve_client_target(repo_root, requested_client.unwrap_or("auto"), false)?;
+    let config_output_path = resolve_output_path(repo_root, &resolution.target, None)?;
+    let startup = resolution.target.startup_instructions.as_ref();
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("failed to resolve user home directory"))?;
+    let startup_instruction_path =
+        startup.map(|startup| expand_target_template(&startup.default_output, repo_root, &home));
+    let reconnect_shell_command = format!(
+        "./scripts/reconnect_local.sh --client {}",
+        resolution.client_key
+    );
+    let reconnect_bootstrap_command = format!(
+        "./scripts/amai_exec.sh bootstrap reconnect --client {} --yes",
+        resolution.client_key
+    );
+    Ok(json!({
+        "client_key": resolution.client_key,
+        "display_name": resolution.target.display_name,
+        "auto_selected": resolution.auto_selected,
+        "selection_reason": resolution.reason,
+        "other_detected_clients": resolution.other_detected_clients,
+        "config_output_path": config_output_path.display().to_string(),
+        "config_install_scope": resolution.target.install_scope,
+        "config_install_scope_label": install_scope_status(&resolution.target.install_scope),
+        "startup_instruction_mode": startup.map(|item| item.mode.clone()),
+        "startup_instruction_format": startup.map(|item| item.format.clone()),
+        "startup_instruction_install_scope": startup.map(|item| item.install_scope.clone()),
+        "startup_instruction_install_scope_label": startup.map(|item| install_scope_status(&item.install_scope)),
+        "startup_instruction_path": startup_instruction_path.map(|path| path.display().to_string()),
+        "reconnect_shell_command": reconnect_shell_command,
+        "reconnect_bootstrap_command": reconnect_bootstrap_command,
+        "fresh_chat_assist_summary": format!(
+            "Для fresh chat front-door используй {} или {}.",
+            reconnect_shell_command,
+            reconnect_bootstrap_command
+        ),
+    }))
+}
+
 fn resolve_output_path(
     repo_root: &Path,
     target: &ClientTarget,
@@ -2019,6 +2220,18 @@ fn startup_contract_artifact_path(repo_root: &Path) -> PathBuf {
 
 fn startup_agent_contract_artifact_path(repo_root: &Path) -> PathBuf {
     repo_root.join(".amai/onboarding/project-chat-startup-agent-contract.json")
+}
+
+fn agent_preflight_contract_artifact_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(".amai/onboarding/project-agent-preflight-contract.json")
+}
+
+fn agent_preflight_agent_contract_artifact_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(".amai/onboarding/project-agent-preflight-agent-contract.json")
+}
+
+fn agent_preflight_state_artifact_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(".amai/onboarding/project-agent-preflight-state.json")
 }
 
 fn managed_startup_block_bounds(content: &str) -> Result<Option<(usize, usize)>> {
@@ -2081,16 +2294,18 @@ fn strip_managed_startup_block(existing: &str) -> Result<Option<String>> {
 }
 
 fn install_startup_instructions(
-    repo_root: &Path,
+    workspace_root: &Path,
+    helper_repo_root: &Path,
     client_resolution: &ClientResolution,
 ) -> Result<Option<StartupInstructionsInstallSummary>> {
     let Some(startup) = &client_resolution.target.startup_instructions else {
         return Ok(None);
     };
     let home = dirs::home_dir().ok_or_else(|| anyhow!("failed to resolve user home directory"))?;
-    let output_path = expand_target_template(&startup.default_output, repo_root, &home);
+    let output_path = expand_target_template(&startup.default_output, workspace_root, &home);
     let content = render_startup_instructions(
-        repo_root,
+        workspace_root,
+        helper_repo_root,
         &client_resolution.target.display_name,
         &client_resolution.client_key,
         &startup.format,
@@ -2108,7 +2323,7 @@ fn install_startup_instructions(
                 if !existing.contains(STARTUP_INSTRUCTIONS_MARKER)
                     && existing.trim() != content.trim()
                 {
-                    let fallback = repo_root.join("tmp/onboarding").join(format!(
+                    let fallback = workspace_root.join("tmp/onboarding").join(format!(
                         "{}-amai-startup-manual.md",
                         client_resolution.client_key
                     ));
@@ -2188,16 +2403,17 @@ fn install_startup_instructions(
 }
 
 fn install_startup_contract_artifact(
-    repo_root: &Path,
+    workspace_root: &Path,
+    helper_repo_root: &Path,
 ) -> Result<Option<StartupContractInstallSummary>> {
-    let output_path = startup_contract_artifact_path(repo_root);
-    let agent_output_path = startup_agent_contract_artifact_path(repo_root);
+    let output_path = startup_contract_artifact_path(workspace_root);
+    let agent_output_path = startup_agent_contract_artifact_path(workspace_root);
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let (content, sha256) = render_startup_contract_artifact(repo_root)?;
-    let agent_content = render_startup_agent_contract_artifact(repo_root)?;
+    let (content, sha256) = render_startup_contract_artifact(workspace_root, helper_repo_root)?;
+    let agent_content = render_startup_agent_contract_artifact(workspace_root, helper_repo_root)?;
     fs::write(&output_path, content.as_bytes())
         .with_context(|| format!("failed to write {}", output_path.display()))?;
     fs::write(&agent_output_path, agent_content.as_bytes())
@@ -2210,6 +2426,516 @@ fn install_startup_contract_artifact(
             "supported clients now get a machine-readable startup source-of-truth alongside managed instructions"
                 .to_string(),
         sha256,
+    }))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AgentPreflightDocumentDescriptor {
+    order: usize,
+    path: &'static str,
+    role: &'static str,
+    condition: &'static str,
+    tree_location: &'static str,
+}
+
+const AGENT_PREFLIGHT_DOCUMENTS: &[AgentPreflightDocumentDescriptor] = &[
+    AgentPreflightDocumentDescriptor {
+        order: 1,
+        path: "AGENTS.md",
+        role: "обязательный runtime/startup law и главный проектный контракт",
+        condition: "always",
+        tree_location: "root",
+    },
+    AgentPreflightDocumentDescriptor {
+        order: 2,
+        path: "README.md",
+        role: "продуктовая картина и базовый старт",
+        condition: "always",
+        tree_location: "root",
+    },
+    AgentPreflightDocumentDescriptor {
+        order: 3,
+        path: "docs/AGENT_START_HERE.md",
+        role: "decision tree и быстрый вход в проект",
+        condition: "always",
+        tree_location: "root",
+    },
+    AgentPreflightDocumentDescriptor {
+        order: 4,
+        path: "docs/IMPLEMENTATION_STATUS.md",
+        role: "живой status snapshot, checkbox-chain и ближайший этап",
+        condition: "always",
+        tree_location: "trunk",
+    },
+    AgentPreflightDocumentDescriptor {
+        order: 5,
+        path: "docs/ARCHITECTURE.md",
+        role: "текущий materialized baseline",
+        condition: "always",
+        tree_location: "current_state_branch",
+    },
+    AgentPreflightDocumentDescriptor {
+        order: 6,
+        path: "docs/OPERATIONS.md",
+        role: "proof, fail-closed и operational laws",
+        condition: "always",
+        tree_location: "current_state_branch",
+    },
+    AgentPreflightDocumentDescriptor {
+        order: 7,
+        path: "docs/AMAI_GLOBAL_MEMORY_ROADMAP.md",
+        role: "канонический target-state roadmap",
+        condition: "always",
+        tree_location: "target_state_branch",
+    },
+    AgentPreflightDocumentDescriptor {
+        order: 8,
+        path: "docs/IMPLEMENTATION_GATES.md",
+        role: "proof/debug/reconcile карта по этапам",
+        condition: "implementation_stage_only",
+        tree_location: "target_state_branch",
+    },
+    AgentPreflightDocumentDescriptor {
+        order: 9,
+        path: "docs/AMAI_TASK_TREE_PLAN.md",
+        role: "частный модульный план task/commitment graph",
+        condition: "task_graph_or_memory_module_only",
+        tree_location: "module_branch",
+    },
+    AgentPreflightDocumentDescriptor {
+        order: 10,
+        path: "docs/AMAI_COMPARE_EXPERIMENT_PLAN.md",
+        role: "частный модульный план compare/eval surface",
+        condition: "compare_or_eval_module_only",
+        tree_location: "module_branch",
+    },
+];
+
+fn project_supports_agent_preflight(workspace_root: &Path) -> bool {
+    AGENT_PREFLIGHT_DOCUMENTS
+        .iter()
+        .all(|doc| workspace_root.join(doc.path).is_file())
+}
+
+fn value_sha256(value: &Value) -> Result<String> {
+    let bytes = serde_json::to_vec(value).context("failed to serialize json value for sha256")?;
+    Ok(hex_sha256(&bytes))
+}
+
+fn agent_preflight_required_documents_json() -> Vec<Value> {
+    AGENT_PREFLIGHT_DOCUMENTS
+        .iter()
+        .map(|doc| {
+            json!({
+                "order": doc.order,
+                "path": doc.path,
+                "role": doc.role,
+                "condition": doc.condition,
+                "tree_location": doc.tree_location
+            })
+        })
+        .collect()
+}
+
+fn agent_preflight_required_document_snapshots(workspace_root: &Path) -> Result<Vec<Value>> {
+    AGENT_PREFLIGHT_DOCUMENTS
+        .iter()
+        .map(|doc| {
+            let path = workspace_root.join(doc.path);
+            let exists = path.is_file();
+            let sha256 = if exists {
+                Some(file_sha256(&path)?)
+            } else {
+                None
+            };
+            let modified = if exists {
+                Some(file_modified_epoch_seconds(&path)?)
+            } else {
+                None
+            };
+            Ok(json!({
+                "order": doc.order,
+                "path": doc.path,
+                "absolute_path": path.display().to_string(),
+                "role": doc.role,
+                "condition": doc.condition,
+                "tree_location": doc.tree_location,
+                "exists": exists,
+                "sha256": sha256,
+                "last_modified_epoch_seconds": modified
+            }))
+        })
+        .collect()
+}
+
+fn file_sha256(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(hex_sha256(&bytes))
+}
+
+fn file_modified_epoch_seconds(path: &Path) -> Result<u64> {
+    let modified = fs::metadata(path)
+        .with_context(|| format!("failed to stat {}", path.display()))?
+        .modified()
+        .with_context(|| format!("failed to read mtime for {}", path.display()))?;
+    let duration = modified
+        .duration_since(UNIX_EPOCH)
+        .with_context(|| format!("mtime for {} predates epoch", path.display()))?;
+    Ok(duration.as_secs())
+}
+
+fn markdown_section_lines<'a>(content: &'a str, heading: &str) -> Result<Vec<&'a str>> {
+    let mut found = false;
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !found {
+            if trimmed == heading {
+                found = true;
+            }
+            continue;
+        }
+        if trimmed.starts_with("## ") || trimmed.starts_with("### ") {
+            break;
+        }
+        lines.push(line);
+    }
+    if !found {
+        bail!("required markdown heading not found: {heading}");
+    }
+    Ok(lines)
+}
+
+fn markdown_bullets_under_heading(content: &str, heading: &str) -> Result<Vec<String>> {
+    Ok(markdown_section_lines(content, heading)?
+        .into_iter()
+        .filter_map(|line| line.trim().strip_prefix("- ").map(str::to_owned))
+        .collect())
+}
+
+fn markdown_items_under_heading(content: &str, heading: &str) -> Result<Vec<String>> {
+    Ok(markdown_section_lines(content, heading)?
+        .into_iter()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                None
+            } else if let Some(bullet) = trimmed.strip_prefix("- ") {
+                Some(bullet.to_string())
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .collect())
+}
+
+fn parse_markdown_link(input: &str) -> Result<(String, String)> {
+    let trimmed = input.trim();
+    let Some(stripped) = trimmed.strip_prefix('[') else {
+        bail!("expected markdown link, got: {trimmed}");
+    };
+    let Some((label, rest)) = stripped.split_once("](") else {
+        bail!("expected markdown link separator in: {trimmed}");
+    };
+    let Some(target) = rest.strip_suffix(')') else {
+        bail!("expected markdown link closing paren in: {trimmed}");
+    };
+    Ok((label.to_string(), target.to_string()))
+}
+
+fn parse_stage_checklist(content: &str) -> Result<Vec<Value>> {
+    markdown_section_lines(content, "## Чеклист этапов")?
+        .into_iter()
+        .filter(|line| line.trim().starts_with("- ["))
+        .map(|line| {
+            let trimmed = line.trim();
+            let (checked, remainder) = if let Some(rest) = trimmed.strip_prefix("- [x] ") {
+                (true, rest)
+            } else if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
+                (false, rest)
+            } else {
+                bail!("unsupported checkbox line format: {trimmed}");
+            };
+            let (label, roadmap_path) = parse_markdown_link(remainder)?;
+            Ok(json!({
+                "checked": checked,
+                "label": label,
+                "roadmap_path": roadmap_path
+            }))
+        })
+        .collect()
+}
+
+fn first_backticked_span(input: &str) -> Option<String> {
+    let start = input.find('`')?;
+    let rest = &input[start + 1..];
+    let end = rest.find('`')?;
+    Some(rest[..end].to_string())
+}
+
+fn parse_declared_next_stage_label(content: &str) -> Result<Option<String>> {
+    for item in markdown_items_under_heading(content, "### Ближайший следующий этап")?
+    {
+        if let Some(label) = first_backticked_span(&item) {
+            return Ok(Some(label));
+        }
+    }
+    Ok(None)
+}
+
+fn helper_script_command(
+    workspace_root: &Path,
+    helper_repo_root: &Path,
+    script_name: &str,
+) -> String {
+    if workspace_root == helper_repo_root {
+        format!("./scripts/{script_name}")
+    } else {
+        helper_repo_root
+            .join("scripts")
+            .join(script_name)
+            .display()
+            .to_string()
+    }
+}
+
+fn agent_preflight_contract_for_workspace(
+    workspace_root: &Path,
+    helper_repo_root: &Path,
+) -> Result<(Value, String)> {
+    if !project_supports_agent_preflight(workspace_root) {
+        bail!(
+            "workspace {} does not contain the required Amai agent-preflight docs",
+            workspace_root.display()
+        );
+    }
+    let contract = json!({
+        "contract_version": "agent-preflight-contract-v1",
+        "purpose": "machine-readable onboarding, status snapshot, and stage-discipline front door for any agent before touching code, schema, or runtime in this workspace",
+        "required_documents": agent_preflight_required_documents_json(),
+        "document_tree": {
+            "root_documents": [
+                "AGENTS.md",
+                "README.md",
+                "docs/AGENT_START_HERE.md",
+                "docs/IMPLEMENTATION_STATUS.md"
+            ],
+            "trunk_document": "docs/IMPLEMENTATION_STATUS.md",
+            "branches": [
+                {
+                    "branch_kind": "current_state_or_bugfix",
+                    "when": "task is about current implementation baseline or bugfix",
+                    "required_documents": ["docs/ARCHITECTURE.md", "docs/OPERATIONS.md"]
+                },
+                {
+                    "branch_kind": "implementation_stage",
+                    "when": "task is about the next roadmap stage or stage-based implementation",
+                    "required_documents": ["docs/AMAI_GLOBAL_MEMORY_ROADMAP.md", "docs/IMPLEMENTATION_GATES.md"]
+                },
+                {
+                    "branch_kind": "module_work",
+                    "when": "task touches task graph, compare/eval, or another memory module",
+                    "required_documents": ["docs/AMAI_TASK_TREE_PLAN.md", "docs/AMAI_COMPARE_EXPERIMENT_PLAN.md"]
+                }
+            ]
+        },
+        "stage_discipline": {
+            "must_read_agents_md_first": true,
+            "must_open_status_before_code": true,
+            "must_follow_checkbox_order": true,
+            "must_open_matching_stage_gate_document": true,
+            "must_use_existing_benchmark_or_proof_harness_before_adhoc_checks": true,
+            "checkbox_requires_tests_manual_check_debug_fix_retest": true,
+            "must_update_implementation_status_after_significant_step": true,
+            "must_write_continuity_handoff_after_significant_step": true,
+            "missing_or_unreadable_fail_closed": true
+        },
+        "status_sources": {
+            "status_snapshot_path": "docs/IMPLEMENTATION_STATUS.md",
+            "agent_entry_path": "docs/AGENT_START_HERE.md",
+            "roadmap_path": "docs/AMAI_GLOBAL_MEMORY_ROADMAP.md",
+            "gates_path": "docs/IMPLEMENTATION_GATES.md"
+        },
+        "refresh_commands": {
+            "cli_command": "bootstrap agent-preflight",
+            "shell_command": helper_script_command(workspace_root, helper_repo_root, "agent_preflight.sh"),
+            "json_flag": "--json"
+        },
+        "runtime_state_artifact": {
+            "workspace_runtime_state_relative_path": ".amai/onboarding/project-agent-preflight-state.json",
+            "workspace_runtime_state_artifact_version": "workspace-agent-preflight-state-v1",
+            "source_summary_field": "agent_preflight_summary",
+            "written_by_tool": "amai bootstrap agent-preflight"
+        },
+        "fail_closed_conditions": {
+            "missing_or_unreadable_required_documents": true,
+            "missing_or_unreadable_status_snapshot": true,
+            "next_stage_drift_detected": true
+        }
+    });
+    let sha256 = value_sha256(&contract)?;
+    Ok((contract, sha256))
+}
+
+fn render_agent_preflight_contract_artifact(
+    workspace_root: &Path,
+    helper_repo_root: &Path,
+) -> Result<(String, String)> {
+    let (contract, sha256) =
+        agent_preflight_contract_for_workspace(workspace_root, helper_repo_root)?;
+    let payload = json!({
+        "artifact_version": "workspace-agent-preflight-contract-v1",
+        "contract_kind": "project_agent_preflight",
+        "repo_root": workspace_root.display().to_string(),
+        "preflight_contract_sha256": sha256,
+        "preflight_contract_sha256_scope": "preflight_contract object only",
+        "preflight_contract": contract
+    });
+    Ok((
+        serde_json::to_string(&payload)
+            .context("failed to serialize agent preflight contract artifact")?,
+        payload["preflight_contract_sha256"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    ))
+}
+
+fn render_agent_preflight_agent_contract_artifact(
+    workspace_root: &Path,
+    helper_repo_root: &Path,
+) -> Result<String> {
+    let (contract, sha256) =
+        agent_preflight_contract_for_workspace(workspace_root, helper_repo_root)?;
+    let payload = json!({
+        "artifact_version": "workspace-agent-preflight-agent-contract-v1",
+        "contract_kind": "project_agent_preflight_agent_read",
+        "repo_root": workspace_root.display().to_string(),
+        "full_preflight_contract_relative_path": ".amai/onboarding/project-agent-preflight-contract.json",
+        "full_preflight_contract_sha256": sha256,
+        "required_start_order": contract["required_documents"].clone(),
+        "document_tree": contract["document_tree"].clone(),
+        "stage_discipline": contract["stage_discipline"].clone(),
+        "refresh_commands": contract["refresh_commands"].clone(),
+        "status_sources": contract["status_sources"].clone(),
+        "runtime_state_artifact": contract["runtime_state_artifact"].clone()
+    });
+    serde_json::to_string(&payload)
+        .context("failed to serialize compact agent preflight contract artifact")
+}
+
+fn render_agent_preflight_state_artifact(
+    workspace_root: &Path,
+    helper_repo_root: &Path,
+) -> Result<String> {
+    let (contract, _) = agent_preflight_contract_for_workspace(workspace_root, helper_repo_root)?;
+    let status_path = workspace_root.join("docs/IMPLEMENTATION_STATUS.md");
+    let status_text = fs::read_to_string(&status_path)
+        .with_context(|| format!("failed to read {}", status_path.display()))?;
+    let gates_path = workspace_root.join("docs/IMPLEMENTATION_GATES.md");
+    if !gates_path.is_file() {
+        bail!(
+            "required implementation gates doc is missing: {}",
+            gates_path.display()
+        );
+    }
+
+    let stage_checklist = parse_stage_checklist(&status_text)?;
+    let next_required_stage = stage_checklist
+        .iter()
+        .find(|item| !item["checked"].as_bool().unwrap_or(false))
+        .cloned();
+    let declared_next_stage = parse_declared_next_stage_label(&status_text)?;
+    if let (Some(expected), Some(declared)) = (
+        next_required_stage
+            .as_ref()
+            .and_then(|value| value["label"].as_str())
+            .map(str::to_owned),
+        declared_next_stage.clone(),
+    ) {
+        if expected != declared {
+            bail!(
+                "implementation status drift detected: first unchecked stage is `{expected}`, but declared next stage is `{declared}`"
+            );
+        }
+    }
+
+    let next_stage_ready_mechanisms = if let Some(stage) = &next_required_stage {
+        let heading = format!(
+            "### {}",
+            stage["label"]
+                .as_str()
+                .ok_or_else(|| anyhow!("next stage label missing from checklist"))?
+        );
+        markdown_items_under_heading(&status_text, &heading)?
+    } else {
+        Vec::new()
+    };
+
+    let payload = json!({
+        "artifact_version": "workspace-agent-preflight-state-v1",
+        "contract_kind": "project_agent_preflight_state",
+        "repo_root": workspace_root.display().to_string(),
+        "source_documents": agent_preflight_required_document_snapshots(workspace_root)?,
+        "agent_preflight_summary": {
+            "status_snapshot_path": "docs/IMPLEMENTATION_STATUS.md",
+            "status_snapshot_sha256": file_sha256(&status_path)?,
+            "overall_state": markdown_bullets_under_heading(&status_text, "### Общая оценка")?,
+            "materialized_baseline": markdown_bullets_under_heading(&status_text, "### Что уже точно сделано")?,
+            "design_closed": markdown_bullets_under_heading(&status_text, "### Что уже закрыто на уровне дизайна")?,
+            "not_materialized": markdown_bullets_under_heading(&status_text, "### Что ещё не materialized в коде")?,
+            "active_focus": markdown_bullets_under_heading(&status_text, "### Что сейчас в работе")?,
+            "blockers": markdown_bullets_under_heading(&status_text, "### Фундаментальные blocker-ы")?,
+            "stage_checklist": stage_checklist,
+            "declared_next_stage_label": declared_next_stage,
+            "next_required_stage": next_required_stage,
+            "next_stage_ready_mechanisms": next_stage_ready_mechanisms,
+            "ready_harnesses_source_path": "docs/IMPLEMENTATION_STATUS.md",
+            "gates_document_path": "docs/IMPLEMENTATION_GATES.md",
+            "roadmap_path": "docs/AMAI_GLOBAL_MEMORY_ROADMAP.md"
+        },
+        "preflight_execution_gate": contract["stage_discipline"].clone(),
+        "refresh_commands": contract["refresh_commands"].clone()
+    });
+    serde_json::to_string(&payload).context("failed to serialize agent preflight state artifact")
+}
+
+fn install_agent_preflight_artifacts(
+    workspace_root: &Path,
+    helper_repo_root: &Path,
+) -> Result<Option<AgentPreflightInstallSummary>> {
+    if !project_supports_agent_preflight(workspace_root) {
+        return Ok(None);
+    }
+    let contract_output_path = agent_preflight_contract_artifact_path(workspace_root);
+    let agent_output_path = agent_preflight_agent_contract_artifact_path(workspace_root);
+    let state_output_path = agent_preflight_state_artifact_path(workspace_root);
+    if let Some(parent) = contract_output_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let (contract_text, sha256) =
+        render_agent_preflight_contract_artifact(workspace_root, helper_repo_root)?;
+    let agent_text =
+        render_agent_preflight_agent_contract_artifact(workspace_root, helper_repo_root)?;
+    let state_text = render_agent_preflight_state_artifact(workspace_root, helper_repo_root)?;
+    fs::write(&contract_output_path, contract_text.as_bytes())
+        .with_context(|| format!("failed to write {}", contract_output_path.display()))?;
+    fs::write(&agent_output_path, agent_text.as_bytes())
+        .with_context(|| format!("failed to write {}", agent_output_path.display()))?;
+    fs::write(&state_output_path, state_text.as_bytes())
+        .with_context(|| format!("failed to write {}", state_output_path.display()))?;
+    Ok(Some(AgentPreflightInstallSummary {
+        status: "workspace_agent_preflight_materialized".to_string(),
+        contract_output_path,
+        agent_output_path,
+        state_output_path,
+        install_scope: "workspace_local".to_string(),
+        reason:
+            "supported project workspaces now get a machine-readable agent preflight gate alongside startup artifacts"
+                .to_string(),
+        sha256,
+        refresh_shell_command: helper_script_command(workspace_root, helper_repo_root, "agent_preflight.sh"),
     }))
 }
 
@@ -2272,12 +2998,13 @@ fn remove_startup_instructions(
 }
 
 fn render_startup_instructions(
-    repo_root: &Path,
+    workspace_root: &Path,
+    helper_repo_root: &Path,
     client_display_name: &str,
     client_key: &str,
     format: &str,
 ) -> Result<String> {
-    let body = render_startup_instruction_body(repo_root, client_key)?;
+    let body = render_startup_instruction_body(workspace_root, helper_repo_root, client_key)?;
     match format {
         "vscode_instructions_md" => Ok(format!(
             "{STARTUP_INSTRUCTIONS_MARKER}\n---\napplyTo: \"**\"\ndescription: \"Amai continuity startup for this workspace\"\n---\n\n# Amai continuity startup ({client_display_name})\n\n{body}\n{STARTUP_INSTRUCTIONS_END_MARKER}\n"
@@ -2297,11 +3024,15 @@ fn render_startup_instructions(
     }
 }
 
-fn render_startup_instruction_body(repo_root: &Path, client_key: &str) -> Result<String> {
-    let contract = mcp::project_chat_startup_contract();
-    let contract_path = startup_contract_artifact_path(repo_root);
-    let agent_contract_path = startup_agent_contract_artifact_path(repo_root);
-    let startup_contract_sha256 = startup_contract_sha256(&contract)?;
+fn render_startup_instruction_body(
+    workspace_root: &Path,
+    helper_repo_root: &Path,
+    client_key: &str,
+) -> Result<String> {
+    let (contract, startup_contract_sha256) =
+        startup_contract_for_workspace(workspace_root, helper_repo_root)?;
+    let contract_path = startup_contract_artifact_path(workspace_root);
+    let agent_contract_path = startup_agent_contract_artifact_path(workspace_root);
     let tool = contract["tool"]
         .as_str()
         .ok_or_else(|| anyhow!("project_chat_startup contract is missing tool"))?;
@@ -2549,6 +3280,30 @@ fn render_startup_instruction_body(repo_root: &Path, client_key: &str) -> Result
     let client_budget_reply_prefix_field = client_budget_enforcement["reply_prefix_field"]
         .as_str()
         .unwrap_or("reply_prefix");
+    let client_budget_reply_prefix_enforcement_flag =
+        client_budget_enforcement["reply_prefix_enforcement_flag"]
+            .as_str()
+            .unwrap_or("--enforce-online-reply-prefix");
+    let client_budget_required_reply_prefix_source =
+        client_budget_enforcement["required_reply_prefix_source"]
+            .as_str()
+            .unwrap_or("personal_agent_online_limit_contour");
+    let client_budget_required_reply_prefix_non_empty =
+        client_budget_enforcement["required_reply_prefix_non_empty"]
+            .as_bool()
+            .unwrap_or(true);
+    let client_budget_reply_prefix_preflight_blocks_substantive_reply =
+        client_budget_enforcement["reply_prefix_preflight_blocks_substantive_reply"]
+            .as_bool()
+            .unwrap_or(true);
+    let client_budget_output_prefix_enforcement_mode =
+        client_budget_enforcement["output_prefix_enforcement_mode"]
+            .as_str()
+            .unwrap_or("instruction_preflight_fail_closed");
+    let client_budget_output_prefix_host_enforced =
+        client_budget_enforcement["output_prefix_host_enforced"]
+            .as_bool()
+            .unwrap_or(false);
     let client_budget_reply_budget_mode_field =
         client_budget_enforcement["reply_budget_mode_field"]
             .as_str()
@@ -2589,6 +3344,26 @@ fn render_startup_instruction_body(repo_root: &Path, client_key: &str) -> Result
         client_budget_enforcement["must_check_before_each_substantive_reply"]
             .as_bool()
             .unwrap_or(false);
+    let client_budget_continuity_write_exempt_from_reply_guard =
+        client_budget_enforcement["continuity_write_exempt_from_reply_guard"]
+            .as_bool()
+            .unwrap_or(false);
+    let client_budget_continuity_write_required_before_rotate =
+        client_budget_enforcement["continuity_write_required_before_rotate"]
+            .as_bool()
+            .unwrap_or(false);
+    let client_budget_continuity_write_operations =
+        client_budget_enforcement["continuity_write_operations"]
+            .as_array()
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "continuity handoff".to_string());
     let client_budget_max_guard_age_seconds = client_budget_enforcement["max_guard_age_seconds"]
         .as_u64()
         .unwrap_or(10);
@@ -2612,7 +3387,7 @@ fn render_startup_instruction_body(repo_root: &Path, client_key: &str) -> Result
                 .join(", ")
         })
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "новый чат нужен сейчас".to_string());
+        .unwrap_or_else(|| "сожми текущий чат сейчас".to_string());
     let client_budget_save_handoff_before_rotate =
         client_budget_enforcement["save_handoff_before_rotate"]
             .as_bool()
@@ -2625,19 +3400,26 @@ fn render_startup_instruction_body(repo_root: &Path, client_key: &str) -> Result
         client_budget_enforcement["full_scale_client_truth_required"]
             .as_bool()
             .unwrap_or(false);
-    let client_budget_blocking_reply_contract_field =
+    let client_budget_reply_blocking_removed = client_budget_enforcement["reply_blocking_removed"]
+        .as_bool()
+        .unwrap_or(false);
+    let client_budget_tool_turn_blocking_removed =
+        client_budget_enforcement["tool_turn_blocking_removed"]
+            .as_bool()
+            .unwrap_or(false);
+    let _client_budget_blocking_reply_contract_field =
         client_budget_enforcement["blocking_reply_contract_field"]
             .as_str()
             .unwrap_or("blocking_reply_contract");
-    let client_budget_blocking_reply_contract_version =
+    let _client_budget_blocking_reply_contract_version =
         client_budget_enforcement["blocking_reply_contract_version"]
             .as_str()
             .unwrap_or(working_state::CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION);
-    let client_budget_blocking_reply_response_kind =
+    let _client_budget_blocking_reply_response_kind =
         client_budget_enforcement["blocking_reply_response_kind"]
             .as_str()
             .unwrap_or(working_state::CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND);
-    let client_budget_blocking_reply_max_sentences =
+    let _client_budget_blocking_reply_max_sentences =
         client_budget_enforcement["blocking_reply_max_sentences"]
             .as_u64()
             .unwrap_or(working_state::CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES);
@@ -2649,7 +3431,7 @@ fn render_startup_instruction_body(repo_root: &Path, client_key: &str) -> Result
         client_budget_enforcement["blocking_reply_must_use_action_bundle_operator_flow"]
             .as_bool()
             .unwrap_or(true);
-    let client_budget_blocking_reply_template =
+    let _client_budget_blocking_reply_template =
         client_budget_enforcement["blocking_reply_template"]
             .as_str()
             .unwrap_or(working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE);
@@ -2659,7 +3441,7 @@ fn render_startup_instruction_body(repo_root: &Path, client_key: &str) -> Result
             .as_str()
             .map(str::to_string)
             .unwrap_or_else(continuity::client_budget_target_chat_command_pattern);
-    let client_budget_target_allowed_percents =
+    let _client_budget_target_allowed_percents =
         client_budget_target_control["allowed_target_percents"]
             .as_array()
             .map(|values| {
@@ -2741,7 +3523,9 @@ fn render_startup_instruction_body(repo_root: &Path, client_key: &str) -> Result
     let client_budget_compact_chat_required_host_action =
         client_budget_compact_chat_control["required_host_action"]
             .as_str()
-            .unwrap_or("open_clean_chat_surface_and_inject_prompt_text");
+            .unwrap_or(
+                "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable",
+            );
     let client_budget_max_guard_age_seconds_text = client_budget_max_guard_age_seconds.to_string();
     let client_budget_stale_guard_requires_refresh_text =
         if client_budget_stale_guard_requires_refresh {
@@ -2761,13 +3545,13 @@ fn render_startup_instruction_body(repo_root: &Path, client_key: &str) -> Result
         } else {
             "false"
         };
-    let client_budget_blocking_reply_must_avoid_substantive_work_text =
+    let _client_budget_blocking_reply_must_avoid_substantive_work_text =
         if client_budget_blocking_reply_must_avoid_substantive_work {
             "true"
         } else {
             "false"
         };
-    let client_budget_blocking_reply_must_use_action_bundle_operator_flow_text =
+    let _client_budget_blocking_reply_must_use_action_bundle_operator_flow_text =
         if client_budget_blocking_reply_must_use_action_bundle_operator_flow {
             "true"
         } else {
@@ -2791,6 +3575,17 @@ fn render_startup_instruction_body(repo_root: &Path, client_key: &str) -> Result
             "false"
         };
     let client_budget_full_scale_truth_required_text = if client_budget_full_scale_truth_required {
+        "true"
+    } else {
+        "false"
+    };
+    let client_budget_reply_blocking_removed_text = if client_budget_reply_blocking_removed {
+        "true"
+    } else {
+        "false"
+    };
+    let client_budget_tool_turn_blocking_removed_text = if client_budget_tool_turn_blocking_removed
+    {
         "true"
     } else {
         "false"
@@ -2842,23 +3637,69 @@ fn render_startup_instruction_body(repo_root: &Path, client_key: &str) -> Result
         } else {
             "false"
         };
+    let client_budget_continuity_write_exempt_from_reply_guard_text =
+        if client_budget_continuity_write_exempt_from_reply_guard {
+            "true"
+        } else {
+            "false"
+        };
+    let client_budget_continuity_write_required_before_rotate_text =
+        if client_budget_continuity_write_required_before_rotate {
+            "true"
+        } else {
+            "false"
+        };
     let client_budget_prefer_compact_diagnostics_text = if client_budget_prefer_compact_diagnostics
     {
         "true"
     } else {
         "false"
     };
-    let repo_root_display = repo_root.display().to_string();
+    let repo_root_display = workspace_root.display().to_string();
     let contract_path_display = contract_path.display().to_string();
     let agent_contract_path_display = agent_contract_path.display().to_string();
     let _startup_agent_contract_relative_path =
         ".amai/onboarding/project-chat-startup-agent-contract.json";
-    let reconnect_shell_command = if reconnect_helper_requires_client_argument {
+    let reconnect_shell_command = if helper_repo_root != workspace_root {
+        let helper = helper_repo_root.display();
+        if reconnect_helper_requires_client_argument {
+            format!(
+                "{reconnect_helper_shell_relative_path} --client {client_key} --cwd {} --workspace-root {} --yes",
+                helper,
+                workspace_root.display()
+            )
+        } else {
+            format!(
+                "{reconnect_helper_shell_relative_path} --cwd {} --workspace-root {} --yes",
+                helper,
+                workspace_root.display()
+            )
+        }
+    } else if reconnect_helper_requires_client_argument {
         format!("{reconnect_helper_shell_relative_path} --client {client_key}")
     } else {
         reconnect_helper_shell_relative_path.to_string()
     };
-    let reconnect_bootstrap_command = if reconnect_helper_requires_client_argument {
+    let reconnect_bootstrap_command = if helper_repo_root != workspace_root {
+        let helper_exec = helper_repo_root.join("scripts/amai_exec.sh");
+        if reconnect_helper_requires_client_argument {
+            format!(
+                "{} {} --client {client_key} --cwd {} --workspace-root {} --yes",
+                helper_exec.display(),
+                reconnect_helper_bootstrap_command,
+                helper_repo_root.display(),
+                workspace_root.display()
+            )
+        } else {
+            format!(
+                "{} {} --cwd {} --workspace-root {} --yes",
+                helper_exec.display(),
+                reconnect_helper_bootstrap_command,
+                helper_repo_root.display(),
+                workspace_root.display()
+            )
+        }
+    } else if reconnect_helper_requires_client_argument {
         if reconnect_helper_requires_yes_argument {
             format!(
                 "./scripts/amai_exec.sh {reconnect_helper_bootstrap_command} --client {client_key} --yes"
@@ -2885,15 +3726,66 @@ fn render_startup_instruction_body(repo_root: &Path, client_key: &str) -> Result
         } else {
             "false"
         };
+    let client_budget_required_reply_prefix_non_empty_text =
+        if client_budget_required_reply_prefix_non_empty {
+            "true"
+        } else {
+            "false"
+        };
+    let client_budget_reply_prefix_preflight_blocks_substantive_reply_text =
+        if client_budget_reply_prefix_preflight_blocks_substantive_reply {
+            "true"
+        } else {
+            "false"
+        };
+    let client_budget_output_prefix_host_enforced_text =
+        if client_budget_output_prefix_host_enforced {
+            "true"
+        } else {
+            "false"
+        };
 
-    Ok(format!(
-        "Перед первым содержательным ответом в новом или resumed чате и дальше перед каждым следующим содержательным ответом:\n1. Workspace = `{repo_root_display}`. Прочитай compact agent contract `{agent_contract_path_display}` и machine-readable startup contract `{contract_path_display}`; startup contract остаётся pinned source-of-truth. До MCP tool call проверь `{startup_contract_sha256_field} = \"{startup_contract_sha256}\"`, `workspace_contract_required_before_tool_call = {startup_contract_required_before_tool_call_text}`, `missing_or_unreadable_fail_closed = {startup_contract_missing_or_unreadable_fail_closed_text}`, `sha256_mismatch_fail_closed = {startup_contract_sha256_mismatch_fail_closed_text}`.\n2. Затем вызови MCP tool `{tool}` с `repo_root = \"{repo_root_display}\"` и `namespace = \"{namespace}\"`; `project` передавай только при exact binding по repo_root. До `continuity_startup_summary` не переходи к `amai_context_pack` и новым действиям. Если tool вернул `{reconcile_error_class}` и detail содержит `{reconcile_error_detail_contains}`, немедленно сделай reconcile через `{reconcile_local_cli_shell_command} --repo-root \"{repo_root_display}\" --namespace \"{namespace}\" --json` (`requires_repo_root_argument = {reconcile_local_cli_requires_repo_root}`, `requires_namespace_argument = {reconcile_local_cli_requires_namespace}`, `json_required = {reconcile_local_cli_json_required}`). Если embedded MCP tool call упал на transport error с detail `{reconcile_transport_error_detail_contains}` (`transport_error_detail_case_insensitive = {reconcile_transport_error_case_insensitive_text}`), делай тот же local CLI reconcile вместо объявления continuity unavailable. Если local CLI startup succeeds, классифицируй это как `{reconcile_local_cli_success_classification}` (`local_cli_success_replaces_mcp_failure = {reconcile_local_cli_success_replaces_mcp_failure}`, `local_cli_success_replaces_transport_failure = {reconcile_local_cli_success_replaces_transport_failure_text}`, `must_request_mcp_reconnect_after_local_success = {reconcile_must_request_mcp_reconnect}`, `must_continue_from_local_startup_payload = {reconcile_must_continue_from_local_payload}`), продолжай от локального startup payload и требуй reconnect embedded MCP session exact front-door-ом: `{reconnect_shell_command}` или `{reconnect_bootstrap_command}`. Только если и MCP, и local CLI fallback провалились, объявляй continuity реально unavailable.\n3. После startup прочитай runtime artifact `{runtime_state_relative_path}`: `workspace_runtime_state_artifact_version` должен быть `{runtime_state_artifact_version}`, его пишет `{runtime_state_written_by_tool}`, он обязан нести `{runtime_state_source_summary_field}`. Fallback: `{startup_state_fallback_shell_command} --repo-root \"{repo_root_display}\" --json`.\n4. В runtime artifact смотри только `{startup_execution_gate_field}`, `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}`, `{active_lease_field}`. Restore бери из `required_summary_fields`, obligations из `restored_obligations`. Fail-closed, если `{gate_semantics_consistent_field} != true` (`gate_semantics_consistent_true_required = {gate_semantics_consistent_true_required_text}`), `{startup_execution_gate_field}.{gate_must_follow_field} != true`, `{startup_execution_gate_field}.{gate_unrelated_work_allowed_field} != false`, `{startup_execution_gate_field}.{gate_prompt_read_field} != true` или `{startup_execution_gate_field}.{gate_no_silent_drop_field} != true`.\n5. Resume law: если `{startup_execution_gate_field}.{gate_required_action_kind_field} == \"{required_action_kind}\"`, `{startup_next_action_field}.action_kind == \"{required_action_kind}\"` (`must_resume_required_return_task_before_unrelated_work = {must_resume_before_unrelated_text}`) или `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"` (`previous_session_owner_must_follow_startup_next_action = {previous_session_owner_must_follow_startup_next_action_text}`), follow startup_next_action first. `no_silent_drop = {no_silent_drop_text}`. Для resume смотри `execctl_active_lease_summary`, `required_return_task`, `project_task_tree`, `project_task_tree_summary`, `project_task_ledger`, `project_task_ledger_summary`.\n6. Перед каждым содержательным ответом обновляй guard `{client_budget_guard_shell_command}` и работай только по `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}`. `must_check_before_each_substantive_reply = {client_budget_must_check_before_each_reply_text}`; stale старше `{client_budget_max_guard_age_seconds_text}` секунд запрещён (`stale_guard_requires_refresh = {client_budget_stale_guard_requires_refresh_text}`); hard gate automation делай через `{client_budget_guard_enforcement_flag}` (`guard_enforcement_exit_on_blocking = {client_budget_guard_enforcement_exit_on_blocking_text}`). Для KPI/guard/exact-pair root-cause сначала используй `{client_budget_compact_diagnostics_shell_command}`; `must_prefer_compact_diagnostics_over_full_snapshot = {client_budget_prefer_compact_diagnostics_text}`.\n7. Gate version pinned: `{client_budget_reply_execution_gate_version}`. Если `{client_budget_reply_execution_gate_field}.{client_budget_reply_prefix_field}` не пустой, начинай каждый user-visible reply с этой exact строки перед compact или blocked ответом. Если `{client_budget_reply_budget_mode_field} == \"{client_budget_compact_reply_mode_value}\"`, substantive reply разрешён только по `{client_budget_reply_budget_contract_field}` с `contract_version = \"{client_budget_compact_reply_contract_version}\"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing. Exact operator-switch для target режима pinned отдельно: если пользователь прислал точную команду, matching `{client_budget_target_command_pattern}`, где `N` входит в [{client_budget_target_allowed_percents}], немедленно переключи режим через `{client_budget_target_shell_command} --repo-root \"{repo_root_display}\" {client_budget_target_namespace_argument} \"{namespace}\" {client_budget_target_percent_argument} N` (`repo_root_argument_required = {client_budget_target_repo_root_argument_required_text}`, `switch_immediately_on_exact_chat_command = {client_budget_target_switch_immediately_text}`, `reply_with_confirmation_after_switch = {client_budget_target_reply_with_confirmation_text}`), а не трактуй это как обычную prose-просьбу. Пример exact chat-команды: `{client_budget_target_example_command}`. Exact operator-switch для huge-chat rebase pinned отдельно: если пользователь прислал точную команду `{client_budget_compact_chat_exact_command}`, немедленно подготовь compact restore через `{client_budget_compact_chat_shell_command} --repo-root \"{repo_root_display}\" {client_budget_compact_chat_namespace_argument} \"{namespace}\" --json` (`repo_root_argument_required = {client_budget_compact_chat_repo_root_argument_required}`, `switch_immediately_on_exact_chat_command = {client_budget_compact_chat_switch_immediately}`, `reply_with_confirmation_after_prepare = {client_budget_compact_chat_reply_with_confirmation}`, `prompt_text_required_for_rebase = {client_budget_compact_chat_prompt_text_required}`), верни confirmation вместе с `prompt_text` и `operator_notice`, и требуй host action `{client_budget_compact_chat_required_host_action}` вместо обычной prose-интерпретации.\n8. Если `{client_budget_reply_execution_gate_field}.must_rotate_before_reply = true`, это hard block: сначала сохрани handoff (`save_handoff_before_rotate = {client_budget_save_handoff_before_rotate_text}`) и продолжай только в свежем чате через continuity startup (`fresh_chat_requires_continuity_startup = {client_budget_fresh_chat_requires_startup_text}`). Если `{client_budget_rotate_now_field} = true` или `{client_budget_status_label_field}` равен одному из [{client_budget_rotate_status_labels}], это warning/advisory pressure signal, а не запрет на содержательный ответ. В blocked path разрешён только `{client_budget_blocking_reply_contract_field}`: `contract_version = \"{client_budget_blocking_reply_contract_version}\"`, `response_kind = \"{client_budget_blocking_reply_response_kind}\"`, `max_sentences = {client_budget_blocking_reply_max_sentences}`, `must_avoid_substantive_work = {client_budget_blocking_reply_must_avoid_substantive_work_text}`, `must_use_action_bundle_operator_flow = {client_budget_blocking_reply_must_use_action_bundle_operator_flow_text}`. Pinned template: `{client_budget_blocking_reply_template}`.\n9. Не подменяй полную клиентскую шкалу внутренним Amai-slice: `full_scale_client_truth_required = {client_budget_full_scale_truth_required_text}`. Любой fail-closed scenario ({fail_closed}) сообщай как блокер и не угадывай continuity."
-    ))
+    let instructions = [
+        "Перед первым содержательным ответом в новом или resumed чате и дальше перед каждым следующим содержательным ответом:".to_string(),
+        format!(
+            "1. Workspace = `{repo_root_display}`. Прочитай compact agent contract `{agent_contract_path_display}` и machine-readable startup contract `{contract_path_display}`; startup contract остаётся pinned source-of-truth. До MCP tool call проверь `{startup_contract_sha256_field} = \"{startup_contract_sha256}\"`, `workspace_contract_required_before_tool_call = {startup_contract_required_before_tool_call_text}`, `missing_or_unreadable_fail_closed = {startup_contract_missing_or_unreadable_fail_closed_text}`, `sha256_mismatch_fail_closed = {startup_contract_sha256_mismatch_fail_closed_text}`."
+        ),
+        format!(
+            "2. Затем вызови MCP tool `{tool}` с `repo_root = \"{repo_root_display}\"` и `namespace = \"{namespace}\"`; `project` передавай только при exact binding по repo_root. До `continuity_startup_summary` не переходи к `amai_context_pack` и новым действиям. Если tool вернул `{reconcile_error_class}` и detail содержит `{reconcile_error_detail_contains}`, немедленно сделай reconcile через `{reconcile_local_cli_shell_command} --repo-root \"{repo_root_display}\" --namespace \"{namespace}\" --json` (`requires_repo_root_argument = {reconcile_local_cli_requires_repo_root}`, `requires_namespace_argument = {reconcile_local_cli_requires_namespace}`, `json_required = {reconcile_local_cli_json_required}`). Если embedded MCP tool call упал на transport error с detail `{reconcile_transport_error_detail_contains}` (`transport_error_detail_case_insensitive = {reconcile_transport_error_case_insensitive_text}`), делай тот же local CLI reconcile. Если local CLI startup succeeds, классифицируй это как `{reconcile_local_cli_success_classification}` (`local_cli_success_replaces_mcp_failure = {reconcile_local_cli_success_replaces_mcp_failure}`, `local_cli_success_replaces_transport_failure = {reconcile_local_cli_success_replaces_transport_failure_text}`, `must_request_mcp_reconnect_after_local_success = {reconcile_must_request_mcp_reconnect}`, `must_continue_from_local_startup_payload = {reconcile_must_continue_from_local_payload}`), продолжай от локального startup payload и требуй reconnect exact front-door-ом: `{reconnect_shell_command}` или `{reconnect_bootstrap_command}`. Только если и MCP, и local CLI fallback провалились, объявляй continuity реально unavailable."
+        ),
+        format!(
+            "3. После startup прочитай runtime artifact `{runtime_state_relative_path}`: `workspace_runtime_state_artifact_version` должен быть `{runtime_state_artifact_version}`, его пишет `{runtime_state_written_by_tool}`, он обязан нести `{runtime_state_source_summary_field}`. Fallback: `{startup_state_fallback_shell_command} --repo-root \"{repo_root_display}\" --json`."
+        ),
+        format!(
+            "4. В runtime artifact смотри только `{startup_execution_gate_field}`, `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}`, `{active_lease_field}`. Restore бери из `required_summary_fields`, obligations из `restored_obligations`. Fail-closed, если `{gate_semantics_consistent_field} != true` (`gate_semantics_consistent_true_required = {gate_semantics_consistent_true_required_text}`), `{startup_execution_gate_field}.{gate_must_follow_field} != true`, `{startup_execution_gate_field}.{gate_unrelated_work_allowed_field} != false`, `{startup_execution_gate_field}.{gate_prompt_read_field} != true` или `{startup_execution_gate_field}.{gate_no_silent_drop_field} != true`."
+        ),
+        format!(
+            "5. Resume law: если `{startup_execution_gate_field}.{gate_required_action_kind_field} == \"{required_action_kind}\"`, `{startup_next_action_field}.action_kind == \"{required_action_kind}\"` (`must_resume_required_return_task_before_unrelated_work = {must_resume_before_unrelated_text}`) или `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"` (`previous_session_owner_must_follow_startup_next_action = {previous_session_owner_must_follow_startup_next_action_text}`), follow startup_next_action first. `no_silent_drop = {no_silent_drop_text}`. Для resume смотри `execctl_active_lease_summary`, `required_return_task`, `project_task_tree`, `project_task_tree_summary`, `project_task_ledger`, `project_task_ledger_summary`."
+        ),
+        format!(
+            "6. Перед каждым содержательным ответом обновляй guard `{client_budget_guard_shell_command}` и работай только по `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}`. `must_check_before_each_substantive_reply = {client_budget_must_check_before_each_reply_text}`; stale старше `{client_budget_max_guard_age_seconds_text}` секунд запрещён (`stale_guard_requires_refresh = {client_budget_stale_guard_requires_refresh_text}`). Hard gate automation: `{client_budget_guard_enforcement_flag}` (`guard_enforcement_exit_on_blocking = {client_budget_guard_enforcement_exit_on_blocking_text}`). Prefix preflight: `{client_budget_reply_prefix_enforcement_flag}` (`required_reply_prefix_source = {client_budget_required_reply_prefix_source}`, `required_reply_prefix_non_empty = {client_budget_required_reply_prefix_non_empty_text}`, `reply_prefix_preflight_blocks_substantive_reply = {client_budget_reply_prefix_preflight_blocks_substantive_reply_text}`, `output_prefix_enforcement_mode = {client_budget_output_prefix_enforcement_mode}`, `output_prefix_host_enforced = {client_budget_output_prefix_host_enforced_text}`). Continuity write-side maintenance в Amai ({client_budget_continuity_write_operations}) не блокируется reply guard (`continuity_write_exempt_from_reply_guard = {client_budget_continuity_write_exempt_from_reply_guard_text}`) и при rotate/advisory pressure остаётся обязательным перед уходом (`continuity_write_required_before_rotate = {client_budget_continuity_write_required_before_rotate_text}`). Для KPI/guard/exact-pair root-cause сначала используй `{client_budget_compact_diagnostics_shell_command}`; `must_prefer_compact_diagnostics_over_full_snapshot = {client_budget_prefer_compact_diagnostics_text}`."
+        ),
+        format!(
+            "7. Gate version pinned: `{client_budget_reply_execution_gate_version}`. Начинать user-visible reply можно только если `{client_budget_reply_execution_gate_field}.{client_budget_reply_prefix_field}` не пустой и источник равен `{client_budget_required_reply_prefix_source}`; иначе substantive reply запрещён и сначала нужен новый guard-check через `{client_budget_reply_prefix_enforcement_flag}`. Если prefix готов, начинай reply с этой exact строки. Если `{client_budget_reply_budget_mode_field} == \"{client_budget_compact_reply_mode_value}\"`, substantive reply разрешён только по `{client_budget_reply_budget_contract_field}` с `contract_version = \"{client_budget_compact_reply_contract_version}\"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing. Exact operator-switch для target режима: matching `{client_budget_target_command_pattern}` -> `{client_budget_target_shell_command} --repo-root \"{repo_root_display}\" {client_budget_target_namespace_argument} \"{namespace}\" {client_budget_target_percent_argument} N` (`repo_root_argument_required = {client_budget_target_repo_root_argument_required_text}`, `switch_immediately_on_exact_chat_command = {client_budget_target_switch_immediately_text}`, `reply_with_confirmation_after_switch = {client_budget_target_reply_with_confirmation_text}`). Пример exact chat-команды: `{client_budget_target_example_command}`. Exact operator-switch для huge-chat rebase: точную команду `{client_budget_compact_chat_exact_command}` обработай через `{client_budget_compact_chat_shell_command} --repo-root \"{repo_root_display}\" {client_budget_compact_chat_namespace_argument} \"{namespace}\" --json` (`repo_root_argument_required = {client_budget_compact_chat_repo_root_argument_required}`, `switch_immediately_on_exact_chat_command = {client_budget_compact_chat_switch_immediately}`, `reply_with_confirmation_after_prepare = {client_budget_compact_chat_reply_with_confirmation}`, `prompt_text_required_for_rebase = {client_budget_compact_chat_prompt_text_required}`), верни `prompt_text` и `operator_notice`, и требуй host action `{client_budget_compact_chat_required_host_action}`."
+        ),
+        format!(
+            "8. Client-budget blocked reply mechanism removed: `reply_blocking_removed = {client_budget_reply_blocking_removed_text}`. Tool-turn blocked mechanism removed too: `tool_turn_blocking_removed = {client_budget_tool_turn_blocking_removed_text}`. Если `{client_budget_reply_execution_gate_field}.must_rotate_before_reply = true`, `{client_budget_reply_execution_gate_field}.must_wait_for_budget_recovery_before_reply = true`, `{client_budget_rotate_now_field} = true`, `{client_budget_status_label_field}` равен одному из [{client_budget_rotate_status_labels}], `same_meter_pure_burn_turn_active = true`, `must_avoid_new_tool_turn_without_specific_delta_goal = true` или `max_tool_roundtrips_soft = 0`, считай это только advisory/compact pressure signal. User-visible blocked wait template использовать запрещено; `amai_context_pack`, continuity write и другие Amai tools не блокируй только из-за этих полей. `save_handoff_before_rotate = {client_budget_save_handoff_before_rotate_text}` и `fresh_chat_requires_continuity_startup = {client_budget_fresh_chat_requires_startup_text}` остаются operator guidance."
+        ),
+        format!(
+            "9. Не подменяй полную клиентскую шкалу внутренним Amai-slice: `full_scale_client_truth_required = {client_budget_full_scale_truth_required_text}`. Любой fail-closed scenario ({fail_closed}) сообщай как блокер и не угадывай continuity."
+        ),
+    ]
+    .join("\n");
+
+    Ok(instructions)
 }
 
-fn render_startup_contract_artifact(repo_root: &Path) -> Result<(String, String)> {
-    let contract = mcp::project_chat_startup_contract();
-    let startup_contract_sha256 = startup_contract_sha256(&contract)?;
+fn render_startup_contract_artifact(
+    workspace_root: &Path,
+    helper_repo_root: &Path,
+) -> Result<(String, String)> {
+    let (contract, startup_contract_sha256) =
+        startup_contract_for_workspace(workspace_root, helper_repo_root)?;
     let tool = contract["tool"]
         .as_str()
         .ok_or_else(|| anyhow!("project_chat_startup contract is missing tool"))?;
@@ -2903,7 +3795,7 @@ fn render_startup_contract_artifact(repo_root: &Path) -> Result<(String, String)
     let payload = json!({
         "artifact_version": "workspace-startup-contract-v1",
         "contract_kind": "project_chat_startup",
-        "repo_root": repo_root.display().to_string(),
+        "repo_root": workspace_root.display().to_string(),
         "default_namespace": namespace,
         "startup_contract_sha256": startup_contract_sha256,
         "startup_contract_sha256_scope": "startup_contract object only",
@@ -2911,7 +3803,7 @@ fn render_startup_contract_artifact(repo_root: &Path) -> Result<(String, String)
         "recommended_startup_call": {
             "tool": tool,
             "arguments": {
-                "repo_root": repo_root.display().to_string(),
+                "repo_root": workspace_root.display().to_string(),
                 "namespace": namespace
             },
             "project_argument_rule": "pass project when already known, otherwise require exact binding by repo_root"
@@ -2923,9 +3815,12 @@ fn render_startup_contract_artifact(repo_root: &Path) -> Result<(String, String)
     Ok((content, startup_contract_sha256))
 }
 
-fn render_startup_agent_contract_artifact(repo_root: &Path) -> Result<String> {
-    let contract = mcp::project_chat_startup_contract();
-    let startup_contract_sha256 = startup_contract_sha256(&contract)?;
+fn render_startup_agent_contract_artifact(
+    workspace_root: &Path,
+    helper_repo_root: &Path,
+) -> Result<String> {
+    let (contract, startup_contract_sha256) =
+        startup_contract_for_workspace(workspace_root, helper_repo_root)?;
     let tool = contract["tool"]
         .as_str()
         .ok_or_else(|| anyhow!("project_chat_startup contract is missing tool"))?;
@@ -2935,7 +3830,7 @@ fn render_startup_agent_contract_artifact(repo_root: &Path) -> Result<String> {
     let payload = json!({
         "artifact_version": "workspace-startup-agent-contract-v1",
         "contract_kind": "project_chat_startup_agent_read",
-        "repo_root": repo_root.display().to_string(),
+        "repo_root": workspace_root.display().to_string(),
         "default_namespace": namespace,
         "tool": tool,
         "full_startup_contract_relative_path": ".amai/onboarding/project-chat-startup-contract.json",
@@ -2943,7 +3838,7 @@ fn render_startup_agent_contract_artifact(repo_root: &Path) -> Result<String> {
         "recommended_startup_call": {
             "tool": tool,
             "arguments": {
-                "repo_root": repo_root.display().to_string(),
+                "repo_root": workspace_root.display().to_string(),
                 "namespace": namespace
             }
         },
@@ -2976,6 +3871,8 @@ fn render_startup_agent_contract_artifact(repo_root: &Path) -> Result<String> {
             "guard_enforcement_flag": contract["live_client_budget_enforcement"]["guard_enforcement_flag"].clone(),
             "reply_execution_gate_field": contract["live_client_budget_enforcement"]["reply_execution_gate_field"].clone(),
             "reply_prefix_field": contract["live_client_budget_enforcement"]["reply_prefix_field"].clone(),
+            "reply_prefix_enforcement_flag": contract["live_client_budget_enforcement"]["reply_prefix_enforcement_flag"].clone(),
+            "required_reply_prefix_source": contract["live_client_budget_enforcement"]["required_reply_prefix_source"].clone(),
             "compact_reply_mode_value": contract["live_client_budget_enforcement"]["compact_reply_mode_value"].clone(),
             "blocking_reply_contract_field": contract["live_client_budget_enforcement"]["blocking_reply_contract_field"].clone(),
             "blocking_reply_template": contract["live_client_budget_enforcement"]["blocking_reply_template"].clone(),
@@ -2991,6 +3888,38 @@ fn render_startup_agent_contract_artifact(repo_root: &Path) -> Result<String> {
         "fail_closed_conditions": contract["fail_closed_conditions"].clone()
     });
     serde_json::to_string(&payload).context("failed to serialize startup agent contract artifact")
+}
+
+fn startup_contract_for_workspace(
+    workspace_root: &Path,
+    helper_repo_root: &Path,
+) -> Result<(Value, String)> {
+    let mut contract = mcp::project_chat_startup_contract();
+    if workspace_root != helper_repo_root {
+        let helper_script = |name: &str| {
+            helper_repo_root
+                .join("scripts")
+                .join(name)
+                .display()
+                .to_string()
+        };
+        contract["tool_runtime_reconcile"]["local_cli"]["shell_command"] =
+            json!(helper_script("continuity_startup.sh"));
+        contract["tool_runtime_reconcile"]["reconnect_helper"]["shell_helper_relative_path"] =
+            json!(helper_script("reconnect_local.sh"));
+        contract["runtime_state_artifact"]["inspection_fallback_cli"]["shell_command"] =
+            json!(helper_script("continuity_startup_state.sh"));
+        contract["live_client_budget_enforcement"]["guard_shell_command"] =
+            json!(helper_script("client_budget_gate.sh"));
+        contract["live_client_budget_enforcement"]["compact_diagnostics_shell_command"] =
+            json!(helper_script("client_budget_root_cause.sh"));
+        contract["live_client_budget_enforcement"]["target_control"]["shell_command"] =
+            json!(helper_script("continuity_client_budget_target.sh"));
+        contract["live_client_budget_enforcement"]["compact_chat_control"]["shell_command"] =
+            json!(helper_script("continuity_compact_chat.sh"));
+    }
+    let sha256 = startup_contract_sha256(&contract)?;
+    Ok((contract, sha256))
 }
 
 fn startup_contract_sha256(contract: &Value) -> Result<String> {
@@ -3100,12 +4029,13 @@ fn maybe_backup_user_global(path: &Path, install_scope: &str) -> Result<Option<P
 #[cfg(test)]
 mod tests {
     use super::{
-        InstallState, detection_score, env_keys, expand_target_template, inspect_startup_artifacts,
-        install_scope_status, merge_managed_startup_block, render_startup_agent_contract_artifact,
-        render_startup_contract_artifact, render_startup_instructions, resolve_client_target,
-        resolve_output_path, save_install_state, startup_agent_contract_artifact_path,
-        startup_contract_artifact_path, startup_contract_sha256, strip_managed_startup_block,
-        working_state_reason_summary,
+        InstallState, describe_client_surface, detection_score, env_keys, expand_target_template,
+        inspect_startup_artifacts, install_scope_status, merge_managed_startup_block,
+        render_agent_preflight_contract_artifact, render_agent_preflight_state_artifact,
+        render_startup_agent_contract_artifact, render_startup_contract_artifact,
+        render_startup_instructions, resolve_client_target, resolve_output_path,
+        save_install_state, startup_agent_contract_artifact_path, startup_contract_artifact_path,
+        startup_contract_sha256, strip_managed_startup_block, working_state_reason_summary,
     };
     use crate::continuity;
     use crate::mcp;
@@ -3167,6 +4097,47 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
     }
 
     #[test]
+    fn describe_client_surface_reports_managed_and_manual_targets() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let codex = describe_client_surface(repo, Some("codex")).expect("codex surface");
+        assert_eq!(codex["client_key"], json!("codex"));
+        assert_eq!(codex["display_name"], json!("Codex"));
+        assert_eq!(
+            codex["startup_instruction_mode"],
+            json!("managed_append_block")
+        );
+        assert_eq!(
+            codex["startup_instruction_path"],
+            json!(repo.join("AGENTS.md").display().to_string())
+        );
+        assert_eq!(
+            codex["reconnect_shell_command"],
+            json!("./scripts/reconnect_local.sh --client codex")
+        );
+        assert_eq!(
+            codex["reconnect_bootstrap_command"],
+            json!("./scripts/amai_exec.sh bootstrap reconnect --client codex --yes")
+        );
+
+        let generic = describe_client_surface(repo, Some("generic")).expect("generic surface");
+        assert_eq!(generic["client_key"], json!("generic"));
+        assert_eq!(
+            generic["startup_instruction_mode"],
+            json!("manual_snippet_only")
+        );
+        assert!(
+            generic["startup_instruction_path"]
+                .as_str()
+                .is_some_and(|value| value.ends_with("tmp/onboarding/generic-amai-startup.md"))
+        );
+        assert!(
+            generic["fresh_chat_assist_summary"].as_str().is_some_and(
+                |value| value.contains("./scripts/reconnect_local.sh --client generic")
+            )
+        );
+    }
+
+    #[test]
     fn reports_install_scope_statuses() {
         assert_eq!(
             install_scope_status("workspace_local"),
@@ -3222,8 +4193,9 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
     #[test]
     fn renders_vscode_startup_instructions_with_repo_root() {
         let repo = Path::new("/tmp/amai");
-        let text = render_startup_instructions(repo, "VS Code", "vscode", "vscode_instructions_md")
-            .expect("startup instructions must render");
+        let text =
+            render_startup_instructions(repo, repo, "VS Code", "vscode", "vscode_instructions_md")
+                .expect("startup instructions must render");
         assert!(text.contains("AMAI MANAGED STARTUP INSTRUCTIONS v1"));
         assert!(text.contains(
             "Перед первым содержательным ответом в новом или resumed чате и дальше перед каждым следующим содержательным ответом:"
@@ -3299,21 +4271,38 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("no_silent_drop = true"));
         assert!(text.contains("./scripts/client_budget_gate.sh"));
         assert!(text.contains("must_check_before_each_substantive_reply = true"));
+        assert!(text.contains("continuity_write_exempt_from_reply_guard = true"));
+        assert!(text.contains("continuity_write_required_before_rotate = true"));
+        assert!(
+            text.contains("continuity import, continuity handoff, observe /api/continuity-handoff")
+        );
         assert!(text.contains("--enforce-reply-gate"));
+        assert!(text.contains("--enforce-online-reply-prefix"));
         assert!(text.contains("guard_enforcement_exit_on_blocking = true"));
+        assert!(
+            text.contains("required_reply_prefix_source = personal_agent_online_limit_contour")
+        );
+        assert!(text.contains("required_reply_prefix_non_empty = true"));
+        assert!(text.contains("reply_prefix_preflight_blocks_substantive_reply = true"));
+        assert!(
+            text.contains("output_prefix_enforcement_mode = instruction_preflight_fail_closed")
+        );
+        assert!(text.contains("output_prefix_host_enforced = false"));
         assert!(text.contains("./scripts/client_budget_root_cause.sh"));
         assert!(text.contains("must_prefer_compact_diagnostics_over_full_snapshot = true"));
         assert!(text.contains("client_budget_reply_gate.reply_execution_gate"));
         assert!(text.contains("Gate version pinned: `client-reply-budget-gate-v1`"));
         assert!(text.contains("reply_execution_gate.reply_prefix"));
-        assert!(text.contains("начинай каждый user-visible reply с этой exact строки"));
+        assert!(text.contains("Начинать user-visible reply можно только если"));
         assert!(text.contains("matching `^экономия_(0|10|20|30|40|50|60|70|80|90)%$`"));
         assert!(text.contains("./scripts/continuity_client_budget_target.sh --repo-root"));
         assert!(text.contains("Пример exact chat-команды: `экономия_50%`"));
         assert!(text.contains("точную команду `компакт_чат`"));
         assert!(text.contains("./scripts/continuity_compact_chat.sh --repo-root"));
         assert!(text.contains("`prompt_text` и `operator_notice`"));
-        assert!(text.contains("open_clean_chat_surface_and_inject_prompt_text"));
+        assert!(text.contains(
+            "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable"
+        ));
         assert!(text.contains("reply_budget_mode == \"compact_high_signal\""));
         assert!(text.contains("reply_budget_contract"));
         assert!(text.contains("contract_version = \"client-reply-budget-v1\""));
@@ -3322,14 +4311,13 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("no repeated known context"));
         assert!(text.contains("stale старше `10` секунд"));
         assert!(text.contains("stale_guard_requires_refresh = true"));
-        assert!(text.contains("blocking_reply_contract"));
-        assert!(text.contains("contract_version = \"client-budget-blocked-reply-v1\""));
-        assert!(text.contains("response_kind = \"wait_for_budget_only\""));
-        assert!(text.contains("max_sentences = 1"));
-        assert!(text.contains("must_avoid_substantive_work = true"));
-        assert!(text.contains("must_use_action_bundle_operator_flow = true"));
-        assert!(text.contains("новый чат нужен сейчас"));
-        assert!(text.contains("warning/advisory pressure signal"));
+        assert!(text.contains("Client-budget blocked reply mechanism removed"));
+        assert!(text.contains("reply_blocking_removed = true"));
+        assert!(text.contains("tool_turn_blocking_removed = true"));
+        assert!(text.contains("User-visible blocked wait template использовать запрещено"));
+        assert!(text.contains("amai_context_pack"));
+        assert!(text.contains("сожми текущий чат сейчас"));
+        assert!(text.contains("advisory/compact pressure signal"));
         assert!(text.contains("full_scale_client_truth_required = true"));
         assert!(text.contains("внутренним Amai-slice"));
         assert!(text.len() < 9000);
@@ -3339,7 +4327,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
     fn renders_machine_readable_startup_contract_artifact() {
         let repo = Path::new("/tmp/amai");
         let (text, sha256) =
-            render_startup_contract_artifact(repo).expect("startup contract must render");
+            render_startup_contract_artifact(repo, repo).expect("startup contract must render");
         let payload: Value = serde_json::from_str(&text).expect("startup contract json");
         assert_eq!(
             payload["artifact_version"],
@@ -3373,7 +4361,19 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["blocking_reply_response_kind"],
-            json!(working_state::CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND)
+            Value::Null
+        );
+        assert_eq!(
+            payload["startup_contract"]["live_client_budget_enforcement"]["reply_blocking_removed"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["startup_contract"]["live_client_budget_enforcement"]["tool_turn_blocking_removed"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["startup_contract"]["live_client_budget_enforcement"]["blocking_reply_max_sentences"],
+            json!(0)
         );
         assert_eq!(
             payload["startup_contract"]["runtime_state_artifact"]["workspace_runtime_state_relative_path"],
@@ -3449,7 +4449,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             payload["startup_contract"]["contract_version"],
-            json!("continuity-startup-contract-v18")
+            json!("continuity-startup-contract-v19")
         );
         assert_eq!(
             payload["startup_contract"]["tool_runtime_reconcile"]["error_class"],
@@ -3514,6 +4514,30 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             json!("reply_prefix")
         );
         assert_eq!(
+            payload["startup_contract"]["live_client_budget_enforcement"]["reply_prefix_enforcement_flag"],
+            json!("--enforce-online-reply-prefix")
+        );
+        assert_eq!(
+            payload["startup_contract"]["live_client_budget_enforcement"]["required_reply_prefix_source"],
+            json!("personal_agent_online_limit_contour")
+        );
+        assert_eq!(
+            payload["startup_contract"]["live_client_budget_enforcement"]["required_reply_prefix_non_empty"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["startup_contract"]["live_client_budget_enforcement"]["reply_prefix_preflight_blocks_substantive_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["startup_contract"]["live_client_budget_enforcement"]["output_prefix_enforcement_mode"],
+            json!("instruction_preflight_fail_closed")
+        );
+        assert_eq!(
+            payload["startup_contract"]["live_client_budget_enforcement"]["output_prefix_host_enforced"],
+            json!(false)
+        );
+        assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["reply_budget_mode_field"],
             json!("reply_budget_mode")
         );
@@ -3554,6 +4578,22 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             json!(true)
         );
         assert_eq!(
+            payload["startup_contract"]["live_client_budget_enforcement"]["continuity_write_exempt_from_reply_guard"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["startup_contract"]["live_client_budget_enforcement"]["continuity_write_required_before_rotate"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["startup_contract"]["live_client_budget_enforcement"]["continuity_write_operations"],
+            json!([
+                "continuity import",
+                "continuity handoff",
+                "observe /api/continuity-handoff"
+            ])
+        );
+        assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["max_guard_age_seconds"],
             json!(10)
         );
@@ -3587,7 +4627,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["compact_chat_control"]["required_host_action"],
-            json!("open_clean_chat_surface_and_inject_prompt_text")
+            json!("open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable")
         );
     }
 
@@ -3595,8 +4635,8 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
     fn renders_compact_startup_agent_contract_artifact() {
         let repo = Path::new("/tmp/amai");
         let (full_text, sha256) =
-            render_startup_contract_artifact(repo).expect("startup contract must render");
-        let text = render_startup_agent_contract_artifact(repo)
+            render_startup_contract_artifact(repo, repo).expect("startup contract must render");
+        let text = render_startup_agent_contract_artifact(repo, repo)
             .expect("startup agent contract must render");
         let payload: Value = serde_json::from_str(&text).expect("startup agent contract json");
 
@@ -3642,6 +4682,14 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             json!("reply_prefix")
         );
         assert_eq!(
+            payload["compact_runtime_pointers"]["reply_prefix_enforcement_flag"],
+            json!("--enforce-online-reply-prefix")
+        );
+        assert_eq!(
+            payload["compact_runtime_pointers"]["required_reply_prefix_source"],
+            json!("personal_agent_online_limit_contour")
+        );
+        assert_eq!(
             payload["compact_runtime_pointers"]["client_budget_target_exact_chat_command_pattern"],
             json!("^экономия_(0|10|20|30|40|50|60|70|80|90)%$")
         );
@@ -3667,12 +4715,150 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             payload["compact_runtime_pointers"]["client_budget_compact_chat_required_host_action"],
-            json!("open_clean_chat_surface_and_inject_prompt_text")
+            json!("open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable")
         );
         assert!(
             text.len() < full_text.len(),
             "startup agent contract must be smaller than full contract"
         );
+    }
+
+    #[test]
+    fn renders_machine_readable_agent_preflight_contract_artifact() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let (text, sha256) = render_agent_preflight_contract_artifact(repo, repo)
+            .expect("agent preflight contract must render");
+        let payload: Value = serde_json::from_str(&text).expect("agent preflight json");
+        assert_eq!(
+            payload["artifact_version"],
+            json!("workspace-agent-preflight-contract-v1")
+        );
+        assert_eq!(
+            payload["preflight_contract_sha256_scope"],
+            json!("preflight_contract object only")
+        );
+        assert_eq!(payload["preflight_contract_sha256"], json!(sha256));
+        assert_eq!(
+            payload["preflight_contract"]["contract_version"],
+            json!("agent-preflight-contract-v1")
+        );
+        assert_eq!(
+            payload["preflight_contract"]["status_sources"]["status_snapshot_path"],
+            json!("docs/IMPLEMENTATION_STATUS.md")
+        );
+        assert_eq!(
+            payload["preflight_contract"]["refresh_commands"]["shell_command"],
+            json!("./scripts/agent_preflight.sh")
+        );
+        assert_eq!(
+            payload["preflight_contract"]["runtime_state_artifact"]["workspace_runtime_state_relative_path"],
+            json!(".amai/onboarding/project-agent-preflight-state.json")
+        );
+        assert_eq!(
+            payload["preflight_contract"]["required_documents"][0]["path"],
+            json!("AGENTS.md")
+        );
+    }
+
+    #[test]
+    fn renders_agent_preflight_state_artifact_with_live_stage_snapshot() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let text =
+            render_agent_preflight_state_artifact(repo, repo).expect("agent preflight state");
+        let payload: Value = serde_json::from_str(&text).expect("agent preflight state json");
+        assert_eq!(
+            payload["artifact_version"],
+            json!("workspace-agent-preflight-state-v1")
+        );
+        assert_eq!(
+            payload["agent_preflight_summary"]["status_snapshot_path"],
+            json!("docs/IMPLEMENTATION_STATUS.md")
+        );
+        assert!(
+            payload["agent_preflight_summary"]["stage_checklist"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        );
+        assert!(
+            payload["agent_preflight_summary"]["next_required_stage"]["label"]
+                .as_str()
+                .is_some_and(|label| !label.is_empty())
+        );
+        assert!(
+            payload["agent_preflight_summary"]["next_stage_ready_mechanisms"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        );
+        assert!(
+            payload["source_documents"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["path"] == json!("AGENTS.md")))
+        );
+    }
+
+    #[test]
+    fn renders_external_workspace_startup_artifacts_with_helper_repo_paths() {
+        let helper_repo = Path::new("/tmp/amai-helper");
+        let workspace = Path::new("/tmp/bug-bounty");
+        let (contract_text, contract_sha) =
+            render_startup_contract_artifact(workspace, helper_repo)
+                .expect("external startup contract must render");
+        let contract: Value =
+            serde_json::from_str(&contract_text).expect("external startup contract json");
+        assert_eq!(contract["repo_root"], json!("/tmp/bug-bounty"));
+        assert_eq!(contract["startup_contract_sha256"], json!(contract_sha));
+        assert_eq!(
+            contract["startup_contract"]["tool_runtime_reconcile"]["local_cli"]["shell_command"],
+            json!("/tmp/amai-helper/scripts/continuity_startup.sh")
+        );
+        assert_eq!(
+            contract["startup_contract"]["runtime_state_artifact"]["inspection_fallback_cli"]["shell_command"],
+            json!("/tmp/amai-helper/scripts/continuity_startup_state.sh")
+        );
+        assert_eq!(
+            contract["startup_contract"]["live_client_budget_enforcement"]["guard_shell_command"],
+            json!("/tmp/amai-helper/scripts/client_budget_gate.sh")
+        );
+        assert_eq!(
+            contract["startup_contract"]["live_client_budget_enforcement"]["compact_diagnostics_shell_command"],
+            json!("/tmp/amai-helper/scripts/client_budget_root_cause.sh")
+        );
+        assert_eq!(
+            contract["startup_contract"]["live_client_budget_enforcement"]["target_control"]["shell_command"],
+            json!("/tmp/amai-helper/scripts/continuity_client_budget_target.sh")
+        );
+        assert_eq!(
+            contract["startup_contract"]["live_client_budget_enforcement"]["compact_chat_control"]
+                ["shell_command"],
+            json!("/tmp/amai-helper/scripts/continuity_compact_chat.sh")
+        );
+
+        let agent_text = render_startup_agent_contract_artifact(workspace, helper_repo)
+            .expect("external startup agent contract must render");
+        let agent: Value =
+            serde_json::from_str(&agent_text).expect("external startup agent contract json");
+        assert_eq!(
+            agent["compact_runtime_pointers"]["guard_shell_command"],
+            json!("/tmp/amai-helper/scripts/client_budget_gate.sh")
+        );
+        assert_eq!(
+            agent["compact_runtime_pointers"]["reconcile_local_cli_shell_command"],
+            json!("/tmp/amai-helper/scripts/continuity_startup.sh")
+        );
+
+        let instructions = render_startup_instructions(
+            workspace,
+            helper_repo,
+            "Codex",
+            "codex",
+            "codex_agents_snippet",
+        )
+        .expect("external startup instructions must render");
+        assert!(instructions.contains("Workspace = `/tmp/bug-bounty`"));
+        assert!(instructions.contains("/tmp/amai-helper/scripts/client_budget_gate.sh"));
+        assert!(instructions.contains("/tmp/amai-helper/scripts/continuity_startup.sh"));
+        assert!(instructions.contains("/tmp/amai-helper/scripts/reconnect_local.sh --client codex --cwd /tmp/amai-helper --workspace-root /tmp/bug-bounty --yes"));
+        assert!(instructions.contains("/tmp/amai-helper/scripts/amai_exec.sh bootstrap reconnect --client codex --cwd /tmp/amai-helper --workspace-root /tmp/bug-bounty --yes"));
     }
 
     #[test]
@@ -3692,7 +4878,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             fs::create_dir_all(parent).expect("startup contract dir");
         }
         let (contract_text, contract_sha) =
-            render_startup_contract_artifact(&repo).expect("startup contract");
+            render_startup_contract_artifact(&repo, &repo).expect("startup contract");
         fs::write(&startup_contract_path, contract_text).expect("write startup contract");
 
         let startup_instruction_path =
@@ -3700,9 +4886,14 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         if let Some(parent) = startup_instruction_path.parent() {
             fs::create_dir_all(parent).expect("startup instruction dir");
         }
-        let startup_instructions =
-            render_startup_instructions(&repo, "VS Code", "vscode", "vscode_instructions_md")
-                .expect("startup instructions");
+        let startup_instructions = render_startup_instructions(
+            &repo,
+            &repo,
+            "VS Code",
+            "vscode",
+            "vscode_instructions_md",
+        )
+        .expect("startup instructions");
         fs::write(&startup_instruction_path, startup_instructions)
             .expect("write startup instructions");
 
@@ -3726,6 +4917,11 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
                     "workspace_startup_contract_materialized".to_string(),
                 ),
                 startup_contract_sha256: Some(contract_sha),
+                agent_preflight_contract_path: None,
+                agent_preflight_agent_contract_path: None,
+                agent_preflight_state_path: None,
+                agent_preflight_contract_status: None,
+                agent_preflight_contract_sha256: None,
             },
         )
         .expect("save install state");
@@ -3907,10 +5103,89 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
     }
 
     #[test]
+    fn startup_artifact_audit_reports_ok_for_external_workspace_install_state() {
+        let unique = format!(
+            "amai-external-startup-artifact-audit-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("epoch")
+                .as_nanos()
+        );
+        let helper_repo = std::env::temp_dir().join(format!("{unique}-helper"));
+        let workspace = std::env::temp_dir().join(format!("{unique}-workspace"));
+        fs::create_dir_all(&helper_repo).expect("temp helper repo");
+        fs::create_dir_all(&workspace).expect("temp workspace");
+
+        let startup_contract_path = startup_contract_artifact_path(&workspace);
+        if let Some(parent) = startup_contract_path.parent() {
+            fs::create_dir_all(parent).expect("startup contract dir");
+        }
+        let (contract_text, contract_sha) =
+            render_startup_contract_artifact(&workspace, &helper_repo).expect("startup contract");
+        fs::write(&startup_contract_path, contract_text).expect("write startup contract");
+
+        let startup_instruction_path = workspace.join("AGENTS.md");
+        let startup_instructions = render_startup_instructions(
+            &workspace,
+            &helper_repo,
+            "Codex",
+            "codex",
+            "codex_agents_snippet",
+        )
+        .expect("startup instructions");
+        fs::write(&startup_instruction_path, startup_instructions)
+            .expect("write startup instructions");
+
+        save_install_state(
+            &helper_repo,
+            &InstallState {
+                package_version: "0.1.0".to_string(),
+                repo_revision: "test".to_string(),
+                client_key: "codex".to_string(),
+                client_config: helper_repo.join(".codex/config.toml").display().to_string(),
+                stack_profile: "default".to_string(),
+                installed_at_epoch_seconds: 1,
+                memory_bridge_path: None,
+                memory_bridge_backup_path: None,
+                startup_instruction_path: Some(startup_instruction_path.display().to_string()),
+                startup_instruction_status: Some(
+                    "managed_append_instruction_installed".to_string(),
+                ),
+                startup_contract_path: Some(startup_contract_path.display().to_string()),
+                startup_contract_status: Some(
+                    "workspace_startup_contract_materialized".to_string(),
+                ),
+                startup_contract_sha256: Some(contract_sha),
+                agent_preflight_contract_path: None,
+                agent_preflight_agent_contract_path: None,
+                agent_preflight_state_path: None,
+                agent_preflight_contract_status: None,
+                agent_preflight_contract_sha256: None,
+            },
+        )
+        .expect("save install state");
+
+        let audit = inspect_startup_artifacts(&helper_repo)
+            .expect("startup artifact audit")
+            .expect("startup artifact audit payload");
+        assert_eq!(audit.status, "ok");
+        assert_eq!(audit.startup_instruction_contains_expected_sha, Some(true));
+        assert_eq!(audit.install_state_sha_matches_current_contract, Some(true));
+        assert_eq!(
+            audit.startup_contract_sha_matches_current_contract,
+            Some(true)
+        );
+
+        fs::remove_dir_all(&helper_repo).expect("cleanup helper repo");
+        fs::remove_dir_all(&workspace).expect("cleanup workspace");
+    }
+
+    #[test]
     fn managed_startup_block_appends_to_existing_rules_file() {
         let repo = Path::new("/tmp/amai");
-        let block = render_startup_instructions(repo, "Codex", "codex", "codex_agents_snippet")
-            .expect("codex startup instructions must render");
+        let block =
+            render_startup_instructions(repo, repo, "Codex", "codex", "codex_agents_snippet")
+                .expect("codex startup instructions must render");
         let existing = "# Existing project rules\n\n- keep this content\n";
         let merged = merge_managed_startup_block(existing, &block).expect("managed merge");
         assert!(merged.contains("# Existing project rules"));
@@ -3922,8 +5197,9 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
     #[test]
     fn strip_managed_startup_block_removes_only_embedded_block() {
         let repo = Path::new("/tmp/amai");
-        let block = render_startup_instructions(repo, "Codex", "codex", "codex_agents_snippet")
-            .expect("codex startup instructions must render");
+        let block =
+            render_startup_instructions(repo, repo, "Codex", "codex", "codex_agents_snippet")
+                .expect("codex startup instructions must render");
         let existing = format!("# Existing project rules\n\n{block}\n## Keep me too\n");
         let stripped = strip_managed_startup_block(&existing)
             .expect("managed strip should succeed")

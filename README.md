@@ -21,6 +21,20 @@ modified_at: 2026-03-29 01:46 MSK
 - `CI`
 - другим агентным клиентам через `MCP`
 
+## Если вы агент или новый инженер
+
+Не пытайтесь собирать картину проекта по кускам.
+
+Сначала откройте:
+- [AGENT_START_HERE.md](docs/AGENT_START_HERE.md)
+
+Этот документ нужен затем, чтобы сразу понять:
+- что в проекте уже materialized;
+- что ещё только в roadmap;
+- какой этап следующий;
+- какими документами руководствоваться;
+- чего нельзя делать при первом кодовом шаге.
+
 ## Что это простыми словами
 
 `Amai` — не “один бесконечный общий чат”.
@@ -658,6 +672,9 @@ scripts\human_dashboard_down.cmd
 - сами карточки при этом больше не тянут полный contractual `observe token-report`: для `observe serve` они используют отдельный `dashboard_read_only` token report без full contractual/export path на каждый refresh;
 - этот dashboard contour при этом разрешает только ограниченный quiet same-meter sync/write-back для active live scope текущей сессии и рабочего окна, а не полный write-side settlement/export контур.
 - если свежий `rollout token_count` для того же thread уже появился, а process-local cache ещё держит старый `client_live_meter`, request-side freshness guard обязан принудительно обновить `client_live_meter` и limit-row до ответа, а не ждать только фонового тика.
+- `headline`, hero-card `Экономия токенов за текущую сессию` и верхние top-cards теперь должны приходить одним coherent live-summary bundle:
+  - bootstrap snapshot разрешён только как стартовая заливка страницы;
+  - после загрузки страница не должна держать их на split poll-контрах и не должна ждать только `focus`/`visibilitychange`, иначе UI снова начнёт рисовать ложный stale drift поверх свежего backend.
 
 После запуска откройте в браузере:
 
@@ -668,6 +685,19 @@ http://127.0.0.1:9464/
 Если у вас поменян `AMI_OBSERVE_BIND`, адрес будет таким же, но с вашим портом.
 
 Если потом нужно остановить human dashboard, используйте симметричную команду `human_dashboard_down`.
+
+Если кажется, что CPU грузит `VS Code`/`Electron`, не ориентируйтесь только на `ps %CPU` у `zygote`.
+Канонический операторский путь теперь такой:
+
+```bash
+./scripts/vscode_live_cpu_truth.sh
+```
+
+Этот скрипт одним запуском показывает:
+- верхний lifetime-tail из `ps`;
+- live CPU за фиксированное окно по `/proc/<pid>/stat`;
+- `code --status` как authoritative источник для окна, `extension-host` и MCP-контуров;
+- `observe healthz`, если запущен локальный human dashboard.
 
 Что показывает эта панель:
 - сколько токенов `Amai` уже сэкономил по проверенной live-выборке;
@@ -1287,8 +1317,9 @@ preview, а не только raw count.
   - если `startup_next_action.action_kind = resume_required_return_task`, клиент обязан
     выполнить именно этот return path до unrelated work;
   - если `startup_next_action.action_kind = rotate_chat_for_client_budget`, клиент обязан
-    сохранить return obligation через handoff и продолжать только в свежем чате через
-    continuity startup; продолжать в раздутом live-thread нельзя;
+    сначала попробовать same-thread host control, если он доступен, и только после
+    подтверждённого провала surface сохранять return obligation через handoff и уходить в fresh
+    chat через continuity startup; продолжать в раздутом live-thread нельзя;
   - эта rotate-ветка теперь несёт и machine-readable `action_bundle` с каноническими шагами
     `capture_continuity_handoff`, `open_fresh_chat`, `run_continuity_startup`;
   - если `execctl_active_lease.lease_owner_state = previous_session_owner`, клиент не имеет права
@@ -1305,7 +1336,7 @@ preview, а не только raw count.
     - `guard_enforcement_exit_on_blocking = true`;
     - `max_guard_age_seconds = 10`;
     - `stale_guard_requires_refresh = true`;
-    - `rotate_status_labels = ["новый чат рекомендован", "новый чат нужен сейчас"]`;
+    - `rotate_status_labels = ["сожми текущий чат", "сожми текущий чат сейчас"]`;
     - `save_handoff_before_rotate = true`;
     - `fresh_chat_requires_continuity_startup = true`.
 
@@ -1829,22 +1860,22 @@ Fail-closed правило для расхождений:
     последнего client turn;
   - если этот live contour уже показывает большой последний thread/request, низкий остаток
     5h лимита и слабый `Amai в полном live-turn`, текущая session-card обязана fail-closed
-    перейти в `новый чат рекомендован` или `новый чат нужен сейчас` и явно советовать
-    сохранить handoff и продолжать через continuity startup, а не делать вид, что exact
-    internal savings уже достаточно;
+    перейти в `сожми текущий чат` или `сожми текущий чат сейчас` и явно советовать
+    same-thread host control как primary path; handoff/new chat остаются только fallback, а не
+    первое действие;
   - тот же early-rotation guard теперь обязан срабатывать и раньше: если exact same-turn pair
     ещё не materialized, а live-turn уже раздут настолько, что честный full-scale effect
-    теряется в размере самого thread/context, operator должен увидеть ранний переход в свежий чат
-    ещё до того, как 5h лимит почти выгорел;
+    теряется в размере самого thread/context, operator должен увидеть ранний same-thread
+    compaction ещё до того, как 5h лимит почти выгорел;
   - и даже когда exact same-turn pair уже materialized, current-session card обязана раньше
-    поднимать `новый чат рекомендован` или `новый чат нужен сейчас`, если полный live-turn уже
+    поднимать `сожми текущий чат` или `сожми текущий чат сейчас`, если полный live-turn уже
     раздут, а доля `Amai в полном live-turn` остаётся микроскопической; иначе exact proof сам по
     себе маскирует реальный burn внешней шкалы клиента;
   - managed startup instructions теперь тоже обязаны повторять этот закон в plain language:
-    если dashboard/current-session contour уже говорит `новый чат рекомендован` или
-    `новый чат нужен сейчас`, либо полный live-turn помечен как `не доказано` на раздутом
-    turn, агент не должен дожигать текущий thread и обязан продолжать через fresh chat +
-    continuity startup;
+    если dashboard/current-session contour уже говорит `сожми текущий чат` или
+    `сожми текущий чат сейчас`, либо полный live-turn помечен как `не доказано` на раздутом
+    turn, агент не должен дожигать текущий thread и обязан сначала использовать same-thread
+    control; fresh chat + continuity startup остаются только fallback после verified failure;
   - этот же закон теперь требует recheck не реже, чем раз в `10` секунд:
     если последняя machine-readable проверка старше `max_guard_age_seconds`, supported client
     обязан сначала обновить `./scripts/client_budget_gate.sh`, а уже потом отвечать;
@@ -1857,7 +1888,8 @@ Fail-closed правило для расхождений:
   - для automation теперь есть и hard gate path:
     `./scripts/client_budget_gate.sh --enforce-reply-gate` обязан печатать тот же
     compact JSON, но выходить с non-zero exit code, если текущий reply уже должен быть
-    остановлен и переведён в свежий чат через continuity startup;
+    остановлен; same-thread control остаётся primary action, а continuity startup нужен только
+    как fallback после verified failure.
   - для этого в observe-layer теперь есть отдельный machine-readable truth-source:
     `./scripts/client_budget_gate.sh`;
   - `cargo run -- observe client-budget-guard` остаётся legacy/debug surface и теперь тоже
@@ -2375,7 +2407,7 @@ cargo run --release -- observe cleanup-snapshots --apply --limit 2000
 - команда честно показывает, сколько aged snapshot реально попало под TTL;
 - удаляет только те записи, которые policy разрешает удалять;
 - benchmark history теперь штампуется как `immutable_snapshot`, поэтому benchmark snapshot больше нельзя незаметно переписать update-ом;
-- source of truth для `schema_version`, `classification_rules_version` и `retention_profile` живёт в [config/observability.toml](/home/art/agent-memory-index/config/observability.toml) и materialize-ится в `_observability` каждого snapshot.
+- source of truth для `schema_version`, `classification_rules_version` и `retention_profile` живёт в [config/observability.toml](config/observability.toml) и materialize-ится в `_observability` каждого snapshot.
 
 Для rebuildable локального мусора теперь есть отдельный cleanup path с запасом по времени:
 
@@ -2387,7 +2419,7 @@ cargo run --release -- observe cleanup-artifacts --aggressive --apply
 ```
 
 Что это значит:
-- cleanup path читает policy из [config/observability.toml](/home/art/agent-memory-index/config/observability.toml), а не из вшитого списка;
+- cleanup path читает policy из [config/observability.toml](config/observability.toml), а не из вшитого списка;
 - под auto-retention сейчас попадают только rebuildable хвосты:
   - `target/debug`
   - `target/release`
@@ -2852,7 +2884,7 @@ cargo run --release -- observe guardrails
 
 Для retrieval science и isolation source of truth теперь machine-readable:
 
-- [config/retrieval_science.toml](/home/art/agent-memory-index/config/retrieval_science.toml)
+- [config/retrieval_science.toml](config/retrieval_science.toml)
   - версии methodology/scoring/degradation/execution-state/lineage;
   - фиксированные suite-version для hot/cold/load/accuracy/continuity/token/text-compare;
   - truth ranking и политика `same input -> same verdict`;
@@ -2865,13 +2897,13 @@ cargo run --release -- observe guardrails
     - direct recovery proof вне MCP-обёртки;
     - machine-readable verdict по `handoff / working_state / chat_start_prompt / replay freshness / previous_chat / exact_time`;
     - reproducibility contract для continuity import/handoff/startup и direct temporal lookup.
-- [config/red_team_retrieval_isolation.toml](/home/art/agent-memory-index/config/red_team_retrieval_isolation.toml)
+- [config/red_team_retrieval_isolation.toml](config/red_team_retrieval_isolation.toml)
   - фиксированный red-team retrieval isolation contour для `project_alpha/project_beta`;
   - hostile mixed query;
   - отдельные hostile visible/hit invariants по проекту и namespace;
   - versioned query suite и scoring rules для `verify accuracy`;
   - тот же `verify accuracy` теперь тоже пишет `canonical_eval` через тот же общий verdict layer, а не только raw precision/invariant числа.
-- [fixtures/text_compare_cases.jsonl](/home/art/agent-memory-index/fixtures/text_compare_cases.jsonl)
+- [fixtures/text_compare_cases.jsonl](fixtures/text_compare_cases.jsonl)
   - versioned comparative retrieval quality suite для `verify text-compare`;
   - теперь этот contour тоже пишет `canonical_eval`, а не только precision/hit ratio и token contour;
   - по каждому кейсу и по каждой стратегии (`hybrid / lexical_only / semantic_only`) сохраняются:

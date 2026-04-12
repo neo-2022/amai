@@ -732,6 +732,8 @@ async fn ensure_repo_registered(
         &repo.manifest.display_name,
         &repo.resolved_root.display().to_string(),
         None,
+        "default",
+        "project_shared",
         &cfg.default_retrieval_mode,
     )
     .await?;
@@ -765,6 +767,7 @@ async fn index_repo(
             limit_files: repo.manifest.limit_files,
             paths_file: None,
             skip_embeddings: repo.manifest.skip_embeddings,
+            preserve_namespace_documents: false,
         },
     )
     .await?;
@@ -822,6 +825,7 @@ async fn run_case(
         limit_symbols: case.limit_symbols.unwrap_or(4),
         limit_chunks: case.limit_chunks.unwrap_or(4),
         limit_semantic_chunks: case.limit_semantic_chunks.unwrap_or(4),
+        at_epoch_ms: None,
         token_source_kind: "benchmark_cold_context_pack".to_string(),
         client_prompt_tokens: None,
         assistant_generation_tokens: None,

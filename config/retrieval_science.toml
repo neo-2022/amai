@@ -198,6 +198,13 @@ query_suite_version = "red-team-retrieval-isolation-v1"
 manifest_path = "config/red_team_retrieval_isolation.toml"
 reproducibility_contract = "Cross-project and cross-namespace leakage must stay zero; hostile visible/hit invariants and precision checks must remain exact on the fixed fixture contour."
 
+[science.suites.memory_benchmark_score]
+suite_version = "external-memory-score-v1"
+dataset_version = "external-memory-benchmarks-v1"
+query_suite_version = "memory-benchmark-score-v1"
+manifest_path = "docs/MEMORY_BENCH_RUNBOOK.md"
+reproducibility_contract = "For the same cases and predictions inputs, the baseline scorer (exact/contains + abstention) must produce the same score summary."
+
 [science.suites.degradation_verification]
 suite_version = "degradation-verification-v2"
 dataset_version = "synthetic-degradation-matrix-v2"
