@@ -1053,3 +1053,254 @@ pub(super) fn exact_pair_frozen_debt_metric_row(alignment: &Value) -> Option<Val
         Some(tooltip.as_str()),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn exact_pair_status_override_marks_irrecoverable_gap_as_alert() {
+        let alignment = json!({
+            "exact_pair_status": {
+                "state": "exact_pair_blocked",
+                "blockers": [{
+                    "code": "tool_overhead_outside_retrieval",
+                    "missing_live_events": 13,
+                    "irrecoverable_missing_live_events": 13
+                }]
+            }
+        });
+
+        let (status, label, tooltip) =
+            exact_pair_card_status_override(&alignment).expect("status override");
+        assert_eq!(status, "alert");
+        assert_eq!(label, "есть старый долг точности");
+        assert!(tooltip.contains("Не хватает строк: 13"));
+        assert!(tooltip.contains("Потеряно без восстановления: 13"));
+    }
+
+    #[test]
+    fn exact_pair_status_override_marks_recoverable_gap_as_waiting() {
+        let alignment = json!({
+            "exact_pair_status": {
+                "state": "exact_pair_blocked",
+                "blockers": [{
+                    "code": "tool_overhead_outside_retrieval",
+                    "missing_live_events": 7,
+                    "irrecoverable_missing_live_events": 0
+                }]
+            }
+        });
+
+        let (status, label, tooltip) =
+            exact_pair_card_status_override(&alignment).expect("status override");
+        assert_eq!(status, "waiting");
+        assert_eq!(label, "ждём полного совпадения");
+        assert!(tooltip.contains("совпадение с реальной шкалой лимита модели ещё не собрано"));
+    }
+
+    #[test]
+    fn exact_pair_status_metric_row_surfaces_frozen_debt_review() {
+        let alignment = json!({
+            "exact_pair_status": {
+                "state": "exact_pair_blocked",
+                "exact_pair_available": false,
+                "blockers": [{
+                    "code": "tool_overhead_outside_retrieval",
+                    "frozen_gap_candidate": true,
+                    "missing_live_events": 13,
+                    "irrecoverable_missing_live_events": 13
+                }]
+            }
+        });
+
+        let row = exact_pair_status_metric_row(&alignment).expect("exact pair row");
+        assert_eq!(row["label"], "Совпадение с реальным лимитом");
+        assert_eq!(
+            row["value"].as_str(),
+            Some("цифра пока не полностью точная: в старой истории потеряно 13 строк")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("старой исторической потери данных")
+        );
+    }
+
+    #[test]
+    fn exact_pair_status_metric_row_surfaces_exact_materialized() {
+        let alignment = json!({
+            "exact_pair_status": {
+                "state": "exact_pair_materialized",
+                "exact_pair_available": true
+            }
+        });
+
+        let row = exact_pair_status_metric_row(&alignment).expect("exact pair row");
+        assert_eq!(
+            row["value"].as_str(),
+            Some("цифра точная: полностью совпадает со шкалой лимита модели")
+        );
+    }
+
+    #[test]
+    fn exact_pair_frozen_debt_metric_row_surfaces_resolution_law() {
+        let alignment = json!({
+            "frozen_gap_review_surface": {
+                "state": "review_required",
+                "blocking_component": "tool_overhead_outside_retrieval",
+                "missing_live_events": 13,
+                "irrecoverable_missing_live_events": 13,
+                "recoverable_missing_live_events": 0,
+                "resolution_condition": "freeze_irrecoverable_gap_or_keep_exact_pair_unavailable"
+            },
+            "exact_pair_status": {
+                "state": "exact_pair_blocked",
+                "blockers": [{
+                    "code": "tool_overhead_outside_retrieval",
+                    "frozen_gap_candidate": true,
+                    "missing_live_events": 13,
+                    "irrecoverable_missing_live_events": 13,
+                    "recoverable_missing_live_events": 0,
+                    "resolution_condition": "freeze_irrecoverable_gap_or_keep_exact_pair_unavailable"
+                }]
+            }
+        });
+
+        let row = exact_pair_frozen_debt_metric_row(&alignment).expect("frozen debt row");
+        assert_eq!(row["label"], "Frozen debt exact-пары");
+        assert_eq!(
+            row["value"].as_str(),
+            Some("tool_overhead_outside_retrieval: 13 irrecoverable rows")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("freeze_irrecoverable_gap_or_keep_exact_pair_unavailable")
+        );
+    }
+
+    #[test]
+    fn client_full_turn_savings_metric_row_surfaces_full_turn_share() {
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 35534
+        });
+        let row = client_full_turn_savings_metric_row(&meter, Some((550, 127, 423, 76.91)))
+            .expect("full turn row");
+        assert_eq!(
+            row["key"].as_str(),
+            Some(CLIENT_LIVE_FULL_TURN_SAVINGS_ROW_KEY)
+        );
+        assert_eq!(row["label"], "Amai в полном live-turn");
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("без Amai 35957")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("замедлением расхода шкалы VS Code")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("rollout token_count.last_token_usage.total_tokens")
+        );
+    }
+
+    #[test]
+    fn client_full_turn_savings_metric_row_hides_percent_until_exact_turn_pair_exists() {
+        let meter = json!({
+            "status": "observed",
+            "thread_binding_state": "current_thread_bound",
+            "current_thread_bound": true,
+            "client_turn_total_tokens": 35534
+        });
+        let row = client_full_turn_savings_metric_row(&meter, None).expect("full turn row");
+        assert_eq!(
+            row["key"].as_str(),
+            Some(CLIENT_LIVE_FULL_TURN_SAVINGS_ROW_KEY)
+        );
+        assert_eq!(row["label"], "Amai в полном live-turn");
+        assert_eq!(
+            row["value"].as_str(),
+            Some("точный процент по шкале VS Code пока не доказан")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("единственный процент")
+        );
+    }
+
+    #[test]
+    fn client_full_turn_savings_metric_row_surfaces_unbound_meter_as_unproven() {
+        let meter = json!({
+            "status": "observed",
+            "thread_binding_state": "no_current_thread_binding",
+            "current_thread_bound": false,
+            "client_turn_total_tokens": 35534
+        });
+        let row = client_full_turn_savings_metric_row(&meter, None).expect("full turn row");
+        assert_eq!(
+            row["key"].as_str(),
+            Some(CLIENT_LIVE_FULL_TURN_SAVINGS_ROW_KEY)
+        );
+        assert_eq!(row["label"], "Amai в полном live-turn");
+        assert_eq!(
+            row["value"].as_str(),
+            Some("точный процент по шкале VS Code пока не доказан")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("current-thread binding")
+        );
+    }
+
+    #[test]
+    fn current_live_turn_exact_pair_surfaces_zero_pair() {
+        let current_live_turn = json!({
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 0,
+                "with_amai_tokens": 0,
+                "saved_tokens": 0,
+                "saved_pct": 0.0
+            }
+        });
+        assert_eq!(
+            current_live_turn_exact_pair(&current_live_turn),
+            Some((0, 0, 0, 0.0))
+        );
+    }
+
+    #[test]
+    fn client_full_turn_savings_metric_row_surfaces_zero_percent_when_no_amai_activity() {
+        let meter = json!({
+            "status": "observed",
+            "thread_binding_state": "current_thread_bound",
+            "current_thread_bound": true,
+            "client_turn_total_tokens": 35534
+        });
+        let row = client_full_turn_savings_metric_row(&meter, Some((0, 0, 0, 0.0)))
+            .expect("full turn row");
+        assert!(row["value"].as_str().unwrap_or_default().contains("0.00%"));
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("delta 0")
+        );
+    }
+}

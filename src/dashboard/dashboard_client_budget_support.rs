@@ -2063,3 +2063,248 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
         "rows": rows,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn client_live_limit_metric_row_surfaces_remaining_budget() {
+        let meter = json!({
+            "status": "observed",
+            "thread_binding_state": "current_thread_bound",
+            "current_thread_bound": true,
+            "primary_limit_remaining_percent": 31,
+            "primary_limit_used_percent": 69,
+            "secondary_limit_remaining_percent": 79,
+            "secondary_limit_used_percent": 21,
+            "ended_at_epoch_ms": 1774625102000u64
+        });
+        let row = client_live_limit_metric_row(&meter).expect("limit row");
+        assert_eq!(row["key"].as_str(), Some(CLIENT_LIVE_LIMIT_ROW_KEY));
+        assert_eq!(row["label"], "Лимит клиента сейчас");
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("5ч остаётся 31.00%")
+        );
+        assert!(row["value"].as_str().unwrap_or_default().contains("raw"));
+    }
+
+    #[test]
+    fn client_live_limit_metric_row_prefers_exact_status_bar_source() {
+        let meter = json!({
+            "status": "observed",
+            "thread_binding_state": "no_current_thread_binding",
+            "current_thread_bound": false,
+            "primary_limit_remaining_percent": 31,
+            "primary_limit_used_percent": 69,
+            "secondary_limit_remaining_percent": 79,
+            "secondary_limit_used_percent": 21,
+            "ended_at_epoch_ms": 1774625102000u64,
+            "status_bar_rate_limits": {
+                "status": "observed",
+                "source": "codex_app_server_account_rate_limits_read_v1",
+                "status_bar_correlated": true,
+                "observed_at_epoch_ms": 1774682249000u64,
+                "primary_limit_used_percent": 38.0,
+                "primary_limit_remaining_percent": 62.0,
+                "secondary_limit_used_percent": 41.0,
+                "secondary_limit_remaining_percent": 59.0
+            }
+        });
+        let row = client_live_limit_metric_row(&meter).expect("limit row");
+        assert_eq!(row["key"].as_str(), Some(CLIENT_LIVE_LIMIT_ROW_KEY));
+        assert_eq!(row["label"], "Лимит клиента сейчас");
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("5ч остаётся 62.00%, 7д остаётся 59.00%")
+        );
+        assert!(row["value"].as_str().unwrap_or_default().contains("live"));
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("codex app-server account/rateLimits/read")
+        );
+    }
+
+    #[test]
+    fn client_live_context_metric_row_uses_last_request_window_pressure() {
+        let meter = json!({
+            "status": "observed",
+            "thread_binding_state": "current_thread_bound",
+            "current_thread_bound": true,
+            "client_turn_total_tokens": 133419,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 51.633359133126934,
+            "ended_at_epoch_ms": 1774625102000u64
+        });
+        let row = client_live_context_metric_row(&meter).expect("context row");
+        assert_eq!(row["key"].as_str(), Some(CLIENT_LIVE_CONTEXT_ROW_KEY));
+        assert_eq!(row["label"].as_str(), Some("Последний запрос клиента"));
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("133419 из 258400")
+        );
+        assert!(row["value"].as_str().unwrap_or_default().contains("raw"));
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_requires_current_thread_binding() {
+        let hourly_burn = json!({});
+        let current_live_turn = json!({});
+        let meter = json!({
+            "status": "observed",
+            "thread_binding_state": "no_current_thread_binding",
+            "current_thread_bound": false,
+            "client_turn_total_tokens": 140921,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 54.54,
+            "primary_limit_remaining_percent": 61.0,
+            "secondary_limit_remaining_percent": 88.0,
+            "ended_at_epoch_ms": 1774622949000u64
+        });
+        assert!(
+            client_turn_pressure_guard(&meter, None, &hourly_burn, &current_live_turn).is_none()
+        );
+        assert!(client_live_context_metric_row(&meter).is_none());
+        let row = client_live_limit_metric_row(&meter).expect("limit row");
+        assert_eq!(row["label"], "Последний observed лимит клиента");
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("последнее observed:")
+        );
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("latest observed")
+        );
+    }
+
+    #[test]
+    fn client_budget_live_payload_surfaces_only_available_rows() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "client_live_meter": {
+                    "status": "observed",
+                    "thread_binding_state": "no_current_thread_binding",
+                    "current_thread_bound": false,
+                    "primary_limit_remaining_percent": 78,
+                    "primary_limit_used_percent": 22,
+                    "secondary_limit_remaining_percent": 63,
+                    "secondary_limit_used_percent": 37,
+                    "ended_at_epoch_ms": 1774683538000u64
+                },
+                "client_limit_hourly_burn": {
+                    "status": "insufficient_history",
+                    "reply_prefix": "5ч KPI: н/д"
+                }
+            }
+        });
+        let payload = client_budget_live_payload(&snapshot);
+        let rows = payload["rows"].as_array().expect("rows array");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[0]["key"].as_str(),
+            Some(CLIENT_LIVE_FULL_TURN_SAVINGS_ROW_KEY)
+        );
+        assert_eq!(rows[1]["key"].as_str(), Some(CLIENT_LIVE_LIMIT_ROW_KEY));
+        assert_eq!(
+            rows[2]["key"].as_str(),
+            Some(CLIENT_LIMIT_HOURLY_BURN_ROW_KEY)
+        );
+        assert_eq!(
+            rows[1]["label"].as_str(),
+            Some("Последний observed лимит клиента")
+        );
+    }
+
+    #[test]
+    fn client_budget_live_payload_surfaces_exact_live_limit_without_rollout_meter() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "client_live_meter": {
+                    "status": "missing",
+                    "status_bar_rate_limits": {
+                        "status": "observed",
+                        "source": "codex_app_server_account_rate_limits_read_v1",
+                        "status_bar_correlated": true,
+                        "observed_at_epoch_ms": 1774682249000u64,
+                        "primary_limit_used_percent": 39.0,
+                        "primary_limit_remaining_percent": 61.0,
+                        "secondary_limit_used_percent": 42.0,
+                        "secondary_limit_remaining_percent": 58.0
+                    }
+                },
+                "client_limit_hourly_burn": {
+                    "status": "insufficient_history",
+                    "reply_prefix": "5ч KPI: н/д"
+                }
+            }
+        });
+        let payload = client_budget_live_payload(&snapshot);
+        let rows = payload["rows"].as_array().expect("rows array");
+        assert_eq!(payload["status"], json!("observed"));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["key"].as_str(), Some(CLIENT_LIVE_LIMIT_ROW_KEY));
+        assert_eq!(rows[0]["label"].as_str(), Some("Лимит клиента сейчас"));
+        assert!(
+            rows[0]["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("5ч остаётся 61.00%, 7д остаётся 58.00%")
+        );
+        assert_eq!(
+            rows[1]["key"].as_str(),
+            Some(CLIENT_LIMIT_HOURLY_BURN_ROW_KEY)
+        );
+    }
+
+    #[test]
+    fn client_budget_live_payload_surfaces_current_live_turn_numeric_row() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "client_live_meter": {
+                    "status": "observed",
+                    "thread_binding_state": "current_thread_bound",
+                    "current_thread_bound": true,
+                    "client_turn_total_tokens": 35534,
+                    "primary_limit_remaining_percent": 61,
+                    "secondary_limit_remaining_percent": 58,
+                    "ended_at_epoch_ms": 1774682249000u64
+                },
+                "current_live_turn": {
+                    "exact_pair_available": true,
+                    "exact_pair": {
+                        "without_amai_tokens": 0,
+                        "with_amai_tokens": 0,
+                        "saved_tokens": 0,
+                        "saved_pct": 0.0
+                    }
+                }
+            }
+        });
+        let payload = client_budget_live_payload(&snapshot);
+        let rows = payload["rows"].as_array().expect("rows array");
+        assert_eq!(
+            rows[0]["key"].as_str(),
+            Some(CLIENT_LIVE_FULL_TURN_SAVINGS_ROW_KEY)
+        );
+        assert!(
+            rows[0]["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("0.00%")
+        );
+    }
+}
