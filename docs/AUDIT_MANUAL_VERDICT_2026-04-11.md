@@ -223,7 +223,7 @@
 - крупные bounded-context файлы остаются очень большими даже после уже выполненных split-pass:
   - `src/token_budget.rs` 28700
   - `src/postgres.rs` 35584
-  - `src/dashboard.rs` 16486
+  - `src/dashboard.rs` 16158
   - `src/observe.rs` 13726
   - `src/working_state.rs` 11099
   - `src/continuity.rs` 10655
@@ -744,6 +744,7 @@
   - dashboard working-state / live-turn current-work contour вынесен в `src/dashboard/dashboard_working_state_card.rs`; `src/dashboard.rs` больше не смешивает restore summarization, same-thread live-turn fallback, active-file hint projection и `working_state_live_card` assembly с соседними benchmark/service/report helpers. После выноса targeted dashboard tests подтверждают контрактную эквивалентность `working_state` card.
   - dashboard service cards / external benchmark-Qdrant contour вынесен в `src/dashboard/dashboard_service_cards.rs`; `src/dashboard.rs` больше не смешивает live Postgres/Qdrant/NATS service-card assembly и отдельную benchmark-Qdrant progress/result card с соседними helpers. По пути закрыт operator-contract drift: benchmark-Qdrant card снова явно показывает `Прогон` и `Последний результат/Состояние`, а не размытый generic-label surface, как требуют dashboard tests.
   - dashboard benchmark cards contour вынесен в `src/dashboard/dashboard_benchmark_cards.rs`; `src/dashboard.rs` больше не держит hot-load, hot-retrieval, cold-path, accuracy, memory/isolation и procedural benchmark-card assembly вместе с их benchmark-specific reason/status helpers и compare-table builder-ами. Targeted benchmark card tests подтверждают контрактную эквивалентность live-progress и lane-label surfaces после split.
+  - dashboard live-latency compare contour вынесен в `src/dashboard/dashboard_live_latency_compare.rs`; `src/dashboard.rs` больше не держит рядом live-response-latency table/status/card assembly, current-vs-rolling compare fallback rules и related operator wording. Во время выноса закрыт live-contract drift: modern `live_response_latency` surface по-прежнему показывает полную 6-row compare-table, legacy fallback shape честно деградирует в compact stable rows, unclassified live signal больше не маскируется под `unknown`, а title/tooltip снова явно говорят про `задержку Amai`, как требуют owner-tests.
   - token-budget exact-client-limits cache/resolution contour вынесен в `src/token_budget/dashboard_exact_client_limits.rs`; `src/token_budget.rs` больше не держит рядом persisted schema, shared cache I/O и live resolution logic для этого dashboard-boundary.
   - token-budget shared hint/dedupe contour вынесен в `src/token_budget/dashboard_shared_hints.rs`; `src/token_budget.rs` больше не смешивает active-thread-hint и continuity-restore dedupe cache helpers с соседними dashboard cache lanes.
   - token-budget dashboard event caches вынесены в `src/token_budget/dashboard_event_caches.rs`; `src/token_budget.rs` больше не держит рядом persisted schema и shared cache I/O для token-events/current-session/live-turn-retrieval cache lanes.
