@@ -7,6 +7,7 @@ set -a
 . ./.env.example
 set +a
 
+./scripts/render_postgres_config.sh >/dev/null
 compose_rendered="$(docker compose config)"
 compose_monitoring_rendered="$(docker compose --profile monitoring config)"
 
@@ -33,5 +34,6 @@ printf '%s\n' "$compose_rendered" | rg -U 'host_ip: 127\.0\.0\.1\n\s+target: 422
 printf '%s\n' "$compose_rendered" | rg -U 'host_ip: 127\.0\.0\.1\n\s+target: 8222\n\s+published: "58222"' >/dev/null
 printf '%s\n' "$compose_monitoring_rendered" | rg -U 'host_ip: 127\.0\.0\.1\n\s+target: 9090\n\s+published: "59090"' >/dev/null
 printf '%s\n' "$compose_monitoring_rendered" | rg -U 'host_ip: 127\.0\.0\.1\n\s+target: 3000\n\s+published: "53000"' >/dev/null
+grep -F "listen_addresses = '*'" tmp/postgres/postgresql.conf >/dev/null
 
 echo "proof_ops_security_defaults: ok"

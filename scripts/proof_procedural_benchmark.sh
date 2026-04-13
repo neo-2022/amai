@@ -9,18 +9,21 @@ step() {
 
 step "verify benchmark catalog surfaces first-class procedural entry"
 list_output="$(./scripts/benchmark_matrix.sh)"
-printf '%s\n' "$list_output" | rg '^- Procedural Memory Evolution \(procedural_memory_evolution\) — частично покрыто$' >/dev/null
+printf '%s\n' "$list_output" | rg '^- Procedural Memory Evolution \(procedural_memory_evolution\) — уже materialized$' >/dev/null
 
 coverage_output="$(./scripts/benchmark_matrix.sh coverage)"
 printf '%s\n' "$coverage_output" | rg '^General Assistant & Reasoning \(general_assistant_reasoning\)$' >/dev/null
-printf '%s\n' "$coverage_output" | rg '^- Частично покрыто текущими proof/harness слоями: 1$' >/dev/null
+printf '%s\n' "$coverage_output" | rg '^- Уже materialized напрямую: 1$' >/dev/null
+printf '%s\n' "$coverage_output" | rg '^- Частично покрыто текущими proof/harness слоями: 0$' >/dev/null
 
 explain_output="$(./scripts/benchmark_matrix.sh explain --benchmark procedural-memory-benchmark)"
 printf '%s\n' "$explain_output" | rg '^Benchmark: Procedural Memory Evolution \(procedural_memory_evolution\)$' >/dev/null
 printf '%s\n' "$explain_output" | rg '^Семейство: General Assistant & Reasoning \(general_assistant_reasoning\)$' >/dev/null
+printf '%s\n' "$explain_output" | rg '^Статус для Amai: уже materialized$' >/dev/null
 printf '%s\n' "$explain_output" | rg 'skill reuse quality' >/dev/null
 printf '%s\n' "$explain_output" | rg 'stale-skill suppression' >/dev/null
 printf '%s\n' "$explain_output" | rg '\./scripts/proof_procedural_benchmark.sh' >/dev/null
+printf '%s\n' "$explain_output" | rg 'persisted `procedural_benchmark_history`' >/dev/null
 
 step "run procedural benchmark metric bundle"
 ./scripts/proof_procedural_seed.sh >/tmp/amai-proof-procedural-seed.out

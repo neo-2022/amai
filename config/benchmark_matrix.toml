@@ -371,7 +371,7 @@ aliases = [
   "навыки и память действий"
 ]
 family = "general_assistant_reasoning"
-coverage_level = "partial"
+coverage_level = "materialized"
 summary = "Внутренний compare-plane benchmark для procedural memory: skill reuse, bad-skill suppression, stale-skill suppression, shadow-to-verified uplift и evaluator correctness поверх truth-layer, а не вместо него."
 reference_url = "docs/AMAI_COMPARE_EXPERIMENT_PLAN.md"
 why_relevant = [
@@ -388,11 +388,13 @@ amai_focus = [
 current_coverage = [
   "Есть procedural seed, shadow review, negative procedural memory и shared-promotion-by-approval proofs.",
   "Есть refinement/version history contours для patch-vs-merge discipline и traceable skill evolution.",
-  "Есть отдельный compare-plane proof bundle `./scripts/proof_procedural_benchmark.sh`."
+  "Есть отдельный compare-plane proof bundle `./scripts/proof_procedural_benchmark.sh`.",
+  "Есть dual-line materialized benchmark snapshot через `verify procedural-benchmark` и persisted `procedural_benchmark_history` в observe/dashboard surfaces.",
+  "Есть richer scored reporting по reuse/suppression/uplift/evaluator метрикам вместо generic memory score."
 ]
 current_gaps = [
-  "Пока это proof-bundle benchmark, а не richer scored run с persisted per-metric history.",
-  "Нет ещё отдельной dashboard-card линии с time-series по reuse quality / suppression / uplift."
+  "Это пока repo-local compare-plane contour, а не внешний public benchmark family с cross-repo dataset breadth.",
+  "Нет ещё statistical significance/drift layer поверх persisted procedural history."
 ]
 proof_commands = [
   "./scripts/proof_procedural_benchmark.sh",
@@ -403,7 +405,7 @@ proof_commands = [
   "./scripts/proof_skill_refinement_contour.sh",
   "./scripts/proof_skill_version_history.sh"
 ]
-next_step = "Материализовать persisted benchmark surface и richer scored reporting по reuse/suppression/uplift метрикам поверх этого proof bundle."
+next_step = "Усилить materialized procedural benchmark статистической честностью: significance/drift reporting, CI publishing discipline и более широкий dataset breadth без потери truth-layer contract."
 
 [benchmarks.swe_bench_verified]
 order = 1

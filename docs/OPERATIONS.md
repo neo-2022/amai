@@ -280,6 +280,9 @@ Hardened deployment contract для local stack:
 
 Если запускаете `docker compose` вручную без bootstrap-скриптов, `./scripts/render_postgres_config.sh` обязателен,
 иначе в `tmp/postgres` не будет актуальных `postgresql.conf` / `pg_hba.conf`.
+Rendered `postgresql.conf` обязан явно держать `listen_addresses = '*'`, иначе loopback-only published host port
+формально остаётся открыт в compose, но `bootstrap/status/proof` path с хоста ломается из-за того, что `PostgreSQL`
+слушает только `localhost` внутри контейнера.
 
 Отдельно по ролям:
 - `AMI_POSTGRES_DSN`

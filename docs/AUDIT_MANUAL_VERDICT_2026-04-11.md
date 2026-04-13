@@ -188,13 +188,13 @@
 **Evidence**
 - `./target/debug/amai benchmark coverage` сейчас всё ещё показывает:
   - `20 total`
-  - `0 materialized`
-  - `3 partial`
+  - `1 materialized`
+  - `2 partial`
   - `12 mapped`
   - `5 future`
 
 **Риск**
-- benchmark mapping есть, но leaderboard-grade measured superiority не доказана.
+- benchmark mapping уже частично поднят до materialized procedural compare-plane, но leaderboard-grade measured superiority и statistical honesty по остальным семействам не доказаны.
 
 **Нужна ли правка сейчас**
 - да.
@@ -692,6 +692,7 @@
 - default compose exposure уже ужесточён до loopback-only published ports через `AMI_STACK_BIND_HOST=127.0.0.1`;
 - monitoring defaults больше не используют floating `latest`;
 - machine-readable proof `./scripts/proof_ops_security_defaults.sh` materialized и заведён в `repo_hygiene_guard`;
+- rendered postgres config теперь явно фиксирует `listen_addresses = '*'`, поэтому loopback-only published host port больше не расходится с реальным `bootstrap/status/proof` access path через контейнерный `localhost-only` default;
 - materialized repo-local cold benchmark fixture tier:
   - `config/cold_benchmark_self_contained.toml`
   - `./scripts/proof_cold_benchmark_self_contained.sh`

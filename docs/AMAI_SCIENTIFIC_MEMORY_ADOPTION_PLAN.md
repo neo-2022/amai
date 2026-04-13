@@ -456,7 +456,7 @@ Dashboard/observe surfaces:
 | Тезис | Ручной verdict | Почему |
 | --- | --- | --- |
 | `restore_confidence` остаётся в основном категориальным contour | `live-confirmed` | В текущем коде и surfaces всё ещё доминируют значения вроде `preliminary / medium / high / durable`, а не формальный calibrated belief-layer. |
-| benchmark story не публикует статистическую честность уровня CI/significance/drift | `live-confirmed` | `benchmark coverage` по-прежнему показывает `0 materialized`, а gates/roadmap держат measured discipline, но не отдельный statistical benchmark layer с доверительными интервалами и hypothesis tests. |
+| benchmark story не публикует статистическую честность уровня CI/significance/drift | `live-confirmed` | `benchmark coverage` уже показывает `1 materialized` procedural compare-plane contour, но gates/roadmap всё ещё не materialize-ят отдельный statistical benchmark layer с доверительными интервалами, significance и drift tests. |
 | формального numeric posterior по memory/belief нет | `partially-confirmed` | В schema и отдельных surfaces есть `confidence`, но нет принятой canonical модели `truth/freshness/scope/usefulness posterior` с calibration policy. |
 | крупные файлы и maintainability debt остаются фактором риска | `live-confirmed` | Giant-file debt остаётся частью текущего реального состояния проекта, хотя несколько bounded-context split уже materialized. |
 
