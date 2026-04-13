@@ -552,3 +552,265 @@ pub(crate) async fn collect_active_agent_live_budget_surface(
         "agents": agents,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn resolved_active_agent_label_prefers_user_defined_display_name() {
+        let thread = json!({
+            "agent_nickname": "Codex",
+            "agent_role": "Assistant"
+        });
+        let label = resolved_active_agent_label(
+            Some("Мой агент"),
+            Some(&thread),
+            "Amai",
+            Some("active headline"),
+            "amai::continuity::default",
+        );
+        assert_eq!(label, "Мой агент");
+    }
+
+    #[test]
+    fn attach_active_agent_personal_limit_surfaces_prefers_exact_status_bar_limits() {
+        let mut agents = vec![json!({
+            "client_live_meter": {
+                "status": "observed",
+                "current_thread_bound": true,
+                "ended_at_epoch_ms": 1775056740000u64,
+                "primary_limit_used_percent": 39,
+                "primary_limit_remaining_percent": 61,
+                "primary_window_duration_mins": 300,
+                "primary_resets_at_epoch_seconds": 1775063220u64,
+                "secondary_limit_used_percent": 72,
+                "secondary_limit_remaining_percent": 28,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": 1775056740000u64,
+                    "primary_limit_used_percent": 7.0,
+                    "primary_limit_remaining_percent": 93.0,
+                    "secondary_limit_used_percent": 2.0,
+                    "secondary_limit_remaining_percent": 98.0,
+                    "primary_window_duration_mins": 300,
+                    "primary_resets_at_epoch_seconds": 1775063220u64
+                }
+            }
+        })];
+
+        attach_active_agent_personal_limit_surfaces(&mut agents);
+
+        assert_eq!(
+            agents[0]["personal_client_limit"]["value_text"].as_str(),
+            Some("5ч остаётся 93.00%, 7д остаётся 98.00%")
+        );
+        assert_eq!(
+            agents[0]["personal_client_limit"]["primary_used_percent"].as_f64(),
+            Some(7.0)
+        );
+        assert_eq!(
+            agents[0]["personal_client_limit"]["label_text"].as_str(),
+            Some("Лимит клиента сейчас:")
+        );
+        assert!(
+            agents[0]["personal_client_limit"]["tooltip"]
+                .as_str()
+                .is_some_and(|tooltip| tooltip.contains("status-bar"))
+        );
+    }
+
+    #[test]
+    fn attach_active_agent_personal_limit_surfaces_uses_thread_local_limits_without_status_bar() {
+        let mut agents = vec![json!({
+            "client_live_meter": {
+                "status": "observed",
+                "thread_id": "thread-amai",
+                "current_thread_bound": true,
+                "ended_at_epoch_ms": 1775056740000u64,
+                "primary_limit_used_percent": 7.0,
+                "primary_limit_remaining_percent": 93.0,
+                "primary_window_duration_mins": 300,
+                "primary_resets_at_epoch_seconds": 1775063220u64,
+                "secondary_limit_used_percent": 2.0,
+                "secondary_limit_remaining_percent": 98.0,
+                "status_bar_rate_limits": {
+                    "status": "missing"
+                }
+            }
+        })];
+
+        attach_active_agent_personal_limit_surfaces(&mut agents);
+
+        assert_eq!(
+            agents[0]["personal_client_limit"]["status"].as_str(),
+            Some("observed")
+        );
+        assert_eq!(
+            agents[0]["personal_client_limit"]["label_text"].as_str(),
+            Some("Личный thread-limit агента:")
+        );
+        assert_eq!(
+            agents[0]["personal_client_limit"]["value_text"].as_str(),
+            Some("5ч остаётся 93.00%, 7д остаётся 98.00%")
+        );
+    }
+
+    #[test]
+    fn attach_active_agent_personal_limit_surfaces_fail_closed_without_any_online_limit_source() {
+        let mut agents = vec![json!({
+            "client_live_meter": {
+                "status": "observed",
+                "thread_id": "thread-amai",
+                "current_thread_bound": true,
+                "status_bar_rate_limits": {
+                    "status": "missing"
+                }
+            }
+        })];
+
+        attach_active_agent_personal_limit_surfaces(&mut agents);
+
+        assert_eq!(
+            agents[0]["personal_client_limit"]["status"].as_str(),
+            Some("missing")
+        );
+        assert_eq!(
+            agents[0]["personal_client_limit"]["label_text"].as_str(),
+            Some("Лимит клиента сейчас:")
+        );
+        assert_eq!(
+            agents[0]["personal_client_limit"]["value_text"].as_str(),
+            Some("н/д")
+        );
+        assert!(
+            agents[0]["personal_client_limit"]["tooltip"]
+                .as_str()
+                .is_some_and(|tooltip| tooltip.contains("Другие источники"))
+        );
+    }
+
+    #[test]
+    fn dedup_active_agents_by_identity_prefers_thread_bound_observed_entry() {
+        let deduped = dedup_active_agents_by_identity(vec![
+            json!({
+                "project_code": "amai",
+                "namespace_code": "continuity",
+                "agent_scope": "amai::continuity::default",
+                "thread_id": null,
+                "heartbeat_at_epoch_ms": 100,
+                "client_live_meter": {
+                    "status": "missing",
+                    "current_thread_bound": false
+                },
+                "personal_agent_kpi": {
+                    "reply_prefix": "5ч KPI: экономия 64.81%"
+                }
+            }),
+            json!({
+                "project_code": "amai",
+                "namespace_code": "continuity",
+                "agent_scope": "amai::continuity::default",
+                "thread_id": "thread-live",
+                "heartbeat_at_epoch_ms": 200,
+                "client_live_meter": {
+                    "status": "observed",
+                    "current_thread_bound": true
+                },
+                "personal_agent_kpi": {
+                    "reply_prefix": "5ч KPI: экономия 66.15%"
+                }
+            }),
+            json!({
+                "project_code": "bug_bounty",
+                "namespace_code": "continuity",
+                "agent_scope": "bug_bounty::continuity::default",
+                "thread_id": "thread-bounty",
+                "heartbeat_at_epoch_ms": 150,
+                "client_live_meter": {
+                    "status": "observed",
+                    "current_thread_bound": true
+                },
+                "personal_agent_kpi": {
+                    "reply_prefix": "5ч KPI: переплата 72.23%"
+                }
+            }),
+        ]);
+
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0]["thread_id"], json!("thread-live"));
+        assert_eq!(
+            deduped[0]["personal_agent_kpi"]["reply_prefix"],
+            json!("5ч KPI: экономия 66.15%")
+        );
+        assert_eq!(deduped[1]["thread_id"], json!("thread-bounty"));
+    }
+
+    #[test]
+    fn active_agent_kpi_aggregate_averages_only_when_all_active_agents_are_observed() {
+        let value = active_agent_kpi_aggregate(&[
+            json!({
+                "personal_agent_kpi": {
+                    "signed_kpi_percent": 60.0
+                }
+            }),
+            json!({
+                "personal_agent_kpi": {
+                    "signed_kpi_percent": 20.0
+                }
+            }),
+        ]);
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(
+            value["reply_prefix"].as_str(),
+            Some("5ч KPI: экономия 40.00%")
+        );
+        assert_eq!(value["active_count"].as_u64(), Some(2));
+        assert_eq!(value["missing_count"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn active_agent_kpi_aggregate_averages_mixed_saving_and_overspend_by_sign() {
+        let value = active_agent_kpi_aggregate(&[
+            json!({
+                "personal_agent_kpi": {
+                    "signed_kpi_percent": 66.15
+                }
+            }),
+            json!({
+                "personal_agent_kpi": {
+                    "signed_kpi_percent": -44.0
+                }
+            }),
+        ]);
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(value["classification"].as_str(), Some("saving"));
+        assert_eq!(
+            value["reply_prefix"].as_str(),
+            Some("5ч KPI: экономия 11.08%")
+        );
+        assert_eq!(value["active_count"].as_u64(), Some(2));
+        assert_eq!(value["missing_count"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn active_agent_kpi_aggregate_fails_closed_when_any_active_agent_is_missing() {
+        let value = active_agent_kpi_aggregate(&[
+            json!({
+                "personal_agent_kpi": {
+                    "signed_kpi_percent": 60.0
+                }
+            }),
+            json!({
+                "personal_agent_kpi": {
+                    "reply_prefix": "5ч KPI: н/д"
+                }
+            }),
+        ]);
+        assert_eq!(value["status"].as_str(), Some("partial"));
+        assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: н/д"));
+        assert_eq!(value["active_count"].as_u64(), Some(2));
+        assert_eq!(value["missing_count"].as_u64(), Some(1));
+    }
+}

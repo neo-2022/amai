@@ -262,3 +262,120 @@ pub(super) fn personal_agent_online_kpi_from_client_live_meter(
         },
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn personal_agent_online_kpi_from_client_live_meter_uses_raw_thread_limit_contour() {
+        let value = personal_agent_online_kpi_from_client_live_meter(
+            &json!({
+                "status": "observed",
+                "current_thread_bound": true,
+                "ended_at_epoch_ms": 1775056740000u64,
+                "primary_limit_used_percent": 14.0,
+                "primary_window_duration_mins": 300,
+                "primary_resets_at_epoch_seconds": 1775063220u64,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": 1775056740000u64,
+                    "primary_limit_used_percent": 14.0,
+                    "primary_window_duration_mins": 300,
+                    "primary_resets_at_epoch_seconds": 1775063220u64
+                }
+            }),
+            "personal_thread_scope",
+            "thread-bounty",
+        )
+        .expect("online kpi");
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(value["confidence"].as_str(), Some("online_limit_contour"));
+        assert_eq!(value["scope_kind"].as_str(), Some("personal_thread_scope"));
+        assert_eq!(value["scope_label"].as_str(), Some("thread-bounty"));
+        assert_eq!(
+            value["reply_prefix"].as_str(),
+            Some("5ч KPI: экономия 78.12%")
+        );
+        assert!(
+            value["summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains("thread-local"))
+        );
+    }
+
+    #[test]
+    fn personal_agent_online_kpi_from_client_live_meter_prefers_thread_local_contour_over_status_bar()
+     {
+        let value = personal_agent_online_kpi_from_client_live_meter(
+            &json!({
+                "status": "observed",
+                "current_thread_bound": true,
+                "ended_at_epoch_ms": 1775056740000u64,
+                "primary_limit_used_percent": 93.0,
+                "primary_limit_remaining_percent": 7.0,
+                "secondary_limit_used_percent": 40.0,
+                "secondary_limit_remaining_percent": 60.0,
+                "primary_window_duration_mins": 300,
+                "primary_resets_at_epoch_seconds": 1775063220u64,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": 1775056740000u64,
+                    "primary_limit_used_percent": 7.0,
+                    "primary_limit_remaining_percent": 93.0,
+                    "secondary_limit_used_percent": 2.0,
+                    "secondary_limit_remaining_percent": 98.0,
+                    "primary_window_duration_mins": 300,
+                    "primary_resets_at_epoch_seconds": 1775063220u64
+                }
+            }),
+            "personal_thread_scope",
+            "thread-amai",
+        )
+        .expect("online kpi");
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(value["confidence"].as_str(), Some("online_limit_contour"));
+        assert_eq!(
+            value["reply_prefix"].as_str(),
+            Some("5ч KPI: переплата 45.31%")
+        );
+        assert!(
+            value["summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains("thread-local"))
+        );
+    }
+
+    #[test]
+    fn personal_agent_online_kpi_from_client_live_meter_damps_before_min_history_span() {
+        let value = personal_agent_online_kpi_from_client_live_meter(
+            &json!({
+                "status": "observed",
+                "current_thread_bound": true,
+                "ended_at_epoch_ms": 300_000u64,
+                "primary_limit_used_percent": 11.0,
+                "primary_window_duration_mins": 300,
+                "primary_resets_at_epoch_seconds": 18_000u64,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": 300_000u64,
+                    "primary_limit_used_percent": 11.0,
+                    "primary_window_duration_mins": 300,
+                    "primary_resets_at_epoch_seconds": 18_000u64
+                }
+            }),
+            "personal_thread_scope",
+            "thread-amai",
+        )
+        .expect("online kpi");
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(value["confidence"].as_str(), Some("online_limit_contour"));
+        assert_eq!(value["window_progress_state"].as_str(), Some("preliminary"));
+        assert_eq!(
+            value["reply_prefix"].as_str(),
+            Some("5ч KPI: переплата 50.91%")
+        );
+        assert_eq!(value["minimum_elapsed_window_minutes"].as_u64(), Some(55));
+    }
+}

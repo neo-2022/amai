@@ -198,3 +198,111 @@ pub(super) fn preferred_personal_agent_kpi(
         "summary": "Для личного 5ч KPI нет exact VS Code status-bar rate-limit contour. Measured token-budget fallback для этого KPI запрещён.",
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn selector(thread_id: Option<&str>) -> PersonalKpiSelector {
+        PersonalKpiSelector {
+            project_code: "amai".to_string(),
+            namespace_code: "continuity".to_string(),
+            agent_scope: "amai::continuity::default".to_string(),
+            thread_id: thread_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn personal_agent_kpi_from_summary_uses_verified_scope_savings() {
+        let value = personal_agent_kpi_from_summary(
+            &json!({
+                "events_total": 3,
+                "counted_events": 2,
+                "verified_effective_savings_pct": 61.25,
+                "effective_savings_pct": 44.0
+            }),
+            Some(&selector(None)),
+        );
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(value["confidence"].as_str(), Some("verified"));
+        assert_eq!(value["classification"].as_str(), Some("saving"));
+        assert_eq!(
+            value["reply_prefix"].as_str(),
+            Some("5ч KPI: экономия 61.25%")
+        );
+    }
+
+    #[test]
+    fn personal_agent_kpi_from_summary_prefers_thread_scope_label_when_bound() {
+        let value = personal_agent_kpi_from_summary(
+            &json!({
+                "events_total": 0,
+                "counted_events": 0
+            }),
+            Some(&selector(Some("thread-123"))),
+        );
+        assert_eq!(value["scope_kind"].as_str(), Some("personal_thread_scope"));
+        assert_eq!(value["scope_label"].as_str(), Some("thread-123"));
+        assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: н/д"));
+    }
+
+    #[test]
+    fn preferred_personal_agent_kpi_prefers_online_limit_contour_over_measured_summary() {
+        let value = preferred_personal_agent_kpi(
+            &json!({
+                "events_total": 3,
+                "counted_events": 2,
+                "verified_effective_savings_pct": 61.25,
+                "effective_savings_pct": 44.0
+            }),
+            Some(&selector(Some("thread-amai"))),
+            Some(&json!({
+                "status": "observed",
+                "current_thread_bound": true,
+                "ended_at_epoch_ms": 1775056740000u64,
+                "primary_limit_used_percent": 14.0,
+                "primary_window_duration_mins": 300,
+                "primary_resets_at_epoch_seconds": 1775063220u64,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": 1775056740000u64,
+                    "primary_limit_used_percent": 14.0,
+                    "primary_window_duration_mins": 300,
+                    "primary_resets_at_epoch_seconds": 1775063220u64
+                }
+            })),
+        );
+        assert_eq!(value["confidence"].as_str(), Some("online_limit_contour"));
+        assert_eq!(
+            value["reply_prefix"].as_str(),
+            Some("5ч KPI: экономия 78.12%")
+        );
+    }
+
+    #[test]
+    fn preferred_personal_agent_kpi_fails_closed_without_online_limit_contour() {
+        let value = preferred_personal_agent_kpi(
+            &json!({
+                "events_total": 3,
+                "counted_events": 2,
+                "verified_effective_savings_pct": 61.25,
+                "effective_savings_pct": 44.0
+            }),
+            Some(&selector(Some("thread-amai"))),
+            Some(&json!({
+                "ended_at_epoch_ms": 1775056740000u64,
+                "status_bar_rate_limits": {
+                    "status": "missing"
+                }
+            })),
+        );
+        assert_eq!(value["status"].as_str(), Some("missing"));
+        assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: н/д"));
+        assert!(
+            value["summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains("запрещён"))
+        );
+    }
+}
