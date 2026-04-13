@@ -460,3 +460,334 @@ pub(crate) async fn collect_agent_scope_activity(db: &Client) -> Result<Value> {
         "recent_scopes": recent_scopes,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn active_agent_activity_entries_adds_recent_thread_fallback_when_lease_missing() {
+        let activity = json!({
+            "active_now_scopes": [
+                {
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/home/art/agent-memory-index",
+                    "agent_scope": "amai::continuity::default",
+                    "owner_thread_id": "thread-amai",
+                    "heartbeat_at_epoch_ms": 9_900,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "live"
+                }
+            ],
+            "client_recent_threads": [
+                {
+                    "thread_id": "thread-amai",
+                    "cwd": "/home/art/agent-memory-index",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_900
+                },
+                {
+                    "thread_id": "thread-bounty",
+                    "cwd": "/home/art/Bug-Bounty",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_800
+                }
+            ],
+            "recent_scopes": [
+                {
+                    "project_code": "bug_bounty",
+                    "namespace_code": "continuity",
+                    "agent_scope": "bug_bounty::continuity::default",
+                    "thread_id": "thread-bounty",
+                    "current_goal": "recent fallback"
+                }
+            ]
+        });
+
+        let entries = active_agent_activity_entries(&activity, 10_000);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[1]["agent_scope"],
+            json!("bug_bounty::continuity::default")
+        );
+        assert_eq!(entries[1]["owner_thread_id"], json!("thread-bounty"));
+        assert_eq!(
+            entries[1]["activity_source"],
+            json!("recent_thread_binding_fallback")
+        );
+        assert_eq!(
+            entries[1]["project_repo_root"],
+            json!("/home/art/Bug-Bounty")
+        );
+    }
+
+    #[test]
+    fn active_agent_activity_entries_adds_unbound_recent_thread_fallback_when_binding_missing() {
+        let activity = json!({
+            "active_now_scopes": [
+                {
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/home/art/agent-memory-index",
+                    "agent_scope": "amai::continuity::default",
+                    "owner_thread_id": "thread-amai",
+                    "heartbeat_at_epoch_ms": 9_900,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "live"
+                }
+            ],
+            "client_recent_threads": [
+                {
+                    "thread_id": "thread-amai",
+                    "cwd": "/home/art/agent-memory-index",
+                    "title": "дальше работай",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_900
+                },
+                {
+                    "thread_id": "thread-bounty",
+                    "cwd": "/home/art/Bug-Bounty",
+                    "title": "Авито продолжаем. Проверь возможность записи в Амаи",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_800
+                }
+            ],
+            "recent_scopes": []
+        });
+
+        let entries = active_agent_activity_entries(&activity, 10_000);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1]["project_code"], json!("bug_bounty"));
+        assert_eq!(
+            entries[1]["agent_scope"],
+            json!("bug_bounty::continuity::default")
+        );
+        assert_eq!(entries[1]["owner_thread_id"], json!("thread-bounty"));
+        assert_eq!(
+            entries[1]["activity_source"],
+            json!("recent_thread_unbound_fallback")
+        );
+        assert_eq!(
+            entries[1]["project_repo_root"],
+            json!("/home/art/Bug-Bounty")
+        );
+    }
+
+    #[test]
+    fn active_agent_activity_entries_skip_proof_runtime_entries() {
+        let activity = json!({
+            "active_now_scopes": [
+                {
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/home/art/agent-memory-index",
+                    "agent_scope": "proof_execctl_restore_primary_123",
+                    "owner_thread_id": "proof-execctl-restore-primary-123",
+                    "heartbeat_at_epoch_ms": 9_900,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "proof live"
+                },
+                {
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/home/art/agent-memory-index",
+                    "agent_scope": "amai::continuity::default",
+                    "owner_thread_id": "thread-amai",
+                    "heartbeat_at_epoch_ms": 9_950,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "real live"
+                },
+                {
+                    "project_code": "execctl_restore_stress_123",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/tmp/proof",
+                    "agent_scope": "shared",
+                    "owner_thread_id": "thread-proofish",
+                    "heartbeat_at_epoch_ms": 9_960,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "Execctl Restore Stress 123"
+                }
+            ],
+            "client_recent_threads": [
+                {
+                    "thread_id": "thread-amai",
+                    "cwd": "/home/art/agent-memory-index",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_800
+                },
+                {
+                    "thread_id": "proof-execctl-restore-foreign-123",
+                    "cwd": "/tmp/proof",
+                    "model": null,
+                    "updated_at_epoch_ms": 9_800
+                },
+                {
+                    "thread_id": "thread-bounty",
+                    "cwd": "/home/art/Bug-Bounty",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_800
+                }
+            ],
+            "recent_scopes": [
+                {
+                    "project_code": "execctl_restore_stress",
+                    "namespace_code": "continuity",
+                    "agent_scope": "proof_execctl_restore_foreign_123",
+                    "thread_id": "proof-execctl-restore-foreign-123",
+                    "current_goal": "proof fallback"
+                },
+                {
+                    "project_code": "bug_bounty",
+                    "namespace_code": "continuity",
+                    "agent_scope": "bug_bounty::continuity::default",
+                    "thread_id": "thread-bounty",
+                    "current_goal": "recent fallback"
+                }
+            ]
+        });
+
+        let entries = active_agent_activity_entries(&activity, 10_000);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0]["agent_scope"],
+            json!("amai::continuity::default")
+        );
+        assert_eq!(
+            entries[1]["agent_scope"],
+            json!("bug_bounty::continuity::default")
+        );
+    }
+
+    #[test]
+    fn active_agent_activity_entries_skip_threads_without_connected_model() {
+        let activity = json!({
+            "active_now_scopes": [
+                {
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/home/art/agent-memory-index",
+                    "agent_scope": "amai::continuity::default",
+                    "owner_thread_id": "thread-amai",
+                    "heartbeat_at_epoch_ms": 9_950,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "real live"
+                },
+                {
+                    "project_code": "execctl_restore_stress_123",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/tmp/proof",
+                    "agent_scope": "execctl_restore_stress_123::continuity::default",
+                    "owner_thread_id": "thread-stress",
+                    "heartbeat_at_epoch_ms": 9_960,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "Execctl Restore Stress 123"
+                }
+            ],
+            "client_recent_threads": [
+                {
+                    "thread_id": "thread-amai",
+                    "cwd": "/home/art/agent-memory-index",
+                    "title": "дальше работай",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_900
+                },
+                {
+                    "thread_id": "thread-stress",
+                    "cwd": "/tmp/proof",
+                    "title": "Execctl Restore Stress 123",
+                    "model": null,
+                    "updated_at_epoch_ms": 9_900
+                }
+            ],
+            "recent_scopes": [
+                {
+                    "project_code": "execctl_restore_stress_123",
+                    "namespace_code": "continuity",
+                    "agent_scope": "execctl_restore_stress_123::continuity::default",
+                    "thread_id": "thread-stress",
+                    "current_goal": "Execctl Restore Stress 123"
+                }
+            ]
+        });
+
+        let entries = active_agent_activity_entries(&activity, 10_000);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0]["agent_scope"],
+            json!("amai::continuity::default")
+        );
+    }
+
+    #[test]
+    fn active_agent_thread_ids_from_activity_returns_only_connected_active_threads() {
+        let activity = json!({
+            "active_now_scopes": [
+                {
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/home/art/agent-memory-index",
+                    "agent_scope": "amai::continuity::default",
+                    "owner_thread_id": "thread-amai",
+                    "heartbeat_at_epoch_ms": 9_950,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "real live"
+                },
+                {
+                    "project_code": "proof_execctl_restore",
+                    "namespace_code": "continuity",
+                    "project_repo_root": "/tmp/proof",
+                    "agent_scope": "proof_execctl_restore::continuity::default",
+                    "owner_thread_id": "thread-proof",
+                    "heartbeat_at_epoch_ms": 9_960,
+                    "expires_at_epoch_ms": 20_000,
+                    "headline": "proof live"
+                }
+            ],
+            "client_recent_threads": [
+                {
+                    "thread_id": "thread-amai",
+                    "cwd": "/home/art/agent-memory-index",
+                    "title": "дальше работай",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_900
+                },
+                {
+                    "thread_id": "thread-proof",
+                    "cwd": "/tmp/proof",
+                    "title": "Execctl Restore Stress 123",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_900
+                },
+                {
+                    "thread_id": "thread-bounty",
+                    "cwd": "/home/art/Bug-Bounty",
+                    "title": "Авито",
+                    "model": "gpt-5.4",
+                    "updated_at_epoch_ms": 9_800
+                }
+            ],
+            "recent_scopes": [
+                {
+                    "project_code": "bug_bounty",
+                    "namespace_code": "continuity",
+                    "agent_scope": "bug_bounty::continuity::default",
+                    "thread_id": "thread-bounty",
+                    "current_goal": "recent fallback"
+                }
+            ]
+        });
+
+        let thread_ids = active_agent_thread_ids_from_activity(&activity, 10_000);
+
+        assert_eq!(
+            thread_ids,
+            vec!["thread-amai".to_string(), "thread-bounty".to_string()]
+        );
+    }
+}

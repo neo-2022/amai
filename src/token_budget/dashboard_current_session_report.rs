@@ -571,3 +571,377 @@ pub(super) fn restore_context_thread_id_hint(restore_context: Option<&Value>) ->
         .map(str::trim)
         .filter(|value| !value.is_empty())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+    use uuid::Uuid;
+
+    #[test]
+    fn reusable_exact_thread_budget_live_surfaces_from_base_report_accepts_matching_thread() {
+        let observed_at_epoch_ms = current_epoch_ms().unwrap_or_default() as u64;
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": observed_at_epoch_ms,
+                    "primary_limit_used_percent": 12.5
+                }
+            },
+            "current_live_turn": {
+                "thread_id": "thread-current",
+                "status": "no_amai_activity_in_current_live_turn"
+            }
+        });
+
+        let reused = reusable_exact_thread_budget_live_surfaces_from_base_report(
+            Some(&report),
+            Some("thread-current"),
+            current_epoch_ms().unwrap_or_default() as u64,
+            DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS,
+        )
+        .expect("reusable live surfaces");
+
+        assert_eq!(reused.0["thread_id"], json!("thread-current"));
+        assert_eq!(
+            reused.1["status"],
+            json!("no_amai_activity_in_current_live_turn")
+        );
+    }
+
+    #[test]
+    fn reusable_exact_thread_budget_live_surfaces_from_base_report_rejects_mismatched_thread() {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-other",
+                "current_thread_bound": true
+            },
+            "current_live_turn": {
+                "thread_id": "thread-other",
+                "status": "no_amai_activity_in_current_live_turn"
+            }
+        });
+
+        assert!(
+            reusable_exact_thread_budget_live_surfaces_from_base_report(
+                Some(&report),
+                Some("thread-current"),
+                current_epoch_ms().unwrap_or_default() as u64,
+                DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn reusable_exact_thread_current_session_budget_report_from_base_report_keeps_minimal_shape() {
+        let observed_at_epoch_ms = current_epoch_ms().unwrap_or_default() as u64;
+        let report = json!({
+            "filters": {
+                "include_verify_events": false
+            },
+            "client_budget_target_percent": 50,
+            "current_session": {
+                "same_meter_saved_pct": 12.34
+            },
+            "statement_previews": {
+                "current_session": {
+                    "client_limit_meter_alignment": {
+                        "equivalence_status": "same_meter_equivalent"
+                    }
+                }
+            },
+            "personal_agent_kpi": {
+                "status": "observed",
+                "reply_prefix": "5ч KPI: 1:1"
+            },
+            "client_limit_hourly_burn": {
+                "status": "observed",
+                "latest_observed_at_epoch_ms": observed_at_epoch_ms
+            },
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": observed_at_epoch_ms,
+                    "primary_limit_used_percent": 12.5
+                }
+            },
+            "current_live_turn": {
+                "thread_id": "thread-current",
+                "status": "no_amai_activity_in_current_live_turn"
+            }
+        });
+
+        let reused = reusable_exact_thread_current_session_budget_report_from_base_report(
+            Some(&report),
+            Some("thread-current"),
+        )
+        .expect("reusable current-session budget report");
+
+        assert_eq!(
+            reused["token_budget_report"]["surface"],
+            json!("dashboard_current_session_budget_only")
+        );
+        assert_eq!(
+            reused["token_budget_report"]["client_budget_target_percent"],
+            json!(50)
+        );
+        assert_eq!(
+            reused["token_budget_report"]["client_live_meter"]["thread_id"],
+            json!("thread-current")
+        );
+        assert_eq!(
+            reused["token_budget_report"]["current_live_turn"]["status"],
+            json!("no_amai_activity_in_current_live_turn")
+        );
+        assert_eq!(
+            reused["token_budget_report"]["statement_previews"]["current_session"]["client_limit_meter_alignment"]
+                ["equivalence_status"],
+            json!("same_meter_equivalent")
+        );
+    }
+
+    #[test]
+    fn reusable_exact_thread_current_session_budget_report_from_base_report_rejects_stale_hourly_burn()
+     {
+        let observed_at_epoch_ms = (current_epoch_ms().unwrap_or_default() as u64)
+            .saturating_sub(DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS + 1);
+        let report = json!({
+            "filters": {
+                "include_verify_events": false
+            },
+            "client_budget_target_percent": 50,
+            "current_session": {
+                "same_meter_saved_pct": 12.34
+            },
+            "statement_previews": {
+                "current_session": {
+                    "client_limit_meter_alignment": {
+                        "equivalence_status": "same_meter_equivalent"
+                    }
+                }
+            },
+            "personal_agent_kpi": {
+                "status": "observed",
+                "reply_prefix": "5ч KPI: 1:1"
+            },
+            "client_limit_hourly_burn": {
+                "status": "observed",
+                "latest_observed_at_epoch_ms": observed_at_epoch_ms
+            },
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": observed_at_epoch_ms,
+                    "primary_limit_used_percent": 12.5
+                }
+            },
+            "current_live_turn": {
+                "thread_id": "thread-current",
+                "status": "no_amai_activity_in_current_live_turn"
+            }
+        });
+
+        assert!(
+            reusable_exact_thread_current_session_budget_report_from_base_report(
+                Some(&report),
+                Some("thread-current"),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn reusable_exact_thread_budget_live_surfaces_reject_stale_exact_status_bar_limits() {
+        let stale_observed_at_epoch_ms = (current_epoch_ms().unwrap_or_default() as u64)
+            .saturating_sub(DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS + 1);
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": stale_observed_at_epoch_ms
+                }
+            },
+            "current_live_turn": {
+                "thread_id": "thread-current",
+                "status": "no_amai_activity_in_current_live_turn"
+            }
+        });
+
+        assert!(
+            reusable_exact_thread_budget_live_surfaces_from_base_report(
+                Some(&report),
+                Some("thread-current"),
+                current_epoch_ms().unwrap_or_default() as u64,
+                DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn reusable_exact_thread_budget_live_surfaces_from_thread_bound_snapshot_accepts_fresh_cache() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "amai-thread-bound-live-surfaces-{}",
+            Uuid::new_v4()
+        ));
+        let thread_id = "thread-current";
+        let observed_at_epoch_ms = current_epoch_ms().unwrap_or_default() as u64;
+        let path = thread_bound_budget_snapshot_shared_cache_path(&temp_root, thread_id);
+        fs::create_dir_all(path.parent().expect("snapshot parent"))
+            .expect("create snapshot parent");
+        let persisted = json!({
+            "cache_version": THREAD_BOUND_BUDGET_SNAPSHOT_SHARED_CACHE_VERSION,
+            "fetched_at_epoch_ms": observed_at_epoch_ms,
+            "thread_id": thread_id,
+            "snapshot": {
+                "token_budget_report": {
+                    "token_budget_report": {
+                        "client_live_meter": {
+                            "thread_id": thread_id,
+                            "current_thread_bound": true,
+                            "status_bar_rate_limits": {
+                                "status": "observed",
+                                "observed_at_epoch_ms": observed_at_epoch_ms,
+                                "primary_limit_used_percent": 7.0,
+                                "primary_limit_remaining_percent": 93.0
+                            }
+                        },
+                        "current_live_turn": {
+                            "thread_id": thread_id,
+                            "status": "no_amai_activity_in_current_live_turn"
+                        }
+                    }
+                }
+            }
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec(&persisted).expect("serialize snapshot"),
+        )
+        .expect("write snapshot");
+
+        let reused = reusable_exact_thread_budget_live_surfaces_from_thread_bound_snapshot(
+            &temp_root,
+            thread_id,
+            observed_at_epoch_ms,
+        )
+        .expect("reused thread-bound live surfaces");
+
+        assert_eq!(reused.0["thread_id"], json!(thread_id));
+        assert_eq!(
+            reused.0["status_bar_rate_limits"]["primary_limit_remaining_percent"],
+            json!(93.0)
+        );
+        assert_eq!(
+            reused.1["status"],
+            json!("no_amai_activity_in_current_live_turn")
+        );
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn reusable_exact_thread_budget_live_surfaces_from_thread_bound_snapshot_respects_invalidation()
+    {
+        let temp_root = std::env::temp_dir().join(format!(
+            "amai-thread-bound-live-surfaces-invalid-{}",
+            Uuid::new_v4()
+        ));
+        let thread_id = "thread-current";
+        let observed_at_epoch_ms = current_epoch_ms().unwrap_or_default() as u64;
+        let path = thread_bound_budget_snapshot_shared_cache_path(&temp_root, thread_id);
+        fs::create_dir_all(path.parent().expect("snapshot parent"))
+            .expect("create snapshot parent");
+        let persisted = json!({
+            "cache_version": THREAD_BOUND_BUDGET_SNAPSHOT_SHARED_CACHE_VERSION,
+            "fetched_at_epoch_ms": observed_at_epoch_ms,
+            "thread_id": thread_id,
+            "snapshot": {
+                "token_budget_report": {
+                    "token_budget_report": {
+                        "client_live_meter": {
+                            "thread_id": thread_id,
+                            "current_thread_bound": true,
+                            "status_bar_rate_limits": {
+                                "status": "observed",
+                                "observed_at_epoch_ms": observed_at_epoch_ms,
+                                "primary_limit_used_percent": 7.0
+                            }
+                        },
+                        "current_live_turn": {
+                            "thread_id": thread_id,
+                            "status": "no_amai_activity_in_current_live_turn"
+                        }
+                    }
+                }
+            }
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec(&persisted).expect("serialize snapshot"),
+        )
+        .expect("write snapshot");
+        let invalidation_path =
+            thread_bound_snapshot_invalidation_shared_cache_path(&temp_root, thread_id);
+        fs::write(
+            &invalidation_path,
+            serde_json::to_vec(&json!({
+                "cache_version": THREAD_BOUND_SNAPSHOT_INVALIDATION_SHARED_CACHE_VERSION,
+                "invalidated_at_epoch_ms": observed_at_epoch_ms,
+                "thread_id": thread_id
+            }))
+            .expect("serialize invalidation"),
+        )
+        .expect("write invalidation");
+
+        assert!(
+            reusable_exact_thread_budget_live_surfaces_from_thread_bound_snapshot(
+                &temp_root,
+                thread_id,
+                observed_at_epoch_ms,
+            )
+            .is_none()
+        );
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn restore_context_thread_id_hint_prefers_working_state_restore_thread_id() {
+        let restore = json!({
+            "thread_id": "thread-fallback",
+            "working_state_restore": {
+                "thread_id": "thread-current"
+            }
+        });
+
+        assert_eq!(
+            restore_context_thread_id_hint(Some(&restore)),
+            Some("thread-current")
+        );
+    }
+
+    #[test]
+    fn restore_context_thread_id_hint_falls_back_to_root_thread_id() {
+        let restore = json!({
+            "thread_id": "thread-fallback",
+            "working_state_restore": {}
+        });
+
+        assert_eq!(
+            restore_context_thread_id_hint(Some(&restore)),
+            Some("thread-fallback")
+        );
+    }
+}
