@@ -570,9 +570,19 @@
 Сейчас активный implementation focus:
 - завершение всех 10 этапов memory fabric;
 - удержание Stage 1-10 bundle в зелёном non-regression состоянии.
-- documentation-grade scientific synthesis по двум PDF-источникам:
+- scientific reinforcement overlay после закрытия Stage 1-10:
   - [AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md](AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md);
-  - только как triage/adoption baseline, без ложного объявления probabilistic layers implemented.
+  - это уже не просто synthesis-note, а authoritative execution-spec для advisory/proof-grade probabilistic/statistical contours;
+  - document authorizes production materialization только для:
+    - statistical benchmark honesty;
+    - lifecycle transition discipline;
+    - `Markov / hazard lifecycle v1` advisory contour;
+    - regression explain surface;
+    - Poisson/arrival capacity forecast;
+  - document explicitly не authorizes:
+    - truth-authoritative Bayesian promotion;
+    - destructive probabilistic auto-decision;
+    - replacement of `verified truth` with projection.
 
 ### Ближайший следующий этап
 
@@ -594,31 +604,43 @@
 - governance/safety/evaluator loop уже закрыт;
 
 После закрытия Stage 1-10 следующий честный надстроечный contour такой:
-- scientific reinforcement memory layer как documentation/research baseline;
+- scientific reinforcement memory layer как queue-driven execution overlay;
 - это не новый отдельный stage и не override текущего roadmap;
-- это curated adoption contour поверх уже закрытых Stage 7 / 9 / 10.
+- это execution program поверх уже закрытых Stage 7 / 9 / 10 с canonical order:
+  - Queue 0: preflight and baseline freeze;
+  - Queue 1: statistical benchmark honesty;
+  - Queue 2: lifecycle transition discipline;
+  - Queue 3: `Markov / hazard lifecycle v1`;
+  - Queue 4: regression explain surface;
+  - Queue 5: Poisson / arrival capacity forecast.
 
-Текущий честный статус направлений из scientific synthesis:
+Текущий честный статус направлений из scientific execution-spec:
 - `confidence/calibration`
   - `concept-only`
+  - out-of-scope для текущего production overlay; отдельный measured approval нужен до реализации.
 - `benchmark significance + drift`
   - `planned`
+  - это первый обязательный implementation queue после Queue 0 baseline freeze.
 - `Markov/hazard lifecycle`
   - `concept-only`
+  - execution path уже определён, но до Queue 2/3 materialization contour ещё не implemented.
 - `Poisson capacity`
   - `blocked by proof/data`
+  - execution path определён как Queue 5 forecast-only contour.
 - `regression explain surface`
   - `planned`
+  - execution path определён как Queue 4 read-only explain contour.
 
 ### Фундаментальные blocker-ы
 
-На текущий момент фундаментальных blocker-ов к началу `Этапа 10` не зафиксировано.
+На текущий момент фундаментальных blocker-ов к старту scientific execution overlay не зафиксировано.
 
 Есть только нормальные дисциплинарные риски:
 - drift между current-state docs и target-state docs;
-- попытка перепрыгнуть через этапы;
+- попытка перепрыгнуть через очереди `Queue 0-5`;
 - попытка кодить без stage gate;
-- попытка принять compare-plane или procedural seed за уже завершённый full procedural memory contour.
+- попытка принять compare-plane или procedural seed за уже завершённый full procedural memory contour;
+- попытка трактовать `AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md` как обзор идей, а не как executable playbook.
 
 ### Главная честная незакрытая проблема
 
@@ -645,9 +667,13 @@
 1. Прочитать этот файл.
 2. Увидеть:
    - что baseline уже есть;
-   - что target-state ещё не materialized;
-   - что следующий этап = `Этап 10. Governance, safety, evaluator loop`.
-3. После этого открывать master-roadmap и брать только нужный этап.
+   - что Stage 1-10 уже закрыты;
+   - что следующий implementation overlay задаётся через `AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md`;
+   - что следующий честный queue-first action = `Queue 0`, если baseline не зафиксирован в текущем изменении, иначе `Queue 1`.
+3. После этого открывать:
+   - `docs/AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md` как execution program;
+   - `docs/IMPLEMENTATION_GATES.md` как proof/gate contract;
+   - `docs/AMAI_GLOBAL_MEMORY_ROADMAP.md` как canonical placement contour.
 
 ## Обязательный закон обновления этого файла
 

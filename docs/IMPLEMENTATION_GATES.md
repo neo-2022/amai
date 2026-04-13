@@ -803,6 +803,12 @@ Companion non-regression:
 Это не отдельный stage-close shortcut.
 Любой будущий Bayesian / calibration / drift / Markov / Poisson / regression contour обязан проходить поверх уже существующих gate laws.
 
+Если работа идёт по [AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md](AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md), implementer обязан:
+- использовать `canonical execution order` из этого документа как обязательную очередь;
+- не перепрыгивать через `Queue 0-5` без явного doc update;
+- не менять exact `v1` methods/contracts/filenames молча;
+- не расширять production scope beyond того, что этот execution-spec явно разрешает.
+
 ### Что обязательно проверить
 
 - probabilistic surface не подменяет current truth-source;
@@ -821,12 +827,33 @@ Companion non-regression:
 - explain trace для lifecycle transitions и forgetting decisions;
 - companion non-regression bundle по затронутым соседним осям (`speed / accuracy / quality / truth`).
 
+Если contour конкретно про `Markov / hazard lifecycle`, дополнительно обязательны:
+- canonical state-model contract:
+  - какие exact lifecycle-состояния считаются наблюдаемыми;
+  - из каких уже существующих полей они вычисляются;
+- transition dataset contract:
+  - какие таблицы/трейсы считаются источником переходов;
+  - как считается dwell-time;
+  - как разделяются cohorts по `retention_class / decay_policy / derivation_kind / freshness/utility/access bands`;
+- operator-facing explain surface:
+  - expected next state;
+  - transition reason;
+  - cohort risk summary;
+  - expected residency / urgency;
+- measured validation, что recommendation contour реально улучшает forgetting/revalidation discipline, а не просто строит красивую матрицу.
+
 ### Что запрещено
 
 - выпускать Bayesian/Markov/Poisson contour только по теоретической красоте;
 - выдавать regression/ranking score за truth verdict;
 - поднимать новую confidence-проекцию выше governed policy/evidence path;
 - объявлять significance/drift достаточной заменой product proof.
+
+Для `Markov / hazard lifecycle` отдельно запрещено:
+- строить одну усреднённую transition matrix на весь memory contour без cohort separation;
+- давать модели право напрямую запускать destructive prune/archive action;
+- использовать probabilistic lifecycle score как замену `truth_state / verification_state / policy decision`;
+- выводить lifecycle-рекомендации без explain trace и before/after audit trail.
 
 ## Честное правило про evidence gap
 

@@ -1758,10 +1758,27 @@ Retrieval не должен сразу прыгать в сырые логи и 
 Источник ручной сверки и triage:
 - [AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md](AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md)
 
+Implementation law для этого контура:
+- `AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md` теперь выполняет не только роль synthesis-doc, но и роль authoritative execution-spec;
+- exact queue order `Queue 0-5`, exact `v1` scope и out-of-scope границы берутся именно оттуда;
+- implementer не имеет права silently reorder-ить очереди или расширять production scope beyond этого execution-spec.
+
 Что сюда входит:
 - probabilistic/statistical ideas берутся только после ручной сверки с текущим repo state;
 - старые snapshot-claims не поднимаются в canonical laws автоматически;
 - methodological ideas не получают authority выше текущих truth/proof/gate contours.
+
+Production scope этого reinforcement contour:
+- statistical benchmark honesty;
+- lifecycle transition discipline;
+- `Markov / hazard lifecycle v1` как advisory/explain contour;
+- regression explain surface;
+- Poisson/arrival capacity forecast как planning/observability contour.
+
+Out-of-scope без отдельной ревизии execution-spec:
+- truth-authoritative Bayesian belief-layer;
+- destructive probabilistic auto-decision;
+- replacement of `verified truth` with mathematical projection.
 
 Как раскладывать по текущим этапам:
 - `Bayesian / confidence / calibration`
@@ -1773,6 +1790,17 @@ Retrieval не должен сразу прыгать в сырые логи и 
   - статус: `planned`.
 - `Markov / hazard lifecycle`
   - extension к `Этапу 9`;
+  - нужен как explainable lifecycle planner, а не как truth-engine;
+  - должен строиться поверх уже существующих lifecycle/policy traces:
+    - `lifecycle_state`
+    - `retention_class`
+    - `decay_policy`
+    - `consolidation_status`
+    - forgetting/revalidation audit trail;
+  - practical effect, который от него требуется:
+    - лучшее `pending_review`/revalidation targeting;
+    - более честный archive/prune forecast;
+    - policy simulation по cohort-level переходам;
   - статус: `concept-only`.
 - `Poisson capacity`
   - future performance/capacity contour;
@@ -1786,6 +1814,7 @@ Retrieval не должен сразу прыгать в сырые логи и 
 - probabilistic score не имеет права переписывать verified truth без policy/evidence path;
 - benchmark significance/drift не заменяют domain proof, а только усиливают measured discipline;
 - lifecycle math обязана оставаться explainable и audit-safe;
+- lifecycle model не имеет права сама объявлять truth verdict или destructive forgetting decision без policy/evidence path;
 - regression допустима только как explain/forecast contour, а не как источник истины.
 
 ## Какие частные планы уже встроены в этот roadmap
