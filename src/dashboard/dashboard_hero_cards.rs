@@ -32,6 +32,144 @@ fn active_agent_budget_card_status(surface: &Value) -> (&'static str, &'static s
     }
 }
 
+fn reviewed_frozen_debt_export_note_sentence(alignment: &Value) -> Option<&'static str> {
+    let surface = &alignment["reviewed_frozen_debt_export_surface"];
+    if surface["export_ready_report_only"].as_bool() != Some(true) {
+        return None;
+    }
+    Some(
+        "Исторический frozen debt уже вынесен в отдельный report-only export contour: его можно review-ить отдельно, но он не имеет права притворяться raw exact history.",
+    )
+}
+
+fn historical_frozen_debt_note_sentence(
+    current_session_alignment: &Value,
+    rolling_window_alignment: &Value,
+    lifetime_alignment: &Value,
+) -> Option<&'static str> {
+    historical_frozen_debt_metric_row(
+        current_session_alignment,
+        rolling_window_alignment,
+        lifetime_alignment,
+    )?;
+    Some(
+        "Текущая сессия и рабочее окно уже exact: frozen debt сейчас остался только в историческом lifetime-хвосте и не выглядит как новый live drift.",
+    )
+}
+
+fn historical_frozen_debt_metric_row(
+    current_session_alignment: &Value,
+    rolling_window_alignment: &Value,
+    lifetime_alignment: &Value,
+) -> Option<Value> {
+    let current_exact = current_session_alignment["exact_pair_status"]["exact_pair_available"]
+        .as_bool()
+        == Some(true);
+    let rolling_exact = rolling_window_alignment["exact_pair_status"]["exact_pair_available"]
+        .as_bool()
+        == Some(true);
+    let frozen_gap_review_surface = &lifetime_alignment["frozen_gap_review_surface"];
+    if !(current_exact
+        && rolling_exact
+        && frozen_gap_review_surface["state"].as_str() == Some("review_required"))
+    {
+        return None;
+    }
+    let blocker_code = frozen_gap_review_surface["blocking_component"]
+        .as_str()
+        .unwrap_or("unknown_blocker");
+    let irrecoverable_missing_live_events =
+        frozen_gap_review_surface["irrecoverable_missing_live_events"]
+            .as_u64()
+            .unwrap_or(0);
+    let tooltip = format!(
+        "Этот ряд показывает, что frozen debt сейчас уже не растёт в активных live scopes.\n- Current session: exact pair materialized\n- Working window: exact pair materialized\n- Lifetime blocker: {}\n- Lifetime irrecoverable rows: {}\n- Значит irrecoverable debt сейчас выглядит как исторический хвост, а не как новый live drift.",
+        blocker_code,
+        format_u64(Some(irrecoverable_missing_live_events)),
+    );
+    Some(metric_row(
+        "Исторический frozen debt",
+        format!(
+            "{}: historical-only, {} rows",
+            blocker_code,
+            format_u64(Some(irrecoverable_missing_live_events))
+        ),
+        Some(tooltip.as_str()),
+    ))
+}
+
+fn reviewed_frozen_debt_export_metric_row(alignment: &Value) -> Option<Value> {
+    let surface = &alignment["reviewed_frozen_debt_export_surface"];
+    if surface["export_ready_report_only"].as_bool() != Some(true) {
+        return None;
+    }
+    let surface_kind = surface["surface_kind"]
+        .as_str()
+        .unwrap_or("reviewed_frozen_debt_report_only");
+    let blocker_code = surface["blocking_component"]
+        .as_str()
+        .unwrap_or("unknown_blocker");
+    let irrecoverable_missing_live_events = surface["irrecoverable_missing_live_events"]
+        .as_u64()
+        .unwrap_or(0);
+    let allowed_claims = surface["allowed_claims"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let forbidden_claims = surface["forbidden_claims"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let propagated_surfaces = surface["propagated_surfaces"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let review_bundle_command = surface["review_bundle_command"]
+        .as_str()
+        .unwrap_or_default();
+    let evidence_pack_command = surface["evidence_pack_command"]
+        .as_str()
+        .unwrap_or_default();
+    let tooltip = format!(
+        "Этот ряд показывает отдельный report-only export contour для irrecoverable historical debt.\n- Surface kind: {}\n- Blocker component: {}\n- Irrecoverable rows: {}\n- Allowed claims: {}\n- Forbidden claims: {}\n- Propagated surfaces: {}\n- Review bundle command: {}\n- Evidence pack command: {}\n- Этот contour не чинит lifetime exactness и не имеет права притворяться raw exact history.",
+        surface_kind,
+        blocker_code,
+        format_u64(Some(irrecoverable_missing_live_events)),
+        allowed_claims,
+        forbidden_claims,
+        propagated_surfaces,
+        review_bundle_command,
+        evidence_pack_command
+    );
+    Some(metric_row(
+        "Review-only export",
+        format!(
+            "{}: {} irrecoverable rows",
+            surface_kind,
+            format_u64(Some(irrecoverable_missing_live_events))
+        ),
+        Some(tooltip.as_str()),
+    ))
+}
+
 pub(crate) fn build_active_agent_budget_session_card_from_surface(
     surface: &Value,
 ) -> Option<Value> {
@@ -1544,6 +1682,91 @@ mod tests {
             Some(
                 "Источник: подтверждённая учтённая история плюс отдельно отмеченный старый долг точности. Это не полный raw spend всей истории."
             )
+        );
+    }
+
+    #[test]
+    fn historical_frozen_debt_metric_row_surfaces_historical_only_tail() {
+        let current_session_alignment = json!({
+            "exact_pair_status": {
+                "exact_pair_available": true
+            }
+        });
+        let rolling_window_alignment = json!({
+            "exact_pair_status": {
+                "exact_pair_available": true
+            }
+        });
+        let lifetime_alignment = json!({
+            "frozen_gap_review_surface": {
+                "state": "review_required",
+                "blocking_component": "tool_overhead_outside_retrieval",
+                "irrecoverable_missing_live_events": 13
+            }
+        });
+
+        let row = historical_frozen_debt_metric_row(
+            &current_session_alignment,
+            &rolling_window_alignment,
+            &lifetime_alignment,
+        )
+        .expect("historical tail row");
+        assert_eq!(row["label"], "Исторический frozen debt");
+        assert_eq!(
+            row["value"].as_str(),
+            Some("tool_overhead_outside_retrieval: historical-only, 13 rows")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Current session: exact pair materialized")
+        );
+    }
+
+    #[test]
+    fn reviewed_frozen_debt_export_metric_row_surfaces_report_only_path() {
+        let alignment = json!({
+            "reviewed_frozen_debt_export_surface": {
+                "export_ready_report_only": true,
+                "surface_kind": "reviewed_frozen_debt_report_only",
+                "blocking_component": "tool_overhead_outside_retrieval",
+                "irrecoverable_missing_live_events": 13,
+                "allowed_claims": [
+                    "reviewed_frozen_debt_report_only",
+                    "historical_source_loss_disclosed_non_exact"
+                ],
+                "forbidden_claims": [
+                    "claim_raw_exact_history",
+                    "claim_exact_same_meter_pair_materialized"
+                ],
+                "propagated_surfaces": [
+                    "statement_export_preview",
+                    "settlement_report_preview",
+                    "contractual_evidence_pack"
+                ],
+                "review_bundle_command": "./scripts/amai_exec.sh observe token-statement-export --scope lifetime",
+                "evidence_pack_command": "./scripts/amai_exec.sh observe token-evidence-pack --scope lifetime"
+            }
+        });
+
+        let row = reviewed_frozen_debt_export_metric_row(&alignment).expect("export row");
+        assert_eq!(row["label"], "Review-only export");
+        assert_eq!(
+            row["value"].as_str(),
+            Some("reviewed_frozen_debt_report_only: 13 irrecoverable rows")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("claim_raw_exact_history")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("token-statement-export --scope lifetime")
         );
     }
 }
