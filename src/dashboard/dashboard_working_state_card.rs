@@ -577,3 +577,412 @@ pub(super) fn working_state_live_card(snapshot: &Value) -> Value {
     }
     card
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn working_state_card_hides_empty_decision_trace_rows_and_requires_repo_scoped_snapshot() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1774239286880u64,
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "captured_at_epoch_ms": 1774239281880u64,
+                    "project": { "code": "amai" },
+                    "namespace": { "code": "default" },
+                    "agent_scope": "amai::default::default",
+                    "session_age_ms": 7u64,
+                    "events_count": 1u64,
+                    "current_goal": "Рабочий запрос: structural graph proof",
+                    "next_step": "Уточните запрос или задайте follow-up.",
+                    "last_command": "context pack",
+                    "last_results_summary": "Найдено: документов 0, символов 0.",
+                    "latest_decision_trace": null,
+                    "active_files": [],
+                    "recent_queries": ["structural graph proof"],
+                    "restore_confidence": "preliminary"
+                }
+            }
+        });
+
+        let card = working_state_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("waiting"));
+        assert_eq!(
+            card["status_label"].as_str(),
+            Some("ждём устойчивый снимок")
+        );
+        let rows = card["rows"].as_array().expect("rows");
+        assert!(
+            rows.iter()
+                .all(|row| row["label"].as_str() != Some("Почему включено"))
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row["label"].as_str() != Some("Почему не вошло"))
+        );
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Короткая сводка по текущей работе")
+        );
+
+        let unknown_card = working_state_live_card(&json!({
+            "captured_at_epoch_ms": 1774239286880u64,
+            "latest_repo_working_state_restore": null
+        }));
+        assert_eq!(unknown_card["status"], json!("unknown"));
+        assert!(
+            unknown_card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("нет свежего локального снимка")
+        );
+    }
+
+    #[test]
+    fn working_state_card_surfaces_current_live_turn_activity_when_exact_pair_is_ready() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1775412360000u64,
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_live_turn": {
+                        "status": "exact_pair_materialized",
+                        "retrieval_context_pack_count": 1,
+                        "matched_context_pack_ids_count": 1,
+                        "note": "Exact full-turn pair materialized from the actual VS Code meter.",
+                        "exact_pair": {
+                            "saved_pct": 76.52
+                        }
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "captured_at_epoch_ms": 1775412359000u64,
+                    "project": { "code": "amai" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "amai::continuity::default",
+                    "session_age_ms": 15u64,
+                    "events_count": 3u64,
+                    "current_goal": "Repair dashboard live-turn behavior",
+                    "next_step": "Surface live turn in current work card.",
+                    "last_command": "context pack",
+                    "last_results_summary": "current_live_turn exact pair materialized",
+                    "active_files": [
+                        "/home/art/agent-memory-index/src/dashboard.rs"
+                    ],
+                    "recent_queries": [],
+                    "restore_confidence": "medium"
+                }
+            }
+        });
+
+        let card = working_state_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("pass"));
+        assert!(
+            card["note"]
+                .as_str()
+                .is_some_and(|note| { note.contains("свежий живой ответ Amai") })
+        );
+        let rows = card["rows"].as_array().expect("rows");
+        let live_turn_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Живой turn Amai"))
+            .expect("live turn row");
+        assert!(
+            live_turn_row["value"].as_str().is_some_and(|value| {
+                value.contains("1 context-pack") && value.contains("76.52%")
+            })
+        );
+    }
+
+    #[test]
+    fn working_state_card_uses_waiting_status_when_only_live_turn_activity_is_fresh() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1775412360000u64,
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_live_turn": {
+                        "status": "exact_pair_materialized",
+                        "retrieval_context_pack_count": 1,
+                        "matched_context_pack_ids_count": 1,
+                        "note": "Exact full-turn pair materialized from the actual VS Code meter.",
+                        "exact_pair": {
+                            "saved_pct": 69.64
+                        }
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "captured_at_epoch_ms": 1775412359000u64,
+                    "project": { "code": "amai" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "amai::continuity::default",
+                    "session_age_ms": 15u64,
+                    "events_count": 0u64,
+                    "current_goal": "Current live-turn now surfaces same-thread Amai activity after fresh context-pack",
+                    "next_step": "Tighten current-work card so fresh exact-pair / thread activity is surfaced there too.",
+                    "last_command": "continuity handoff",
+                    "last_results_summary": null,
+                    "active_files": [],
+                    "recent_queries": [],
+                    "restore_confidence": "preliminary"
+                }
+            }
+        });
+
+        let card = working_state_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("waiting"));
+        assert_eq!(card["status_label"].as_str(), Some("живой turn уже виден"));
+        let rows = card["rows"].as_array().expect("rows");
+        let last_result_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Последний результат"))
+            .expect("last result row");
+        assert!(
+            last_result_row["value"]
+                .as_str()
+                .is_some_and(|value| { value.contains("Exact full-turn pair materialized") })
+        );
+        let last_command_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Последняя команда"))
+            .expect("last command row");
+        assert_eq!(
+            last_command_row["value"].as_str(),
+            Some("Amai context pack")
+        );
+    }
+
+    #[test]
+    fn preliminary_handoff_command_is_overridden_by_fresh_live_turn_command() {
+        assert!(should_override_last_command_with_live_turn(
+            "сохранена рабочая сводка",
+            "preliminary",
+            0,
+        ));
+        assert!(!should_override_last_command_with_live_turn(
+            "сохранена рабочая сводка",
+            "high",
+            0,
+        ));
+        assert!(!should_override_last_command_with_live_turn(
+            "сохранена рабочая сводка",
+            "preliminary",
+            2,
+        ));
+    }
+
+    #[test]
+    fn live_file_hints_restore_last_command_when_new_turn_is_still_empty() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn",
+                        "current_thread_bound": true,
+                        "retrieval_context_pack_count": 0,
+                        "matched_context_pack_ids_count": 0
+                    },
+                    "live_response_latency": {
+                        "current_session_relation": {
+                            "status": "recent_same_chat_series_previous_turn"
+                        },
+                        "current_thread_live_file_hints": {
+                            "hints": [
+                                {"label": "dashboard.rs", "query": "./src/dashboard.rs"}
+                            ]
+                        }
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "captured_at_epoch_ms": 1775412359000u64,
+                    "project": { "code": "amai" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "amai::continuity::default",
+                    "session_age_ms": 15u64,
+                    "events_count": 0u64,
+                    "current_goal": "Current live-turn now surfaces same-thread Amai activity after fresh context-pack",
+                    "next_step": "Tighten current-work card so fresh exact-pair / thread activity is surfaced there too.",
+                    "last_command": null,
+                    "last_results_summary": null,
+                    "active_files": [],
+                    "recent_queries": [],
+                    "restore_confidence": "preliminary"
+                }
+            }
+        });
+
+        let card = working_state_live_card(&snapshot);
+        let rows = card["rows"].as_array().expect("rows");
+        let last_command_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Последняя команда"))
+            .expect("last command row");
+        assert_eq!(
+            last_command_row["value"].as_str(),
+            Some("Amai context pack")
+        );
+    }
+
+    #[test]
+    fn working_state_card_falls_back_to_live_turn_when_working_state_is_missing() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_live_turn": {
+                        "status": "thread_activity_observed_turn_open",
+                        "retrieval_context_pack_count": 2,
+                        "matched_context_pack_ids_count": 1,
+                        "note": "Observed new retrieval_context_pack after the last completed turn."
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": null
+        });
+
+        let card = working_state_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("waiting"));
+        assert_eq!(card["status_label"].as_str(), Some("живой turn уже виден"));
+        assert!(card["note"].as_str().is_some_and(|note| {
+            note.contains("текущий chat turn уже видит свежую активность Amai")
+        }));
+        let rows = card["rows"].as_array().expect("rows");
+        let live_turn_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Живой turn Amai"))
+            .expect("live turn row");
+        assert_eq!(
+            live_turn_row["value"].as_str(),
+            Some("2 context-pack • turn ещё открыт")
+        );
+    }
+
+    #[test]
+    fn working_state_card_surfaces_open_turn_without_amai_answer_yet() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1775420265000u64,
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn",
+                        "current_thread_bound": true,
+                        "thread_id": "thread-live",
+                        "note": "В текущем live-turn не наблюдалось ни одного retrieval_context_pack от Amai."
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project": { "code": "amai" },
+                    "namespace": { "code": "continuity" },
+                    "next_step": "Wait for the next real Amai answer in this chat.",
+                    "current_goal": "Observe the next online answer",
+                    "events_count": 0u64,
+                    "restore_confidence": "preliminary"
+                }
+            }
+        });
+
+        let card = working_state_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("waiting"));
+        assert_eq!(card["status_label"].as_str(), Some("ждём ответ Amai"));
+        let rows = card["rows"].as_array().expect("rows");
+        let live_turn_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Живой turn Amai"))
+            .expect("live turn row");
+        assert_eq!(
+            live_turn_row["value"].as_str(),
+            Some("turn открыт • ответов Amai ещё нет")
+        );
+        assert!(
+            card["status_tooltip"]
+                .as_str()
+                .is_some_and(|tooltip| tooltip.contains("Amai в нём ещё не ответила"))
+        );
+    }
+
+    #[test]
+    fn working_state_card_uses_live_file_hints_when_active_files_are_empty() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1775420265000u64,
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn",
+                        "current_thread_bound": true,
+                        "thread_id": "thread-live"
+                    },
+                    "live_response_latency": {
+                        "current_thread_live_file_hints": {
+                            "hints": [
+                                { "label": "dashboard.rs", "query": "./src/dashboard.rs" },
+                                { "label": "token_budget.rs", "query": "./src/token_budget.rs" }
+                            ]
+                        }
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project": { "code": "amai" },
+                    "namespace": { "code": "continuity" },
+                    "next_step": "Add live file hints.",
+                    "current_goal": "Observe the next online answer",
+                    "events_count": 0u64,
+                    "restore_confidence": "preliminary",
+                    "active_files": []
+                }
+            }
+        });
+
+        let card = working_state_live_card(&snapshot);
+        let rows = card["rows"].as_array().expect("rows");
+        let active_files_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Активные файлы"))
+            .expect("active files row");
+        assert_eq!(
+            active_files_row["value"].as_str(),
+            Some("2 • dashboard.rs, token_budget.rs")
+        );
+    }
+
+    #[test]
+    fn summarize_working_state_next_step_humanizes_live_card_reconciliation_text() {
+        assert_eq!(
+            summarize_working_state_next_step(Some(
+                "If user continues, refine operator-facing copy or expand the same reconciliation pattern to other live cards."
+            )),
+            "уточнить операторский текст в live-карточках"
+        );
+        assert_eq!(
+            summarize_working_state_goal(
+                Some(
+                    "If user continues, refine operator-facing copy or expand the same reconciliation pattern to other live cards."
+                ),
+                None
+            ),
+            "доработка live-карточек панели"
+        );
+        assert_eq!(
+            summarize_working_state_next_step(Some(
+                "If user continues, enrich current-work card with live-thread active files or replace generic next-step text."
+            )),
+            "добавить в карточку текущей работы живые подсказки по активным файлам"
+        );
+        assert_eq!(
+            summarize_working_state_next_step(Some(
+                "Optionally continue by filling last-command placeholder from the same live-turn source so the card is fully operator-readable before working-state catches up."
+            )),
+            "заполнить в карточке текущей работы последнюю команду из живого Amai-turn"
+        );
+    }
+}
