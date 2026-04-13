@@ -798,6 +798,36 @@ Companion non-regression:
 - privacy rules не ломаются shared/import paths;
 - evaluator контур реально останавливает плохие “улучшения”.
 
+## Probabilistic / statistical reinforcement changes
+
+Это не отдельный stage-close shortcut.
+Любой будущий Bayesian / calibration / drift / Markov / Poisson / regression contour обязан проходить поверх уже существующих gate laws.
+
+### Что обязательно проверить
+
+- probabilistic surface не подменяет current truth-source;
+- новая confidence-модель не переписывает verified truth только потому, что у неё красивое число;
+- benchmark improvement не объявляется без явного baseline/candidate сравнения;
+- significance и drift проверяются на raw-run данных, а не на красивом summary;
+- lifecycle/forgetting math остаётся explainable и audit-safe;
+- regression используется только как explain/forecast surface, а не как authoritative routing/truth layer;
+- capacity/arrival model не превращается в runtime enforcement truth до observed validation.
+
+### Какой proof path обязателен
+
+- baseline vs candidate raw-result lane;
+- measured calibration / benchmark honesty surface;
+- drift report по score/latency/verdict distributions;
+- explain trace для lifecycle transitions и forgetting decisions;
+- companion non-regression bundle по затронутым соседним осям (`speed / accuracy / quality / truth`).
+
+### Что запрещено
+
+- выпускать Bayesian/Markov/Poisson contour только по теоретической красоте;
+- выдавать regression/ranking score за truth verdict;
+- поднимать новую confidence-проекцию выше governed policy/evidence path;
+- объявлять significance/drift достаточной заменой product proof.
+
 ## Честное правило про evidence gap
 
 Если у этапа ещё нет dedicated proof harness, агент не имеет права закрывать этап “по ощущениям”.

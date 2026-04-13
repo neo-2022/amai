@@ -1750,6 +1750,44 @@ Retrieval не должен сразу прыгать в сырые логи и 
 - система не только помнит больше;
 - она помнит безопаснее, честнее и устойчивее.
 
+## Scientific reinforcement contour
+
+Это не отдельный "второй roadmap" и не новая параллельная архитектура.
+
+Это documentation-grade adoption contour поверх уже существующих Stage 7 / 9 / 10.
+Источник ручной сверки и triage:
+- [AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md](AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md)
+
+Что сюда входит:
+- probabilistic/statistical ideas берутся только после ручной сверки с текущим repo state;
+- старые snapshot-claims не поднимаются в canonical laws автоматически;
+- methodological ideas не получают authority выше текущих truth/proof/gate contours.
+
+Как раскладывать по текущим этапам:
+- `Bayesian / confidence / calibration`
+  - future extension к `Этапу 10`;
+  - пока не source of truth и не materialized law;
+  - статус: `concept-only`.
+- `statistical benchmark discipline + drift checks`
+  - extension к `Этапу 7` и `Этапу 10`;
+  - статус: `planned`.
+- `Markov / hazard lifecycle`
+  - extension к `Этапу 9`;
+  - статус: `concept-only`.
+- `Poisson capacity`
+  - future performance/capacity contour;
+  - статус: `blocked by proof/data`.
+- `regression / explainability`
+  - optional explain surface;
+  - не authoritative truth-layer;
+  - статус: `planned`.
+
+Жёсткие ограничения:
+- probabilistic score не имеет права переписывать verified truth без policy/evidence path;
+- benchmark significance/drift не заменяют domain proof, а только усиливают measured discipline;
+- lifecycle math обязана оставаться explainable и audit-safe;
+- regression допустима только как explain/forecast contour, а не как источник истины.
+
 ## Какие частные планы уже встроены в этот roadmap
 
 ### Частный план 1. `AMAI_TASK_TREE_PLAN.md`

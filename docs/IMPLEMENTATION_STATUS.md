@@ -570,6 +570,9 @@
 Сейчас активный implementation focus:
 - завершение всех 10 этапов memory fabric;
 - удержание Stage 1-10 bundle в зелёном non-regression состоянии.
+- documentation-grade scientific synthesis по двум PDF-источникам:
+  - [AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md](AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md);
+  - только как triage/adoption baseline, без ложного объявления probabilistic layers implemented.
 
 ### Ближайший следующий этап
 
@@ -589,6 +592,23 @@
 - full procedural memory уже закрыт;
 - forgetting/consolidation/pruning уже закрыт;
 - governance/safety/evaluator loop уже закрыт;
+
+После закрытия Stage 1-10 следующий честный надстроечный contour такой:
+- scientific reinforcement memory layer как documentation/research baseline;
+- это не новый отдельный stage и не override текущего roadmap;
+- это curated adoption contour поверх уже закрытых Stage 7 / 9 / 10.
+
+Текущий честный статус направлений из scientific synthesis:
+- `confidence/calibration`
+  - `concept-only`
+- `benchmark significance + drift`
+  - `planned`
+- `Markov/hazard lifecycle`
+  - `concept-only`
+- `Poisson capacity`
+  - `blocked by proof/data`
+- `regression explain surface`
+  - `planned`
 
 ### Фундаментальные blocker-ы
 
