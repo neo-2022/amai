@@ -1303,4 +1303,286 @@ mod tests {
                 .contains("delta 0")
         );
     }
+
+    #[test]
+    fn client_budget_root_cause_payload_stays_compact_and_surfaces_primary_blocker() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "client_live_meter": {
+                        "status": "observed",
+                        "thread_binding_state": "current_thread_bound",
+                        "current_thread_bound": true,
+                        "client_turn_total_tokens": 3210,
+                        "context_used_percent": 64.0,
+                        "ended_at_epoch_ms": 2000,
+                        "status_bar_rate_limits": {
+                            "status": "observed",
+                            "observed_at_epoch_ms": 2000
+                        }
+                    },
+                    "current_live_turn": {
+                        "status": "same_meter_pending",
+                        "exact_pair_available": false,
+                        "observed_client_prompt_tokens": 22,
+                        "observed_assistant_generation_tokens": 0,
+                        "observed_continuity_restore_tokens": 144,
+                        "observed_tool_overhead_tokens": 311,
+                        "observed_whole_cycle_with_amai_tokens": 477
+                    },
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "reply_prefix": "5ч KPI: переплата 20.00%"
+                    },
+                    "statement_previews": {
+                        "current_session": {
+                            "client_limit_meter_alignment": {
+                                "exact_pair_status": {
+                                    "state": "exact_pair_blocked",
+                                    "exact_pair_available": false,
+                                    "primary_blocking_reason": "assistant_generation_unmeasured",
+                                    "blockers": [
+                                        {
+                                            "code": "assistant_generation",
+                                            "blocker_kind": "generic_alignment_gap",
+                                            "blocking_reason": "assistant_generation_unmeasured",
+                                            "missing_live_events": 1,
+                                            "irrecoverable_missing_live_events": 0
+                                        }
+                                    ]
+                                },
+                                "measured_components": ["client_prompt", "continuity_restore_outside_retrieval"],
+                                "missing_components": ["assistant_generation", "tool_overhead_outside_retrieval"],
+                                "partially_measured_components": ["tool_overhead_outside_retrieval"],
+                                "blocking_reasons": ["assistant_generation_unmeasured"]
+                            }
+                        }
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {}
+            }
+        });
+
+        let payload = super::client_budget_root_cause_payload(&snapshot);
+        assert_eq!(
+            payload["reply_prefix"].as_str(),
+            Some("5ч KPI: переплата 20.00%")
+        );
+        assert_eq!(
+            payload["exact_pair_status"]["primary_blocker_code"].as_str(),
+            Some("assistant_generation")
+        );
+        assert_eq!(
+            payload["exact_pair_status"]["note"].as_str(),
+            Some(
+                "Exact pair сейчас удерживает assistant-generation baseline semantics: observed output tokens уже видны, но deduplicated same-meter baseline для этого scope ещё не materialized."
+            )
+        );
+        assert_eq!(
+            payload["guard"]["reply_budget_mode"].as_str(),
+            Some(working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL)
+        );
+        assert!(
+            serde_json::to_string(&payload)
+                .expect("compact payload")
+                .len()
+                < 2500
+        );
+    }
+
+    #[test]
+    fn client_budget_root_cause_payload_omits_zero_activity_noise() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "client_live_meter": {
+                        "status": "observed",
+                        "thread_binding_state": "current_thread_bound",
+                        "current_thread_bound": true,
+                        "client_turn_total_tokens": 172361,
+                        "context_used_percent": 66.7,
+                        "ended_at_epoch_ms": 2000,
+                        "status_bar_rate_limits": {
+                            "status": "observed",
+                            "observed_at_epoch_ms": 2000
+                        }
+                    },
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn",
+                        "exact_pair_available": true,
+                        "exact_pair": {
+                            "without_amai_tokens": 0,
+                            "with_amai_tokens": 0,
+                            "saved_tokens": 0,
+                            "saved_pct": 0.0
+                        },
+                        "observed_client_prompt_tokens": null,
+                        "observed_assistant_generation_tokens": null,
+                        "observed_continuity_restore_tokens": null,
+                        "observed_tool_overhead_tokens": null,
+                        "observed_whole_cycle_with_amai_tokens": null,
+                        "verified_observed_whole_cycle_with_amai_tokens": null
+                    },
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "reply_prefix": "5ч KPI: переплата 75.41%"
+                    },
+                    "statement_previews": {
+                        "current_session": {
+                            "client_limit_meter_alignment": {
+                                "exact_pair_status": {
+                                    "state": "exact_pair_materialized",
+                                    "exact_pair_available": true,
+                                    "primary_blocking_reason": null,
+                                    "blockers": []
+                                },
+                                "measured_components": ["retrieval_payload", "followup_recovery", "client_prompt", "continuity_restore_outside_retrieval"],
+                                "missing_components": [],
+                                "partially_measured_components": [],
+                                "blocking_reasons": []
+                            }
+                        }
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {}
+            }
+        });
+
+        let payload = super::client_budget_root_cause_payload(&snapshot);
+        assert_eq!(
+            payload["current_live_turn"]["status"].as_str(),
+            Some("no_amai_activity_in_current_live_turn")
+        );
+        assert_eq!(payload["current_live_turn"]["saved_pct"], json!(0.0));
+        assert!(payload["current_live_turn"]["exact_pair"].is_null());
+        assert!(payload["current_live_turn"]["observed_client_prompt_tokens"].is_null());
+        assert_eq!(
+            payload["exact_pair_status"]["state"].as_str(),
+            Some("not_applicable_current_live_turn_has_no_amai_activity")
+        );
+        assert_eq!(
+            payload["exact_pair_status"]["note"].as_str(),
+            Some(
+                "В текущем live-turn у Amai нет активности, поэтому exact-pair blocker surface здесь не про missing measurement, а про нулевой вклад: для этого turn Amai честно даёт 0.00% same-meter savings."
+            )
+        );
+        assert!(payload["exact_pair_status"]["primary_blocker_code"].is_null());
+        assert!(payload["exact_pair_status"]["missing_live_events"].is_null());
+        assert!(payload["missing_components"].is_null());
+        assert!(payload["partially_measured_components"].is_null());
+        assert!(payload["blocking_reasons"].is_null());
+        assert!(
+            serde_json::to_string(&payload)
+                .expect("compact payload")
+                .len()
+                < 1600
+        );
+    }
+
+    #[test]
+    fn client_budget_root_cause_payload_surfaces_same_meter_economics_for_giant_thread_overhang() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "client_live_meter": {
+                        "status": "observed",
+                        "thread_binding_state": "current_thread_bound",
+                        "current_thread_bound": true,
+                        "client_turn_total_tokens": 87356,
+                        "context_used_percent": 33.45,
+                        "ended_at_epoch_ms": 2000,
+                        "status_bar_rate_limits": {
+                            "status": "observed",
+                            "observed_at_epoch_ms": 2000
+                        }
+                    },
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn",
+                        "exact_pair_available": true,
+                        "exact_pair": {
+                            "without_amai_tokens": 0,
+                            "with_amai_tokens": 0,
+                            "saved_tokens": 0,
+                            "saved_pct": 0.0
+                        }
+                    },
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "reply_prefix": "5ч KPI: переплата 1988.49%"
+                    },
+                    "statement_previews": {
+                        "current_session": {
+                            "observed_whole_cycle_with_amai_tokens": 72,
+                            "client_limit_meter_alignment": {
+                                "same_meter_as_client_limit": true,
+                                "strict_client_meter_slice": {
+                                    "lower_bound_tokens": 182
+                                },
+                                "baseline_equivalence": {
+                                    "measured_baseline_tokens_lower_bound": 182,
+                                    "component_semantics": [
+                                        {
+                                            "code": "client_prompt",
+                                            "baseline_measured_tokens": 4,
+                                            "observed_tokens": 4,
+                                            "whole_cycle_observed_complete": true
+                                        },
+                                        {
+                                            "code": "continuity_restore_outside_retrieval",
+                                            "baseline_measured_tokens": 178,
+                                            "observed_tokens": 68,
+                                            "whole_cycle_observed_complete": true
+                                        }
+                                    ]
+                                },
+                                "exact_pair_status": {
+                                    "state": "exact_pair_materialized",
+                                    "exact_pair_available": true,
+                                    "primary_blocking_reason": null,
+                                    "blockers": []
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {}
+            }
+        });
+
+        let payload = super::client_budget_root_cause_payload(&snapshot);
+        assert_eq!(
+            payload["same_meter_economics"]["strict_lower_bound_tokens"],
+            json!(182)
+        );
+        assert_eq!(
+            payload["same_meter_economics"]["same_meter_saved_tokens"],
+            json!(110)
+        );
+        assert_eq!(
+            payload["same_meter_economics"]["continuity_restore_baseline_tokens"],
+            json!(178)
+        );
+        assert_eq!(
+            payload["same_meter_economics"]["continuity_restore_observed_tokens"],
+            json!(68)
+        );
+        assert_eq!(
+            payload["same_meter_economics"]["continuity_restore_delta_tokens"],
+            json!(-110)
+        );
+        assert_eq!(
+            payload["same_meter_economics"]["full_turn_overhang_tokens"],
+            json!(87174)
+        );
+        assert_eq!(
+            payload["same_meter_economics"]["dominant_cost_surface"],
+            json!("giant_thread_context_outside_same_meter_slice")
+        );
+    }
 }

@@ -2307,4 +2307,155 @@ mod tests {
                 .contains("0.00%")
         );
     }
+
+    #[test]
+    fn client_budget_live_payload_surfaces_hourly_burn_reply_prefix() {
+        let snapshot = json!({
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "client_budget_target_percent": 50
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "client_live_meter": {
+                        "status": "observed",
+                        "current_thread_bound": true,
+                        "thread_binding_state": "current_thread_bound",
+                        "ended_at_epoch_ms": 1000,
+                        "client_turn_total_tokens": 1000,
+                        "latest_model_context_window": 2000,
+                        "context_used_percent": 50.0,
+                        "primary_limit_used_percent": 57.0,
+                        "primary_limit_remaining_percent": 43.0,
+                        "secondary_limit_used_percent": 77.0,
+                        "secondary_limit_remaining_percent": 23.0,
+                        "status_bar_rate_limits": {
+                            "status": "observed",
+                            "source": "codex_app_server_account_rate_limits_read_v1",
+                            "observed_at_epoch_ms": 2000,
+                            "primary_limit_used_percent": 57.0,
+                            "primary_limit_remaining_percent": 43.0,
+                            "secondary_limit_used_percent": 77.0,
+                            "secondary_limit_remaining_percent": 23.0
+                        }
+                    },
+                    "current_live_turn": {
+                        "exact_pair_available": false
+                    },
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "classification": "saving",
+                        "reply_prefix": "5ч KPI: экономия 50.00%",
+                        "projected_primary_used_per_hour_percent": 10.0,
+                        "kpi_percent": 50.0,
+                        "remaining_window_minutes": 30.0,
+                        "actual_remaining_percent": 75.0,
+                        "ideal_remaining_percent": 50.0,
+                        "latest_observed_at_epoch_ms": 2000,
+                        "projected_reset_delta_minutes": 30.0
+                    }
+                }
+            }
+        });
+
+        let payload = client_budget_live_payload(&snapshot);
+        assert_eq!(
+            payload["reply_prefix"].as_str(),
+            Some("5ч KPI: экономия 50.00%")
+        );
+        let rows = payload["rows"].as_array().expect("rows");
+        assert!(
+            rows.iter()
+                .any(|row| { row["key"].as_str() == Some(CLIENT_LIMIT_HOURLY_BURN_ROW_KEY) })
+        );
+        let hourly_row = rows
+            .iter()
+            .find(|row| row["key"].as_str() == Some(CLIENT_LIMIT_HOURLY_BURN_ROW_KEY))
+            .expect("hourly burn row");
+        assert_eq!(
+            hourly_row["target_selector"]["current_target_percent"],
+            json!(50)
+        );
+        assert_eq!(
+            hourly_row["target_selector"]["selected_chat_command"],
+            json!("экономия_50%")
+        );
+    }
+
+    #[test]
+    fn client_budget_live_payload_prefers_live_personal_agent_reply_prefix() {
+        let snapshot = json!({
+            "active_agent_budget": {
+                "aggregate": {
+                    "status": "observed",
+                    "reply_prefix": "5ч KPI: экономия 28.49%"
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "client_budget_target_percent": 50
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "client_live_meter": {
+                        "status": "observed",
+                        "current_thread_bound": true,
+                        "thread_binding_state": "current_thread_bound",
+                        "ended_at_epoch_ms": 1000,
+                        "client_turn_total_tokens": 1000,
+                        "latest_model_context_window": 2000,
+                        "context_used_percent": 50.0,
+                        "primary_limit_used_percent": 57.0,
+                        "primary_limit_remaining_percent": 43.0,
+                        "secondary_limit_used_percent": 77.0,
+                        "secondary_limit_remaining_percent": 23.0,
+                        "status_bar_rate_limits": {
+                            "status": "observed",
+                            "source": "codex_app_server_account_rate_limits_read_v1",
+                            "observed_at_epoch_ms": 2000,
+                            "primary_limit_used_percent": 57.0,
+                            "primary_limit_remaining_percent": 43.0,
+                            "secondary_limit_used_percent": 77.0,
+                            "secondary_limit_remaining_percent": 23.0
+                        }
+                    },
+                    "current_live_turn": {
+                        "exact_pair_available": false
+                    },
+                    "personal_agent_kpi": {
+                        "status": "observed",
+                        "reply_prefix": "5ч KPI: экономия 61.25%"
+                    },
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "classification": "saving",
+                        "reply_prefix": "5ч KPI: экономия 50.00%",
+                        "projected_primary_used_per_hour_percent": 10.0,
+                        "kpi_percent": 50.0,
+                        "remaining_window_minutes": 30.0,
+                        "actual_remaining_percent": 75.0,
+                        "ideal_remaining_percent": 50.0,
+                        "latest_observed_at_epoch_ms": 2000,
+                        "projected_reset_delta_minutes": 30.0
+                    }
+                }
+            }
+        });
+
+        let payload = client_budget_live_payload(&snapshot);
+        assert_eq!(
+            payload["reply_prefix"].as_str(),
+            Some("5ч KPI: экономия 50.00%")
+        );
+        assert_eq!(
+            payload["global_reply_prefix"].as_str(),
+            Some("5ч KPI: экономия 50.00%")
+        );
+        assert_eq!(
+            payload["reply_prefix_source"],
+            json!("global_client_limit_hourly_burn")
+        );
+    }
 }
