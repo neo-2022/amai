@@ -2620,6 +2620,12 @@ fn find_untracked_ann_benchmark_process(repo_root: &Path) -> Option<UntrackedAnn
         {
             continue;
         }
+        let upstream_clone_dir_text = upstream_clone_dir.display().to_string();
+        let repo_bound_process = command.contains(&upstream_clone_dir_text)
+            || process_cwd_matches_prefix(pid, &upstream_clone_dir);
+        if !repo_bound_process {
+            continue;
+        }
         let Some(dataset_display_name) = command_arg_value(&command, "--dataset") else {
             continue;
         };
@@ -5472,6 +5478,9 @@ fn benchmark_runner_process_alive(
         if !file_name.chars().all(|ch| ch.is_ascii_digit()) {
             continue;
         }
+        let Some(pid) = file_name.parse::<u32>().ok() else {
+            continue;
+        };
         let Ok(cmdline) = fs::read(entry.path().join("cmdline")) else {
             continue;
         };
@@ -5479,7 +5488,24 @@ fn benchmark_runner_process_alive(
             continue;
         }
         let command = String::from_utf8_lossy(&cmdline).replace('\0', " ");
-        if command_matches_benchmark_runtime_markers(&command, &runtime_markers) {
+        let ann_match = runtime_markers
+            .ann_runpy_marker
+            .as_ref()
+            .is_some_and(|marker| command.contains(marker));
+        if ann_match {
+            let repo_bound =
+                runtime_markers
+                    .ann_upstream_clone_dir
+                    .as_ref()
+                    .is_some_and(|prefix| {
+                        command.contains(&prefix.display().to_string())
+                            || process_cwd_matches_prefix(pid, prefix)
+                    });
+            if repo_bound {
+                return true;
+            }
+        }
+        if command_matches_benchmark_runtime_markers(&command, &runtime_markers) && !ann_match {
             return true;
         }
     }
@@ -5491,6 +5517,7 @@ struct BenchmarkRuntimeMarkers {
     script_marker: Option<String>,
     vectordbbench_qdrant_http_url: Option<String>,
     ann_runpy_marker: Option<String>,
+    ann_upstream_clone_dir: Option<PathBuf>,
 }
 
 fn benchmark_runtime_markers(
@@ -5512,10 +5539,19 @@ fn benchmark_runtime_markers(
                 .filter(|value| !value.is_empty())
                 .map(|dataset| format!("run.py --dataset {dataset} --algorithm qdrant"))
         });
+    let ann_upstream_clone_dir = output_dir
+        .and_then(load_external_benchmark_summary_json)
+        .and_then(|summary| {
+            summary["upstream_clone_dir"]
+                .as_str()
+                .map(PathBuf::from)
+                .filter(|path| !path.as_os_str().is_empty())
+        });
     BenchmarkRuntimeMarkers {
         script_marker,
         vectordbbench_qdrant_http_url,
         ann_runpy_marker,
+        ann_upstream_clone_dir,
     }
 }
 
@@ -5546,6 +5582,12 @@ fn command_matches_benchmark_runtime_markers(
         return true;
     }
     false
+}
+
+fn process_cwd_matches_prefix(pid: u32, prefix: &Path) -> bool {
+    fs::read_link(Path::new("/proc").join(pid.to_string()).join("cwd"))
+        .map(|cwd| cwd.starts_with(prefix))
+        .unwrap_or(false)
 }
 
 fn process_is_alive(pid: u32) -> bool {
@@ -5673,7 +5715,7 @@ mod tests {
         VectorDbBenchBundle, adapter_compatibility_overrides, ann_benchmark_dataset_name,
         benchmark_run_summary_for_qdrant_http_url, benchmark_runtime_markers,
         build_launch_commands, command_matches_benchmark_runtime_markers, determine_adapter_status,
-        find_untracked_ann_benchmark_process, latest_ann_live_progress, normalize_key, now_epoch_s,
+        find_untracked_ann_benchmark_process, latest_ann_live_progress, normalize_key,
         ordered_benchmarks, parse_ann_hdf5_result_summary, persist_reconciled_run_status,
         recommended_datasets, reconcile_run_status, reconcile_run_status_with_runtime,
         render_adapter_script, resolve_benchmark, resolve_dataset,
@@ -5684,6 +5726,17 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_temp_root(prefix: &str) -> PathBuf {
+        let unique_id = TEST_TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("{prefix}-{}-{unique_id}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        path
+    }
 
     #[test]
     fn resolve_benchmark_accepts_aliases_and_display_name() {
@@ -5768,11 +5821,7 @@ mod tests {
 
     #[test]
     fn parse_ann_hdf5_result_summary_extracts_metrics_from_hdf5_and_ground_truth() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "amai-ann-hdf5-parse-{}-{}",
-            std::process::id(),
-            now_epoch_s()
-        ));
+        let temp_root = unique_temp_root("amai-ann-hdf5-parse");
         fs::create_dir_all(temp_root.join("10/qdrant")).expect("create result root");
         let dataset_path = temp_root.join("dataset.hdf5");
         let result_path = temp_root
@@ -5820,11 +5869,7 @@ mod tests {
 
     #[test]
     fn parse_ann_hdf5_result_summary_keeps_latency_even_without_ground_truth() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "amai-ann-hdf5-parse-no-gt-{}-{}",
-            std::process::id(),
-            now_epoch_s()
-        ));
+        let temp_root = unique_temp_root("amai-ann-hdf5-parse-no-gt");
         fs::create_dir_all(temp_root.join("11/qdrant")).expect("create result root");
         let result_path = temp_root
             .join("11")
@@ -5974,10 +6019,7 @@ mod tests {
 
     #[test]
     fn benchmark_run_summary_includes_running_heartbeat_epoch() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "amai-external-benchmark-summary-heartbeat-{}",
-            std::process::id()
-        ));
+        let temp_root = unique_temp_root("amai-external-benchmark-summary-heartbeat");
         let output_dir = temp_root
             .join("state")
             .join("external-benchmarks")
@@ -6028,10 +6070,7 @@ mod tests {
 
     #[test]
     fn latest_ann_live_progress_extracts_definition_group_and_processed_counts() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "amai-external-benchmark-log-progress-{}",
-            std::process::id()
-        ));
+        let temp_root = unique_temp_root("amai-external-benchmark-log-progress");
         fs::create_dir_all(&temp_root).expect("create temp root");
         fs::write(
             temp_root.join("run_external.log"),
@@ -6057,10 +6096,7 @@ mod tests {
 
     #[test]
     fn latest_ann_live_progress_resets_after_new_container_boundary() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "amai-external-benchmark-log-progress-reset-{}",
-            std::process::id()
-        ));
+        let temp_root = unique_temp_root("amai-external-benchmark-log-progress-reset");
         fs::create_dir_all(&temp_root).expect("create temp root");
         fs::write(
             temp_root.join("run_external.log"),
@@ -6078,10 +6114,7 @@ mod tests {
 
     #[test]
     fn benchmark_run_summary_includes_live_log_progress() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "amai-external-benchmark-summary-progress-{}",
-            std::process::id()
-        ));
+        let temp_root = unique_temp_root("amai-external-benchmark-summary-progress");
         let output_dir = temp_root
             .join("state")
             .join("external-benchmarks")
@@ -6387,10 +6420,7 @@ mod tests {
 
     #[test]
     fn reconcile_run_status_with_runtime_upgrades_started_message_when_log_is_fresh() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "amai-external-benchmark-live-log-{}",
-            std::process::id()
-        ));
+        let temp_root = unique_temp_root("amai-external-benchmark-live-log");
         fs::create_dir_all(&temp_root).expect("create temp root");
         fs::write(temp_root.join("run_external.log"), "still running\n").expect("write live log");
         let run_status = json!({
@@ -6414,17 +6444,22 @@ mod tests {
 
     #[test]
     fn benchmark_runtime_markers_include_ann_runpy_marker() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "amai-external-benchmark-ann-markers-{}",
-            std::process::id()
-        ));
+        let temp_root = unique_temp_root("amai-external-benchmark-ann-markers");
         fs::create_dir_all(&temp_root).expect("create temp root");
+        let upstream_clone_dir = temp_root
+            .join("state")
+            .join("external-benchmarks")
+            .join("upstream")
+            .join("ann_benchmarks");
+        fs::create_dir_all(&upstream_clone_dir).expect("create ann upstream dir");
         fs::write(
             temp_root.join("summary.json"),
-            r#"{
-  "benchmark_code": "ann_benchmarks",
-  "dataset_display_name": "dbpedia-openai-1000k-angular"
-}"#,
+            serde_json::to_string_pretty(&json!({
+                "benchmark_code": "ann_benchmarks",
+                "dataset_display_name": "dbpedia-openai-1000k-angular",
+                "upstream_clone_dir": upstream_clone_dir.display().to_string(),
+            }))
+            .expect("summary json"),
         )
         .expect("write summary");
         let markers = benchmark_runtime_markers(Some(&temp_root), None);
@@ -6432,6 +6467,7 @@ mod tests {
             markers.ann_runpy_marker.as_deref(),
             Some("run.py --dataset dbpedia-openai-1000k-angular --algorithm qdrant")
         );
+        assert_eq!(markers.ann_upstream_clone_dir, Some(upstream_clone_dir));
         let _ = fs::remove_dir_all(&temp_root);
     }
 
@@ -6451,12 +6487,15 @@ mod tests {
 
     #[test]
     fn find_untracked_ann_benchmark_process_detects_run_algorithm_command() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "amai-external-benchmark-untracked-ann-{}",
-            std::process::id()
-        ));
+        let temp_root = unique_temp_root("amai-external-benchmark-untracked-ann");
         let config_dir = temp_root.join("config");
+        let upstream_clone_dir = temp_root
+            .join("state")
+            .join("external-benchmarks")
+            .join("upstream")
+            .join("ann_benchmarks");
         fs::create_dir_all(&config_dir).expect("create config dir");
+        fs::create_dir_all(&upstream_clone_dir).expect("create ann upstream dir");
         fs::write(
             config_dir.join("external_benchmark_targets.toml"),
             r#"[source]
@@ -6502,6 +6541,7 @@ why_useful = ["test"]
         )
         .expect("write datasets");
         let mut child = Command::new("python3")
+            .current_dir(&upstream_clone_dir)
             .args([
                 "-c",
                 "import time; time.sleep(3)",
@@ -6530,11 +6570,13 @@ why_useful = ["test"]
 
     #[test]
     fn benchmark_run_summary_prefers_untracked_ann_process_over_stale_latest_success() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "amai-external-benchmark-untracked-summary-{}",
-            std::process::id()
-        ));
+        let temp_root = unique_temp_root("amai-external-benchmark-untracked-summary");
         let config_dir = temp_root.join("config");
+        let upstream_clone_dir = temp_root
+            .join("state")
+            .join("external-benchmarks")
+            .join("upstream")
+            .join("ann_benchmarks");
         let output_dir = temp_root
             .join("state")
             .join("external-benchmarks")
@@ -6543,6 +6585,7 @@ why_useful = ["test"]
             .join("dbpedia_openai_1000k_angular")
             .join("latest");
         fs::create_dir_all(&config_dir).expect("create config dir");
+        fs::create_dir_all(&upstream_clone_dir).expect("create ann upstream dir");
         fs::create_dir_all(&output_dir).expect("create output dir");
         fs::write(
             config_dir.join("external_benchmark_targets.toml"),
@@ -6616,6 +6659,7 @@ why_useful = ["test"]
         )
         .expect("write status");
         let mut child = Command::new("python3")
+            .current_dir(&upstream_clone_dir)
             .args([
                 "-c",
                 "import time; time.sleep(3)",
@@ -6652,21 +6696,26 @@ why_useful = ["test"]
     #[test]
     fn reconcile_run_status_with_runtime_keeps_running_when_shell_pid_died_but_ann_runpy_still_alive()
      {
-        let temp_root = std::env::temp_dir().join(format!(
-            "amai-external-benchmark-ann-live-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&temp_root).expect("create temp root");
+        let temp_root = unique_temp_root("amai-external-benchmark-ann-live");
+        let upstream_clone_dir = temp_root
+            .join("state")
+            .join("external-benchmarks")
+            .join("upstream")
+            .join("ann_benchmarks");
+        fs::create_dir_all(&upstream_clone_dir).expect("create ann upstream dir");
         fs::write(
             temp_root.join("summary.json"),
-            r#"{
-  "benchmark_code": "ann_benchmarks",
-  "dataset_display_name": "dbpedia-openai-1000k-angular"
-}"#,
+            serde_json::to_string_pretty(&json!({
+                "benchmark_code": "ann_benchmarks",
+                "dataset_display_name": "dbpedia-openai-1000k-angular",
+                "upstream_clone_dir": upstream_clone_dir.display().to_string(),
+            }))
+            .expect("summary json"),
         )
         .expect("write summary");
         fs::write(temp_root.join("run_external.log"), "still running\n").expect("write live log");
         let mut child = Command::new("python3")
+            .current_dir(&upstream_clone_dir)
             .args([
                 "-c",
                 "import time; time.sleep(3)",
@@ -6696,10 +6745,7 @@ why_useful = ["test"]
 
     #[test]
     fn persist_reconciled_run_status_rewrites_stale_running_payload() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "amai-external-benchmark-persist-status-{}",
-            std::process::id()
-        ));
+        let temp_root = unique_temp_root("amai-external-benchmark-persist-status");
         fs::create_dir_all(&temp_root).expect("create temp root");
         let status_path = temp_root.join("run_status.json");
         let original = json!({
@@ -6752,8 +6798,7 @@ why_useful = ["test"]
         let registry = sample_registry();
         let benchmark = &registry.benchmarks["ann_benchmarks"];
         let dataset = &catalog.datasets["dbpedia_openai_1000k_angular"];
-        let temp_root =
-            std::env::temp_dir().join(format!("amai-ann-upstream-disabled-{}", std::process::id()));
+        let temp_root = unique_temp_root("amai-ann-upstream-disabled");
         let config_dir = temp_root
             .join("ann_benchmarks")
             .join("algorithms")
@@ -6783,8 +6828,7 @@ why_useful = ["test"]
             .disabled_default_launch_override = Some("local_qdrant_enable".to_owned());
         let benchmark = &registry.benchmarks["ann_benchmarks"];
         let dataset = &catalog.datasets["dbpedia_openai_1000k_angular"];
-        let temp_root =
-            std::env::temp_dir().join(format!("amai-ann-upstream-enabled-{}", std::process::id()));
+        let temp_root = unique_temp_root("amai-ann-upstream-enabled");
         let config_dir = temp_root
             .join("ann_benchmarks")
             .join("algorithms")
