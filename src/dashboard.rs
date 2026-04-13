@@ -19,6 +19,7 @@ mod dashboard_context;
 mod dashboard_current_session_budget_guard;
 mod dashboard_hero_cards;
 mod dashboard_live_latency_compare;
+mod dashboard_overview;
 mod dashboard_payload;
 mod dashboard_renderer;
 mod dashboard_runtime_support;
@@ -27,8 +28,9 @@ mod dashboard_working_state_card;
 use self::dashboard_benchmark_cards::build_benchmark_cards;
 pub use self::dashboard_card_support::monitoring_url;
 use self::dashboard_card_support::{
-    card, tcp_port_is_open, with_extra_class, with_status, with_status_label, with_status_tooltip,
-    with_table_orientation,
+    card, card_with_rows, compact_dashboard_text, humanize_identifier, metric_row,
+    metric_row_with_key, status_label, status_reason_tooltip, tcp_port_is_open, with_extra_class,
+    with_status, with_status_label, with_status_tooltip, with_table_orientation,
 };
 use self::dashboard_client_budget_diagnostics::*;
 #[allow(unused_imports)]
@@ -50,6 +52,7 @@ use self::dashboard_hero_cards::{
 use self::dashboard_live_latency_compare::{
     live_latency_compare_card, live_latency_compare_status,
 };
+use self::dashboard_overview::{build_headline, build_top_cards};
 pub use self::dashboard_payload::{build_live_summary_payload, build_payload};
 pub use self::dashboard_renderer::render_html;
 #[cfg(test)]
@@ -87,68 +90,6 @@ fn slowest_observe_refresh_stage(snapshot: &Value) -> (Option<String>, Option<u6
     slowest
         .map(|(label, duration_ms)| (Some(label.to_string()), Some(duration_ms)))
         .unwrap_or((None, None))
-}
-
-fn build_headline(snapshot: &Value, captured_at_epoch_ms: u64) -> Value {
-    let pass = snapshot["sla"]["summary"]["pass"].as_u64().unwrap_or(0);
-    let alert = snapshot["sla"]["summary"]["alert"].as_u64().unwrap_or(0);
-    let critical = snapshot["sla"]["summary"]["critical"].as_u64().unwrap_or(0);
-    let unknown = snapshot["sla"]["summary"]["unknown"].as_u64().unwrap_or(0);
-    let token_headline = &snapshot["token_budget_report"]["token_budget_report"]["headline"];
-    let active_agent_headline = &snapshot["active_agent_budget"]["headline"];
-    let sla_status = if critical > 0 {
-        "critical"
-    } else if alert > 0 {
-        "alert"
-    } else if unknown > 0 {
-        "unknown"
-    } else {
-        "pass"
-    };
-    let live_status = live_latency_compare_status(snapshot);
-    let status = combine_headline_statuses(sla_status, live_status);
-    json!({
-        "status": status,
-        "status_label": headline_status_label(status),
-        "status_reason": headline_status_reason(pass, alert, critical, unknown, live_status),
-        "captured_at": human_timestamp(captured_at_epoch_ms),
-        "summary": format!("SLA сейчас: pass={pass}, alert={alert}, critical={critical}, unknown={unknown}"),
-        "token_title": active_agent_headline["title"]
-            .as_str()
-            .or_else(|| token_headline["title"].as_str())
-            .unwrap_or("ещё нет данных"),
-        "token_value": active_agent_headline["value_text"]
-            .as_str()
-            .map(str::to_string)
-            .unwrap_or_else(|| format_percent(token_headline["value_percent"].as_f64())),
-        "token_scope": if active_agent_headline.is_object() { "" } else { token_headline["scope_label"].as_str().unwrap_or("") },
-    })
-}
-
-fn build_top_cards(snapshot: &Value) -> Vec<Value> {
-    vec![
-        live_latency_compare_card(snapshot),
-        working_state_live_card(snapshot),
-    ]
-}
-
-fn humanize_identifier(value: &str) -> String {
-    value
-        .split(['_', '-', '/', ':'])
-        .filter(|part| !part.trim().is_empty())
-        .map(|part| {
-            let mut chars = part.chars();
-            match chars.next() {
-                Some(first) => {
-                    let head = first.to_uppercase().collect::<String>();
-                    let tail = chars.as_str().to_lowercase();
-                    format!("{head}{tail}")
-                }
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn hot_retrieval_benchmark_status(hot_retrieval: &Value, thresholds: &Value) -> &'static str {
@@ -551,81 +492,10 @@ fn live_response_latency_current_thread_file_hints(snapshot: &Value) -> Vec<Stri
         .collect()
 }
 
-fn compact_dashboard_text(value: Option<&str>, max_chars: usize, fallback: &str) -> String {
-    let text = value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(fallback);
-    let count = text.chars().count();
-    if count <= max_chars {
-        return text.to_string();
-    }
-    let truncated = text
-        .chars()
-        .take(max_chars.saturating_sub(1))
-        .collect::<String>();
-    format!("{truncated}…")
-}
-
-fn card_with_rows(
-    title: &str,
-    value: String,
-    note: String,
-    status: &str,
-    source_label: Option<String>,
-    title_tooltip: Option<String>,
-    rows: Vec<Value>,
-) -> Value {
-    json!({
-        "title": title,
-        "value": value,
-        "note": note,
-        "status": status,
-        "status_label": status_label(status),
-        "status_tooltip": Value::Null,
-        "source_label": source_label,
-        "title_tooltip": title_tooltip,
-        "rows": rows,
-    })
-}
-
-fn metric_row(label: &str, value: String, tooltip: Option<&str>) -> Value {
-    json!({
-        "label": label,
-        "value": value,
-        "tooltip": tooltip,
-    })
-}
-
-fn metric_row_with_key(key: &str, label: &str, value: String, tooltip: Option<&str>) -> Value {
-    let mut row = metric_row(label, value, tooltip);
-    if let Some(root) = row.as_object_mut() {
-        root.insert("key".to_string(), Value::from(key));
-    }
-    row
-}
-
 const CLIENT_LIVE_CONTEXT_ROW_KEY: &str = "client_live_context";
 const CLIENT_LIVE_FULL_TURN_SAVINGS_ROW_KEY: &str = "client_live_full_turn_savings";
 const CLIENT_LIVE_LIMIT_ROW_KEY: &str = "client_live_limit";
 const CLIENT_LIMIT_HOURLY_BURN_ROW_KEY: &str = "client_limit_hourly_burn";
-
-fn status_reason_tooltip(status: &str, reasons: Vec<String>, fallback: &str) -> Option<String> {
-    if status == "pass" {
-        return None;
-    }
-    let intro = match status {
-        "critical" => "Статус стал критичным по следующим причинам:",
-        "alert" => "Статус требует внимания по следующим причинам:",
-        "waiting" => "Статус пока не может считаться нормальным по следующим причинам:",
-        _ => "Статус пока не может считаться нормальным по следующим причинам:",
-    };
-    if reasons.is_empty() {
-        Some(format!("{intro}\n- {fallback}"))
-    } else {
-        Some(format!("{intro}\n- {}", reasons.join("\n- ")))
-    }
-}
 
 fn failing_metric_reason_strict_less(
     label: &str,
@@ -894,59 +764,6 @@ fn target_values(snapshot: &Value, targets: &LiveLatencyTableTargets) -> Vec<Str
     ]
 }
 
-fn status_label(status: &str) -> &'static str {
-    match status {
-        "pass" => "в норме",
-        "alert" => "внимание",
-        "critical" => "критично",
-        "waiting" => "ждём подтверждённую выборку",
-        _ => "нет данных",
-    }
-}
-
-fn headline_status_label(status: &str) -> &'static str {
-    match status {
-        "pass" => "система в норме",
-        "alert" => "нужно внимание",
-        "critical" => "есть критичные сигналы",
-        "waiting" => "данных пока мало",
-        _ => "данных пока мало",
-    }
-}
-
-fn headline_status_reason(
-    pass: u64,
-    alert: u64,
-    critical: u64,
-    unknown: u64,
-    live_status: &str,
-) -> String {
-    let mut base = if critical > 0 {
-        format!("Критичных SLA-проверок: {critical}. Предупреждений: {alert}.")
-    } else if alert > 0 {
-        format!("SLA-предупреждений: {alert}. Критичных SLA-проверок нет.")
-    } else if unknown > 0 {
-        format!("Неопределённых SLA-проверок: {unknown}. Остальные зелёные: {pass}.")
-    } else {
-        format!("Все SLA-проверки зелёные: {pass}.")
-    };
-
-    match live_status {
-        "critical" => {
-            base.push_str(" Живой пользовательский поток сейчас в критичном состоянии.");
-        }
-        "alert" => {
-            base.push_str(" Живой пользовательский поток сейчас требует внимания.");
-        }
-        "unknown" => {
-            base.push_str(" По живому пользовательскому потоку пока недостаточно данных.");
-        }
-        _ => {}
-    }
-
-    base
-}
-
 fn assess_live_latency_slice(
     slice: Option<&Value>,
     targets: &LiveLatencyTableTargets,
@@ -1051,25 +868,6 @@ fn combine_live_compare_status(statuses: &[&str]) -> &'static str {
         return "waiting";
     }
     "unknown"
-}
-
-fn combine_headline_statuses(sla_status: &str, live_status: &str) -> &'static str {
-    match live_status {
-        "critical" => "critical",
-        "alert" => {
-            if sla_status == "critical" {
-                "critical"
-            } else {
-                "alert"
-            }
-        }
-        _ => match sla_status {
-            "pass" => "pass",
-            "alert" => "alert",
-            "critical" => "critical",
-            _ => "unknown",
-        },
-    }
 }
 
 fn cold_contour_status(snapshot: &Value) -> &'static str {
