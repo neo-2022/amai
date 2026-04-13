@@ -1,3 +1,6 @@
+use super::dashboard_live_response_latency_support::{
+    live_response_latency_current_thread_file_hints, token_budget_report_root,
+};
 use super::*;
 
 fn plain_working_state_scope(restore: &Value) -> String {

@@ -1,4 +1,227 @@
+use super::dashboard_live_response_latency_support::{
+    live_response_latency_root, token_budget_report_root,
+};
 use super::*;
+
+fn compare_values(snapshot: &Value, slice: Option<&Value>, sample_count: u64) -> Vec<String> {
+    if sample_count == 0 {
+        return vec![
+            "ещё нет данных".to_string(),
+            "ещё нет данных".to_string(),
+            "ещё нет данных".to_string(),
+            "ещё нет данных".to_string(),
+            "0".to_string(),
+        ];
+    }
+    vec![
+        format_ms(
+            snapshot,
+            slice.and_then(|value| value["p50_latency_ms"].as_f64()),
+        ),
+        format_ms(
+            snapshot,
+            slice.and_then(|value| value["p95_latency_ms"].as_f64()),
+        ),
+        format_ms(
+            snapshot,
+            slice.and_then(|value| value["p99_latency_ms"].as_f64()),
+        ),
+        format_ms(
+            snapshot,
+            slice.and_then(|value| value["max_latency_ms"].as_f64()),
+        ),
+        format_u64(Some(sample_count)),
+    ]
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LiveLatencyTableTargets {
+    p50_ms: f64,
+    p95_ms: f64,
+    p99_ms: f64,
+    max_ms: f64,
+    live_readiness_sample_count: u64,
+    benchmark_sample_count: u64,
+}
+
+struct LiveLatencySliceAssessment {
+    status: &'static str,
+    note: String,
+}
+
+fn default_live_latency_table_targets(state: &str) -> LiveLatencyTableTargets {
+    match state {
+        "hot" => LiveLatencyTableTargets {
+            p50_ms: 1.0,
+            p95_ms: 2.0,
+            p99_ms: 3.0,
+            max_ms: 5.0,
+            live_readiness_sample_count: 100,
+            benchmark_sample_count: 100000,
+        },
+        _ => LiveLatencyTableTargets {
+            p50_ms: 2.0,
+            p95_ms: 4.0,
+            p99_ms: 6.0,
+            max_ms: 10.0,
+            live_readiness_sample_count: 100,
+            benchmark_sample_count: 10000,
+        },
+    }
+}
+
+fn live_latency_table_targets(snapshot: &Value, state: &str) -> LiveLatencyTableTargets {
+    let defaults = default_live_latency_table_targets(state);
+    let thresholds = if state == "hot" {
+        &snapshot["thresholds"]["retrieval"]["hot_live_table"]
+    } else {
+        &snapshot["thresholds"]["retrieval"]["cold_live_table"]
+    };
+    LiveLatencyTableTargets {
+        p50_ms: thresholds["target_p50_ms"]
+            .as_f64()
+            .filter(|value| *value > 0.0)
+            .unwrap_or(defaults.p50_ms),
+        p95_ms: thresholds["target_p95_ms"]
+            .as_f64()
+            .filter(|value| *value > 0.0)
+            .unwrap_or(defaults.p95_ms),
+        p99_ms: thresholds["target_p99_ms"]
+            .as_f64()
+            .filter(|value| *value > 0.0)
+            .unwrap_or(defaults.p99_ms),
+        max_ms: thresholds["target_max_ms"]
+            .as_f64()
+            .filter(|value| *value > 0.0)
+            .unwrap_or(defaults.max_ms),
+        live_readiness_sample_count: thresholds["live_readiness_sample_count"]
+            .as_u64()
+            .or_else(|| thresholds["target_sample_count"].as_u64())
+            .filter(|value| *value > 0)
+            .unwrap_or(defaults.live_readiness_sample_count),
+        benchmark_sample_count: thresholds["benchmark_sample_count"]
+            .as_u64()
+            .or_else(|| thresholds["target_sample_count"].as_u64())
+            .filter(|value| *value > 0)
+            .unwrap_or(defaults.benchmark_sample_count),
+    }
+}
+
+fn target_values(snapshot: &Value, targets: &LiveLatencyTableTargets) -> Vec<String> {
+    vec![
+        format_time_threshold(snapshot, Some(targets.p50_ms), "<="),
+        format_time_threshold(snapshot, Some(targets.p95_ms), "<="),
+        format_time_threshold(snapshot, Some(targets.p99_ms), "<="),
+        format_time_threshold(snapshot, Some(targets.max_ms), "<="),
+        format_target_u64(">=", targets.live_readiness_sample_count),
+    ]
+}
+
+fn assess_live_latency_slice(
+    slice: Option<&Value>,
+    targets: &LiveLatencyTableTargets,
+) -> LiveLatencySliceAssessment {
+    let Some(slice) = slice else {
+        return LiveLatencySliceAssessment {
+            status: "unknown",
+            note: "В живом окне ещё не накопилась выборка для этого режима.".to_string(),
+        };
+    };
+
+    let sample_count = slice["sample_count"].as_u64().unwrap_or_default();
+    if sample_count == 0 {
+        return LiveLatencySliceAssessment {
+            status: "unknown",
+            note: "В живом окне ещё не накопилась выборка для этого режима.".to_string(),
+        };
+    }
+
+    let metrics = [
+        ("P50", slice["p50_latency_ms"].as_f64(), targets.p50_ms),
+        ("P95", slice["p95_latency_ms"].as_f64(), targets.p95_ms),
+        ("P99", slice["p99_latency_ms"].as_f64(), targets.p99_ms),
+        ("Max", slice["max_latency_ms"].as_f64(), targets.max_ms),
+    ];
+
+    let missing_metrics = metrics
+        .iter()
+        .filter_map(|(label, value, _)| value.is_none().then_some(*label))
+        .collect::<Vec<_>>();
+    if !missing_metrics.is_empty() {
+        return LiveLatencySliceAssessment {
+            status: "unknown",
+            note: format!(
+                "Часть живых значений ещё не собрана: {}.",
+                missing_metrics.join(", ")
+            ),
+        };
+    }
+
+    let failed_metrics = metrics
+        .iter()
+        .filter_map(|(label, value, target)| {
+            (!value.is_some_and(|value| value <= *target)).then_some(*label)
+        })
+        .collect::<Vec<_>>();
+    let sample_ok = sample_count >= targets.live_readiness_sample_count;
+
+    if !sample_ok {
+        return LiveLatencySliceAssessment {
+            status: "waiting",
+            note: if failed_metrics.is_empty() {
+                format!(
+                    "По задержке всё хорошо, но живое окно ещё мало: {} из >= {}. Строгая проверочная выборка отдельно: > {}.",
+                    format_u64(Some(sample_count)),
+                    format_u64(Some(targets.live_readiness_sample_count)),
+                    format_u64(Some(targets.benchmark_sample_count))
+                )
+            } else {
+                format!(
+                    "Пока рано делать строгий вывод: живое окно ещё мало ({} из >= {}), а текущие значения ещё не лучше эталона по {}. Строгая проверочная выборка отдельно: > {}.",
+                    format_u64(Some(sample_count)),
+                    format_u64(Some(targets.live_readiness_sample_count)),
+                    failed_metrics.join(", "),
+                    format_u64(Some(targets.benchmark_sample_count))
+                )
+            },
+        };
+    }
+
+    if !failed_metrics.is_empty() {
+        return LiveLatencySliceAssessment {
+            status: "critical",
+            note: format!(
+                "Живой эталон уже не выполняется по {}. Живая выборка: {}. Строгая проверочная норма показывается отдельно.",
+                failed_metrics.join(", "),
+                format_u64(Some(sample_count))
+            ),
+        };
+    }
+
+    LiveLatencySliceAssessment {
+        status: "pass",
+        note: format!(
+            "Живой эталон выдержан. Живая выборка: {}. Строгая проверочная норма показывается отдельно.",
+            format_u64(Some(sample_count))
+        ),
+    }
+}
+
+fn combine_live_compare_status(statuses: &[&str]) -> &'static str {
+    if statuses.contains(&"critical") {
+        return "critical";
+    }
+    if statuses.contains(&"alert") {
+        return "alert";
+    }
+    if statuses.iter().all(|status| *status == "pass") {
+        return "pass";
+    }
+    if statuses.contains(&"waiting") {
+        return "waiting";
+    }
+    "unknown"
+}
 
 fn live_latency_compare_status_tooltip(
     overall_status: &str,
