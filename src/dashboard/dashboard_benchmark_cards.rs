@@ -1071,6 +1071,401 @@ pub(super) fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
     ]
 }
 
+fn hot_retrieval_benchmark_status(hot_retrieval: &Value, thresholds: &Value) -> &'static str {
+    combine_statuses(&[
+        status_strict_less_than(
+            hot_retrieval["p50_ms"].as_f64(),
+            thresholds["retrieval"]["hot_live_table"]["target_p50_ms"].as_f64(),
+        ),
+        status_strict_less_than(
+            hot_retrieval["p95_ms"].as_f64(),
+            thresholds["retrieval"]["hot_live_table"]["target_p95_ms"].as_f64(),
+        ),
+        status_strict_less_than(
+            hot_retrieval["p99_ms"].as_f64(),
+            thresholds["retrieval"]["hot_live_table"]["target_p99_ms"].as_f64(),
+        ),
+        status_strict_less_than(
+            hot_retrieval["max_ms"].as_f64(),
+            thresholds["retrieval"]["hot_live_table"]["target_max_ms"].as_f64(),
+        ),
+        status_at_least_or_equal(
+            hot_retrieval["iterations"].as_f64(),
+            thresholds["retrieval"]["hot_benchmark_table"]["target_iterations"].as_f64(),
+        ),
+        status_at_least_or_equal(
+            hot_retrieval["warmup"].as_f64(),
+            thresholds["retrieval"]["hot_benchmark_table"]["target_warmup"].as_f64(),
+        ),
+    ])
+}
+
+fn hot_load_benchmark_reasons(
+    snapshot: &Value,
+    hot_load: &Value,
+    thresholds: &Value,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    let sample_count = hot_load["success_count"]
+        .as_u64()
+        .zip(hot_load["error_count"].as_u64())
+        .map(|(success, errors)| success + errors);
+
+    if let Some(reason) = failing_metric_reason_strict_more(
+        "Burst QPS",
+        hot_load["qps"].as_f64(),
+        thresholds["load"]["hot_qps"]["target"].as_f64(),
+        format_burst_qps_table(hot_load["qps"].as_f64()),
+        format_burst_qps_threshold(thresholds["load"]["hot_qps"]["target"].as_f64(), ">"),
+    ) {
+        reasons.push(reason);
+    }
+    if let Some(reason) = failing_metric_reason_at_most_or_equal(
+        "Error rate",
+        hot_load["error_rate"].as_f64(),
+        thresholds["load"]["hot_error_rate"]["target"].as_f64(),
+        format_percent(hot_load["error_rate"].as_f64()),
+        format_zero_or_at_most_percent(
+            thresholds["load"]["hot_error_rate"]
+                .get("target")
+                .and_then(Value::as_f64),
+        ),
+    ) {
+        reasons.push(reason);
+    }
+    for (label, value_key, target_key) in [
+        ("P50", "p50_ms", "target_p50_ms"),
+        ("P95", "p95_ms", "target_p95_ms"),
+        ("P99", "p99_ms", "target_p99_ms"),
+        ("Max", "max_ms", "target_max_ms"),
+    ] {
+        if let Some(reason) = failing_metric_reason_strict_less(
+            label,
+            hot_load[value_key].as_f64(),
+            thresholds["load"]["hot_benchmark_table"][target_key].as_f64(),
+            format_ms(snapshot, hot_load[value_key].as_f64()),
+            format_time_threshold(
+                snapshot,
+                thresholds["load"]["hot_benchmark_table"][target_key].as_f64(),
+                "<",
+            ),
+        ) {
+            reasons.push(reason);
+        }
+    }
+    if let Some(reason) = failing_metric_reason_strict_more(
+        "Workers",
+        hot_load["workers"].as_f64(),
+        thresholds["load"]["hot_benchmark_table"]["target_workers"].as_f64(),
+        format_u64(hot_load["workers"].as_u64()),
+        format_threshold_at_least(
+            thresholds["load"]["hot_benchmark_table"]["target_workers"].as_f64(),
+            "",
+            0,
+        ),
+    ) {
+        reasons.push(reason);
+    }
+    if let Some(reason) = failing_metric_reason_strict_more(
+        "Выборка",
+        sample_count.map(|value| value as f64),
+        thresholds["load"]["hot_benchmark_table"]["target_sample_count"].as_f64(),
+        format_u64(sample_count),
+        format_threshold_at_least(
+            thresholds["load"]["hot_benchmark_table"]["target_sample_count"].as_f64(),
+            "",
+            0,
+        ),
+    ) {
+        reasons.push(reason);
+    }
+    reasons
+}
+
+fn hot_retrieval_benchmark_reasons(
+    snapshot: &Value,
+    hot_retrieval: &Value,
+    thresholds: &Value,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    for (label, value_key, target_key) in [
+        ("P50", "p50_ms", "target_p50_ms"),
+        ("P95", "p95_ms", "target_p95_ms"),
+        ("P99", "p99_ms", "target_p99_ms"),
+        ("Max", "max_ms", "target_max_ms"),
+    ] {
+        if let Some(reason) = failing_metric_reason_strict_less(
+            label,
+            hot_retrieval[value_key].as_f64(),
+            thresholds["retrieval"]["hot_live_table"][target_key].as_f64(),
+            format_ms(snapshot, hot_retrieval[value_key].as_f64()),
+            format_time_threshold(
+                snapshot,
+                thresholds["retrieval"]["hot_live_table"][target_key].as_f64(),
+                "<",
+            ),
+        ) {
+            reasons.push(reason);
+        }
+    }
+    if let Some(reason) = failing_metric_reason_at_least_or_equal(
+        "Итерации",
+        hot_retrieval["iterations"].as_f64(),
+        thresholds["retrieval"]["hot_benchmark_table"]["target_iterations"].as_f64(),
+        format_u64(hot_retrieval["iterations"].as_u64()),
+        format_threshold_at_least_or_equal(
+            thresholds["retrieval"]["hot_benchmark_table"]["target_iterations"].as_f64(),
+            "",
+            0,
+        ),
+    ) {
+        reasons.push(reason);
+    }
+    if let Some(reason) = failing_metric_reason_at_least_or_equal(
+        "Warmup",
+        hot_retrieval["warmup"].as_f64(),
+        thresholds["retrieval"]["hot_benchmark_table"]["target_warmup"].as_f64(),
+        format_u64(hot_retrieval["warmup"].as_u64()),
+        format_threshold_at_least_or_equal(
+            thresholds["retrieval"]["hot_benchmark_table"]["target_warmup"].as_f64(),
+            "",
+            0,
+        ),
+    ) {
+        reasons.push(reason);
+    }
+    reasons
+}
+
+fn cold_benchmark_reasons(snapshot: &Value, cold_contour: &Value) -> Vec<String> {
+    let mut reasons = Vec::new();
+    let profile = &cold_contour["profile"];
+    let summary = &cold_contour["machine_readable_summary"];
+    for (label, value_key, target_key) in [
+        ("Cold P50", "p50", "target_p50_ms"),
+        ("Cold P95", "p95", "target_p95_ms"),
+        ("Cold P99", "p99", "target_p99_ms"),
+        ("Cold Max", "max", "target_max_ms"),
+    ] {
+        if let Some(reason) = failing_metric_reason_strict_less(
+            label,
+            summary[value_key].as_f64(),
+            profile[target_key].as_f64(),
+            format_ms(snapshot, summary[value_key].as_f64()),
+            format_time_threshold(snapshot, profile[target_key].as_f64(), "<"),
+        ) {
+            reasons.push(reason);
+        }
+    }
+    for (label, value_key, target_key) in [
+        ("Precision", "precision", "min_precision"),
+        ("Recall", "recall", "min_recall"),
+        ("Hit rate", "hit_rate", "min_target_hit_rate"),
+    ] {
+        if let Some(reason) = failing_metric_reason_at_least_or_equal(
+            label,
+            summary[value_key].as_f64().map(|value| value * 100.0),
+            profile[target_key].as_f64().map(|value| value * 100.0),
+            format_ratio_percent(summary[value_key].as_f64()),
+            format_threshold_value(
+                profile[target_key].as_f64().map(|value| value * 100.0),
+                ">=",
+                "%",
+                2,
+            ),
+        ) {
+            reasons.push(reason);
+        }
+    }
+    for (label, value_key, target_key) in [
+        ("Выборка", "sample_count", "min_sample_count"),
+        ("Repo count", "repo_count", "min_repo_count"),
+        ("Query slices", "query_slice_count", "min_query_slice_count"),
+    ] {
+        if let Some(reason) = failing_metric_reason_at_least_or_equal(
+            label,
+            summary[value_key].as_f64(),
+            profile[target_key].as_f64(),
+            format_u64(summary[value_key].as_u64()),
+            format_threshold_at_least_or_equal(profile[target_key].as_f64(), "", 0),
+        ) {
+            reasons.push(reason);
+        }
+    }
+    if let Some(reason) = failing_metric_reason_strict_less(
+        "Duration",
+        summary["duration"].as_f64(),
+        profile["max_duration_seconds"].as_f64(),
+        format_seconds(snapshot, summary["duration"].as_f64()),
+        format_threshold_rendered(
+            "<",
+            format_seconds(snapshot, profile["max_duration_seconds"].as_f64()),
+        ),
+    ) {
+        reasons.push(reason);
+    }
+    if let Some(reason) = failing_metric_reason_at_most_or_equal(
+        "Leakage",
+        summary["leakage"].as_f64(),
+        profile["max_leakage"].as_f64(),
+        format_u64(summary["leakage"].as_u64()),
+        format_threshold_value(profile["max_leakage"].as_f64(), "=", "", 0),
+    ) {
+        reasons.push(reason);
+    }
+    if let Some(reason) = failing_metric_reason_at_most_or_equal(
+        "Error rate",
+        summary["error_rate"].as_f64().map(|value| value * 100.0),
+        profile["max_error_rate"]
+            .as_f64()
+            .map(|value| value * 100.0),
+        format_percent(summary["error_rate"].as_f64()),
+        format_zero_or_at_most_percent(
+            profile["max_error_rate"]
+                .as_f64()
+                .map(|value| value * 100.0),
+        ),
+    ) {
+        reasons.push(reason);
+    }
+    reasons
+}
+
+fn cold_benchmark_progress_reasons(
+    snapshot: &Value,
+    cold_contour: &Value,
+    progress: &Value,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    let completed = progress["progress"]["completed_case_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let target = progress["progress"]["target_case_count"]
+        .as_u64()
+        .unwrap_or(0);
+    reasons.push(format!(
+        "Прогон ещё не завершён: собрано {} из {} cold-case.",
+        format_u64(Some(completed)),
+        format_u64(Some(target))
+    ));
+    if let Some(phase) = progress["phase"].as_str() {
+        reasons.push(format!("Текущая фаза: {phase}."));
+    }
+    if let Some(current_repo_code) = progress["current_repo_code"].as_str() {
+        let current_repo_name = progress["current_repo_display_name"]
+            .as_str()
+            .unwrap_or(current_repo_code);
+        let indexed = progress["progress"]["current_repo_indexed_files"].as_u64();
+        let target = progress["progress"]["current_repo_target_files"].as_u64();
+        if indexed.is_some() || target.is_some() {
+            reasons.push(format!(
+                "Сейчас индексируется репозиторий {}: {} из {} файлов уже записаны в индекс.",
+                current_repo_name,
+                format_u64(indexed),
+                format_u64(target),
+            ));
+        }
+    }
+    if cold_contour["machine_readable_summary"]["sample_count"].as_u64() == Some(0) {
+        reasons.push(
+            "Пока нет ни одного завершённого cold-case, поэтому latency и quality ещё не накопились."
+                .to_string(),
+        );
+        return reasons;
+    }
+    reasons.extend(cold_benchmark_reasons(snapshot, cold_contour));
+    reasons
+}
+
+fn accuracy_benchmark_reasons(accuracy: &Value, thresholds: &Value) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if let Some(reason) = failing_metric_reason_at_most_or_equal(
+        "Leakage",
+        accuracy["cross_project_leakage"].as_f64(),
+        Some(0.0),
+        format_f64_count(accuracy["cross_project_leakage"].as_f64()),
+        "0".to_string(),
+    ) {
+        reasons.push(reason);
+    }
+    if let Some(reason) = failing_metric_reason_at_least_or_equal(
+        "Symbol precision",
+        accuracy["symbol_precision"]
+            .as_f64()
+            .map(|value| value * 100.0),
+        thresholds["accuracy"]["symbol_precision"]["target"]
+            .as_f64()
+            .map(|value| value * 100.0),
+        format_ratio_percent(accuracy["symbol_precision"].as_f64()),
+        format_ratio_percent(thresholds["accuracy"]["symbol_precision"]["target"].as_f64()),
+    ) {
+        reasons.push(reason);
+    }
+    if let Some(reason) = failing_metric_reason_at_least_or_equal(
+        "Semantic precision",
+        accuracy["semantic_precision"]
+            .as_f64()
+            .map(|value| value * 100.0),
+        thresholds["accuracy"]["semantic_precision"]["target"]
+            .as_f64()
+            .map(|value| value * 100.0),
+        format_ratio_percent(accuracy["semantic_precision"].as_f64()),
+        format_ratio_percent(thresholds["accuracy"]["semantic_precision"]["target"].as_f64()),
+    ) {
+        reasons.push(reason);
+    }
+    reasons
+}
+
+fn hot_load_benchmark_status(hot_load: &Value, thresholds: &Value) -> &'static str {
+    let qps_status = status_strict_more_than(
+        hot_load["qps"].as_f64(),
+        thresholds["load"]["hot_qps"]["target"].as_f64(),
+    );
+    let error_status = status_at_most_or_equal(
+        hot_load["error_rate"].as_f64(),
+        thresholds["load"]["hot_error_rate"]["target"].as_f64(),
+    );
+    let p50_status = status_strict_less_than(
+        hot_load["p50_ms"].as_f64(),
+        thresholds["load"]["hot_benchmark_table"]["target_p50_ms"].as_f64(),
+    );
+    let p95_status = status_strict_less_than(
+        hot_load["p95_ms"].as_f64(),
+        thresholds["load"]["hot_benchmark_table"]["target_p95_ms"].as_f64(),
+    );
+    let p99_status = status_strict_less_than(
+        hot_load["p99_ms"].as_f64(),
+        thresholds["load"]["hot_benchmark_table"]["target_p99_ms"].as_f64(),
+    );
+    let max_status = status_strict_less_than(
+        hot_load["max_ms"].as_f64(),
+        thresholds["load"]["hot_benchmark_table"]["target_max_ms"].as_f64(),
+    );
+    let workers_status = status_strict_more_than(
+        hot_load["workers"].as_f64(),
+        thresholds["load"]["hot_benchmark_table"]["target_workers"].as_f64(),
+    );
+    let sample_count = hot_load["success_count"]
+        .as_u64()
+        .zip(hot_load["error_count"].as_u64())
+        .map(|(success, errors)| (success + errors) as f64);
+    let sample_status = status_strict_more_than(
+        sample_count,
+        thresholds["load"]["hot_benchmark_table"]["target_sample_count"].as_f64(),
+    );
+    combine_statuses(&[
+        qps_status,
+        error_status,
+        p50_status,
+        p95_status,
+        p99_status,
+        max_status,
+        workers_status,
+        sample_status,
+    ])
+}
+
 fn compare_table_card(
     title: &str,
     note: String,
@@ -1108,4 +1503,686 @@ fn compare_table_row(label: &str, tooltip: &str, values: Vec<String>) -> Value {
         "tooltip": tooltip,
         "values": values,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn benchmark_cards_name_lanes_explicitly() {
+        let snapshot = json!({
+            "latest_retrieval_load_hot": {
+                "load_verification": {
+                    "captured_at_epoch_ms": 1,
+                    "project": "project_alpha",
+                    "namespace": "review",
+                    "query": "alpha_only_token",
+                    "execution_mode": "hot_cache_only",
+                    "qps": 1224682.0,
+                    "p50_ms": 0.007,
+                    "p95_ms": 0.010,
+                    "p99_ms": 0.015,
+                    "max_ms": 0.439,
+                    "error_rate": 0.0,
+                    "workers": 17,
+                    "success_count": 10013,
+                    "error_count": 0
+                }
+            },
+            "latest_retrieval_hot": {
+                "benchmark": {
+                    "captured_at_epoch_ms": 2,
+                    "project": "project_alpha",
+                    "namespace": "default",
+                    "query": "alpha_runtime_summary",
+                    "disable_cache": false,
+                    "qps": 1661.13,
+                    "p50_ms": 0.000211,
+                    "p95_ms": 0.000271,
+                    "p99_ms": 0.000280,
+                    "max_ms": 0.000280,
+                    "iterations": 20,
+                    "warmup": 3
+                }
+            },
+            "latest_cold_path_benchmark": {
+                "cold_benchmark": {
+                    "captured_at_epoch_ms": 3,
+                    "executive_summary": { "verdict": "TARGET MET" },
+                    "profile": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 12.0,
+                        "target_p99_ms": 13.0,
+                        "target_max_ms": 15.0,
+                        "min_precision": 0.9,
+                        "min_recall": 0.9,
+                        "min_target_hit_rate": 0.9,
+                        "min_sample_count": 100.0,
+                        "min_repo_count": 75.0,
+                        "min_query_slice_count": 200.0,
+                        "max_duration_seconds": 120.0,
+                        "max_leakage": 0.0,
+                        "max_error_rate": 0.0
+                    },
+                    "machine_readable_summary": {
+                        "p50": 1.0,
+                        "p95": 2.0,
+                        "p99": 3.0,
+                        "max": 4.0,
+                        "precision": 1.0,
+                        "recall": 1.0,
+                        "hit_rate": 1.0,
+                        "sample_count": 1000,
+                        "repo_count": 75,
+                        "query_slice_count": 200,
+                        "duration": 10.0,
+                        "leakage": 0,
+                        "error_rate": 0.0
+                    }
+                }
+            },
+            "latest_retrieval_accuracy": {
+                "accuracy_verification": {
+                    "captured_at_epoch_ms": 4,
+                    "cross_project_leakage": 0.0,
+                    "symbol_precision": 1.0,
+                    "semantic_precision": 1.0
+                }
+            },
+            "latest_procedural_benchmark": {
+                "captured_at_epoch_ms": 5,
+                "procedural_benchmark": {
+                    "benchmark_run_state": "dual_line_materialized",
+                    "benchmark_run_state_ru": "обе benchmark-линии materialized",
+                    "benchmark_metric_kind": "procedural_skill_metrics",
+                    "benchmark_with_amai_series": [
+                        { "metric_key": "reuse_quality", "value": 1.0 },
+                        { "metric_key": "bad_skill_suppression", "value": 1.0 },
+                        { "metric_key": "stale_skill_suppression", "value": 1.0 },
+                        { "metric_key": "shadow_to_verified_uplift", "value": 1.0 },
+                        { "metric_key": "evaluator_correctness", "value": 1.0 }
+                    ],
+                    "benchmark_without_amai_series": [
+                        { "metric_key": "reuse_quality", "value": 0.0 },
+                        { "metric_key": "bad_skill_suppression", "value": 1.0 },
+                        { "metric_key": "stale_skill_suppression", "value": 1.0 },
+                        { "metric_key": "shadow_to_verified_uplift", "value": 0.0 },
+                        { "metric_key": "evaluator_correctness", "value": 1.0 }
+                    ],
+                    "benchmark_line_summaries": {
+                        "with_amai": {
+                            "line_code": "with_amai",
+                            "state": "materialized",
+                            "point_count": 5,
+                            "pass_percent": 100.0
+                        },
+                        "without_amai_but_measuring": {
+                            "line_code": "without_amai_but_measuring",
+                            "state": "materialized",
+                            "point_count": 5,
+                            "pass_percent": 60.0,
+                            "reason_ru": "Amai не помогает, но benchmark продолжает измерять procedural lane."
+                        }
+                    },
+                    "benchmark_run_passport": {
+                        "multi_platform_runtime_contract": "platform-neutral benchmark snapshot"
+                    },
+                    "summary": {
+                        "total_metrics": 5,
+                        "passed_metrics": 5,
+                        "pass_percent": 100.0,
+                        "without_amai_series_available": true
+                    },
+                    "procedural_metrics": [
+                        {
+                            "metric_key": "reuse_quality",
+                            "label_ru": "Reuse quality",
+                            "tooltip_ru": "Skill reuse quality",
+                            "passed": true
+                        },
+                        {
+                            "metric_key": "bad_skill_suppression",
+                            "label_ru": "Bad-skill suppression",
+                            "tooltip_ru": "Bad skill suppression",
+                            "passed": true
+                        },
+                        {
+                            "metric_key": "stale_skill_suppression",
+                            "label_ru": "Stale-skill suppression",
+                            "tooltip_ru": "Stale skill suppression",
+                            "passed": true
+                        },
+                        {
+                            "metric_key": "shadow_to_verified_uplift",
+                            "label_ru": "Shadow-to-verified uplift",
+                            "tooltip_ru": "Shadow uplift",
+                            "passed": true
+                        },
+                        {
+                            "metric_key": "evaluator_correctness",
+                            "label_ru": "Evaluator correctness",
+                            "tooltip_ru": "Evaluator correctness",
+                            "passed": true
+                        }
+                    ]
+                }
+            },
+            "latest_memory_benchmark_score": {
+                "_observability": {
+                    "captured_at_epoch_ms": 6
+                },
+                "memory_benchmark_score": {
+                    "bench": "longmemeval",
+                    "dataset": "longmemeval_s_cleaned",
+                    "note": "Baseline scorer: exact/contains match + abstention heuristics. Official upstream scoring not yet implemented.",
+                    "capability_breakdown": {
+                        "longmemeval_overall_accuracy": 0.02,
+                        "longmemeval_abstention_accuracy": 0.0,
+                        "longmemeval_false_answer_rate_on_abstention": 1.0
+                    },
+                    "summary": {
+                        "total": 500,
+                        "missing_prediction": 490,
+                        "abstention_expected": 32
+                    }
+                }
+            },
+            "procedural_benchmark_history": {
+                "history_count": 2,
+                "with_amai_history_count": 2,
+                "without_amai_history_count": 2,
+                "history_rows": [
+                    {
+                        "benchmark_run_id": "procedural-benchmark-1",
+                        "captured_at_epoch_ms": 4,
+                        "benchmark_run_state": "dual_line_materialized",
+                        "with_amai_pass_percent": 80.0,
+                        "without_amai_pass_percent": 40.0
+                    },
+                    {
+                        "benchmark_run_id": "procedural-benchmark-2",
+                        "captured_at_epoch_ms": 5,
+                        "benchmark_run_state": "dual_line_materialized",
+                        "with_amai_pass_percent": 100.0,
+                        "without_amai_pass_percent": 60.0
+                    }
+                ],
+                "with_amai_pass_percent_series": [
+                    { "benchmark_run_id": "procedural-benchmark-1", "captured_at_epoch_ms": 4, "pass_percent": 80.0 },
+                    { "benchmark_run_id": "procedural-benchmark-2", "captured_at_epoch_ms": 5, "pass_percent": 100.0 }
+                ],
+                "without_amai_pass_percent_series": [
+                    { "benchmark_run_id": "procedural-benchmark-1", "captured_at_epoch_ms": 4, "pass_percent": 40.0 },
+                    { "benchmark_run_id": "procedural-benchmark-2", "captured_at_epoch_ms": 5, "pass_percent": 60.0 }
+                ]
+            },
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "load": {
+                    "hot_qps": { "target": 1200000.0 },
+                    "hot_error_rate": { "target": 0.0 },
+                    "hot_benchmark_table": {
+                        "target_p50_ms": 0.012,
+                        "target_p95_ms": 0.015,
+                        "target_p99_ms": 0.020,
+                        "target_max_ms": 0.500,
+                        "target_workers": 16.0,
+                        "target_sample_count": 10000.0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 2.0,
+                        "target_p99_ms": 3.0,
+                        "target_max_ms": 5.0
+                    },
+                    "hot_benchmark_table": {
+                        "target_iterations": 20.0,
+                        "target_warmup": 3.0
+                    }
+                },
+                "accuracy": {
+                    "symbol_precision": { "target": 0.99 },
+                    "semantic_precision": { "target": 0.98 }
+                }
+            },
+            "sla": {
+                "checks": [
+                    { "metric": "accuracy.cross_project_leakage", "status": "pass" },
+                    { "metric": "accuracy.symbol_precision", "status": "pass" },
+                    { "metric": "accuracy.semantic_precision", "status": "pass" }
+                ]
+            }
+        });
+
+        let cards = build_benchmark_cards(&snapshot);
+        let titles: Vec<&str> = cards
+            .iter()
+            .filter_map(|card| card["title"].as_str())
+            .collect();
+        assert_eq!(cards[0]["title"].as_str(), Some("Нагрузка после прогрева"));
+        assert_eq!(cards[1]["title"].as_str(), Some("Повторный запрос"));
+        assert!(
+            cards[0]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Он не равен retrieval.hot_p95_ms")
+        );
+        assert!(
+            cards[1]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("источник SLA-метрики retrieval.hot_p95_ms")
+        );
+        assert_eq!(cards[1]["headline_value"].as_str(), Some("271 ns"));
+        assert_eq!(
+            cards[0]["table"]["rows"][0]["values"][0].as_str(),
+            Some("> 1200000\nBurst QPS")
+        );
+        assert_eq!(
+            cards[0]["table"]["rows"][0]["values"][1].as_str(),
+            Some("1224682\nBurst QPS")
+        );
+        assert_eq!(
+            cards[0]["table"]["rows"][5]["values"][0].as_str(),
+            Some("= 0.00%")
+        );
+        assert_eq!(
+            cards[1]["table"]["rows"][0]["values"][0].as_str(),
+            Some("нет SLA-порога")
+        );
+        assert_eq!(
+            cards[1]["table"]["rows"][1]["values"][1].as_str(),
+            Some("211 ns")
+        );
+        assert_eq!(
+            cards[1]["table"]["rows"][2]["values"][1].as_str(),
+            Some("271 ns")
+        );
+        assert_eq!(
+            cards[1]["table"]["rows"][3]["values"][1].as_str(),
+            Some("280 ns")
+        );
+        assert_eq!(
+            cards[1]["table"]["rows"][4]["values"][1].as_str(),
+            Some("280 ns")
+        );
+        assert_eq!(
+            cards[1]["table"]["rows"][5]["values"][0].as_str(),
+            Some(">= 20")
+        );
+        assert_eq!(
+            cards[1]["table"]["rows"][6]["values"][0].as_str(),
+            Some(">= 3")
+        );
+        assert_eq!(
+            cards[2]["table"]["rows"][8]["values"][0].as_str(),
+            Some(">= 75")
+        );
+        assert_eq!(
+            cards[3]["table"]["rows"][1]["values"][0].as_str(),
+            Some("99.00%")
+        );
+        assert_eq!(
+            cards[3]["table"]["rows"][2]["values"][0].as_str(),
+            Some("98.00%")
+        );
+        assert_eq!(
+            cards[3]["headline_value"].as_str(),
+            Some("утечки 0 • symbol 100.00% • semantic 100.00%")
+        );
+        assert_eq!(
+            cards[3]["extra_class"].as_str(),
+            Some("benchmark-span-full")
+        );
+        assert_eq!(cards[3]["table_orientation"].as_str(), Some("transposed"));
+        assert_eq!(cards[4]["title"].as_str(), Some("Память и изоляция"));
+        assert_eq!(cards[4]["status"].as_str(), Some("critical"));
+        assert_eq!(
+            cards[4]["headline_value"].as_str(),
+            Some("500 кейсов • overall 2.00% • abstention 0.00%")
+        );
+        assert_eq!(
+            cards[4]["table"]["rows"][0]["values"][1].as_str(),
+            Some("longmemeval")
+        );
+        assert_eq!(
+            cards[4]["table"]["rows"][2]["values"][1].as_str(),
+            Some("500")
+        );
+        assert_eq!(
+            cards[4]["table"]["rows"][5]["values"][1].as_str(),
+            Some("100.00%")
+        );
+        assert_eq!(
+            cards[4]["table"]["rows"][6]["values"][1].as_str(),
+            Some("490")
+        );
+        assert!(
+            cards[4]["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Missing predictions")
+        );
+        assert_eq!(cards[5]["title"].as_str(), Some("Навыки и память действий"));
+        assert_eq!(
+            cards[5]["headline_value"].as_str(),
+            Some(
+                "5 из 5 skill-метрик подтверждены с Amai (100.00%); линия без Amai materialized отдельно"
+            )
+        );
+        assert_eq!(cards[5]["status"].as_str(), Some("pass"));
+        assert!(
+            cards[5]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("generic memory score запрещён")
+        );
+        assert!(
+            cards[5]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Линия без Amai materialized отдельно")
+        );
+        assert_eq!(
+            cards[5]["benchmark_metric_kind"].as_str(),
+            Some("procedural_skill_metrics")
+        );
+        assert_eq!(
+            cards[5]["benchmark_run_state"].as_str(),
+            Some("dual_line_materialized")
+        );
+        assert_eq!(
+            cards[5]["without_amai_series_available"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][0]["label"].as_str(),
+            Some("Metric kind")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][0]["values"][1].as_str(),
+            Some("procedural_skill_metrics")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][1]["values"][1].as_str(),
+            Some("dual_line_materialized (обе benchmark-линии materialized)")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][3]["values"][1].as_str(),
+            Some("materialized")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][4]["values"][1].as_str(),
+            Some("5")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][5]["values"][1].as_str(),
+            Some("materialized")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][6]["values"][1].as_str(),
+            Some("platform-neutral benchmark snapshot")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][7]["label"].as_str(),
+            Some("История benchmark")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][7]["values"][1].as_str(),
+            Some("2")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][8]["values"][1].as_str(),
+            Some("2")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][9]["values"][1].as_str(),
+            Some("2")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][10]["label"].as_str(),
+            Some("Reuse quality")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][14]["values"][1].as_str(),
+            Some("pass")
+        );
+        assert_eq!(
+            cards[5]["benchmark_with_amai_history_series"]
+                .as_array()
+                .map(|items| items.len()),
+            Some(2)
+        );
+        assert_eq!(
+            cards[5]["benchmark_without_amai_history_series"]
+                .as_array()
+                .map(|items| items.len()),
+            Some(2)
+        );
+        assert!(titles.contains(&"Память и изоляция"));
+    }
+
+    #[test]
+    fn cold_benchmark_card_switches_to_live_progress_when_run_is_active() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 120_000u64,
+            "cold_path_benchmark_progress": {
+                "cold_benchmark_progress": {
+                    "state": "running",
+                    "captured_at_epoch_ms": 10,
+                    "started_at_epoch_ms": 0,
+                    "phase": "running",
+                    "progress": {
+                        "completed_case_count": 128,
+                        "target_case_count": 442,
+                        "current_repo_indexed_files": 512,
+                        "current_repo_target_files": 800
+                    },
+                    "current_repo_code": "amai",
+                    "current_repo_display_name": "Amai",
+                    "profile": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 5.0,
+                        "target_p99_ms": 10.0,
+                        "target_max_ms": 15.0,
+                        "min_precision": 0.997,
+                        "min_recall": 0.997,
+                        "min_target_hit_rate": 0.997,
+                        "min_sample_count": 1000.0,
+                        "min_repo_count": 75.0,
+                        "min_query_slice_count": 200.0,
+                        "max_duration_seconds": 10.0,
+                        "max_leakage": 0.0,
+                        "max_error_rate": 0.0
+                    },
+                    "machine_readable_summary": {
+                        "p50": 1.345,
+                        "p95": 1.777,
+                        "p99": 2.307,
+                        "max": 6.529,
+                        "precision": 1.0,
+                        "recall": 1.0,
+                        "hit_rate": 1.0,
+                        "sample_count": 128,
+                        "repo_count": 32,
+                        "query_slice_count": 64,
+                        "duration": 9.5,
+                        "run_wall_clock_duration": 312.0,
+                        "leakage": 0,
+                        "error_rate": 0.0
+                    }
+                }
+            },
+            "latest_retrieval_load_hot": {
+                "load_verification": { "success_count": 0, "error_count": 0 }
+            },
+            "latest_retrieval_hot": {
+                "benchmark": {}
+            },
+            "latest_cold_path_benchmark": {
+                "cold_benchmark": {
+                    "captured_at_epoch_ms": 3,
+                    "executive_summary": { "verdict": "NOT MET" },
+                    "profile": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 5.0,
+                        "target_p99_ms": 10.0,
+                        "target_max_ms": 15.0,
+                        "min_precision": 0.997,
+                        "min_recall": 0.997,
+                        "min_target_hit_rate": 0.997,
+                        "min_sample_count": 1000.0,
+                        "min_repo_count": 75.0,
+                        "min_query_slice_count": 200.0,
+                        "max_duration_seconds": 10.0,
+                        "max_leakage": 0.0,
+                        "max_error_rate": 0.0
+                    },
+                    "machine_readable_summary": {
+                        "p50": 9.0,
+                        "p95": 11.0,
+                        "p99": 13.0,
+                        "max": 18.0,
+                        "precision": 0.5,
+                        "recall": 0.5,
+                        "hit_rate": 0.5,
+                        "sample_count": 9,
+                        "repo_count": 4,
+                        "query_slice_count": 9,
+                        "duration": 999.0,
+                        "leakage": 1,
+                        "error_rate": 0.1
+                    }
+                }
+            },
+            "latest_retrieval_accuracy": {
+                "accuracy_verification": {
+                    "captured_at_epoch_ms": 4,
+                    "cross_project_leakage": 0.0,
+                    "symbol_precision": 1.0,
+                    "semantic_precision": 1.0
+                }
+            },
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "load": {
+                    "hot_qps": { "target": 1200000.0 },
+                    "hot_error_rate": { "target": 0.0 },
+                    "hot_benchmark_table": {
+                        "target_p50_ms": 0.012,
+                        "target_p95_ms": 0.015,
+                        "target_p99_ms": 0.020,
+                        "target_max_ms": 0.500,
+                        "target_workers": 16.0,
+                        "target_sample_count": 10000.0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 2.0,
+                        "target_p99_ms": 3.0,
+                        "target_max_ms": 5.0
+                    },
+                    "hot_benchmark_table": {
+                        "target_iterations": 20.0,
+                        "target_warmup": 3.0
+                    }
+                },
+                "accuracy": {
+                    "symbol_precision": { "target": 0.99 },
+                    "semantic_precision": { "target": 0.98 }
+                }
+            },
+            "sla": {
+                "checks": [
+                    { "metric": "accuracy.cross_project_leakage", "status": "pass" },
+                    { "metric": "accuracy.symbol_precision", "status": "pass" },
+                    { "metric": "accuracy.semantic_precision", "status": "pass" }
+                ]
+            }
+        });
+
+        let cards = build_benchmark_cards(&snapshot);
+        let cold_card = &cards[2];
+        assert_eq!(cold_card["status"].as_str(), Some("waiting"));
+        assert_eq!(cold_card["status_label"].as_str(), Some("идёт прогон"));
+        assert!(
+            cold_card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("обновляются по мере прогона")
+        );
+        assert_eq!(
+            cold_card["table"]["columns"][2]["label"].as_str(),
+            Some("Онлайн\nсейчас")
+        );
+        assert_eq!(
+            cold_card["table"]["rows"][0]["label"].as_str(),
+            Some("Прогресс")
+        );
+        assert_eq!(
+            cold_card["table"]["rows"][0]["values"][1].as_str(),
+            Some("128 из 442")
+        );
+        assert_eq!(
+            cold_card["table"]["rows"][1]["values"][1].as_str(),
+            Some("120 s")
+        );
+        assert_eq!(
+            cold_card["table"]["rows"][2]["values"][0].as_str(),
+            Some("Amai")
+        );
+        assert_eq!(
+            cold_card["table"]["rows"][2]["values"][1].as_str(),
+            Some("512 из 800")
+        );
+        assert_eq!(
+            cold_card["table"]["rows"][4]["values"][1].as_str(),
+            Some("1.777 ms")
+        );
+        assert_eq!(
+            cold_card["table"]["rows"][13]["values"][1].as_str(),
+            Some("9.5 s")
+        );
+        assert!(
+            cold_card["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Сейчас индексируется репозиторий Amai")
+        );
+    }
 }
