@@ -1317,3 +1317,277 @@ pub(super) fn artifact_cleanup_warning(
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn synthetic_machine_summary(
+        disk_available_gib: f64,
+        disk_used_percent: Option<f64>,
+    ) -> MachineSummary {
+        MachineSummary {
+            cpu_model: "Synthetic CPU".to_string(),
+            logical_cpus: 8,
+            physical_cpus: Some(4),
+            cpu_usage_percent: Some(12.0),
+            cpu_temperature_celsius: None,
+            cpu_max_mhz: Some(4200.0),
+            cpu_source_label: "synthetic".to_string(),
+            total_memory_gib: 64.0,
+            available_memory_gib: 48.0,
+            used_memory_gib: 16.0,
+            memory_used_percent: Some(25.0),
+            memory_type: "DDR5".to_string(),
+            memory_speed_label: "5600 MT/s".to_string(),
+            memory_source_label: "synthetic".to_string(),
+            swap_total_gib: 16.0,
+            swap_used_gib: 0.0,
+            disk_device: Some("/dev/nvme0n1".to_string()),
+            disk_model: "Synthetic NVMe".to_string(),
+            disk_kind: "NVMe SSD".to_string(),
+            disk_source_label: "synthetic".to_string(),
+            disk_total_gib: 1900.0,
+            disk_available_gib,
+            disk_used_percent,
+            disk_busy_percent: None,
+            disk_read_mib_per_sec: None,
+            disk_write_mib_per_sec: None,
+            disk_temperature_celsius: None,
+            disk_firmware: "test".to_string(),
+            accelerators: Vec::<AcceleratorSummary>::new(),
+        }
+    }
+
+    #[test]
+    fn artifact_cleanup_warning_surfaces_large_unmanaged_root() {
+        let snapshot = json!({
+            "artifact_cleanup": {
+                "selected_reclaimable_bytes": 0,
+                "aggressive_preview_reclaimable_bytes": 0,
+                "repo_inventory": {
+                    "out_of_policy_bytes": 200_239_479_576u64,
+                    "unmanaged_alert_triggered": true,
+                    "large_unmanaged_roots": [
+                        {
+                            "path": "output/windows-vm-lab",
+                            "unmanaged_bytes": 199_715_979_264u64
+                        }
+                    ],
+                    "manual_only_targets": [
+                        {
+                            "path": "output/windows-vm-lab"
+                        }
+                    ]
+                }
+            }
+        });
+        let warning = artifact_cleanup_warning(&snapshot, None).expect("warning");
+        assert!(warning.contains("вне cleanup policy"));
+        assert!(warning.contains("output/windows-vm-lab"));
+        assert!(
+            warning.contains("observe cleanup-artifacts --target output/windows-vm-lab --apply")
+        );
+    }
+
+    #[test]
+    fn artifact_cleanup_card_surfaces_policy_retained_hot_storage_as_waiting() {
+        let snapshot = json!({
+            "artifact_cleanup": {
+                "captured_at_epoch_ms": 42,
+                "selected": 0,
+                "selected_reclaimable_bytes": 0,
+                "policy_retained_reclaimable_bytes": 18_460_613_632u64,
+                "policy_retained_targets": [
+                    {
+                        "path": "target/debug",
+                        "ttl_hours": 168,
+                        "keep_latest": 3,
+                        "aggressive_preview_reclaimable_bytes": 16_254_702_590u64
+                    }
+                ],
+                "manual_only_reclaimable_bytes": 0,
+                "manual_only_reclaimable_targets": [],
+                "expired": 0,
+                "kept_latest": 13,
+                "protected": 0,
+                "targets_scanned": 8,
+                "aggressive_preview_selected": 19,
+                "aggressive_preview_reclaimable_bytes": 32_577_450_367u64,
+                "last_apply": {
+                    "captured_at_epoch_ms": 41,
+                    "mode": "aggressive",
+                    "deleted": 1,
+                    "reclaimed_bytes": 28_888_311_035u64
+                },
+                "repo_inventory": {
+                    "repo_total_bytes": 35_728_482_155u64,
+                    "cleanup_scope_bytes": 32_698_373_188u64,
+                    "out_of_policy_bytes": 3_030_108_967u64,
+                    "unmanaged_alert_triggered": false,
+                    "large_unmanaged_roots": [],
+                    "manual_only_targets": [
+                        {
+                            "path": "output/windows-vm-lab",
+                            "ttl_hours": 24,
+                            "keep_latest": 2,
+                            "total_bytes": 15_079_381u64
+                        }
+                    ],
+                    "unreadable_paths_count": 1
+                }
+            }
+        });
+        let cards = build_machine_cards(&snapshot, None, None);
+        let cleanup_card = cards
+            .iter()
+            .find(|card| card["title"].as_str() == Some("Локальный мусор и retention"))
+            .expect("cleanup card");
+        assert_eq!(cleanup_card["status"].as_str(), Some("waiting"));
+        assert_eq!(cleanup_card["value"].as_str(), Some("17.19 GiB ждёт TTL"));
+        let operator_row = cleanup_card["rows"]
+            .as_array()
+            .expect("cleanup rows")
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Operator reclaim next"))
+            .expect("operator reclaim row");
+        assert!(
+            operator_row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("observe cleanup-artifacts --target target/debug --aggressive --apply")
+        );
+        let warning = artifact_cleanup_warning(&snapshot, None).expect("warning");
+        assert!(warning.contains("policy-covered"));
+        assert!(warning.contains("TTL/keep-latest"));
+        assert!(warning.contains("target/debug"));
+        assert!(warning.contains("--aggressive --apply"));
+    }
+
+    #[test]
+    fn artifact_cleanup_card_escalates_policy_retained_hot_storage_under_disk_pressure() {
+        let snapshot = json!({
+            "artifact_cleanup": {
+                "captured_at_epoch_ms": 42,
+                "selected": 0,
+                "selected_reclaimable_bytes": 0,
+                "policy_retained_reclaimable_bytes": 18_460_613_632u64,
+                "policy_retained_targets": [
+                    {
+                        "path": "target/debug",
+                        "ttl_hours": 168,
+                        "keep_latest": 3,
+                        "aggressive_preview_reclaimable_bytes": 16_254_702_590u64
+                    }
+                ],
+                "manual_only_reclaimable_bytes": 0,
+                "manual_only_reclaimable_targets": [],
+                "disk_pressure_thresholds": {
+                    "alert_used_percent": 85.0,
+                    "critical_used_percent": 92.0,
+                    "alert_available_gib": 150.0,
+                    "critical_available_gib": 60.0
+                },
+                "expired": 0,
+                "kept_latest": 13,
+                "protected": 0,
+                "targets_scanned": 8,
+                "aggressive_preview_selected": 19,
+                "aggressive_preview_reclaimable_bytes": 32_577_450_367u64,
+                "last_apply": {
+                    "captured_at_epoch_ms": 41,
+                    "mode": "aggressive",
+                    "deleted": 1,
+                    "reclaimed_bytes": 28_888_311_035u64
+                },
+                "repo_inventory": {
+                    "repo_total_bytes": 35_728_482_155u64,
+                    "cleanup_scope_bytes": 32_698_373_188u64,
+                    "out_of_policy_bytes": 3_030_108_967u64,
+                    "unmanaged_alert_triggered": false,
+                    "large_unmanaged_roots": [],
+                    "manual_only_targets": [],
+                    "unreadable_paths_count": 1
+                }
+            }
+        });
+        let machine = synthetic_machine_summary(48.0, Some(94.0));
+        let cards = build_machine_cards(&snapshot, Some(&machine), None);
+        let cleanup_card = cards
+            .iter()
+            .find(|card| card["title"].as_str() == Some("Локальный мусор и retention"))
+            .expect("cleanup card");
+        assert_eq!(cleanup_card["status"].as_str(), Some("critical"));
+        let warning = artifact_cleanup_warning(&snapshot, Some(&machine)).expect("warning");
+        assert!(warning.contains("давление"));
+        assert!(warning.contains("target/debug"));
+        assert!(warning.contains("--aggressive --apply"));
+    }
+
+    #[test]
+    fn artifact_cleanup_card_surfaces_unreadable_samples_as_best_effort_note() {
+        let snapshot = json!({
+            "artifact_cleanup": {
+                "captured_at_epoch_ms": 42,
+                "selected": 0,
+                "selected_reclaimable_bytes": 0,
+                "policy_retained_reclaimable_bytes": 18_460_613_632u64,
+                "policy_retained_targets": [
+                    {
+                        "path": "target/debug",
+                        "ttl_hours": 168,
+                        "keep_latest": 3,
+                        "aggressive_preview_reclaimable_bytes": 16_254_702_590u64
+                    }
+                ],
+                "manual_only_reclaimable_bytes": 0,
+                "manual_only_reclaimable_targets": [],
+                "expired": 0,
+                "kept_latest": 13,
+                "protected": 0,
+                "targets_scanned": 8,
+                "aggressive_preview_selected": 19,
+                "aggressive_preview_reclaimable_bytes": 32_577_450_367u64,
+                "last_apply": {
+                    "captured_at_epoch_ms": 41,
+                    "mode": "aggressive",
+                    "deleted": 1,
+                    "reclaimed_bytes": 28_888_311_035u64
+                },
+                "repo_inventory": {
+                    "repo_total_bytes": 35_728_482_155u64,
+                    "cleanup_scope_bytes": 32_698_373_188u64,
+                    "out_of_policy_bytes": 3_030_108_967u64,
+                    "unmanaged_alert_triggered": false,
+                    "large_unmanaged_roots": [],
+                    "manual_only_targets": [],
+                    "unreadable_paths_count": 1,
+                    "unreadable_paths_sample": [
+                        "/home/art/agent-memory-index/state/postgres/pgdata"
+                    ]
+                }
+            }
+        });
+        let cards = build_machine_cards(&snapshot, None, None);
+        let cleanup_card = cards
+            .iter()
+            .find(|card| card["title"].as_str() == Some("Локальный мусор и retention"))
+            .expect("cleanup card");
+        assert!(
+            cleanup_card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("best-effort lower bound")
+        );
+        let unreadable_row = cleanup_card["rows"]
+            .as_array()
+            .expect("cleanup rows")
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Unreadable sample"))
+            .expect("unreadable sample row");
+        assert_eq!(
+            unreadable_row["value"].as_str(),
+            Some("/home/art/agent-memory-index/state/postgres/pgdata")
+        );
+    }
+}

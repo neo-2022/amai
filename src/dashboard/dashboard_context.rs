@@ -35,3 +35,13 @@ pub(super) fn load_install_state(repo_root: &Path) -> Result<Option<InstallState
         serde_json::from_str(&content).context("failed to parse dashboard install state")?;
     Ok(Some(state))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_url_rewrites_unspecified_v4() {
+        assert_eq!(browser_base_url("0.0.0.0:9464"), "http://127.0.0.1:9464");
+    }
+}

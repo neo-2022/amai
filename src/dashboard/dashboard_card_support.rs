@@ -186,3 +186,16 @@ pub(super) fn with_status_label(mut card: Value, status_label: &str) -> Value {
     }
     card
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monitoring_url_reuses_dashboard_host() {
+        assert_eq!(
+            monitoring_url("http://demo-host:9464", "59090"),
+            "http://demo-host:59090"
+        );
+    }
+}

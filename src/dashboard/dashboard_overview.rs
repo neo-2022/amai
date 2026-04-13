@@ -108,3 +108,173 @@ fn combine_headline_statuses(sla_status: &str, live_status: &str) -> &'static st
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn top_cards_split_live_retrieval_from_real_workline() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1774239286880u64,
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 2.0,
+                        "target_p99_ms": 3.0,
+                        "target_max_ms": 5.0,
+                        "target_sample_count": 100000
+                    },
+                    "cold_live_table": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 4.0,
+                        "target_p99_ms": 6.0,
+                        "target_max_ms": 10.0,
+                        "target_sample_count": 10000
+                    }
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "latency_slices": [
+                            {
+                                "state": "hot",
+                                "sample_count": 100001,
+                                "p50_latency_ms": 0.4,
+                                "p95_latency_ms": 0.7,
+                                "p99_latency_ms": 1.2,
+                                "max_latency_ms": 2.5
+                            },
+                            {
+                                "state": "cold",
+                                "sample_count": 10001,
+                                "p50_latency_ms": 1.2,
+                                "p95_latency_ms": 2.1,
+                                "p99_latency_ms": 3.4,
+                                "max_latency_ms": 5.2
+                            }
+                        ]
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "captured_at_epoch_ms": 1774239281880u64,
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_age_ms": 15u64,
+                    "events_count": 3u64,
+                    "current_goal": "Amai observability guardrail proof materialized",
+                    "next_step": "Вывести guardrail verdict в dashboard/service layer.",
+                    "last_command": "continuity handoff",
+                    "last_results_summary": "Зафиксирован handoff для art :: continuity",
+                    "latest_decision_trace": {
+                        "included": [
+                            {
+                                "strategy": "exact_documents",
+                                "count": 1,
+                                "reason": "Нашлись точные document/path совпадения внутри видимого контура."
+                            }
+                        ],
+                        "not_included": [
+                            {
+                                "strategy": "semantic_chunks",
+                                "reason": "Semantic layer честно abstained и не добавил фрагменты."
+                            }
+                        ]
+                    },
+                    "active_files": [
+                        "/home/art/agent-memory-index/src/observe.rs",
+                        "/home/art/agent-memory-index/src/dashboard.rs"
+                    ],
+                    "recent_queries": [],
+                    "restore_confidence": "preliminary"
+                }
+            },
+            "agent_scope_activity": {
+                "client_recent_window_minutes": 30,
+                "client_recent_thread_count": 1,
+                "client_recent_threads": [
+                    {
+                        "thread_id": "019d16f2-528d-7cc0-bcfe-8984f95f05c7",
+                        "cwd": "/home/art/Art",
+                        "rollout_path": "/home/art/.codex/sessions/2026/03/22/rollout-2026-03-22T22-07-52-019d16f2-528d-7cc0-bcfe-8984f95f05c7.jsonl",
+                        "title": "продолжай по Amai continuity",
+                        "agent_nickname": "Amai",
+                        "agent_role": "continuity",
+                        "model_provider": "openai",
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "xhigh",
+                        "updated_at_epoch_ms": 1774239285880u64
+                    }
+                ],
+                "active_now_count": 1,
+                "active_now_scopes": [
+                    {
+                        "agent_scope": "art::continuity::default",
+                        "owner_thread_id": "019d16f2-528d-7cc0-bcfe-8984f95f05c7",
+                        "heartbeat_at_epoch_ms": 1774239285880u64
+                    }
+                ],
+                "recent_scope_window_hours": 24,
+                "recent_scope_count": 3,
+                "recent_scopes": [
+                    {
+                        "agent_scope": "art::continuity::default",
+                        "captured_at_epoch_ms": 1774239285880u64
+                    },
+                    {
+                        "agent_scope": "bug_bounty::continuity::default",
+                        "captured_at_epoch_ms": 1774239200000u64
+                    }
+                ]
+            }
+        });
+
+        let cards = build_top_cards(&snapshot);
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0]["title"].as_str(), Some("Скорость ответа"));
+        assert_eq!(cards[1]["title"].as_str(), Some("Текущая работа"));
+        assert!(
+            cards[0]["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty()
+        );
+        assert!(
+            cards[1]["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Уверенность в этом рабочем снимке пока")
+        );
+        assert!(
+            cards[1]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Короткая сводка по текущей работе")
+        );
+        assert!(cards[1]["rows"].as_array().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row["label"].as_str() == Some("Что дальше"))
+        }));
+    }
+}
