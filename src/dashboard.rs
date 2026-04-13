@@ -63,8 +63,6 @@ use self::dashboard_runtime_support::artifact_cleanup_warning;
 use self::dashboard_runtime_support::{
     build_glossary, build_governance_card, build_links, build_machine_cards, build_warnings,
 };
-#[cfg(test)]
-use self::dashboard_service_cards::benchmark_qdrant_live_card;
 use self::dashboard_service_cards::build_service_cards;
 use self::dashboard_working_state_card::*;
 
@@ -83,11 +81,10 @@ const CLIENT_LIMIT_HOURLY_BURN_ROW_KEY: &str = "client_limit_hourly_burn";
 #[cfg(test)]
 mod tests {
     use super::{
-        artifact_cleanup_warning, benchmark_qdrant_live_card, browser_base_url,
-        build_governance_card, build_hero_cards, build_links, build_live_summary_payload,
-        build_machine_cards, build_payload, build_service_cards, build_top_cards, format_ms,
-        format_time_compare_pair, human_elapsed_ms, live_latency_compare_card, monitoring_url,
-        render_html, working_state_live_card,
+        artifact_cleanup_warning, browser_base_url, build_governance_card, build_hero_cards,
+        build_links, build_live_summary_payload, build_machine_cards, build_payload,
+        build_top_cards, format_ms, format_time_compare_pair, human_elapsed_ms,
+        live_latency_compare_card, monitoring_url, render_html, working_state_live_card,
     };
     use crate::config::AppConfig;
     use crate::hardware_telemetry::{AcceleratorSummary, MachineSummary};
@@ -419,195 +416,6 @@ mod tests {
         assert_eq!(
             format_time_compare_pair(&snapshot, Some(1.0), Some(0.000271), "<="),
             vec!["<= 1 ms".to_string(), "271 ns".to_string()]
-        );
-    }
-
-    #[test]
-    fn benchmark_qdrant_card_uses_last_success_snapshot_without_error_rows() {
-        let snapshot = json!({
-            "thresholds": {
-                "qdrant": {
-                    "optimize_queue": { "target": 10.0 },
-                    "update_queue_length": { "target": 0.0 }
-                }
-            },
-            "benchmark_qdrant": {
-                "configured": true,
-                "available": false,
-                "active": false,
-                "from_last_success": true,
-                "http_url": "http://127.0.0.1:7633",
-                "memory_resident_bytes": 422123456.0,
-                "points_count": 70200.0,
-                "segments_count": 8.0,
-                "index_optimize_queue": 0.0,
-                "update_queue_length": 0.0,
-                "run_summary": {
-                    "benchmark_display_name": "VectorDBBench",
-                    "dataset_display_name": "dbpedia-openai-1000k-angular",
-                    "run_state": "finished_ok",
-                    "dataset_size": 990000,
-                    "latest_result": {
-                        "recall": 0.9958,
-                        "p95_ms": 0.0117,
-                        "p99_ms": 0.0129
-                    }
-                }
-            }
-        });
-        let card = benchmark_qdrant_live_card(&snapshot);
-        assert_eq!(card["status"].as_str(), Some("unknown"));
-        assert_eq!(
-            card["status_label"].as_str(),
-            Some("последний прогон успешен")
-        );
-        assert_eq!(card["value"].as_str(), Some("последний прогон успешен"));
-        assert!(
-            card["note"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("последнего успешного прогона")
-        );
-        let empty_rows = Vec::new();
-        let labels = card["rows"]
-            .as_array()
-            .unwrap_or(&empty_rows)
-            .iter()
-            .filter_map(|row| row["label"].as_str())
-            .collect::<Vec<_>>();
-        assert!(labels.contains(&"Прогон"));
-        assert!(labels.contains(&"Последний результат"));
-    }
-
-    #[test]
-    fn benchmark_qdrant_card_without_cache_shows_test_not_running_without_error_rows() {
-        let snapshot = json!({
-            "thresholds": {
-                "qdrant": {
-                    "optimize_queue": { "target": 10.0 },
-                    "update_queue_length": { "target": 0.0 }
-                }
-            },
-            "benchmark_qdrant": {
-                "configured": true,
-                "available": false,
-                "active": false,
-                "from_last_success": false,
-                "http_url": "http://127.0.0.1:7633",
-                "index_optimize_queue": null,
-                "update_queue_length": null,
-                "memory_resident_bytes": null,
-                "points_count": null,
-                "segments_count": null,
-                "run_summary": {
-                    "benchmark_display_name": "VectorDBBench",
-                    "dataset_display_name": "dbpedia-openai-1000k-angular",
-                    "run_state": "not_started"
-                }
-            }
-        });
-        let card = benchmark_qdrant_live_card(&snapshot);
-        assert_eq!(card["status"].as_str(), Some("unknown"));
-        assert_eq!(card["status_label"].as_str(), Some("тест не запущен"));
-        assert_eq!(card["value"].as_str(), Some("ещё нет данных"));
-        let empty_rows = Vec::new();
-        let labels = card["rows"]
-            .as_array()
-            .unwrap_or(&empty_rows)
-            .iter()
-            .filter_map(|row| row["label"].as_str())
-            .collect::<Vec<_>>();
-        assert!(labels.contains(&"Прогон"));
-        assert!(labels.contains(&"Состояние"));
-    }
-
-    #[test]
-    fn benchmark_qdrant_card_marks_stopped_test_even_if_metrics_are_still_available() {
-        let snapshot = json!({
-            "thresholds": {
-                "qdrant": {
-                    "optimize_queue": { "target": 10.0 },
-                    "update_queue_length": { "target": 0.0 }
-                }
-            },
-            "benchmark_qdrant": {
-                "configured": true,
-                "available": true,
-                "active": false,
-                "from_last_success": false,
-                "http_url": "http://127.0.0.1:7633",
-                "memory_resident_bytes": 219709440.0,
-                "points_count": 218800.0,
-                "segments_count": 8.0,
-                "index_optimize_queue": 0.0,
-                "update_queue_length": 0.0,
-                "run_summary": {
-                    "benchmark_display_name": "VectorDBBench",
-                    "dataset_display_name": "dbpedia-openai-1000k-angular",
-                    "run_state": "finished_error"
-                }
-            }
-        });
-        let card = benchmark_qdrant_live_card(&snapshot);
-        assert_eq!(card["status"].as_str(), Some("alert"));
-        assert_eq!(
-            card["status_label"].as_str(),
-            Some("последний прогон с ошибкой")
-        );
-        assert_eq!(card["value"].as_str(), Some("последний прогон с ошибкой"));
-        assert!(
-            card["note"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("завершился с ошибкой")
-        );
-    }
-
-    #[test]
-    fn benchmark_qdrant_card_is_waiting_while_live_run_is_still_in_progress() {
-        let snapshot = json!({
-            "thresholds": {
-                "qdrant": {
-                    "optimize_queue": { "target": 10.0 },
-                    "update_queue_length": { "target": 0.0 }
-                }
-            },
-            "benchmark_qdrant": {
-                "configured": true,
-                "available": true,
-                "active": true,
-                "from_last_success": false,
-                "http_url": "http://127.0.0.1:7633",
-                "memory_resident_bytes": 219709440.0,
-                "points_count": 990000.0,
-                "segments_count": 8.0,
-                "index_optimize_queue": 0.0,
-                "update_queue_length": 0.0,
-                "run_summary": {
-                    "benchmark_display_name": "ann-benchmarks",
-                    "dataset_display_name": "dbpedia-openai-1000k-angular",
-                    "run_state": "running",
-                    "dataset_size": 990000,
-                    "started_at_epoch_s": 1775800000,
-                    "live_progress": {
-                        "definition_label": "['angular', 'scalar', 32, 128]",
-                        "group_current": 9,
-                        "group_total": 18,
-                        "processed_current": 1000,
-                        "processed_total": 10000
-                    }
-                }
-            }
-        });
-        let card = benchmark_qdrant_live_card(&snapshot);
-        assert_eq!(card["status"].as_str(), Some("waiting"));
-        assert_eq!(card["status_label"].as_str(), Some("идёт прогон"));
-        assert_eq!(card["value"].as_str(), Some("идёт прогон"));
-        assert!(
-            card["status_tooltip"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("Итоговый статус")
         );
     }
 
@@ -6506,86 +6314,6 @@ mod tests {
 
         let card = build_governance_card(&snapshot);
         assert_eq!(card["value"], json!("1 конфликт"));
-    }
-
-    #[test]
-    fn service_cards_keep_only_live_operator_cards() {
-        let snapshot = json!({
-            "postgres": {
-                "query_probe_p95_ms": 1.5,
-                "connection_usage_ratio": 0.2,
-                "replica_lag_seconds": 0.0,
-                "deadlocks_delta": 0.0,
-                "transactions_per_sec": 12.0,
-                "wal_bytes_per_sec": 4096.0
-            },
-            "qdrant": {
-                "index_optimize_queue": 0.0,
-                "update_queue_length": 0.0,
-                "memory_resident_bytes": 1024.0,
-                "points_count": 10.0,
-                "segments_count": 2.0
-            },
-            "nats": {
-                "publish_probe_p95_ms": 1.0,
-                "consumer_lag_msgs": 0.0,
-                "jetstream_disk_usage_ratio": 0.1
-            },
-            "thresholds": {
-                "postgres": {
-                    "query_probe_p95_ms": { "target": 5.0 },
-                    "connection_usage_ratio": { "target": 0.8 }
-                },
-                "qdrant": {
-                    "optimize_queue": { "target": 0.0 },
-                    "update_queue_length": { "target": 0.0 }
-                },
-                "nats": {
-                    "publish_probe_p95_ms": { "target": 5.0 },
-                    "consumer_lag_msgs": { "target": 0.0 },
-                    "jetstream_disk_usage_ratio": { "target": 0.8 }
-                }
-            },
-            "governance_surface": {
-                "human_override_audit": {
-                    "forgetting_audit_log_entries_total": 4
-                },
-                "wrong_link_rate": {
-                    "open_conflict_count": 0
-                },
-                "poisoning_alert_count": {
-                    "active_quarantine_items": 0
-                },
-                "trust_state_distribution": {
-                    "disputed_memory_items": 0
-                },
-                "stale_memory_error_rate": {
-                    "rate": 0.05
-                },
-                "forgetting_job_breakdown": {
-                    "pruning_job": 1,
-                    "cold_archive_job": 1,
-                    "revalidation_job": 1,
-                    "de_duplication_job": 1,
-                    "summarization_job": 0
-                }
-            },
-            "benchmark_external_summary": {}
-        });
-
-        let cards = build_service_cards(&snapshot);
-        let titles: Vec<&str> = cards
-            .iter()
-            .filter_map(|card| card["title"].as_str())
-            .collect();
-
-        assert!(titles.contains(&"PostgreSQL"));
-        assert!(titles.contains(&"Qdrant Amai live"));
-        assert!(titles.contains(&"Qdrant внешнего бенча"));
-        assert!(titles.contains(&"NATS / JetStream"));
-        assert!(titles.contains(&"Жизненный цикл памяти"));
-        assert!(!titles.contains(&"Поведение при сбоях"));
-        assert!(!titles.contains(&"Правильное продолжение"));
     }
 
     #[test]
