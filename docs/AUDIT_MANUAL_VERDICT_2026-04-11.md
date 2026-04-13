@@ -223,7 +223,7 @@
 - крупные bounded-context файлы остаются очень большими даже после уже выполненных split-pass:
   - `src/token_budget.rs` 28700
   - `src/postgres.rs` 35584
-  - `src/dashboard.rs` 20855
+  - `src/dashboard.rs` 18235
   - `src/observe.rs` 13726
   - `src/working_state.rs` 11099
   - `src/continuity.rs` 10655
@@ -740,6 +740,8 @@
   - dashboard install/browser context helpers вынесены в `src/dashboard/dashboard_context.rs`.
   - dashboard card/status + monitoring URL helpers вынесены в `src/dashboard/dashboard_card_support.rs`.
   - dashboard renderer/template слой вынесен в `src/dashboard/dashboard_renderer.rs` + `src/dashboard/dashboard_template.html`; `src/dashboard.rs` больше не тащит встроенный HTML-монолит.
+  - dashboard client-budget / host-current-thread-control / reply-gate support contour вынесен в `src/dashboard/dashboard_client_budget_support.rs`; `src/dashboard.rs` больше не держит рядом target-selector helpers, same-thread host-control effect/selection logic, global-limit guard helpers, client-turn pressure heuristics и live client-budget payload support. Во время выноса закрыт self-consistency defect: pure-burn rotate path снова materialize-ит `blocking=true`, `must_rotate_before_reply=true` и `rotate_chat_only` blocking contract, как требуют dashboard/continuity tests.
+  - dashboard working-state / live-turn current-work contour вынесен в `src/dashboard/dashboard_working_state_card.rs`; `src/dashboard.rs` больше не смешивает restore summarization, same-thread live-turn fallback, active-file hint projection и `working_state_live_card` assembly с соседними benchmark/service/report helpers. После выноса targeted dashboard tests подтверждают контрактную эквивалентность `working_state` card.
   - token-budget exact-client-limits cache/resolution contour вынесен в `src/token_budget/dashboard_exact_client_limits.rs`; `src/token_budget.rs` больше не держит рядом persisted schema, shared cache I/O и live resolution logic для этого dashboard-boundary.
   - token-budget shared hint/dedupe contour вынесен в `src/token_budget/dashboard_shared_hints.rs`; `src/token_budget.rs` больше не смешивает active-thread-hint и continuity-restore dedupe cache helpers с соседними dashboard cache lanes.
   - token-budget dashboard event caches вынесены в `src/token_budget/dashboard_event_caches.rs`; `src/token_budget.rs` больше не держит рядом persisted schema и shared cache I/O для token-events/current-session/live-turn-retrieval cache lanes.
