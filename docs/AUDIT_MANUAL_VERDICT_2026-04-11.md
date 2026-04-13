@@ -734,6 +734,11 @@
 - operator UX cleanup:
   - operator commands теперь идут через `./scripts/amai_exec.sh` (binary-first);
   - build chatter подавляется по умолчанию, лог сохраняется в `state/logs/`.
+- benchmark runtime self-consistency cleanup:
+  - `src/external_benchmark.rs` больше не подхватывает чужой live ANN surrogate только по общему `--dataset` marker;
+  - untracked ANN detection и runtime `running` revival теперь repo-root bound через ожидаемый `upstream_clone_dir`;
+  - benchmark test-fixture temp roots больше не конфликтуют между параллельными тестами;
+  - `cargo test --quiet benchmark_ -- --nocapture` снова проходит целиком, без ложного drift в `benchmark_run_summary_*`.
 
 ### Queue 3: structural refactors
 
