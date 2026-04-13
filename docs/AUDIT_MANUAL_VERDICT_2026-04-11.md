@@ -130,18 +130,19 @@
 **Evidence**
 - `scripts/agent_preflight.sh`, `scripts/proof_cold_benchmark_canonical.sh`, `scripts/proof_procedural_benchmark.sh`, `scripts/proof_procedural_seed.sh`, `scripts/proof_procedural_shadow_review.sh`, `scripts/proof_negative_procedural_memory.sh`, `scripts/proof_shared_promotion_by_approval.sh`, `scripts/proof_skill_refinement_contour.sh`, `scripts/proof_skill_version_history.sh` сейчас существуют;
 - следовательно, исходный `missing scripts` block устарел;
-- абсолютные path-bound ссылки сведены к минимуму и не считаются operator-truth source;
+- `rg -n '/home/art/agent-memory-index' AGENTS.md README.md docs config` теперь находит только intentionally workspace-bound startup law в `AGENTS.md` и self-referential audit grep lines, а не широкий слой canonical docs/config drift.
 
 **Риск**
 - missing-scripts часть уже не live;
-- portability / relocation drift остаётся live проблемой.
+- broad canonical portability drift в docs/config больше не подтверждается, но managed startup contracts и generated runtime artifacts по-прежнему остаются workspace-bound by design.
 
 **Нужна ли правка сейчас**
-- да.
+- нет как live blocker.
 
 **Какой exact fix path**
-- довести cleanup абсолютных repo-root ссылок в canonical docs и generated artifacts до repo-local или parameterized form;
-- отделить допустимые path-specific operator examples от source-of-truth ссылок.
+- удерживать разделение:
+  - public canonical docs/config должны оставаться repo-local или parameterized;
+  - intentionally workspace-bound startup contracts допустимы только в `AGENTS.md` managed block и generated `.amai` artifacts.
 
 **Какой proof/smoke обязателен после исправления**
 - `rg -n '/home/art/agent-memory-index' AGENTS.md README.md docs config`
@@ -153,29 +154,29 @@
 ### 4. P0: repo не воспроизводим офлайн
 
 **Ручной verdict**
-- `частично`
+- `устарело`
 
 **Evidence**
-- `cargo test --workspace --all-targets --no-run --offline` на текущей машине проходит;
-- `.cargo/` каталог существует, но внутри нет materialized config/registry policy;
-- `vendor/` отсутствует;
-- значит deterministic offline reproducibility не закреплена как repo contract, даже если локальная машина уже прогрета кэшем.
+- `vendor/` materialized в repo;
+- `.cargo/config.toml` явно переводит `crates-io` на `vendored-sources`;
+- `./scripts/proof_offline_no_run_build.sh` проходит и подтверждает no-run build path на пустом `CARGO_HOME` с `--offline --locked`.
 
 **Риск**
-- зависимость от warm local cargo cache остаётся;
-- это слабый supply-chain/reproducibility baseline.
+- live P0 больше не подтверждается;
+- остаётся только обычный риск поддержки vendored dependency layer и offline proof в актуальном состоянии.
 
 **Нужна ли правка сейчас**
-- да.
+- нет.
 
 **Какой exact fix path**
-- материализовать reproducible offline strategy:
-  - либо `cargo vendor` + `.cargo/config.toml`;
-  - либо document/CI-attested internal mirror strategy;
-- закрепить это в repo и CI, а не оставлять как свойство конкретной машины.
+- уже materialized:
+  - `vendor/`
+  - `.cargo/config.toml`
+  - `./scripts/proof_offline_no_run_build.sh`
+- дальше только удерживать этот contract через CI/hygiene contour.
 
 **Какой proof/smoke обязателен после исправления**
-- fresh-environment `cargo test --workspace --all-targets --no-run --offline`
+- `./scripts/proof_offline_no_run_build.sh`
 - CI job без доступа к crates.io
 
 ---
@@ -219,17 +220,17 @@
 - `подтверждено`
 
 **Evidence**
-- текущие размеры ещё больше audit snapshot:
-  - `src/token_budget.rs` 35637
-  - `src/postgres.rs` 35580
-  - `src/dashboard.rs` 26739
-  - `src/observe.rs` 13718
+- крупные bounded-context файлы остаются очень большими даже после уже выполненных split-pass:
+  - `src/token_budget.rs` 28700
+  - `src/postgres.rs` 35584
+  - `src/dashboard.rs` 20855
+  - `src/observe.rs` 13726
   - `src/working_state.rs` 11099
-  - `src/continuity.rs` 10652
-  - `src/mcp.rs` 7697
+  - `src/continuity.rs` 10655
+  - `src/mcp.rs` 7559
   - `src/external_benchmark.rs` 6933
   - `src/retrieval.rs` 6521
-- `cargo fmt --check` сейчас продолжает падать на drift как минимум в `src/continuity.rs` и `src/observe.rs`.
+- `cargo fmt --check` уже проходит, поэтому formatting-drift часть этого подпункта устарела.
 
 **Риск**
 - bounded-context границы размыты;
@@ -254,27 +255,26 @@
 ### 7. P1: security / ops baseline не production-grade
 
 **Ручной verdict**
-- `подтверждено`
+- `частично`
 
 **Evidence**
-- `compose.yaml` публикует host ports для Postgres, Qdrant, MinIO, NATS, Prometheus, Grafana;
-- `config/nats/server.conf` слушает `0.0.0.0:4222` и `0.0.0.0:8222`, при этом нет named users/passwords;
-- `.env.example` содержит `change_me`, `minioadmin`, а Prometheus/Grafana задаются через `latest`;
-- `src/postgres.rs` содержит:
-  - `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ami TO {user};`
+- `.env.example` уже фиксирует `AMI_STACK_BIND_HOST=127.0.0.1`, `AMI_PROMETHEUS_IMAGE=prom/prometheus:v3.4.1`, `AMI_GRAFANA_IMAGE=grafana/grafana:11.6.1`;
+- `./scripts/proof_ops_security_defaults.sh` проходит и подтверждает loopback-only published ports плюс rendered postgres host-access contract;
+- `./scripts/proof_app_db_role_read_only.sh` проходит, а `ensure_app_role()` теперь даёт только `GRANT SELECT ON ALL TABLES IN SCHEMA ami TO {user};`;
+- при этом `config/nats/server.conf.tpl` в default local/dev profile всё ещё слушает `0.0.0.0`, а auth block остаётся optional contour, а не mandatory default.
 
 **Риск**
-- baseline годится для local/dev/lab, но не для hardened deployment.
+- local/dev baseline уже materially hardened;
+- но default profile по-прежнему нельзя путать с production-grade hardened deployment.
 
 **Нужна ли правка сейчас**
-- да.
+- да, но как near-term hardening, а не как raw baseline failure.
 
 **Какой exact fix path**
-- подготовить hardened default profile:
-  - закрыть лишние host-port exposures;
-  - ввести auth/TLS story для NATS/MinIO/Postgres;
-  - убрать `latest` tags;
-  - документировать least-privilege DB role model.
+- сохранить dual-profile truth:
+  - default profile остаётся local/dev-safe;
+  - hardened profile должен оставаться runnable и proof-backed для production-like deployment;
+- если нужен ещё более жёсткий baseline, следующий шаг — продвинуть auth/TLS/NATS hardening из optional contour в stronger default deployment path.
 
 **Какой proof/smoke обязателен после исправления**
 - hardened compose bring-up
@@ -330,14 +330,14 @@
 
 **Риск**
 - missing-entry-doc часть устарела;
-- overload/reference sprawl остаются.
+- overload/reference sprawl остаются, но canonical absolute repo-root drift в public docs в основном уже снят.
 
 **Нужна ли правка сейчас**
 - да, как doc hygiene/hardening.
 
 **Какой exact fix path**
 - сохранить `AGENT_START_HERE` как canonical short entry;
-- дальше ужать повторяющиеся narrative blocks и уменьшить число абсолютных path-bound ссылок.
+- дальше ужать повторяющиеся narrative blocks; absolute path-bound cleanup в public docs уже в основном закрыт и не должен снова расползаться.
 
 **Какой proof/smoke обязателен после исправления**
 - `cargo run --quiet -- bootstrap agent-preflight --json`
@@ -348,22 +348,26 @@
 ### 10. P1: cold benchmark / external corpus не self-contained
 
 **Ручной verdict**
-- `подтверждено`
+- `частично`
 
 **Evidence**
 - `config/cold_repo_pool_seed.tsv` требует `../Art`, `../my_langgraph_agent`, `../agent-RegArt` и большой набор внешних git repos;
 - `config/cold_benchmark_manifest.toml` содержит cases на внешние corpus paths.
+- при этом repo уже materialize-ит self-contained mandatory tier:
+  - `config/cold_benchmark_self_contained.toml`
+  - `./scripts/proof_cold_benchmark_self_contained.sh`
+  - живой proof сейчас проходит.
 
 **Риск**
-- reproducible benchmark path зависит от внешнего corpus окружения;
-- это снижает доверие к benchmark portability.
+- mandatory repo-local cold benchmark path уже self-contained;
+- expanded corpus profile всё ещё зависит от внешнего benchmark окружения, поэтому broad benchmark portability закрыта не полностью.
 
 **Нужна ли правка сейчас**
-- да.
+- да, но уже не как immediate blocker.
 
 **Какой exact fix path**
-- выделить self-contained fixture tier для mandatory cold benchmark;
-- external corpus оставить как expanded profile с pinned revisions/checksums.
+- удерживать self-contained tier как mandatory baseline;
+- external corpus оставлять как expanded profile с pinned revisions/checksums и явным non-mandatory статусом.
 
 **Какой proof/smoke обязателен после исправления**
 - self-contained cold benchmark run на clean machine
@@ -660,9 +664,9 @@
 
 ### Queue 1: immediate blockers
 
-- Довести reproducibility contract до deterministic offline story, а не rely-on-cache.
-- Дочистить remaining absolute repo-root ссылки из canonical docs/config/generated surfaces.
-- Добавить CI checks на:
+- Remaining Queue 1 work:
+  - удерживать уже закрытый offline/portability baseline и не давать ему деградировать обратно;
+  - добавить CI checks на:
   - startup/doc/script drift
   - broken/missing path refs
   - executable bits for runnable proof scripts
