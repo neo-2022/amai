@@ -263,30 +263,6 @@ pub fn upsert_document(
     Ok(())
 }
 
-pub fn get_cached_document_by_path(
-    path: &Path,
-    project_code: &str,
-    namespace_code: &str,
-    relative_path: &str,
-) -> Result<Option<String>> {
-    let conn = Connection::open(path)?;
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT content
-        FROM cached_documents
-        WHERE project_code = ?1
-          AND namespace_code = ?2
-          AND relative_path = ?3
-        LIMIT 1
-        "#,
-    )?;
-    let mut rows = stmt.query(params![project_code, namespace_code, relative_path])?;
-    let Some(row) = rows.next()? else {
-        return Ok(None);
-    };
-    Ok(Some(row.get(0)?))
-}
-
 pub fn get_cached_document_snippet_by_path(
     path: &Path,
     project_code: &str,
@@ -316,29 +292,6 @@ pub fn get_cached_document_snippet_by_path(
         relative_path,
         max_bytes as i64
     ])?;
-    let Some(row) = rows.next()? else {
-        return Ok(None);
-    };
-    Ok(Some(row.get(0)?))
-}
-
-pub fn get_cached_document_by_project_path(
-    path: &Path,
-    project_code: &str,
-    relative_path: &str,
-) -> Result<Option<String>> {
-    let conn = Connection::open(path)?;
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT content
-        FROM cached_documents
-        WHERE project_code = ?1
-          AND relative_path = ?2
-        ORDER BY cached_at DESC
-        LIMIT 1
-        "#,
-    )?;
-    let mut rows = stmt.query(params![project_code, relative_path])?;
     let Some(row) = rows.next()? else {
         return Ok(None);
     };

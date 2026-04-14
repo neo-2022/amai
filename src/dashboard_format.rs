@@ -504,3 +504,94 @@ pub(crate) fn human_elapsed_ms(value_ms: u64) -> String {
         parts.join(" ")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn elapsed_label_is_compact() {
+        assert_eq!(human_elapsed_ms(30_000), "меньше минуты");
+        assert_eq!(human_elapsed_ms(61_000), "1 мин.");
+        assert_eq!(human_elapsed_ms(3_720_000), "1 ч. 2 мин.");
+    }
+
+    #[test]
+    fn format_ms_uses_dashboard_timing_policy_from_snapshot() {
+        let snapshot = json!({
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.0005,
+                        "switch_to_microseconds_below_ms": 2.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "below timer floor",
+                        "seconds_suffix": "secs",
+                        "milliseconds_suffix": "millis",
+                        "microseconds_suffix": "micros",
+                        "nanoseconds_suffix": "nanos",
+                        "seconds_decimals": 2,
+                        "milliseconds_decimals": 2,
+                        "microseconds_decimals": 1,
+                        "nanoseconds_decimals": 0
+                    }
+                }
+            }
+        });
+
+        assert_eq!(format_ms(&snapshot, Some(0.0)), "below timer floor");
+        assert_eq!(format_ms(&snapshot, Some(0.0004)), "400 nanos");
+        assert_eq!(format_ms(&snapshot, Some(0.0015)), "1.5 micros");
+        assert_eq!(format_ms(&snapshot, Some(2.3456)), "2.35 millis");
+        assert_eq!(format_ms(&snapshot, Some(2345.6)), "2.35 secs");
+    }
+
+    #[test]
+    fn format_ms_falls_back_to_default_dashboard_timing_policy_when_missing() {
+        let snapshot = json!({});
+
+        assert_eq!(format_ms(&snapshot, Some(0.0)), "0 ns");
+        assert_eq!(format_ms(&snapshot, Some(0.0004)), "400 ns");
+        assert_eq!(format_ms(&snapshot, Some(0.0015)), "1.5 µs");
+        assert_eq!(format_ms(&snapshot, Some(2.3456)), "2.346 ms");
+        assert_eq!(format_ms(&snapshot, Some(2345.6)), "2.346 s");
+    }
+
+    #[test]
+    fn compare_time_pair_uses_one_row_unit_for_target_and_current() {
+        let snapshot = json!({
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                }
+            }
+        });
+
+        assert_eq!(
+            format_time_compare_pair(&snapshot, Some(1.0), Some(0.674), "<="),
+            vec!["<= 1 ms".to_string(), "0.674 ms".to_string()]
+        );
+        assert_eq!(
+            format_time_compare_pair(&snapshot, Some(0.015), Some(0.003226), "<="),
+            vec!["<= 15 µs".to_string(), "3.226 µs".to_string()]
+        );
+        assert_eq!(
+            format_time_compare_pair(&snapshot, Some(1.0), Some(0.000271), "<="),
+            vec!["<= 1 ms".to_string(), "271 ns".to_string()]
+        );
+    }
+}

@@ -2067,7 +2067,8 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use crate::working_state;
+    use serde_json::{Value, json};
 
     #[test]
     fn client_live_limit_metric_row_surfaces_remaining_budget() {
@@ -2457,5 +2458,2175 @@ mod tests {
             payload["reply_prefix_source"],
             json!("global_client_limit_hourly_burn")
         );
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_triggers_on_large_thread_with_weak_full_turn_share() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "events_total": 4,
+                        "counted_events": 2,
+                        "verified_effective_saved_tokens": 445,
+                        "verified_effective_savings_pct": 78.76,
+                        "started_at_epoch_ms": 1,
+                        "ended_at_epoch_ms": 2,
+                        "median_recovery_tokens": 0.0,
+                        "answer_like_rate": 50.0,
+                        "answer_like_counted_events": 2,
+                        "verified_answer_like_savings_pct": 78.76,
+                        "verified_baseline_tokens": 565,
+                        "verified_delivered_tokens": 120,
+                        "verified_recovery_tokens": 0,
+                        "excluded_events_count": 2,
+                        "excluded_effective_saved_tokens": 0,
+                        "total_naive_tokens": 565,
+                        "total_context_tokens": 120,
+                        "effective_savings_pct": 78.76,
+                        "total_effective_saved_tokens": 445,
+                        "total_recovery_tokens": 0
+                    },
+                    "rolling_window": {
+                        "events_total": 0,
+                        "counted_events": 0
+                    },
+                    "lifetime": {
+                        "events_total": 0,
+                        "counted_events": 0
+                    },
+                    "statement_previews": {
+                        "current_session": {
+                            "verified_observed_whole_cycle_with_amai_tokens": 206274,
+                            "client_limit_meter_alignment": {
+                                "same_meter_as_client_limit": true,
+                                "exact_pair_status": {
+                                    "exact_pair_available": true
+                                },
+                                "strict_client_meter_slice": {
+                                    "lower_bound_tokens": 206719
+                                },
+                                "explicit_boundary_surface": {
+                                    "blocks_full_same_meter_equivalence": false
+                                }
+                            }
+                        }
+                    },
+                    "statement_export_previews": {
+                        "lifetime": {}
+                    },
+                    "client_live_meter": {
+                        "status": "observed",
+                        "thread_binding_state": "current_thread_bound",
+                        "current_thread_bound": true,
+                        "thread_id": "019d4eb1-3e92-75e3-b22b-2bdf21f13885",
+                        "client_turn_total_tokens": 206274,
+                        "latest_model_context_window": 258400,
+                        "context_used_percent": 79.82739938080495,
+                        "primary_limit_remaining_percent": 28.0,
+                        "secondary_limit_remaining_percent": 78.0
+                    },
+                    "profile": {
+                        "display_name": "Обычная рабочая машина"
+                    }
+                }
+            }
+        });
+
+        let cards = build_hero_cards(&snapshot);
+        assert_eq!(cards[0]["status"].as_str(), Some("critical"));
+        assert_eq!(
+            cards[0]["status_label"].as_str(),
+            Some("сожми текущий чат сейчас")
+        );
+        assert!(
+            cards[0]["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("внешний лимит клиента уже горит быстрее")
+        );
+        let row = cards[0]["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Следующее действие"))
+            .expect("next action row");
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("compact window")
+        );
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("проверь effect")
+        );
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_stays_off_for_light_live_turn() {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 95.0
+        });
+        let current_live_turn = json!({
+            "status": "observed",
+            "retrieval_context_pack_count": 1
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 22000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 8.51,
+            "primary_limit_remaining_percent": 74.0,
+            "secondary_limit_remaining_percent": 91.0
+        });
+        assert!(
+            super::client_turn_pressure_guard(
+                &meter,
+                Some((22420, 22000, 420, 1.87)),
+                &hourly_burn,
+                &current_live_turn
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_triggers_on_nearly_exhausted_primary_limit_even_below_70pct() {
+        let hourly_burn = json!({});
+        let current_live_turn = json!({});
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 178971,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 69.26,
+            "primary_limit_remaining_percent": 3.0,
+            "secondary_limit_remaining_percent": 71.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((179416, 178971, 445, 0.25)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_triggers_early_when_exact_full_turn_pair_is_missing() {
+        let hourly_burn = json!({});
+        let current_live_turn = json!({});
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 118116,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 45.71,
+            "primary_limit_remaining_percent": 61.0,
+            "secondary_limit_remaining_percent": 88.0
+        });
+        let guard =
+            super::client_turn_pressure_guard(&meter, None, &hourly_burn, &current_live_turn)
+                .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+        assert!(
+            super::client_turn_pressure_tooltip(guard, None, false,).contains("слишком раздут")
+        );
+    }
+
+    #[test]
+    fn client_turn_pressure_tooltip_surfaces_same_thread_host_control_when_present() {
+        let hourly_burn = json!({});
+        let current_live_turn = json!({});
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 118116,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 45.71,
+            "primary_limit_remaining_percent": 61.0,
+            "secondary_limit_remaining_percent": 88.0
+        });
+        let guard =
+            super::client_turn_pressure_guard(&meter, None, &hourly_burn, &current_live_turn)
+                .expect("pressure guard");
+        let bundle = json!({
+            "host_current_thread_control": working_state::build_host_current_thread_control_surface()
+        });
+        let tooltip = super::client_turn_pressure_tooltip(guard, Some(&bundle), false);
+        assert!(tooltip.contains("same-thread host surface"));
+        assert!(tooltip.contains("thread-overlay-open-current"));
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_triggers_when_exact_full_turn_savings_are_tiny() {
+        let hourly_burn = json!({});
+        let current_live_turn = json!({});
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 140921,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 54.54,
+            "primary_limit_remaining_percent": 61.0,
+            "secondary_limit_remaining_percent": 88.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((141366, 140921, 445, 0.31)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_blocks_earlier_for_negligible_exact_savings() {
+        let hourly_burn = json!({});
+        let current_live_turn = json!({});
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 90000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 34.83,
+            "primary_limit_remaining_percent": 82.0,
+            "secondary_limit_remaining_percent": 95.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((90106, 90000, 106, 0.12)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_recommends_rotate_even_earlier_for_small_negligible_gain() {
+        let hourly_burn = json!({});
+        let current_live_turn = json!({});
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 74000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 28.64,
+            "primary_limit_remaining_percent": 82.0,
+            "secondary_limit_remaining_percent": 95.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((74072, 74000, 72, 0.1)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "alert");
+        assert_eq!(guard.status_label, "новый чат рекомендован");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_escalates_to_critical_when_primary_budget_is_nearly_burned() {
+        let hourly_burn = json!({});
+        let current_live_turn = json!({});
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 118116,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 45.71,
+            "primary_limit_remaining_percent": 1.0,
+            "secondary_limit_remaining_percent": 88.0
+        });
+        let guard =
+            super::client_turn_pressure_guard(&meter, None, &hourly_burn, &current_live_turn)
+                .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_early_when_5h_kpi_overspends_without_amai_activity() {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "overspend",
+            "kpi_percent": 2100.0,
+            "reply_prefix": "5ч KPI: переплата 2100.00%"
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn"
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 172361,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 66.7,
+            "primary_limit_remaining_percent": 86.0,
+            "secondary_limit_remaining_percent": 98.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((172361, 172361, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_now_when_5h_kpi_overspends_with_weak_live_gain() {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "overspend",
+            "kpi_percent": 180.0,
+            "reply_prefix": "5ч KPI: переплата 180.00%"
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 175432,
+                "with_amai_tokens": 172361,
+                "saved_tokens": 3071,
+                "saved_pct": 1.750
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 172361,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 66.7,
+            "primary_limit_remaining_percent": 86.0,
+            "secondary_limit_remaining_percent": 98.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((175432, 172361, 3071, 1.75)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_now_for_overspend_large_thread_even_with_fresh_budget() {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "overspend",
+            "kpi_percent": 110.0,
+            "reply_prefix": "5ч KPI: переплата 110.00%"
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 206720,
+                "with_amai_tokens": 206274,
+                "saved_tokens": 446,
+                "saved_pct": 0.22
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 206274,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 79.83,
+            "primary_limit_remaining_percent": 92.0,
+            "secondary_limit_remaining_percent": 98.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((206720, 206274, 446, 0.22)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_now_for_huge_overspend_thread_before_primary_limit_softens()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "overspend",
+            "kpi_percent": 205.0,
+            "reply_prefix": "5ч KPI: переплата 205.00%"
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 206720,
+                "with_amai_tokens": 206274,
+                "saved_tokens": 446,
+                "saved_pct": 0.22
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 245000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 94.8,
+            "primary_limit_remaining_percent": 92.0,
+            "secondary_limit_remaining_percent": 98.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((245630, 245000, 630, 0.25)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_now_for_huge_no_amai_thread_without_hourly_burn_surface()
+    {
+        let hourly_burn = json!({
+            "status": "missing"
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn"
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 245000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 94.8,
+            "primary_limit_remaining_percent": 92.0,
+            "secondary_limit_remaining_percent": 98.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((245000, 245000, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_recommends_rotate_for_large_no_amai_thread_without_hourly_burn_surface()
+     {
+        let hourly_burn = json!({
+            "status": "missing"
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn"
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 161000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 62.3,
+            "primary_limit_remaining_percent": 91.0,
+            "secondary_limit_remaining_percent": 98.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((161000, 161000, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_for_huge_no_amai_thread_when_exact_5h_kpi_is_below_target_saving()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 40.0
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn"
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 240000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 92.88,
+            "primary_limit_remaining_percent": 93.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((240000, 240000, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_for_large_weak_exact_pair_thread_when_5h_kpi_is_below_target_saving()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 40.0
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 206720,
+                "with_amai_tokens": 206274,
+                "saved_tokens": 446,
+                "saved_pct": 0.22
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 206274,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 79.83,
+            "primary_limit_remaining_percent": 93.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((206720, 206274, 446, 0.22)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_for_large_high_context_thread_when_exact_pair_is_far_below_target()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 95.0
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 206720,
+                "with_amai_tokens": 206274,
+                "saved_tokens": 446,
+                "saved_pct": 0.22
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 206274,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 79.83,
+            "primary_limit_remaining_percent": 93.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        assert!(
+            super::client_turn_pressure_guard(
+                &meter,
+                Some((206720, 206274, 446, 0.22)),
+                &hourly_burn,
+                &current_live_turn,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_for_large_high_context_thread_when_exact_pair_is_below_90_target()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 95.0
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 206720,
+                "with_amai_tokens": 206274,
+                "saved_tokens": 446,
+                "saved_pct": 0.22
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 206274,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 79.83,
+            "primary_limit_remaining_percent": 93.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        assert!(
+            super::client_turn_pressure_guard_with_target(
+                &meter,
+                Some((206720, 206274, 446, 0.22)),
+                &hourly_burn,
+                &current_live_turn,
+                90,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_recommends_rotate_early_when_exact_pair_is_below_90_target() {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 95.0
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 15000,
+                "with_amai_tokens": 13500,
+                "saved_tokens": 1500,
+                "saved_pct": 10.0
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 13500,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 5.22,
+            "primary_limit_remaining_percent": 93.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        assert!(
+            super::client_turn_pressure_guard_with_target(
+                &meter,
+                Some((15000, 13500, 1500, 10.0)),
+                &hourly_burn,
+                &current_live_turn,
+                90,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_recommends_rotate_on_small_thread_when_exact_pair_and_5h_kpi_are_below_target()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 70.0
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 15000,
+                "with_amai_tokens": 13500,
+                "saved_tokens": 1500,
+                "saved_pct": 10.0
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 13500,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 5.22,
+            "primary_limit_remaining_percent": 93.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard_with_target(
+            &meter,
+            Some((15000, 13500, 1500, 10.0)),
+            &hourly_burn,
+            &current_live_turn,
+            90,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "alert");
+        assert_eq!(guard.status_label, "новый чат рекомендован");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_recommends_rotate_on_moderate_thread_when_exact_pair_and_5h_kpi_are_below_target()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 70.0
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 60000,
+                "with_amai_tokens": 54000,
+                "saved_tokens": 6000,
+                "saved_pct": 10.0
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 54000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 20.9,
+            "primary_limit_remaining_percent": 93.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard_with_target(
+            &meter,
+            Some((60000, 54000, 6000, 10.0)),
+            &hourly_burn,
+            &current_live_turn,
+            90,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "alert");
+        assert_eq!(guard.status_label, "новый чат рекомендован");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_respects_custom_50_percent_target() {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 60.0
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 60000,
+                "with_amai_tokens": 54000,
+                "saved_tokens": 6000,
+                "saved_pct": 10.0
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 54000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 20.9,
+            "primary_limit_remaining_percent": 93.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        assert!(
+            super::client_turn_pressure_guard_with_target(
+                &meter,
+                Some((60000, 54000, 6000, 10.0)),
+                &hourly_burn,
+                &current_live_turn,
+                50,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_zero_target_disables_target_only_pressure() {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 1.0
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 60000,
+                "with_amai_tokens": 54000,
+                "saved_tokens": 6000,
+                "saved_pct": 10.0
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 54000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 20.9,
+            "primary_limit_remaining_percent": 93.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        assert!(
+            super::client_turn_pressure_guard_with_target(
+                &meter,
+                Some((60000, 54000, 6000, 10.0)),
+                &hourly_burn,
+                &current_live_turn,
+                0,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_recommends_rotate_for_small_no_amai_thread_when_5h_kpi_is_below_target()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 40.0
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn"
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 46000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 17.8,
+            "primary_limit_remaining_percent": 93.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((46000, 46000, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_stays_off_for_huge_no_amai_thread_when_exact_5h_kpi_is_target_saving()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 80.0
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn"
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 245000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 94.8,
+            "primary_limit_remaining_percent": 93.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((245000, 245000, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_recommends_rotate_for_moderate_no_amai_thread_when_5h_kpi_is_below_target()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 40.0
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn"
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 126000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 48.76,
+            "primary_limit_remaining_percent": 93.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((126000, 126000, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_for_early_no_amai_thread_when_5h_kpi_is_below_target() {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 40.0
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn"
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 68000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 26.32,
+            "primary_limit_remaining_percent": 93.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((68000, 68000, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_for_huge_no_amai_thread_when_exact_5h_kpi_is_one_to_one()
+    {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "one_to_one",
+            "kpi_percent": 0.6
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn"
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 245000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 94.8,
+            "primary_limit_remaining_percent": 93.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((245000, 245000, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_keeps_critical_primary_limit_even_when_exact_5h_kpi_is_saving() {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 95.0
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 120000,
+                "with_amai_tokens": 108000,
+                "saved_tokens": 12000,
+                "saved_pct": 10.0
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 108000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 41.81,
+            "primary_limit_remaining_percent": 2.0,
+            "secondary_limit_remaining_percent": 95.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((120000, 108000, 12000, 10.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_limit_hourly_burn_row_embeds_same_thread_host_control_in_selector() {
+        let row = super::client_limit_hourly_burn_metric_row(
+            &json!({
+                "status": "observed",
+                "classification": "saving",
+                "reply_prefix": "5ч KPI: экономия 50.00%",
+                "projected_primary_used_per_hour_percent": 10.0,
+                "kpi_percent": 50.0,
+                "remaining_window_minutes": 30.0,
+                "actual_remaining_percent": 75.0,
+                "ideal_remaining_percent": 50.0,
+                "latest_observed_at_epoch_ms": 2000,
+                "projected_reset_delta_minutes": 30.0
+            }),
+            50,
+            &json!({
+                "recent_actions": [{
+                    "source_kind": "host_current_thread_control_feedback",
+                    "summary": "Operator confirmed same-thread overlay opened.",
+                    "recorded_at_epoch_ms": 3000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "opened",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 12000,
+                                "context_used_percent": 4.65,
+                                "primary_limit_used_percent": 21
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 2000
+                            }
+                        }
+                    }
+                }]
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 6000,
+                "client_turn_total_tokens": 14500,
+                "context_used_percent": 5.61,
+                "primary_limit_used_percent": 23
+            }),
+            &json!({
+                "stage": "preserve",
+                "growth_since_compaction_tokens": 4500
+            }),
+            &working_state::build_host_current_thread_control_surface_for_thread(Some(
+                "thread-current",
+            )),
+        )
+        .expect("hourly burn row");
+        assert_eq!(
+            row["target_selector"]["host_current_thread_control"]["command_id"],
+            json!("thread-overlay-open-current")
+        );
+        assert_eq!(
+            row["target_selector"]["host_current_thread_control_button_label"],
+            json!("Open thread overlay")
+        );
+        assert_eq!(
+            row["target_selector"]["host_current_thread_control"]["external_uri_launch"]["uri"],
+            json!("vscode://openai.chatgpt/thread-overlay/thread-current")
+        );
+        assert_eq!(
+            row["target_selector"]["host_current_thread_control_last_feedback_kind"],
+            json!("opened")
+        );
+        assert!(
+            row["target_selector"]["host_current_thread_control_last_feedback_summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Operator confirmed same-thread overlay opened.")
+        );
+        assert!(
+            row["target_selector"]["host_current_thread_control_effect_summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("thread overlay")
+        );
+    }
+
+    #[test]
+    fn client_limit_hourly_burn_row_uses_surface_driven_compact_window_text() {
+        let row = super::client_limit_hourly_burn_metric_row(
+            &json!({
+                "status": "observed",
+                "classification": "saving",
+                "reply_prefix": "5ч KPI: экономия 50.00%",
+                "projected_primary_used_per_hour_percent": 10.0,
+                "kpi_percent": 50.0,
+                "remaining_window_minutes": 30.0,
+                "actual_remaining_percent": 75.0,
+                "ideal_remaining_percent": 50.0,
+                "latest_observed_at_epoch_ms": 2000,
+                "projected_reset_delta_minutes": 30.0
+            }),
+            50,
+            &json!({}),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 6000,
+                "client_turn_total_tokens": 15000,
+                "context_used_percent": 5.8,
+                "primary_limit_used_percent": 24
+            }),
+            &json!({
+                "stage": "preserve",
+                "growth_since_compaction_tokens": 4800
+            }),
+            &working_state::build_host_current_thread_control_surface_for_thread_and_stage(
+                Some("thread-current"),
+                working_state::HostContextCompactionStage::Preserve,
+            ),
+        )
+        .expect("hourly burn row");
+        assert_eq!(
+            row["target_selector"]["host_current_thread_control"]["command_id"],
+            json!("hotkey-window-open-current")
+        );
+        assert_eq!(
+            row["target_selector"]["host_current_thread_control_button_label"],
+            json!("Open compact window")
+        );
+        assert!(
+            row["target_selector"]["host_current_thread_control_intro"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("compact-window")
+        );
+        assert!(
+            row["target_selector"]["host_current_thread_control_notice_message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("compact window")
+        );
+        assert!(
+            row["target_selector"]["host_current_thread_control_ack_intro"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("compact window")
+        );
+    }
+
+    #[test]
+    fn client_limit_hourly_burn_row_embeds_compact_chat_client_surface_assist() {
+        let row = super::client_limit_hourly_burn_metric_row(
+            &json!({
+                "status": "observed",
+                "classification": "saving",
+                "reply_prefix": "5ч KPI: экономия 50.00%",
+                "projected_primary_used_per_hour_percent": 10.0,
+                "kpi_percent": 50.0,
+                "remaining_window_minutes": 30.0,
+                "actual_remaining_percent": 75.0,
+                "ideal_remaining_percent": 50.0,
+                "latest_observed_at_epoch_ms": 2000,
+                "projected_reset_delta_minutes": 30.0
+            }),
+            50,
+            &json!({
+                "project": {
+                    "repo_root": env!("CARGO_MANIFEST_DIR")
+                }
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 6000,
+                "client_turn_total_tokens": 15000,
+                "context_used_percent": 5.8,
+                "primary_limit_used_percent": 24
+            }),
+            &json!({
+                "stage": "preserve",
+                "growth_since_compaction_tokens": 4800
+            }),
+            &working_state::build_host_current_thread_control_surface_for_thread_and_stage(
+                Some("thread-current"),
+                working_state::HostContextCompactionStage::Preserve,
+            ),
+        )
+        .expect("hourly burn row");
+        assert_eq!(
+            row["target_selector"]["compact_chat_required_host_action"],
+            json!("open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable")
+        );
+        assert!(
+            row["target_selector"]["compact_chat_note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("clean")
+        );
+        assert!(
+            row["target_selector"]["compact_chat_assist_summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("./scripts/reconnect_local.sh --client")
+        );
+        assert!(
+            row["target_selector"]["compact_chat_reconnect_bootstrap_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("./scripts/amai_exec.sh bootstrap reconnect --client")
+        );
+    }
+
+    #[test]
+    fn compact_chat_selector_client_surface_falls_back_to_discovered_repo_root() {
+        let surface = super::compact_chat_selector_client_surface(&json!({}));
+        assert!(
+            surface["display_name"]
+                .as_str()
+                .is_some_and(|value| !value.trim().is_empty())
+        );
+        assert!(
+            surface["reconnect_shell_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("./scripts/reconnect_local.sh --client")
+        );
+    }
+
+    #[test]
+    fn host_current_thread_control_effect_recommends_rotate_fallback_after_failed_compact_window() {
+        let effect = super::host_current_thread_control_effect_payload(
+            &json!({
+                "recent_actions": [{
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 3000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 100000,
+                                "context_used_percent": 40.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 20000,
+                                "stage": "preserve"
+                            }
+                        }
+                    }
+                }]
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 9000,
+                "client_turn_total_tokens": 160500,
+                "context_used_percent": 53.5,
+                "primary_limit_used_percent": 66
+            }),
+            &json!({
+                "stage": "critical_regrowth",
+                "growth_since_compaction_tokens": 52000
+            }),
+        );
+        assert_eq!(
+            effect["effect_verdict"],
+            json!("full_scale_client_burn_worsened_rotate_fallback_recommended")
+        );
+        assert_eq!(effect["rotate_fallback_recommended"], json!(true));
+        assert_eq!(effect["full_scale_client_burn_worsened"], json!(true));
+        assert_eq!(effect["retry_allowed"], json!(false));
+        assert!(
+            effect["verdict_summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("полный 5ч burn")
+        );
+    }
+
+    #[test]
+    fn host_current_thread_control_effect_recommends_overlay_trial_during_critical_regrowth() {
+        let effect = super::host_current_thread_control_effect_payload_for_command(
+            &json!({
+                "recent_actions": [{
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 3000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 100000,
+                                "context_used_percent": 40.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 20000,
+                                "stage": "critical_regrowth"
+                            }
+                        }
+                    }
+                }]
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 9000,
+                "client_turn_total_tokens": 106500,
+                "context_used_percent": 42.6,
+                "primary_limit_used_percent": 60
+            }),
+            &json!({
+                "stage": "critical_regrowth",
+                "growth_since_compaction_tokens": 26530
+            }),
+            Some("hotkey-window-open-current"),
+        );
+        assert_eq!(
+            effect["effect_verdict"],
+            json!("critical_regrowth_overlay_trial_recommended")
+        );
+        assert_eq!(effect["overlay_trial_recommended"], json!(true));
+        assert!(
+            effect["verdict_summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("overlay")
+        );
+    }
+
+    #[test]
+    fn host_current_thread_control_effect_marks_recent_baseline_as_measurement_pending() {
+        let effect = super::host_current_thread_control_effect_payload_for_command(
+            &json!({
+                "recent_actions": [{
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 8_500,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 100000,
+                                "context_used_percent": 40.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 20000,
+                                "stage": "preserve"
+                            }
+                        }
+                    }
+                }]
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 9_000,
+                "client_turn_total_tokens": 101000,
+                "context_used_percent": 40.2,
+                "primary_limit_used_percent": 60
+            }),
+            &json!({
+                "stage": "preserve",
+                "growth_since_compaction_tokens": 20800
+            }),
+            Some("hotkey-window-open-current"),
+        );
+        assert_eq!(effect["measurement_pending"], json!(true));
+        assert_eq!(effect["retry_allowed"], json!(false));
+        assert_eq!(effect["effect_verdict"], json!("measurement_pending"));
+        assert!(
+            effect["verdict_summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("дождись измеримого effect")
+        );
+    }
+
+    #[test]
+    fn host_current_thread_control_effect_clears_measurement_pending_after_short_idle_window() {
+        let effect = super::host_current_thread_control_effect_payload_for_command(
+            &json!({
+                "recent_actions": [{
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 1_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "opened",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 100000,
+                                "context_used_percent": 40.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 20000,
+                                "stage": "inactive"
+                            }
+                        }
+                    }
+                }]
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 31_500,
+                "client_turn_total_tokens": 100000,
+                "context_used_percent": 40.0,
+                "primary_limit_used_percent": 60
+            }),
+            &json!({
+                "stage": "inactive",
+                "growth_since_compaction_tokens": 20000
+            }),
+            Some("thread-overlay-open-current"),
+        );
+        assert_eq!(effect["measurement_pending"], json!(false));
+        assert_eq!(effect["measurement_sufficient"], json!(true));
+        assert_eq!(effect["retry_allowed"], json!(true));
+        assert_eq!(
+            effect["effect_verdict"],
+            json!("opened_overlay_surface_observed")
+        );
+    }
+
+    #[test]
+    fn host_current_thread_control_effect_marks_verified_compaction_after_requested_feedback() {
+        let effect = super::host_current_thread_control_effect_payload_for_command(
+            &json!({
+                "recent_actions": [{
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 1_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 100000,
+                                "context_used_percent": 40.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "compaction_count": 2,
+                                "compacted_at_epoch_ms": 900,
+                                "growth_since_compaction_tokens": 20000,
+                                "stage": "preserve"
+                            }
+                        }
+                    }
+                }]
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 300_000,
+                "client_turn_total_tokens": 101000,
+                "context_used_percent": 40.2,
+                "primary_limit_used_percent": 61
+            }),
+            &json!({
+                "stage": "preserve",
+                "compaction_count": 3,
+                "compacted_at_epoch_ms": 200_000,
+                "growth_since_compaction_tokens": 20800
+            }),
+            Some("thread-overlay-open-current"),
+        );
+        assert_eq!(
+            effect["verified_host_compaction_observed_after_feedback"],
+            json!(true)
+        );
+        assert_eq!(effect["compaction_count_delta"], json!(1));
+    }
+
+    #[test]
+    fn host_current_thread_control_effect_recommends_rotate_when_full_scale_burn_worsens() {
+        let effect = super::host_current_thread_control_effect_payload_for_command(
+            &json!({
+                "recent_actions": [{
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 1_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 165_000,
+                                "context_used_percent": 63.0,
+                                "primary_limit_used_percent": 20
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 60_000,
+                                "stage": "critical_regrowth"
+                            }
+                        }
+                    }
+                }]
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 601_000,
+                "client_turn_total_tokens": 93_000,
+                "context_used_percent": 36.0,
+                "primary_limit_used_percent": 40
+            }),
+            &json!({
+                "stage": "critical_regrowth",
+                "growth_since_compaction_tokens": 0
+            }),
+            Some("thread-overlay-open-current"),
+        );
+        assert_eq!(
+            effect["effect_verdict"],
+            json!("full_scale_client_burn_worsened_rotate_fallback_recommended")
+        );
+        assert_eq!(effect["full_scale_client_burn_worsened"], json!(true));
+        assert_eq!(effect["rotate_fallback_recommended"], json!(true));
+        assert_eq!(effect["material_compaction_gain_observed"], json!(false));
+        assert_eq!(effect["retry_allowed"], json!(false));
+        assert!(
+            effect["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("против идеального темпа")
+        );
+        assert!(
+            effect["verdict_summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("полный 5ч burn")
+        );
+    }
+
+    #[test]
+    fn client_limit_hourly_burn_row_blocks_same_thread_retry_while_measurement_pending() {
+        let row = super::client_limit_hourly_burn_metric_row(
+            &json!({
+                "status": "observed",
+                "classification": "overspend",
+                "reply_prefix": "5ч KPI: переплата 10.00%",
+                "projected_primary_used_per_hour_percent": 12.0,
+                "kpi_percent": 10.0,
+                "remaining_window_minutes": 30.0,
+                "actual_remaining_percent": 40.0,
+                "ideal_remaining_percent": 50.0,
+                "latest_observed_at_epoch_ms": 9_000,
+                "projected_reset_delta_minutes": -10.0
+            }),
+            90,
+            &json!({
+                "recent_actions": [{
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 8_500,
+                    "summary": "Requested compact window launch via host current-thread control.",
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 100000,
+                                "context_used_percent": 40.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 20000,
+                                "stage": "preserve"
+                            }
+                        }
+                    }
+                }]
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 9_000,
+                "client_turn_total_tokens": 101000,
+                "context_used_percent": 40.2,
+                "primary_limit_used_percent": 60
+            }),
+            &json!({
+                "stage": "preserve",
+                "growth_since_compaction_tokens": 20800
+            }),
+            &working_state::build_host_current_thread_control_surface_for_thread_and_stage(
+                Some("thread-current"),
+                working_state::HostContextCompactionStage::Preserve,
+            ),
+        )
+        .expect("hourly burn row");
+        assert_eq!(
+            row["target_selector"]["host_current_thread_control_retry_allowed"],
+            json!(false)
+        );
+        assert_eq!(
+            row["target_selector"]["host_current_thread_control_measurement_pending"],
+            json!(true)
+        );
+        assert!(
+            row["target_selector"]["host_current_thread_control_retry_blocked_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Requested compact window launch")
+        );
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_prefers_lower_regrowth_rate_in_critical_stage() {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            }
+        });
+        let restore = json!({
+            "thread_id": "thread-current",
+            "recent_actions": [
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 1000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 100000,
+                                "context_used_percent": 40.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 20000,
+                                "stage": "critical_regrowth"
+                            }
+                        }
+                    }
+                },
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 5000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 120000,
+                                "context_used_percent": 48.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 32000,
+                                "stage": "critical_regrowth"
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let client_live_meter = json!({
+            "thread_id": "thread-current",
+            "ended_at_epoch_ms": 9000,
+            "client_turn_total_tokens": 124000,
+            "context_used_percent": 49.2,
+            "primary_limit_used_percent": 60
+        });
+        let host_context_compaction = json!({
+            "stage": "critical_regrowth",
+            "growth_since_compaction_tokens": 36000
+        });
+        let (surface, effect, same_thread_preferred) =
+            super::selected_host_current_thread_control_state(
+                &report,
+                &restore,
+                &client_live_meter,
+                &host_context_compaction,
+            );
+        assert_eq!(surface["command_id"], json!("thread-overlay-open-current"));
+        assert_eq!(
+            surface["selection_reason"],
+            json!("critical_regrowth_try_overlay")
+        );
+        assert_eq!(effect["command_id"], json!("thread-overlay-open-current"));
+        assert_eq!(same_thread_preferred, true);
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_drops_same_thread_preference_only_after_verified_failure_on_both_surfaces()
+     {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            }
+        });
+        let restore = json!({
+            "thread_id": "thread-current",
+            "recent_actions": [
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 1_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 170_000,
+                                "context_used_percent": 65.0,
+                                "primary_limit_used_percent": 20
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 80_000,
+                                "stage": "critical_regrowth",
+                                "compaction_count": 1,
+                                "compacted_at_epoch_ms": 1_500
+                            }
+                        }
+                    }
+                },
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 2_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 160_000,
+                                "context_used_percent": 62.0,
+                                "primary_limit_used_percent": 20
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 60_000,
+                                "stage": "critical_regrowth",
+                                "compaction_count": 1,
+                                "compacted_at_epoch_ms": 2_500
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let client_live_meter = json!({
+            "thread_id": "thread-current",
+            "ended_at_epoch_ms": 602_000,
+            "client_turn_total_tokens": 188_000,
+            "context_used_percent": 72.5,
+            "primary_limit_used_percent": 40
+        });
+        let host_context_compaction = json!({
+            "stage": "critical_regrowth",
+            "growth_since_compaction_tokens": 95_000,
+            "compaction_count": 2,
+            "compacted_at_epoch_ms": 3_000
+        });
+        let (_surface, effect, same_thread_preferred) =
+            super::selected_host_current_thread_control_state(
+                &report,
+                &restore,
+                &client_live_meter,
+                &host_context_compaction,
+            );
+        assert_eq!(same_thread_preferred, false);
+        assert_eq!(effect["rotate_fallback_recommended"], json!(true));
+        assert_eq!(effect["full_scale_client_burn_worsened"], json!(true));
+        assert_eq!(effect["retry_allowed"], json!(false));
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_keeps_same_thread_preference_when_verified_compaction_has_material_gain()
+     {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            }
+        });
+        let restore = json!({
+            "thread_id": "thread-current",
+            "recent_actions": [
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 1_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 170_000,
+                                "context_used_percent": 65.0,
+                                "primary_limit_used_percent": 20
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 80_000,
+                                "stage": "critical_regrowth",
+                                "compaction_count": 1,
+                                "compacted_at_epoch_ms": 1_500
+                            }
+                        }
+                    }
+                },
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 2_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 160_000,
+                                "context_used_percent": 62.0,
+                                "primary_limit_used_percent": 20
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 60_000,
+                                "stage": "critical_regrowth",
+                                "compaction_count": 1,
+                                "compacted_at_epoch_ms": 2_500
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let client_live_meter = json!({
+            "thread_id": "thread-current",
+            "ended_at_epoch_ms": 602_000,
+            "client_turn_total_tokens": 92_000,
+            "context_used_percent": 35.5,
+            "primary_limit_used_percent": 40
+        });
+        let host_context_compaction = json!({
+            "stage": "critical_regrowth",
+            "growth_since_compaction_tokens": 0,
+            "compaction_count": 2,
+            "compacted_at_epoch_ms": 3_000
+        });
+        let (_surface, effect, same_thread_preferred) =
+            super::selected_host_current_thread_control_state(
+                &report,
+                &restore,
+                &client_live_meter,
+                &host_context_compaction,
+            );
+        assert_eq!(same_thread_preferred, true);
+        assert_eq!(effect["rotate_fallback_recommended"], json!(true));
+        assert_eq!(effect["full_scale_client_burn_worsened"], json!(true));
+        assert_eq!(effect["material_compaction_gain_observed"], json!(true));
+        assert_eq!(effect["retry_allowed"], json!(true));
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_keeps_same_thread_preference_when_both_surfaces_only_have_observational_rotate_fallback()
+     {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            }
+        });
+        let restore = json!({
+            "thread_id": "thread-current",
+            "recent_actions": [
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 1_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 170_000,
+                                "context_used_percent": 65.0,
+                                "primary_limit_used_percent": 20
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 80_000,
+                                "stage": "critical_regrowth"
+                            }
+                        }
+                    }
+                },
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 2_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 160_000,
+                                "context_used_percent": 62.0,
+                                "primary_limit_used_percent": 20
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 60_000,
+                                "stage": "critical_regrowth"
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let client_live_meter = json!({
+            "thread_id": "thread-current",
+            "ended_at_epoch_ms": 602_000,
+            "client_turn_total_tokens": 92_000,
+            "context_used_percent": 35.5,
+            "primary_limit_used_percent": 40
+        });
+        let host_context_compaction = json!({
+            "stage": "critical_regrowth",
+            "growth_since_compaction_tokens": 0
+        });
+        let (_surface, effect, same_thread_preferred) =
+            super::selected_host_current_thread_control_state(
+                &report,
+                &restore,
+                &client_live_meter,
+                &host_context_compaction,
+            );
+        assert_eq!(same_thread_preferred, true);
+        assert_eq!(effect["rotate_fallback_recommended"], json!(true));
+        assert_eq!(
+            effect["verified_host_compaction_observed_after_feedback"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_keeps_same_thread_preference_for_oversized_critical_regrowth_without_verified_failure()
+     {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            }
+        });
+        let restore = json!({
+            "thread_id": "thread-current",
+            "recent_actions": []
+        });
+        let client_live_meter = json!({
+            "thread_id": "thread-current",
+            "ended_at_epoch_ms": 9_000,
+            "client_turn_total_tokens": 190_000,
+            "context_used_percent": 81.0,
+            "primary_limit_used_percent": 60
+        });
+        let host_context_compaction = json!({
+            "stage": "critical_regrowth",
+            "growth_since_compaction_tokens": 80_000,
+            "regrowth_of_recovered_surface_ratio": 0.8
+        });
+        let (_surface, _effect, same_thread_preferred) =
+            super::selected_host_current_thread_control_state(
+                &report,
+                &restore,
+                &client_live_meter,
+                &host_context_compaction,
+            );
+        assert_eq!(same_thread_preferred, true);
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_keeps_pending_feedback_command_selected() {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            }
+        });
+        let restore = json!({
+            "thread_id": "thread-current",
+            "recent_actions": [
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 5_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 110000,
+                                "context_used_percent": 46.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 26000,
+                                "stage": "inactive"
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let client_live_meter = json!({
+            "thread_id": "thread-current",
+            "ended_at_epoch_ms": 9_000,
+            "client_turn_total_tokens": 111000,
+            "context_used_percent": 46.2,
+            "primary_limit_used_percent": 60
+        });
+        let host_context_compaction = json!({
+            "stage": "inactive",
+            "growth_since_compaction_tokens": 26200
+        });
+
+        let (surface, effect, _) = super::selected_host_current_thread_control_state(
+            &report,
+            &restore,
+            &client_live_meter,
+            &host_context_compaction,
+        );
+
+        assert_eq!(
+            surface["command_id"],
+            json!(working_state::HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID)
+        );
+        assert_eq!(effect["command_id"], json!("hotkey-window-open-current"));
+        assert_eq!(effect["effect_verdict"], json!("measurement_pending"));
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_ignores_pending_feedback_from_other_thread() {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            }
+        });
+        let restore = json!({
+            "thread_id": "thread-current",
+            "recent_actions": [
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 5_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-old",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 110000,
+                                "context_used_percent": 46.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 26000,
+                                "stage": "inactive"
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let client_live_meter = json!({
+            "thread_id": "thread-current",
+            "ended_at_epoch_ms": 9_000,
+            "client_turn_total_tokens": 111000,
+            "context_used_percent": 46.2,
+            "primary_limit_used_percent": 60
+        });
+        let host_context_compaction = json!({
+            "stage": "inactive",
+            "growth_since_compaction_tokens": 26200
+        });
+
+        let (surface, effect, _) = super::selected_host_current_thread_control_state(
+            &report,
+            &restore,
+            &client_live_meter,
+            &host_context_compaction,
+        );
+
+        assert_eq!(
+            surface["command_id"],
+            json!(working_state::HOST_CURRENT_THREAD_CONTROL_COMMAND_ID)
+        );
+        assert_eq!(effect["command_id"], Value::Null);
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_prefers_newer_pending_feedback_command() {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            }
+        });
+        let restore = json!({
+            "thread_id": "thread-current",
+            "recent_actions": [
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 9_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 120000,
+                                "context_used_percent": 48.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 30000,
+                                "stage": "inactive"
+                            }
+                        }
+                    }
+                },
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 5_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 110000,
+                                "context_used_percent": 46.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 26000,
+                                "stage": "inactive"
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let client_live_meter = json!({
+            "thread_id": "thread-current",
+            "ended_at_epoch_ms": 10_000,
+            "client_turn_total_tokens": 120400,
+            "context_used_percent": 48.1,
+            "primary_limit_used_percent": 60
+        });
+        let host_context_compaction = json!({
+            "stage": "inactive",
+            "growth_since_compaction_tokens": 30100
+        });
+
+        let (surface, effect, _) = super::selected_host_current_thread_control_state(
+            &report,
+            &restore,
+            &client_live_meter,
+            &host_context_compaction,
+        );
+
+        assert_eq!(
+            surface["command_id"],
+            json!(working_state::HOST_CURRENT_THREAD_CONTROL_COMMAND_ID)
+        );
+        assert_eq!(effect["command_id"], json!("thread-overlay-open-current"));
+        assert_eq!(effect["effect_verdict"], json!("measurement_pending"));
     }
 }

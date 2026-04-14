@@ -1316,22 +1316,6 @@ pub fn latest_rollout_client_meter_observation_for_thread(
     latest_rollout_client_meter_observation_from_path(thread_id, &rollout_path)
 }
 
-pub fn rollout_client_meter_observations_for_thread(
-    thread_id: &str,
-) -> Result<Vec<RolloutClientMeterObservation>> {
-    let Some(record) = thread_record_by_id(thread_id)? else {
-        return Ok(Vec::new());
-    };
-    if record.rollout_path.is_empty() {
-        return Ok(Vec::new());
-    }
-    let rollout_path = PathBuf::from(record.rollout_path);
-    if !rollout_path.exists() {
-        return Ok(Vec::new());
-    }
-    parse_rollout_client_meter_observations(thread_id, &rollout_path)
-}
-
 pub fn latest_rollout_context_compaction_observation_for_thread(
     thread_id: &str,
 ) -> Result<Option<RolloutContextCompactionObservation>> {

@@ -799,7 +799,7 @@ pub(super) fn build_client_budget_reply_execution_gate_with_primary_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     #[test]
     fn current_session_budget_guard_surfaces_machine_readable_rotate_flags() {
@@ -2109,5 +2109,350 @@ mod tests {
                 .contains("latest observed")
         );
         assert_eq!(guard["observed_at_epoch_ms"], json!(1774622949000u64));
+    }
+
+    #[test]
+    fn reply_execution_gate_waits_for_same_thread_effect_when_retry_is_blocked() {
+        let gate = build_client_budget_reply_execution_gate_with_primary_command(
+            "critical",
+            "сожми текущий чат сейчас",
+            Some("5ч KPI: переплата 10.00%"),
+            Some("5ч KPI: переплата 10.00%"),
+            "personal_agent_5h_kpi",
+            Some(9_000),
+            10,
+            false,
+            true,
+            true,
+            false,
+            true,
+            Some("amai"),
+            Some("continuity"),
+            Some("/home/art/agent-memory-index"),
+            Some("headline"),
+            Some("next step"),
+            90,
+            working_state::HostContextCompactionStage::CriticalRegrowth,
+            true,
+            true,
+            false,
+            Some("thread-current"),
+            Some("thread-overlay-open-current"),
+            &json!({
+                "retry_allowed": false,
+                "retry_blocked_reason": "Requested same-thread overlay launch via host current-thread control.",
+                "measurement_pending": false,
+                "effect_verdict": "requested_overlay_surface_observed",
+                "summary": "Overlay request is still active."
+            }),
+            false,
+            Some("Requested same-thread overlay launch via host current-thread control."),
+        );
+        assert_eq!(
+            gate["action_bundle"]["host_current_thread_control"]["retry_allowed"],
+            json!(false)
+        );
+        assert_eq!(
+            gate["action_kind"],
+            json!("wait_for_same_thread_effect_measurement")
+        );
+        assert_eq!(
+            gate["action_bundle"]["operator_flow"]["primary_command_kind"],
+            json!("wait_for_same_thread_effect_measurement")
+        );
+        assert_eq!(
+            gate["must_wait_for_same_thread_effect_measurement_before_reply"],
+            json!(true)
+        );
+        assert!(gate["action_bundle"]["operator_flow"]["primary_command"].is_null());
+        assert_eq!(
+            gate["action_bundle"]["measurement_before_retry_required"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn reply_execution_gate_requests_feedback_confirmation_when_retry_is_blocked_by_pending_feedback()
+     {
+        let gate = build_client_budget_reply_execution_gate_with_primary_command(
+            "critical",
+            "сожми текущий чат сейчас",
+            Some("5ч KPI: переплата 10.00%"),
+            Some("5ч KPI: переплата 10.00%"),
+            "personal_agent_5h_kpi",
+            Some(9_000),
+            10,
+            false,
+            true,
+            true,
+            false,
+            true,
+            Some("amai"),
+            Some("continuity"),
+            Some("/home/art/agent-memory-index"),
+            Some("headline"),
+            Some("next step"),
+            90,
+            working_state::HostContextCompactionStage::CriticalRegrowth,
+            true,
+            true,
+            false,
+            Some("thread-current"),
+            Some("thread-overlay-open-current"),
+            &json!({
+                "retry_allowed": false,
+                "retry_blocked_reason": "Requested same-thread overlay launch via host current-thread control.",
+                "measurement_pending": false,
+                "effect_verdict": "requested_overlay_surface_observed",
+                "summary": "Overlay request is still active."
+            }),
+            true,
+            Some("Requested same-thread overlay launch via host current-thread control."),
+        );
+        assert_eq!(
+            gate["action_kind"],
+            json!("confirm_same_thread_host_control_feedback")
+        );
+        assert_eq!(
+            gate["action_bundle"]["operator_flow"]["primary_command_kind"],
+            json!("confirm_same_thread_host_control_feedback")
+        );
+        assert_eq!(
+            gate["must_confirm_same_thread_host_control_feedback_before_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            gate["action_bundle"]["feedback_confirmation_before_retry_required"],
+            json!(true)
+        );
+        assert_eq!(
+            gate["action_bundle"]["operator_flow"]["same_thread_feedback_confirmation_required"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn reply_execution_gate_skips_feedback_confirmation_after_verified_host_compaction() {
+        let gate = build_client_budget_reply_execution_gate_with_primary_command(
+            "critical",
+            "сожми текущий чат сейчас",
+            Some("5ч KPI: переплата 10.00%"),
+            Some("5ч KPI: переплата 10.00%"),
+            "personal_agent_5h_kpi",
+            Some(9_000),
+            10,
+            false,
+            true,
+            true,
+            false,
+            true,
+            Some("amai"),
+            Some("continuity"),
+            Some("/home/art/agent-memory-index"),
+            Some("headline"),
+            Some("next step"),
+            90,
+            working_state::HostContextCompactionStage::CriticalRegrowth,
+            true,
+            true,
+            false,
+            Some("thread-current"),
+            Some("thread-overlay-open-current"),
+            &json!({
+                "retry_allowed": false,
+                "measurement_pending": false,
+                "effect_verdict": "full_scale_client_burn_worsened_rotate_fallback_recommended",
+                "verified_host_compaction_observed_after_feedback": true,
+                "summary": "Real host compaction already observed after baseline."
+            }),
+            false,
+            Some("Requested same-thread overlay launch via host current-thread control."),
+        );
+        assert_eq!(
+            gate["action_bundle"]["feedback_confirmation_before_retry_required"],
+            Value::Null
+        );
+        assert_eq!(
+            gate["action_bundle"]["measurement_before_retry_required"],
+            json!(true)
+        );
+        assert_eq!(
+            gate["action_bundle"]["operator_flow"]["primary_command_kind"],
+            json!("wait_for_same_thread_effect_measurement")
+        );
+        assert_eq!(
+            gate["action_bundle"]["operator_flow"]["same_thread_feedback_confirmation_required"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn reply_execution_gate_keeps_rotate_order_when_same_thread_retry_is_disallowed_after_rotate_selection()
+     {
+        let gate = build_client_budget_reply_execution_gate_with_primary_command(
+            "critical",
+            "новый чат нужен сейчас",
+            Some("5ч KPI: переплата 10.00%"),
+            Some("5ч KPI: переплата 10.00%"),
+            "personal_agent_5h_kpi",
+            Some(9_000),
+            10,
+            false,
+            true,
+            true,
+            false,
+            true,
+            Some("amai"),
+            Some("continuity"),
+            Some("/home/art/agent-memory-index"),
+            Some("headline"),
+            Some("next step"),
+            90,
+            working_state::HostContextCompactionStage::CriticalRegrowth,
+            false,
+            true,
+            false,
+            Some("thread-current"),
+            Some("hotkey-window-open-current"),
+            &json!({
+                "retry_allowed": false,
+                "measurement_pending": false,
+                "effect_verdict": "full_scale_client_burn_worsened_rotate_fallback_recommended",
+                "verified_host_compaction_observed_after_feedback": true,
+                "summary": "Surface already failed; rotate is primary."
+            }),
+            false,
+            Some("Requested same-thread compact window launch via host current-thread control."),
+        );
+        assert_eq!(
+            gate["action_bundle"]["operator_flow"]["primary_command_kind"],
+            json!("rotate_helper_command")
+        );
+        assert_eq!(
+            gate["action_bundle"]["measurement_before_retry_required"],
+            Value::Null
+        );
+        assert_eq!(
+            gate["action_bundle"]["order"],
+            json!([
+                "run_rotate_helper",
+                "open_fresh_chat",
+                "run_continuity_startup"
+            ])
+        );
+    }
+
+    #[test]
+    fn reply_execution_gate_requests_feedback_confirmation_before_rotate_when_same_thread_feedback_is_pending()
+     {
+        let gate = build_client_budget_reply_execution_gate_with_primary_command(
+            "critical",
+            "новый чат нужен сейчас",
+            Some("5ч KPI: переплата 10.00%"),
+            Some("5ч KPI: переплата 10.00%"),
+            "personal_agent_5h_kpi",
+            Some(9_000),
+            10,
+            false,
+            true,
+            true,
+            false,
+            true,
+            Some("amai"),
+            Some("continuity"),
+            Some("/home/art/agent-memory-index"),
+            Some("headline"),
+            Some("next step"),
+            90,
+            working_state::HostContextCompactionStage::CriticalRegrowth,
+            false,
+            true,
+            false,
+            Some("thread-current"),
+            Some("hotkey-window-open-current"),
+            &json!({
+                "retry_allowed": false,
+                "measurement_pending": false,
+                "effect_verdict": "requested_compact_surface_observed",
+                "summary": "Requested compact window launch via host current-thread control."
+            }),
+            true,
+            Some("Requested same-thread compact window launch via host current-thread control."),
+        );
+        assert_eq!(
+            gate["action_kind"],
+            json!("confirm_same_thread_host_control_feedback")
+        );
+        assert_eq!(
+            gate["action_bundle"]["operator_flow"]["primary_command_kind"],
+            json!("confirm_same_thread_host_control_feedback")
+        );
+        assert_eq!(
+            gate["must_confirm_same_thread_host_control_feedback_before_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            gate["action_bundle"]["feedback_confirmation_before_retry_required"],
+            json!(true)
+        );
+        assert_eq!(
+            gate["action_bundle"]["order"],
+            json!([
+                "confirm_same_thread_host_control_feedback",
+                "run_rotate_helper",
+                "open_fresh_chat",
+                "run_continuity_startup"
+            ])
+        );
+    }
+
+    #[test]
+    fn reply_execution_gate_hard_blocks_rotate_now_for_pure_burn_critical_regrowth() {
+        let gate = build_client_budget_reply_execution_gate_with_primary_command(
+            "critical",
+            "новый чат нужен сейчас",
+            Some("5ч KPI: переплата 10.00%"),
+            Some("5ч KPI: переплата 10.00%"),
+            "personal_agent_5h_kpi",
+            Some(9_000),
+            10,
+            true,
+            true,
+            true,
+            false,
+            true,
+            Some("amai"),
+            Some("continuity"),
+            Some("/home/art/agent-memory-index"),
+            Some("headline"),
+            Some("next step"),
+            90,
+            working_state::HostContextCompactionStage::CriticalRegrowth,
+            false,
+            true,
+            true,
+            Some("thread-current"),
+            Some("hotkey-window-open-current"),
+            &json!({
+                "retry_allowed": false,
+                "measurement_pending": false,
+                "effect_verdict": "full_scale_client_burn_worsened_rotate_fallback_recommended",
+                "verified_host_compaction_observed_after_feedback": true,
+                "summary": "Surface already failed; rotate is primary."
+            }),
+            false,
+            None,
+        );
+        assert_eq!(gate["action_kind"], json!("rotate_chat_for_client_budget"));
+        assert_eq!(gate["blocking"], json!(true));
+        assert_eq!(gate["must_rotate_before_reply"], json!(true));
+        assert_eq!(
+            gate["blocking_reply_contract"]["response_kind"],
+            json!(working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND)
+        );
+        assert_eq!(
+            gate["reason"],
+            json!("client_budget_guard_pure_burn_rotate_now")
+        );
     }
 }

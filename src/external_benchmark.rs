@@ -1701,10 +1701,6 @@ fn retrieval_payload_hit_count(payload: &Value, keys: &[&str]) -> usize {
         .sum()
 }
 
-fn scan_runtime_files_for_benchmark_answer(runtime_root: &Path, question: &str) -> Option<String> {
-    scan_runtime_files_for_benchmark_answer_scored(runtime_root, question).map(|(_, text)| text)
-}
-
 fn scan_runtime_files_for_benchmark_answer_scored(
     runtime_root: &Path,
     question: &str,

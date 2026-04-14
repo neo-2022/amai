@@ -114,6 +114,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn build_headline_prefers_active_agent_budget_average() {
+        let snapshot = json!({
+            "sla": {
+                "summary": {
+                    "pass": 19,
+                    "alert": 0,
+                    "critical": 0,
+                    "unknown": 0
+                }
+            },
+            "active_agent_budget": {
+                "headline": {
+                    "title": "Средний KPI активных агентов",
+                    "value_text": "5ч KPI: экономия 40.00%",
+                    "scope_label": "среднее по 2 активным агентам"
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "headline": {
+                        "title": "global fallback",
+                        "value_percent": 12.0,
+                        "scope_label": "fallback"
+                    }
+                }
+            }
+        });
+        let headline = build_headline(&snapshot, 1775039106398);
+        assert_eq!(
+            headline["token_title"].as_str(),
+            Some("Средний KPI активных агентов")
+        );
+        assert_eq!(
+            headline["token_value"].as_str(),
+            Some("5ч KPI: экономия 40.00%")
+        );
+        assert_eq!(headline["token_scope"].as_str(), Some(""));
+    }
+
+    #[test]
     fn top_cards_split_live_retrieval_from_real_workline() {
         let snapshot = json!({
             "captured_at_epoch_ms": 1774239286880u64,

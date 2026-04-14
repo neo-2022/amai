@@ -1360,6 +1360,249 @@ mod tests {
     }
 
     #[test]
+    fn build_links_groups_api_and_monitoring_entries() {
+        let links = build_links("http://127.0.0.1:9464");
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0]["label"].as_str(), Some(""));
+        assert_eq!(
+            links[0]["items"].as_array().map(|items| items.len()),
+            Some(4)
+        );
+        assert_eq!(links[1]["label"].as_str(), Some(""));
+        assert_eq!(links[1]["note"].as_str(), Some(""));
+        assert_eq!(
+            links[1]["items"].as_array().map(|items| items.len()),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn machine_cards_include_artifact_cleanup_visibility() {
+        let snapshot = json!({
+            "artifact_cleanup": {
+                "captured_at_epoch_ms": 42,
+                "selected": 0,
+                "selected_reclaimable_bytes": 0,
+                "policy_retained_reclaimable_bytes": 0,
+                "policy_retained_targets": [],
+                "manual_only_reclaimable_bytes": 0,
+                "manual_only_reclaimable_targets": [],
+                "expired": 0,
+                "kept_latest": 3,
+                "protected": 1,
+                "targets_scanned": 7,
+                "aggressive_preview_selected": 4,
+                "aggressive_preview_reclaimable_bytes": 35_604_527_338u64,
+                "last_apply": {
+                    "captured_at_epoch_ms": 41,
+                    "mode": "aggressive",
+                    "deleted": 30,
+                    "reclaimed_bytes": 50_424_092_586u64
+                },
+                "repo_inventory": {
+                    "repo_total_bytes": 230_200_000_000u64,
+                    "cleanup_scope_bytes": 29_960_520_424u64,
+                    "out_of_policy_bytes": 200_239_479_576u64,
+                    "unmanaged_alert_triggered": true,
+                    "large_unmanaged_roots": [
+                        {
+                            "path": "output/windows-vm-lab",
+                            "unmanaged_bytes": 199_715_979_264u64
+                        }
+                    ],
+                    "manual_only_targets": [
+                        {
+                            "path": "output/windows-vm-lab",
+                            "ttl_hours": 168,
+                            "keep_latest": 2,
+                            "total_bytes": 199_715_979_264u64
+                        }
+                    ],
+                    "unreadable_paths_count": 1
+                }
+            }
+        });
+        let cards = build_machine_cards(&snapshot, None, None);
+        let cleanup_card = cards
+            .iter()
+            .find(|card| card["title"].as_str() == Some("Локальный мусор и retention"))
+            .expect("cleanup card");
+        assert_eq!(cleanup_card["status"].as_str(), Some("alert"));
+        assert_eq!(
+            cleanup_card["value"].as_str(),
+            Some("186.49 GiB вне policy")
+        );
+        assert_eq!(
+            cleanup_card["rows"][0]["value"].as_str(),
+            Some("214.39 GiB")
+        );
+        assert_eq!(cleanup_card["rows"][1]["value"].as_str(), Some("27.90 GiB"));
+        assert_eq!(
+            cleanup_card["rows"][2]["value"].as_str(),
+            Some("186.49 GiB")
+        );
+        assert_eq!(cleanup_card["rows"][4]["value"].as_str(), Some("33.16 GiB"));
+        assert_eq!(
+            cleanup_card["rows"][7]["value"].as_str(),
+            Some("46.96 GiB (30, aggressive)")
+        );
+        assert_eq!(
+            cleanup_card["rows"][11]["value"].as_str(),
+            Some("output/windows-vm-lab (186.00 GiB)")
+        );
+        assert_eq!(
+            cleanup_card["rows"][12]["value"].as_str(),
+            Some("output/windows-vm-lab (186.00 GiB, ttl 168h, keep_latest 2)")
+        );
+    }
+
+    #[test]
+    fn governance_card_surfaces_forgetting_job_breakdown() {
+        let snapshot = json!({
+            "governance_surface": {
+                "human_override_audit": {
+                    "scope_override_events_total": 2,
+                    "forgetting_audit_log_entries_total": 17
+                },
+                "wrong_link_rate": {
+                    "open_conflict_count": 0
+                },
+                "poisoning_alert_count": {
+                    "active_quarantine_items": 0
+                },
+                "trust_state_distribution": {
+                    "disputed_memory_items": 0
+                },
+                "stale_memory_error_rate": {
+                    "rate": 0.125
+                },
+                "forgetting_job_breakdown": {
+                    "pruning_job": 7,
+                    "cold_archive_job": 3,
+                    "revalidation_job": 4,
+                    "de_duplication_job": 2,
+                    "summarization_job": 0
+                }
+            }
+        });
+
+        let card = build_governance_card(&snapshot);
+        assert_eq!(card["title"], json!("Жизненный цикл памяти"));
+        assert_eq!(card["status"], json!("pass"));
+        assert_eq!(card["rows"][0]["value"], json!("7"));
+        assert_eq!(card["rows"][1]["value"], json!("3"));
+        assert_eq!(card["rows"][2]["value"], json!("4"));
+        assert_eq!(card["rows"][3]["value"], json!("2"));
+        assert_eq!(card["rows"][4]["value"], json!("0"));
+    }
+
+    #[test]
+    fn governance_card_alert_headline_surfaces_quarantine_and_conflicts() {
+        let snapshot = json!({
+            "governance_surface": {
+                "human_override_audit": {
+                    "forgetting_audit_log_entries_total": 18
+                },
+                "wrong_link_rate": {
+                    "open_conflict_count": 135
+                },
+                "poisoning_alert_count": {
+                    "active_quarantine_items": 66,
+                    "active_quarantine_breakdown": [
+                        {
+                            "quarantine_reason": "proof quarantine",
+                            "entity_kind": "import_packet",
+                            "source_kind": "import_packet_override",
+                            "item_count": 60
+                        }
+                    ]
+                },
+                "open_conflict_breakdown": [
+                    {
+                        "summary": "truth conflict detected",
+                        "source_kind": "verification_conflict_runtime",
+                        "item_count": 120
+                    }
+                ],
+                "trust_state_distribution": {
+                    "disputed_memory_items": 0
+                },
+                "stale_memory_error_rate": {
+                    "rate": 0.0095
+                },
+                "forgetting_job_breakdown": {
+                    "pruning_job": 6,
+                    "cold_archive_job": 6,
+                    "revalidation_job": 6,
+                    "de_duplication_job": 0,
+                    "summarization_job": 0
+                }
+            }
+        });
+
+        let card = build_governance_card(&snapshot);
+        assert_eq!(card["status"], json!("alert"));
+        assert_eq!(card["value"], json!("66 в quarantine • 135 конфликтов"));
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("главный quarantine-класс")
+        );
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("главный конфликт")
+        );
+        assert_eq!(card["rows"][6]["label"], json!("Quarantine"));
+        assert_eq!(card["rows"][6]["value"], json!("66"));
+        assert_eq!(card["rows"][7]["label"], json!("Спорные"));
+        assert_eq!(card["rows"][8]["label"], json!("Открытые конфликты"));
+    }
+
+    #[test]
+    fn governance_card_uses_correct_russian_count_forms_in_alert_headline() {
+        let snapshot = json!({
+            "governance_surface": {
+                "human_override_audit": {
+                    "forgetting_audit_log_entries_total": 1
+                },
+                "wrong_link_rate": {
+                    "open_conflict_count": 1
+                },
+                "poisoning_alert_count": {
+                    "active_quarantine_items": 0,
+                    "active_quarantine_breakdown": []
+                },
+                "open_conflict_breakdown": [
+                    {
+                        "summary": "cli get conflict 1",
+                        "source_kind": "runtime_cli",
+                        "item_count": 1
+                    }
+                ],
+                "trust_state_distribution": {
+                    "disputed_memory_items": 0
+                },
+                "stale_memory_error_rate": {
+                    "rate": 0.0
+                },
+                "forgetting_job_breakdown": {
+                    "pruning_job": 0,
+                    "cold_archive_job": 0,
+                    "revalidation_job": 0,
+                    "de_duplication_job": 0,
+                    "summarization_job": 0
+                }
+            }
+        });
+
+        let card = build_governance_card(&snapshot);
+        assert_eq!(card["value"], json!("1 конфликт"));
+    }
+
+    #[test]
     fn artifact_cleanup_warning_surfaces_large_unmanaged_root() {
         let snapshot = json!({
             "artifact_cleanup": {
