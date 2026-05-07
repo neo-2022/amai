@@ -1,0 +1,51 @@
+.env
+.env.local
+.amai/
+.fastembed_cache/
+.mcp.json
+.openclaw/
+
+target/
+*.log
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+
+# Runtime state is local-only by default. Keep tracked .gitkeep files explicit.
+state/*
+!state/postgres/
+!state/qdrant/
+!state/minio/
+!state/nats/
+!state/sqlite/
+
+state/postgres/*
+!state/postgres/.gitkeep
+state/qdrant/*
+!state/qdrant/.gitkeep
+state/minio/*
+!state/minio/.gitkeep
+state/nats/*
+!state/nats/.gitkeep
+state/sqlite/*
+!state/sqlite/.gitkeep
+
+tmp/*
+!tmp/.gitkeep
+output/
+
+.vscode/
+.cursor/
+.github/instructions/amai-continuity-startup.instructions.md
+
+# Local agent/dev artifacts (must not be committed).
+.codex
+.playwright-cli/
+
+# Vendor must stay self-contained in git even if nested files match generic ignore
+# patterns such as target/, output/ or .vscode/.
+!vendor/**
+vendor/**/.vscode/
+vendor/**/src/target/
+vendor/**/src/output/

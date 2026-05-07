@@ -1,0 +1,26 @@
+{
+  "name": "amai-vscode-bridge",
+  "displayName": "Amai VS Code Bridge",
+  "description": "Public VS Code URI bridge for opening a clean Codex chat surface and injecting an Amai restore prompt.",
+  "version": "0.0.2",
+  "publisher": "amai",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onUri",
+    "onCommand:amaiVscodeBridge.openCleanChat"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "amaiVscodeBridge.openCleanChat",
+        "title": "Amai: Open Clean Codex Chat"
+      }
+    ]
+  }
+}

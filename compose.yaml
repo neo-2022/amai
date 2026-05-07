@@ -1,0 +1,113 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: ami-postgres
+    restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+    environment:
+      POSTGRES_DB: ${AMI_PG_DB}
+      POSTGRES_USER: ${AMI_PG_USER}
+      POSTGRES_PASSWORD: ${AMI_PG_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${AMI_STACK_BIND_HOST}:${AMI_PG_PORT}:5432"
+    volumes:
+      - ./state/postgres:/var/lib/postgresql/data
+      - ${AMI_POSTGRES_CERTS_DIR}:/etc/postgresql/certs:ro
+      - ./tmp/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./tmp/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AMI_PG_USER} -d ${AMI_PG_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  qdrant:
+    image: qdrant/qdrant:v1.17.0
+    container_name: ami-qdrant
+    restart: unless-stopped
+    ports:
+      - "${AMI_STACK_BIND_HOST}:56333:6333"
+      - "${AMI_STACK_BIND_HOST}:56334:6334"
+    volumes:
+      - ./state/qdrant:/qdrant/storage
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-18T16-25-55Z
+    container_name: ami-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${AMI_S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${AMI_S3_SECRET_KEY}
+    ports:
+      - "${AMI_STACK_BIND_HOST}:59000:9000"
+      - "${AMI_STACK_BIND_HOST}:59001:9001"
+    volumes:
+      - ./state/minio:/data
+      - ${AMI_MINIO_CERTS_DIR}:/root/.minio/certs:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS ${AMI_MINIO_SCHEME}://127.0.0.1:9000/minio/health/live >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  nats:
+    image: nats:2.11.4
+    container_name: ami-nats
+    restart: unless-stopped
+    command: ["-c", "/etc/nats/server.conf"]
+    ports:
+      - "${AMI_STACK_BIND_HOST}:54222:4222"
+      - "${AMI_STACK_BIND_HOST}:58222:8222"
+    volumes:
+      - ./tmp/nats/server.conf:/etc/nats/server.conf:ro
+      - ./state/nats:/data/jetstream
+
+  prometheus:
+    profiles: ["monitoring"]
+    image: ${AMI_PROMETHEUS_IMAGE}
+    container_name: ami-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "${AMI_STACK_BIND_HOST}:${AMI_PROMETHEUS_PORT}:9090"
+    volumes:
+      - ./tmp/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/prometheus/rules:/etc/prometheus/rules:ro
+      - amai-prometheus-data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - qdrant
+      - nats
+
+  grafana:
+    profiles: ["monitoring"]
+    image: ${AMI_GRAFANA_IMAGE}
+    container_name: ami-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${AMI_GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${AMI_GRAFANA_ADMIN_PASSWORD}
+    ports:
+      - "${AMI_STACK_BIND_HOST}:${AMI_GRAFANA_PORT}:3000"
+    volumes:
+      - ./tmp/monitoring/grafana/provisioning/datasources/prometheus.yaml:/etc/grafana/provisioning/datasources/prometheus.yaml:ro
+      - ./config/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - amai-grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  amai-prometheus-data:
+  amai-grafana-data:

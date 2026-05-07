@@ -1,0 +1,180 @@
+modified_at = "2026-03-26 14:44 MSK"
+"Ручная сверка guide/docs" = "2026-03-26 14:44 MSK"
+
+[observability]
+schema_version = 2
+classification_rules_version = "observability-source-class-v2"
+retention_profile = "observability-retention-v1"
+retention_live_system_hours = 168
+retention_live_context_hours = 72
+retention_benchmark_hours = 2160
+retention_verify_event_hours = 720
+retention_working_state_restore_hours = 720
+
+[snapshot]
+postgres_query_probe_iterations = 20
+nats_publish_probe_iterations = 20
+
+[dashboard]
+refresh_ms = 5000
+exact_client_limit_prewarm_seconds = 15
+compact_client_budget_prewarm_seconds = 15
+
+[dashboard.timing_format]
+switch_to_nanoseconds_below_ms = 0.001
+switch_to_microseconds_below_ms = 1.0
+switch_to_seconds_at_or_above_ms = 1000.0
+non_positive_floor_label = "0 ns"
+seconds_suffix = "s"
+milliseconds_suffix = "ms"
+microseconds_suffix = "µs"
+nanoseconds_suffix = "ns"
+seconds_decimals = 3
+milliseconds_decimals = 3
+microseconds_decimals = 3
+nanoseconds_decimals = 0
+
+[artifact_cleanup]
+sweep_interval_seconds = 3600
+unmanaged_root_alert_bytes = 10737418240
+max_unmanaged_roots = 3
+disk_pressure_alert_used_percent = 85.0
+disk_pressure_critical_used_percent = 92.0
+disk_pressure_alert_available_gib = 150.0
+disk_pressure_critical_available_gib = 60.0
+
+[[artifact_cleanup.targets]]
+path = "target/debug"
+description = "stale debug build outputs"
+ttl_hours = 168
+keep_latest = 3
+auto_apply = true
+
+[[artifact_cleanup.targets]]
+path = "target/release"
+description = "stale release build outputs"
+ttl_hours = 336
+keep_latest = 3
+auto_apply = true
+
+[[artifact_cleanup.targets]]
+path = ".fastembed_cache"
+description = "stale local embedding model cache"
+ttl_hours = 336
+keep_latest = 1
+auto_apply = true
+
+[[artifact_cleanup.targets]]
+path = "state/external-benchmarks/datasets"
+description = "stale external benchmark raw datasets"
+ttl_hours = 336
+keep_latest = 1
+auto_apply = true
+
+[[artifact_cleanup.targets]]
+path = "state/external-benchmarks/converted"
+description = "stale converted external benchmark datasets"
+ttl_hours = 336
+keep_latest = 1
+auto_apply = true
+
+[[artifact_cleanup.targets]]
+path = "state/external-benchmarks/upstream"
+description = "stale upstream benchmark mirrors"
+ttl_hours = 336
+keep_latest = 1
+auto_apply = true
+
+[[artifact_cleanup.targets]]
+path = "state/external-benchmarks/runs"
+description = "stale external benchmark run outputs"
+ttl_hours = 168
+keep_latest = 2
+auto_apply = true
+
+[[artifact_cleanup.targets]]
+path = "output/windows-vm-lab"
+description = "stale Windows VM lab proof runs"
+ttl_hours = 24
+keep_latest = 2
+auto_apply = false
+entry_cleanup_strategy = "windows_vm_lab_preserve_evidence"
+
+[postgres]
+target_connection_usage_ratio = 0.80
+alert_connection_usage_ratio = 0.90
+critical_connection_usage_ratio = 0.95
+target_query_probe_p95_ms = 50.0
+alert_query_probe_p95_ms = 100.0
+critical_query_probe_p95_ms = 250.0
+target_replica_lag_seconds = 0.5
+alert_replica_lag_seconds = 1.0
+critical_replica_lag_seconds = 5.0
+
+[qdrant]
+target_index_optimize_queue = 10.0
+alert_index_optimize_queue = 100.0
+critical_index_optimize_queue = 500.0
+target_search_p95_ms = 100.0
+alert_search_p95_ms = 250.0
+critical_search_p95_ms = 500.0
+target_update_queue_length = 0.0
+alert_update_queue_length = 100.0
+critical_update_queue_length = 1000.0
+
+[nats]
+target_publish_p95_ms = 10.0
+alert_publish_p95_ms = 25.0
+critical_publish_p95_ms = 100.0
+target_consumer_lag_msgs = 1000.0
+alert_consumer_lag_msgs = 10000.0
+critical_consumer_lag_msgs = 50000.0
+target_jetstream_disk_usage_ratio = 0.80
+alert_jetstream_disk_usage_ratio = 0.90
+critical_jetstream_disk_usage_ratio = 0.95
+
+[retrieval]
+target_cold_p50_ms = 2.0
+target_p95_ms = 12.0
+target_cold_p99_ms = 13.0
+target_cold_max_ms = 15.0
+live_readiness_cold_sample_count = 100
+target_cold_sample_count = 10000
+target_hot_p50_ms = 1.0
+target_hot_p95_ms = 1.0
+target_hot_p99_ms = 2.0
+target_hot_max_ms = 5.0
+live_readiness_hot_sample_count = 20
+target_hot_sample_count = 100000
+target_hot_benchmark_iterations = 20
+target_hot_benchmark_warmup = 3
+alert_p95_ms = 13.0
+critical_p95_ms = 15.0
+stretch_hot_p95_ms = 1.0
+
+[parser]
+target_coverage_ratio = 0.95
+alert_coverage_ratio = 0.80
+critical_coverage_ratio = 0.50
+
+[accuracy]
+target_symbol_precision = 0.99
+alert_symbol_precision = 0.95
+critical_symbol_precision = 0.90
+target_semantic_precision = 0.98
+alert_semantic_precision = 0.90
+critical_semantic_precision = 0.85
+
+[load]
+target_hot_qps = 1200000.0
+target_hot_p50_ms = 0.012
+target_hot_p95_ms = 0.015
+target_hot_p99_ms = 0.020
+target_hot_max_ms = 0.5
+target_hot_workers = 16
+target_hot_sample_count = 10000
+alert_hot_qps = 30000.0
+critical_hot_qps = 20000.0
+target_hot_error_rate = 0.0
+alert_hot_error_rate = 0.01
+critical_hot_error_rate = 0.05

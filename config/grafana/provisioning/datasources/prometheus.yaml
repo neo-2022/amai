@@ -1,0 +1,10 @@
+apiVersion: 1
+
+datasources:
+  - name: Amai Prometheus
+    uid: amai-prometheus
+    type: prometheus
+    access: proxy
+    url: __AMI_GRAFANA_PROMETHEUS_URL__
+    isDefault: true
+    editable: false

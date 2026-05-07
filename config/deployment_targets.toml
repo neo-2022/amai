@@ -1,0 +1,67 @@
+[targets.local_docker]
+display_name = "Local Docker Baseline"
+support_level = "materialized"
+summary = "Главный режим для локальной машины или обычного Linux-хоста. Именно от него сейчас идёт основной product path для Amai."
+why_choose = [
+  "Нужен основной локальный путь без лишней серверной сложности.",
+  "Нужно честно поднять текущий Amai stack и пользоваться им сразу.",
+  "Нужен baseline для install, proof, observability и обычного MCP-подключения."
+]
+not_for = [
+  "Если вы хотите строить командный orchestration-layer поверх нескольких серверов.",
+  "Если вам нужен именно следующий production deployment layer, а не простой baseline."
+]
+requires_commands = ["docker"]
+optional_commands = ["git"]
+next_step = "Для обычного человека: ./scripts/install_amai.sh"
+
+[targets.remote_ssh]
+display_name = "Remote SSH Client Mode"
+support_level = "materialized"
+summary = "Amai живёт на Linux/VPS-хосте, а локальная IDE подключается к нему через SSH. Это лучший путь для Windows/macOS-клиента без публикации внутренних баз наружу."
+why_choose = [
+  "Нужен удалённый режим без раскрытия PostgreSQL, Qdrant, NATS и S3 в интернет.",
+  "Нужно пользоваться Amai с ноутбука, а сам stack держать на Linux/VPS.",
+  "Нужно подключить VS Code, Cursor или другой клиент к уже поднятому удалённому Amai."
+]
+not_for = [
+  "Если вы хотите, чтобы все сервисы жили прямо на локальной машине пользователя.",
+  "Если вам нужен первый локальный install path без отдельного сервера."
+]
+requires_commands = ["ssh"]
+optional_commands = ["docker"]
+next_step = "Для удалённого режима: ./scripts/onboard_remote_client.sh --client vscode --ssh-destination user@host --remote-repo-root /srv/amai"
+
+[targets.kubernetes_server]
+display_name = "Kubernetes Server Layer"
+support_level = "foundation_ready"
+summary = "Следующий server/team deployment layer поверх текущего Docker baseline. Нужен не всем, а там, где уже начинается более серьёзная server orchestration."
+why_choose = [
+  "Нужен следующий production deployment layer для команды или server-инфраструктуры.",
+  "Нужны rolling updates, более формальная orchestration-схема и развитие вокруг auth/license/subscription.",
+  "Нужно закладывать следующий этап без подмены текущего простого user-path."
+]
+not_for = [
+  "Если вам нужен первый install path для обычного человека.",
+  "Если у вас один локальный хост или один дешёвый VPS и нет реальной пользы от Kubernetes."
+]
+requires_commands = ["kubectl", "kind"]
+optional_commands = ["docker"]
+next_step = "Сначала посмотрите готовность машины: cargo run -- deployment preflight --target kubernetes_server"
+
+[targets.windows_vm_lab]
+display_name = "Windows VM Validation Lab"
+support_level = "materialized"
+summary = "Контур для проверки Windows-клиентского пути через виртуальную машину. Это не основной user-path, а отдельная проверочная лаборатория."
+why_choose = [
+  "Нужно честно прогнать Windows smoke без бумажных заявлений о поддержке.",
+  "Нужно проверить install/remove/MCP path в Windows-контуре.",
+  "Нужно зафиксировать реальный validation layer для будущей поддержки Windows."
+]
+not_for = [
+  "Если вам нужно просто пользоваться Amai прямо сейчас.",
+  "Если вам не нужен отдельный Windows validation contour."
+]
+requires_commands = ["qemu-system-x86_64", "qemu-img", "xorriso", "genisoimage", "mkfs.fat", "swtpm", "7z"]
+optional_commands = ["ssh"]
+next_step = "Для живого proof: ./scripts/proof_windows_vm_lab.sh --iso-path /path/to/windows.iso"
