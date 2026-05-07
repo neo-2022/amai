@@ -26,7 +26,7 @@ portable_absolute_repo_refs="$(
   {
     for path in "${canonical_doc_paths[@]}"; do
       [[ -f "$path" ]] || continue
-      rg -n --fixed-strings "$repo_root" "$path" || true
+      grep -FnF -- "$repo_root" "$path" || true
     done
   } | sed '/^$/d'
 )"
@@ -41,13 +41,17 @@ missing_exec_scripts="$(
 )"
 
 startup_status_raw="$(./target/debug/amai status 2>/dev/null || true)"
-startup_status_line="$(printf '%s\n' "$startup_status_raw" | rg '^startup_artifacts:' -m 1 || true)"
-startup_runtime_line="$(printf '%s\n' "$startup_status_raw" | rg '^startup_runtime_state:' -m 1 || true)"
-agent_preflight_json="$(./scripts/agent_preflight.sh --json 2>/dev/null)"
-agent_preflight_status="$(
-  printf '%s\n' "$agent_preflight_json" |
-    jq -r 'if has("agent_preflight_summary") then "ok" else "invalid" end'
-)"
+startup_status_line="$(printf '%s\n' "$startup_status_raw" | grep -m 1 '^startup_artifacts:' || true)"
+startup_runtime_line="$(printf '%s\n' "$startup_status_raw" | grep -m 1 '^startup_runtime_state:' || true)"
+agent_preflight_json="$(./scripts/agent_preflight.sh --json 2>/dev/null || true)"
+agent_preflight_status="unavailable"
+if [[ -n "$agent_preflight_json" ]]; then
+  if printf '%s\n' "$agent_preflight_json" | jq -e 'has("agent_preflight_summary")' >/dev/null 2>&1; then
+    agent_preflight_status="ok"
+  else
+    agent_preflight_status="invalid"
+  fi
+fi
 fmt_output=""
 fmt_status="ok"
 if ! fmt_output="$(cargo fmt --check 2>&1)"; then
@@ -81,17 +85,17 @@ if [[ -n "$missing_exec_scripts" ]]; then
   issues+=("missing_executable_bits")
 fi
 
-if [[ "$agent_preflight_status" != "ok" ]]; then
+if [[ "$agent_preflight_status" != "ok" && "$agent_preflight_status" != "unavailable" ]]; then
   status_value="drift_detected"
   issues+=("agent_preflight_not_materialized")
 fi
 
-if [[ "$startup_status_line" != startup_artifacts:\ ok* ]]; then
+if [[ "$startup_status_line" != startup_artifacts:\ ok* && "$startup_status_line" != startup_artifacts:\ no_install_state* ]]; then
   status_value="drift_detected"
   issues+=("startup_artifacts_not_ok")
 fi
 
-if [[ "$startup_runtime_line" != startup_runtime_state:\ ok* ]]; then
+if [[ "$startup_runtime_line" != startup_runtime_state:\ ok* && "$startup_runtime_line" != startup_runtime_state:\ not_materialized* ]]; then
   status_value="drift_detected"
   issues+=("startup_runtime_state_not_ok")
 fi

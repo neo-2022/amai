@@ -114,8 +114,7 @@ mod tests {
 
     #[test]
     fn append_working_state_warning_to_message_keeps_base_without_warning() {
-        let message =
-            append_working_state_warning_to_message("Target switched.", &json!({}));
+        let message = append_working_state_warning_to_message("Target switched.", &json!({}));
         assert_eq!(message, "Target switched.");
     }
 
@@ -158,7 +157,10 @@ mod tests {
                 }
             }
         }));
-        assert_eq!(message, "Целевая экономия переключена. restore refresh degraded");
+        assert_eq!(
+            message,
+            "Целевая экономия переключена. restore refresh degraded"
+        );
     }
 
     #[test]
@@ -173,7 +175,10 @@ mod tests {
                 }
             }
         }));
-        assert_eq!(message, "Целевая экономия переключена. restore refresh degraded");
+        assert_eq!(
+            message,
+            "Целевая экономия переключена. restore refresh degraded"
+        );
     }
 
     #[test]
@@ -374,7 +379,10 @@ mod tests {
         );
         assert_eq!(notice["kind"], json!("client_budget_target_changed"));
         assert_eq!(notice["thread_id"], json!("query-thread"));
-        assert_eq!(notice["message_text"], json!("Целевая экономия переключена."));
+        assert_eq!(
+            notice["message_text"],
+            json!("Целевая экономия переключена.")
+        );
         assert_eq!(notice["reply_prefix"], json!("5ч KPI: переплата 7.00%"));
         assert!(notice["exact_chat_command"].is_null());
         assert_eq!(notice["target_percent"], json!(9));
@@ -383,11 +391,8 @@ mod tests {
 
     #[test]
     fn agent_display_name_update_notice_payload_preserves_thread_id() {
-        let notice = agent_display_name_update_notice_payload(
-            "agent.scope",
-            "Agent Name",
-            Some("thread-1"),
-        );
+        let notice =
+            agent_display_name_update_notice_payload("agent.scope", "Agent Name", Some("thread-1"));
         assert_eq!(notice["kind"], json!("agent_display_name_updated"));
         assert_eq!(notice["thread_id"], json!("thread-1"));
         assert_eq!(notice["agent_scope"], json!("agent.scope"));
@@ -400,8 +405,7 @@ mod tests {
 
     #[test]
     fn agent_display_name_update_notice_payload_preserves_missing_thread_id_as_null() {
-        let notice =
-            agent_display_name_update_notice_payload("agent.scope", "Agent Name", None);
+        let notice = agent_display_name_update_notice_payload("agent.scope", "Agent Name", None);
         assert!(notice["thread_id"].is_null());
     }
 }
@@ -781,12 +785,9 @@ pub(super) async fn client_budget_target_update_api_handler(
             percent: request.percent,
             json: true,
         };
-        let update = continuity::client_budget_target_payload(
-            &state.cfg,
-            &args,
-            query.thread_id.as_deref(),
-        )
-        .await?;
+        let update =
+            continuity::client_budget_target_payload(&state.cfg, &args, query.thread_id.as_deref())
+                .await?;
         refresh_observe_cache(
             state.cache.clone(),
             state.cfg.clone(),

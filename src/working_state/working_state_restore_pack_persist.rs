@@ -50,11 +50,11 @@ pub(super) fn persisted_restore_snapshot_payload(bundle: &Value) -> Value {
     let mut payload = json!({
         "working_state_restore": bundle["working_state_restore"].clone()
     });
-    let authoritative_event_id = payload["working_state_restore"]["state_lineage"]
-        ["authoritative_event_id"]
-        .as_str()
-        .filter(|value| !value.trim().is_empty())
-        .map(ToOwned::to_owned);
+    let authoritative_event_id =
+        payload["working_state_restore"]["state_lineage"]["authoritative_event_id"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned);
     if let Some(restore) = payload
         .get_mut("working_state_restore")
         .and_then(Value::as_object_mut)

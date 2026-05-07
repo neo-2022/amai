@@ -238,13 +238,9 @@ fn url_encode_component(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~' => encoded.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
             _ => encoded.push_str(&format!("%{byte:02X}")),
         }
     }
@@ -276,7 +272,10 @@ fn build_vscode_public_bridge_launch_command(
     target: &str,
 ) -> String {
     let uri = build_vscode_public_bridge_uri(repo_root, prompt_path, result_path, target);
-    if let Some(vscode_binary) = vscode_binary.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(vscode_binary) = vscode_binary
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         return format!(
             "cd {} && {} --open-url {}",
             shell_quote(&repo_root.display().to_string()),
@@ -391,7 +390,9 @@ pub(super) fn build_compact_chat_clean_launch_surface_with_vscode_contracts(
         .filter(|value| !value.is_empty())
     else {
         if let (Some(uri_open_command), true, true) = (
-            uri_open_command.map(str::trim).filter(|value| !value.is_empty()),
+            uri_open_command
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
             public_bridge_installed,
             public_bridge_live_verified,
         ) {
@@ -440,7 +441,9 @@ pub(super) fn build_compact_chat_clean_launch_surface_with_vscode_contracts(
     };
 
     if let (Some(uri_open_command), true, true) = (
-        uri_open_command.map(str::trim).filter(|value| !value.is_empty()),
+        uri_open_command
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
         public_bridge_installed,
         public_bridge_live_verified,
     ) {

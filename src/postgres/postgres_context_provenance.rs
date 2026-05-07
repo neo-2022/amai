@@ -155,8 +155,8 @@ fn forced_restore_pack_create_error_for_tests(
                 pack_kind
             ),
         )),
-        ("outcome_unknown_after_write", true) => Some(
-            RestorePackCreateError::outcome_unknown_after_write(
+        ("outcome_unknown_after_write", true) => {
+            Some(RestorePackCreateError::outcome_unknown_after_write(
                 project_code,
                 namespace_code,
                 pack_kind,
@@ -167,8 +167,8 @@ fn forced_restore_pack_create_error_for_tests(
                     namespace_code,
                     pack_kind
                 ),
-            ),
-        ),
+            ))
+        }
         _ => None,
     }
 }

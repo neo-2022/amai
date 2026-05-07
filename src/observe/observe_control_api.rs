@@ -20,8 +20,7 @@ mod observe_control_warning_tests {
 
     #[test]
     fn append_working_state_warning_to_message_keeps_base_without_warning() {
-        let message =
-            append_working_state_warning_to_message("Host control opened.", &json!({}));
+        let message = append_working_state_warning_to_message("Host control opened.", &json!({}));
         assert_eq!(message, "Host control opened.");
     }
 
@@ -482,9 +481,7 @@ pub(super) async fn client_budget_compact_chat_api_handler(
             let bind = state.bind.clone();
             let refresh_ms = state.dashboard_refresh_ms;
             async move {
-                if let Err(error) =
-                    refresh_observe_cache(cache, cfg, bind, refresh_ms).await
-                {
+                if let Err(error) = refresh_observe_cache(cache, cfg, bind, refresh_ms).await {
                     eprintln!("client_budget_compact_chat refresh failed: {error:#}");
                 }
             }
@@ -962,14 +959,14 @@ pub async fn client_budget_host_control_launch_payload(
     let launched_feedback_kind = working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED;
     let working_state_write_status =
         working_state::record_host_current_thread_control_feedback_with_thread_hint(
-        &db,
-        &project,
-        &namespace,
-        launched_feedback_kind,
-        Some(command_id),
-        Some(thread_id),
-    )
-    .await?;
+            &db,
+            &project,
+            &namespace,
+            launched_feedback_kind,
+            Some(command_id),
+            Some(thread_id),
+        )
+        .await?;
     let _ = write_shared_thread_bound_snapshot_invalidation(&repo_root, thread_id);
     let restore = working_state::build_restore_bundle(&db, &project, &namespace).await?;
     if let Ok(snapshot) = collect_client_budget_snapshot_from_db(
@@ -1127,17 +1124,17 @@ pub(super) fn client_budget_host_control_launch_api_summary(payload: &Value) -> 
 }
 
 fn client_budget_host_control_launch_chat_notice(payload: &Value, thread_id: &str) -> Value {
-    let source_notice =
-        &payload["client_budget_host_control_launch"]["operator_notice"];
+    let source_notice = &payload["client_budget_host_control_launch"]["operator_notice"];
     let fallback_thread_id = source_notice["thread_id"]
         .as_str()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(thread_id);
-    let fallback_feedback_kind = payload["client_budget_host_control_launch"]["working_state_write_status"]
-        .as_object()
-        .map(|_| working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED)
-        .unwrap_or(working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED);
+    let fallback_feedback_kind =
+        payload["client_budget_host_control_launch"]["working_state_write_status"]
+            .as_object()
+            .map(|_| working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED)
+            .unwrap_or(working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED);
     let fallback_message_text = append_working_state_warning_to_message(
         "Запрошен same-thread host control.",
         &payload["client_budget_host_control_launch"]["working_state_write_status"],
@@ -1388,7 +1385,10 @@ mod tests {
 
         let notice = client_budget_host_control_launch_chat_notice(&payload, "thread-1");
         assert!(notice["working_state_write_status"].is_null());
-        assert_eq!(notice["kind"], json!("host_current_thread_control_launch_opened"));
+        assert_eq!(
+            notice["kind"],
+            json!("host_current_thread_control_launch_opened")
+        );
         assert_eq!(notice["reply_prefix"], json!("5ч KPI: переплата 0.00%"));
         assert_eq!(notice["feedback_kind"], json!("opened"));
         assert_eq!(notice["thread_id"], json!("thread-1"));
@@ -1418,7 +1418,10 @@ mod tests {
         });
 
         let notice = client_budget_host_control_launch_chat_notice(&payload, "thread-1");
-        assert_eq!(notice["kind"], json!("host_current_thread_control_launch_opened"));
+        assert_eq!(
+            notice["kind"],
+            json!("host_current_thread_control_launch_opened")
+        );
         assert_eq!(notice["feedback_kind"], json!("opened"));
         assert_eq!(notice["command_id"], json!("thread-overlay-open-current"));
         assert_eq!(
@@ -1492,8 +1495,7 @@ mod tests {
             }
         });
 
-        let notice =
-            client_budget_host_control_feedback_chat_notice(&payload, Some("thread-1"));
+        let notice = client_budget_host_control_feedback_chat_notice(&payload, Some("thread-1"));
         assert_eq!(
             notice["kind"],
             json!("host_current_thread_control_feedback_opened")
@@ -1598,16 +1600,23 @@ mod tests {
             }
         });
 
-        let notice = compact_chat_delivery_surface_notice_payload(&payload, Some("query-thread-id"));
+        let notice =
+            compact_chat_delivery_surface_notice_payload(&payload, Some("query-thread-id"));
 
-        assert_eq!(notice["kind"], json!("client_budget_compact_chat_requested"));
+        assert_eq!(
+            notice["kind"],
+            json!("client_budget_compact_chat_requested")
+        );
         assert_eq!(notice["thread_id"], json!("source-thread-id"));
         assert_eq!(notice["message_text"], json!("source message"));
         assert_eq!(notice["reply_prefix"], json!("5ч KPI: экономия 12.00%"));
         assert_eq!(notice["exact_chat_command"], json!("/source"));
         assert_eq!(notice["prompt_text"], json!("restore prompt"));
         assert_eq!(notice["prompt_file"], json!("/tmp/prompt.md"));
-        assert_eq!(notice["launch_clean_chat_command"], json!("code chat --mode agent"));
+        assert_eq!(
+            notice["launch_clean_chat_command"],
+            json!("code chat --mode agent")
+        );
         assert_eq!(
             notice["launch_clean_chat_fallback_command"],
             json!("code chat --reuse-window")
@@ -1650,9 +1659,13 @@ mod tests {
             }
         });
 
-        let notice = compact_chat_delivery_surface_notice_payload(&payload, Some("query-thread-id"));
+        let notice =
+            compact_chat_delivery_surface_notice_payload(&payload, Some("query-thread-id"));
 
-        assert_eq!(notice["kind"], json!("client_budget_compact_chat_launch_failed"));
+        assert_eq!(
+            notice["kind"],
+            json!("client_budget_compact_chat_launch_failed")
+        );
         assert_eq!(notice["thread_id"], json!("query-thread-id"));
         assert!(notice["message_text"].is_null());
         assert!(notice["reply_prefix"].is_null());
@@ -1683,9 +1696,13 @@ mod tests {
             }
         });
 
-        let notice = compact_chat_delivery_surface_notice_payload(&payload, Some("query-thread-id"));
+        let notice =
+            compact_chat_delivery_surface_notice_payload(&payload, Some("query-thread-id"));
 
-        assert_eq!(notice["kind"], json!("client_budget_compact_chat_launch_failed"));
+        assert_eq!(
+            notice["kind"],
+            json!("client_budget_compact_chat_launch_failed")
+        );
         assert_eq!(notice["thread_id"], json!("query-thread-id"));
         assert!(notice["message_text"].is_null());
         assert!(notice["reply_prefix"].is_null());
@@ -1760,7 +1777,10 @@ mod tests {
             response["chat_notice"]["launch_clean_chat_command_kind"],
             json!("vscode_code_chat_cli")
         );
-        assert_eq!(response["chat_notice"]["thread_id"], json!("source-thread-id"));
+        assert_eq!(
+            response["chat_notice"]["thread_id"],
+            json!("source-thread-id")
+        );
         assert_eq!(response["chat_notice"]["prompt_text"], json!("PROMPT"));
         assert_eq!(
             response["chat_notice"]["required_host_action"],
@@ -1978,10 +1998,7 @@ mod tests {
             response["continuity_compact_chat"]["host_launch"]["reason"],
             json!("auto_launch_disabled")
         );
-        assert_eq!(
-            response["chat_notice"]["note"],
-            json!("policy disabled")
-        );
+        assert_eq!(response["chat_notice"]["note"], json!("policy disabled"));
     }
 
     #[test]
@@ -2030,9 +2047,7 @@ mod tests {
             ),
         )
         .expect("write fake xdg-open");
-        let mut perms = fs::metadata(&script_path)
-            .expect("metadata")
-            .permissions();
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&script_path, perms).expect("chmod");
         let path_prefix = format!("{}:/usr/bin:/bin", fakebin.display());
@@ -2048,10 +2063,7 @@ mod tests {
         .await
         .expect("xdg-open launch should succeed");
 
-        assert_eq!(
-            fs::read_to_string(&marker_path).expect("marker"),
-            uri
-        );
+        assert_eq!(fs::read_to_string(&marker_path).expect("marker"), uri);
         assert_eq!(launch["launched"], json!(true));
         assert_eq!(launch["launch_method"], json!("xdg_open"));
         assert_eq!(launch["uri"], json!(uri));
@@ -2111,14 +2123,14 @@ pub(super) async fn client_budget_host_control_feedback_api_handler(
         );
         let working_state_write_status =
             working_state::record_host_current_thread_control_feedback_with_thread_hint(
-            &db,
-            &project,
-            &namespace,
-            feedback_kind,
-            Some(command_id),
-            query.thread_id.as_deref(),
-        )
-        .await?;
+                &db,
+                &project,
+                &namespace,
+                feedback_kind,
+                Some(command_id),
+                query.thread_id.as_deref(),
+            )
+            .await?;
         if let Some(thread_id) = query
             .thread_id
             .as_deref()

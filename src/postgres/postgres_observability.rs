@@ -83,8 +83,10 @@ pub(crate) async fn insert_observability_snapshot_detailed(
     payload: &Value,
 ) -> std::result::Result<Uuid, ObservabilityInsertError> {
     let prepare_started = Instant::now();
-    let (stored_payload, meta) = prepare_observability_payload(snapshot_kind, payload)
-        .map_err(|error| ObservabilityInsertError::before_write(snapshot_kind, "prepare_failed", error))?;
+    let (stored_payload, meta) =
+        prepare_observability_payload(snapshot_kind, payload).map_err(|error| {
+            ObservabilityInsertError::before_write(snapshot_kind, "prepare_failed", error)
+        })?;
     observability_profile_log(
         "insert_observability_snapshot.prepare_payload",
         prepare_started.elapsed().as_millis(),
@@ -277,11 +279,15 @@ pub(crate) async fn insert_observability_snapshot_detailed(
             ObservabilityInsertError::before_write(snapshot_kind, &meta.event_key, error)
         })?
         .ok_or_else(|| {
-            ObservabilityInsertError::before_write(snapshot_kind, &meta.event_key, anyhow!(
-                "observability snapshot conflict vanished unexpectedly for {} :: {}",
+            ObservabilityInsertError::before_write(
                 snapshot_kind,
-                meta.event_key
-            ))
+                &meta.event_key,
+                anyhow!(
+                    "observability snapshot conflict vanished unexpectedly for {} :: {}",
+                    snapshot_kind,
+                    meta.event_key
+                ),
+            )
         })?;
     observability_profile_log(
         "insert_observability_snapshot.inspect_conflict",
@@ -1289,8 +1295,8 @@ fn forced_observability_insert_error_for_tests(
     let (phase_raw, sqlstate_raw) = trimmed.split_once(':').unwrap_or((trimmed, "XX000"));
     let sqlstate_code = Some(sqlstate_raw.trim().to_string());
     match phase_raw.trim() {
-        "before_write" if !write_may_have_succeeded => Some(
-            ObservabilityInsertError::before_write_with_sqlstate(
+        "before_write" if !write_may_have_succeeded => {
+            Some(ObservabilityInsertError::before_write_with_sqlstate(
                 snapshot_kind,
                 event_key,
                 sqlstate_code,
@@ -1300,10 +1306,10 @@ fn forced_observability_insert_error_for_tests(
                     event_key,
                     sqlstate_raw.trim()
                 ),
-            ),
-        ),
-        "outcome_unknown_after_write" if write_may_have_succeeded => Some(
-            ObservabilityInsertError::outcome_unknown_after_write(
+            ))
+        }
+        "outcome_unknown_after_write" if write_may_have_succeeded => {
+            Some(ObservabilityInsertError::outcome_unknown_after_write(
                 snapshot_kind,
                 event_key,
                 sqlstate_code,
@@ -1313,8 +1319,8 @@ fn forced_observability_insert_error_for_tests(
                     event_key,
                     sqlstate_raw.trim()
                 ),
-            ),
-        ),
+            ))
+        }
         _ => None,
     }
 }

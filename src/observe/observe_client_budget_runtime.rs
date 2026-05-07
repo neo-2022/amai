@@ -478,7 +478,9 @@ fn compact_latest_repo_working_state_restore_for_budget(payload: &Value) -> Valu
     })
 }
 
-fn compact_latest_repo_working_state_restore_from_optional_payload(payload: Option<&Value>) -> Value {
+fn compact_latest_repo_working_state_restore_from_optional_payload(
+    payload: Option<&Value>,
+) -> Value {
     payload
         .map(compact_latest_repo_working_state_restore_for_budget)
         .unwrap_or_else(|| json!({ "working_state_restore": {} }))
@@ -1740,20 +1742,20 @@ mod tests {
 
         let compact = compact_working_state_restore_for_budget(&restore);
         assert_eq!(
-            compact["recent_actions"][0]["host_current_thread_control_feedback"]
-                ["working_state_write_status"]["status"],
+            compact["recent_actions"][0]["host_current_thread_control_feedback"]["working_state_write_status"]
+                ["status"],
             "degraded_after_primary_write"
         );
         assert_eq!(
-            compact["recent_actions"][0]["host_current_thread_control_feedback"]
-                ["working_state_write_status"]["warning"],
+            compact["recent_actions"][0]["host_current_thread_control_feedback"]["working_state_write_status"]
+                ["warning"],
             "Refresh degraded after primary write."
         );
     }
 
     #[test]
-    fn compact_working_state_restore_for_budget_preserves_missing_host_feedback_write_status_as_null(
-    ) {
+    fn compact_working_state_restore_for_budget_preserves_missing_host_feedback_write_status_as_null()
+     {
         let restore = json!({
             "recent_actions": [
                 {
@@ -1782,7 +1784,8 @@ mod tests {
     }
 
     #[test]
-    fn compact_latest_repo_working_state_restore_from_optional_payload_preserves_override_payload() {
+    fn compact_latest_repo_working_state_restore_from_optional_payload_preserves_override_payload()
+    {
         let payload = json!({
             "working_state_restore": {
                 "current_goal": "override goal",
@@ -1816,15 +1819,15 @@ mod tests {
             "override goal"
         );
         assert_eq!(
-            compact["working_state_restore"]["recent_actions"][0]
-                ["host_current_thread_control_feedback"]["working_state_write_status"]["status"],
+            compact["working_state_restore"]["recent_actions"][0]["host_current_thread_control_feedback"]
+                ["working_state_write_status"]["status"],
             "degraded_after_primary_write"
         );
     }
 
     #[test]
-    fn compact_latest_repo_working_state_restore_from_optional_payload_preserves_missing_payload_as_empty_restore(
-    ) {
+    fn compact_latest_repo_working_state_restore_from_optional_payload_preserves_missing_payload_as_empty_restore()
+     {
         let compact = compact_latest_repo_working_state_restore_from_optional_payload(None);
         assert_eq!(compact, json!({ "working_state_restore": {} }));
     }
