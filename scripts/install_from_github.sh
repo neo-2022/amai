@@ -154,13 +154,14 @@ else
   else
     current_branch="$(git -C "${clone_dir}" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
     if [[ -n "${current_branch}" ]]; then
-      git -C "${clone_dir}" pull --ff-only origin "${current_branch}"
+      git -C "${clone_dir}" checkout --force "${current_branch}"
+      git -C "${clone_dir}" reset --hard "origin/${current_branch}"
     else
       default_ref="$(git -C "${clone_dir}" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
       default_branch="${default_ref#refs/remotes/origin/}"
       if [[ -n "${default_branch}" ]]; then
         git -C "${clone_dir}" checkout --force "${default_branch}"
-        git -C "${clone_dir}" pull --ff-only origin "${default_branch}"
+        git -C "${clone_dir}" reset --hard "origin/${default_branch}"
       else
         echo "install_from_github.sh could not determine the default branch for ${clone_dir}" >&2
         exit 66
