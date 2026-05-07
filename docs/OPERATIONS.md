@@ -172,19 +172,25 @@ cd <amai-repo-root>
 Если нужен именно `GitHub-first` bootstrap без отдельного ручного clone шага:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/<ref>/scripts/install_from_github.sh) \
-  --repo-url https://github.com/<owner>/<repo>.git \
+bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) \
   --client vscode \
   --stack-profile default \
   --yes
 ```
 
 Этот wrapper:
+- по умолчанию использует canonical public source `https://github.com/neo-2022/amai.git`;
 - сам клонирует или обновляет repo в `~/.local/share/amai/repo` по умолчанию;
 - затем запускает канонический `scripts/install_amai.sh` уже внутри clone;
 - нужен именно для beta/public install contour, где продукт должен стартовать одной командой от GitHub, а не после ручного `git clone`.
 - если для install path не хватает `cargo`, `rustc`, `docker` или `docker compose`, shell front-door должен fail-closed до `cargo run` и напечатать явное remediation-сообщение.
 - если client = `vscode`, onboarding дополнительно ставит repo-local public bridge `amai.amai-vscode-bridge`, чтобы clean-surface launch опирался на явный Amai-owned `vscode://.../open-clean-chat` path, а не на скрытые внутренности upstream extension.
+
+Если нужен другой git source, wrapper всё ещё допускает явное переопределение:
+
+```bash
+  --repo-url https://github.com/<owner>/<repo>.git
+```
 
 Эта команда:
 - сначала показывает понятную проверку машины;

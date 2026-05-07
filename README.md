@@ -326,8 +326,7 @@ scripts\preflight.cmd
 Если нужен именно `GitHub-first` путь без отдельного ручного `git clone`, используйте bootstrap-wrapper:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/<ref>/scripts/install_from_github.sh) \
-  --repo-url https://github.com/<owner>/<repo>.git \
+bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) \
   --client vscode \
   --stack-profile default \
   --yes
@@ -335,6 +334,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/<ref>/scripts
 
 Этот путь:
 - сам клонирует или обновляет repo;
+- по умолчанию использует канонический public source `https://github.com/neo-2022/amai.git`;
 - по умолчанию кладёт clone в `~/.local/share/amai/repo`;
 - затем запускает канонический `scripts/install_amai.sh` уже внутри этого clone.
 - если на машине не хватает `cargo`, `rustc`, `docker` или `docker compose`, shell front-door теперь обязан fail-closed сразу и прямо сказать, чего не хватает, вместо позднего провала глубоко внутри onboarding.
@@ -344,6 +344,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/<ref>/scripts
 
 ```bash
   --clone-dir /path/to/amai-repo
+```
+
+Если нужен не canonical public source, а fork или локальный checkout, явно переопределите источник:
+
+```bash
+  --repo-url https://github.com/<owner>/<repo>.git
 ```
 
 ### Linux и macOS
