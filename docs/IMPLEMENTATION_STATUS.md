@@ -2179,10 +2179,12 @@ Stage status после fresh proof-refresh 2026-04-24:
   - он сам клонирует или обновляет repo;
   - default clone target = `~/.local/share/amai/repo`;
   - затем запускает канонический `scripts/install_amai.sh` уже внутри clone;
-  - `--repo-url` обязателен, если `AMAI_GIT_REPO_URL` не задан, потому что текущий private workspace remote не может служить public beta source-of-truth.
+  - canonical public source теперь materialized прямо в shell front-door как default `https://github.com/neo-2022/amai.git`, а `--repo-url` остаётся override path для fork/local checkout install.
 - добавлен proof [scripts/proof_install_from_github.sh](../scripts/proof_install_from_github.sh) на path `clone -> install -> rerun without duplicate config`.
+- добавлен proof [scripts/proof_install_from_github_public_default_source.sh](../scripts/proof_install_from_github_public_default_source.sh) на path `canonical public default source -> clone -> install` без явного `--repo-url`.
 - proof bundle для этого install slice:
   - `./scripts/proof_install_from_github.sh`
+  - `./scripts/proof_install_from_github_public_default_source.sh`
   - `./scripts/proof_install_auto.sh`
 
 ### 2026-05-06 — Install prerequisite front-door fail-closed materialized

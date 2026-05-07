@@ -3,12 +3,12 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: install_from_github.sh --repo-url <git-url> [options] [-- <install_amai args...>]
+Usage: install_from_github.sh [options] [-- <install_amai args...>]
 
 Clones or updates the Amai repository and then runs scripts/install_amai.sh from that clone.
 
 Options:
-  --repo-url <git-url>     Git URL to clone from. Required unless AMAI_GIT_REPO_URL is set.
+  --repo-url <git-url>     Git URL to clone from. Default: https://github.com/neo-2022/amai.git
   --clone-dir <path>       Where to place the clone. Default: $HOME/.local/share/amai/repo
   --repo-ref <ref>         Optional branch/tag/commit to check out before install.
   --help                   Show this help.
@@ -17,7 +17,8 @@ All remaining arguments are passed through to scripts/install_amai.sh inside the
 EOF
 }
 
-repo_url="${AMAI_GIT_REPO_URL:-}"
+default_public_repo_url="https://github.com/neo-2022/amai.git"
+repo_url="${AMAI_GIT_REPO_URL:-${default_public_repo_url}}"
 clone_dir="${AMAI_GITHUB_CLONE_DIR:-${HOME}/.local/share/amai/repo}"
 repo_ref=""
 install_args=()
@@ -75,11 +76,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-if [[ -z "${repo_url}" ]]; then
-  echo "install_from_github.sh requires --repo-url or AMAI_GIT_REPO_URL" >&2
-  exit 64
-fi
 
 repo_url="$(normalize_repo_url "${repo_url}")"
 if [[ "${repo_url}" == file://* ]]; then
