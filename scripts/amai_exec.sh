@@ -61,7 +61,9 @@ if [[ "${AMAI_EXEC_FORCE_CARGO:-0}" != "1" ]] && release_binary_is_fresh; then
 fi
 
 if command -v cargo >/dev/null 2>&1; then
-  build_release_binary
+  if ! release_binary_is_fresh; then
+    build_release_binary
+  fi
   exec ./target/release/amai "$@"
 fi
 
