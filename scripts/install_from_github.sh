@@ -93,13 +93,39 @@ repair_local_source_checkout() {
 
 assert_checkout_complete() {
   local clone_root="$1"
-  if command -v cargo >/dev/null 2>&1; then
-    if (cd "${clone_root}" && cargo metadata --offline --format-version 1 >/dev/null 2>&1); then
+  local cargo_bin=""
+  local rustc_bin=""
+  local metadata_stderr
+  metadata_stderr="$(mktemp)"
+  trap 'rm -f "${metadata_stderr}"' RETURN
+  if [[ -x "${clone_root}/scripts/resolve_cargo.sh" && -x "${clone_root}/scripts/resolve_rustc.sh" ]]; then
+    cargo_bin="$("${clone_root}/scripts/resolve_cargo.sh")" || {
+      echo "install_from_github.sh: unable to materialize a working cargo toolchain for ${clone_root}." >&2
+      echo "install_from_github.sh: repair rustup/cargo availability or publish a bootstrap that installs Rust automatically." >&2
+      exit 68
+    }
+    rustc_bin="$("${clone_root}/scripts/resolve_rustc.sh")" || {
+      echo "install_from_github.sh: unable to materialize a working rustc toolchain for ${clone_root}." >&2
+      echo "install_from_github.sh: repair rustup/rustc availability or publish a bootstrap that installs Rust automatically." >&2
+      exit 68
+    }
+    if (cd "${clone_root}" && env RUSTC="${rustc_bin}" "${cargo_bin}" metadata --offline --format-version 1 >/dev/null 2>"${metadata_stderr}"); then
+      return
+    fi
+  elif command -v cargo >/dev/null 2>&1; then
+    if (cd "${clone_root}" && cargo metadata --offline --format-version 1 >/dev/null 2>"${metadata_stderr}"); then
       return
     fi
   fi
-  echo "install_from_github.sh: checkout is missing vendored source files required for cargo metadata." >&2
-  echo "install_from_github.sh: refresh the published git source so vendor/ stays self-contained in the checkout." >&2
+  if grep -Eq 'failed to calculate checksum of|No such file or directory.*vendor|can.t find.*vendor|failed to load manifest for dependency' "${metadata_stderr}"; then
+    echo "install_from_github.sh: checkout is missing vendored source files required for cargo metadata." >&2
+    echo "install_from_github.sh: refresh the published git source so vendor/ stays self-contained in the checkout." >&2
+    sed -n '1,40p' "${metadata_stderr}" >&2
+    exit 68
+  fi
+  echo "install_from_github.sh: cargo metadata failed before install bootstrap could continue." >&2
+  echo "install_from_github.sh: this machine still has a broken Rust toolchain or another cargo-level failure." >&2
+  sed -n '1,40p' "${metadata_stderr}" >&2
   exit 68
 }
 

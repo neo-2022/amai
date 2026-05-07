@@ -3,7 +3,9 @@ set -euo pipefail
 
 ensure_default_rustup_toolchain() {
   command -v rustup >/dev/null 2>&1 || return 1
-  rustup show active-toolchain >/dev/null 2>&1 && return 0
+  rustup show active-toolchain >/dev/null 2>&1 || true
+  rustup default stable >/dev/null 2>&1 || true
+  rustup toolchain install stable >/dev/null 2>&1 || true
   rustup default stable >/dev/null 2>&1
 }
 
