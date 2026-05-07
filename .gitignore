@@ -47,4 +47,3 @@ output/
 # patterns such as target/, output/ or .vscode/.
 !vendor/**
 vendor/**/.vscode/
-vendor/**/src/output/
