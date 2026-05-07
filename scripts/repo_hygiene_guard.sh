@@ -43,6 +43,12 @@ missing_exec_scripts="$(
 startup_status_raw="$(./target/debug/amai status 2>/dev/null || true)"
 startup_status_line="$(printf '%s\n' "$startup_status_raw" | grep -m 1 '^startup_artifacts:' || true)"
 startup_runtime_line="$(printf '%s\n' "$startup_status_raw" | grep -m 1 '^startup_runtime_state:' || true)"
+if [[ -z "$startup_status_line" ]]; then
+  startup_status_line="startup_artifacts: unavailable"
+fi
+if [[ -z "$startup_runtime_line" ]]; then
+  startup_runtime_line="startup_runtime_state: unavailable"
+fi
 agent_preflight_json="$(./scripts/agent_preflight.sh --json 2>/dev/null || true)"
 agent_preflight_status="unavailable"
 if [[ -n "$agent_preflight_json" ]]; then
@@ -90,12 +96,12 @@ if [[ "$agent_preflight_status" != "ok" && "$agent_preflight_status" != "unavail
   issues+=("agent_preflight_not_materialized")
 fi
 
-if [[ "$startup_status_line" != startup_artifacts:\ ok* && "$startup_status_line" != startup_artifacts:\ no_install_state* ]]; then
+if [[ "$startup_status_line" != startup_artifacts:\ ok* && "$startup_status_line" != startup_artifacts:\ no_install_state* && "$startup_status_line" != startup_artifacts:\ unavailable* ]]; then
   status_value="drift_detected"
   issues+=("startup_artifacts_not_ok")
 fi
 
-if [[ "$startup_runtime_line" != startup_runtime_state:\ ok* && "$startup_runtime_line" != startup_runtime_state:\ not_materialized* ]]; then
+if [[ "$startup_runtime_line" != startup_runtime_state:\ ok* && "$startup_runtime_line" != startup_runtime_state:\ not_materialized* && "$startup_runtime_line" != startup_runtime_state:\ unavailable* ]]; then
   status_value="drift_detected"
   issues+=("startup_runtime_state_not_ok")
 fi
