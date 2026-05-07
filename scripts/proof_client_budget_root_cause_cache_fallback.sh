@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CACHE_PATH="${REPO_ROOT}/state/observe/client_budget_surfaces_cache.json"
+THREAD_CACHE_PATH="${REPO_ROOT}/state/observe/client_budget_surfaces_cache.thread-${CODEX_THREAD_ID:-}.json"
 
 cd "${REPO_ROOT}"
 
@@ -13,6 +14,12 @@ if [[ -f "${CACHE_PATH}" ]]; then
   cp "${CACHE_PATH}" "${backup_path}"
 fi
 
+thread_backup_path=""
+if [[ -n "${CODEX_THREAD_ID:-}" ]] && [[ -f "${THREAD_CACHE_PATH}" ]]; then
+  thread_backup_path="$(mktemp)"
+  cp "${THREAD_CACHE_PATH}" "${thread_backup_path}"
+fi
+
 cleanup() {
   if [[ -n "${backup_path}" && -f "${backup_path}" ]]; then
     mkdir -p "$(dirname "${CACHE_PATH}")"
@@ -20,15 +27,24 @@ cleanup() {
   else
     rm -f "${CACHE_PATH}"
   fi
+  if [[ -n "${CODEX_THREAD_ID:-}" ]]; then
+    if [[ -n "${thread_backup_path}" && -f "${thread_backup_path}" ]]; then
+      mkdir -p "$(dirname "${THREAD_CACHE_PATH}")"
+      mv "${thread_backup_path}" "${THREAD_CACHE_PATH}"
+    else
+      rm -f "${THREAD_CACHE_PATH}"
+    fi
+  fi
 }
 trap cleanup EXIT
 
 mkdir -p "$(dirname "${CACHE_PATH}")"
 now_ms="$(date +%s%3N)"
+rm -f "${THREAD_CACHE_PATH}"
 
 cat >"${CACHE_PATH}" <<EOF
 {
-  "cache_version": "client-budget-surfaces-cache-v1",
+  "cache_version": "client-budget-surfaces-cache-v7",
   "fetched_at_epoch_ms": ${now_ms},
   "root_cause": {
     "client_budget_reply_gate": {
@@ -88,7 +104,7 @@ cat >"${CACHE_PATH}" <<EOF
 }
 EOF
 
-payload="$(AMI_OBSERVE_BIND=127.0.0.1:1 "${SCRIPT_DIR}/client_budget_root_cause.sh" --enforce-reply-gate)"
+payload="$(env -u CODEX_THREAD_ID AMI_OBSERVE_BIND=127.0.0.1:1 "${SCRIPT_DIR}/client_budget_root_cause.sh" --enforce-reply-gate)"
 
 printf '%s\n' "${payload}" | jq -e '
   .client_budget_reply_gate.reply_execution_gate.reply_prefix == "5ч KPI: переплата 12.34%"

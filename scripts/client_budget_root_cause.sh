@@ -90,7 +90,7 @@ if [[ -n "$thread_id" ]]; then
 fi
 api_max_time="1.5"
 if [[ -n "$thread_id" ]]; then
-  api_max_time="7"
+  api_max_time="0.75"
 fi
 cache_path="${REPO_ROOT}/state/observe/client_budget_surfaces_cache.json"
 if [[ -n "$thread_id" ]]; then
@@ -256,6 +256,16 @@ if [[ -n "$api_payload" ]]; then
   exit 0
 fi
 
+fallback_command=("$SCRIPT_DIR/amai_exec.sh" observe client-budget-root-cause "${observe_passthrough_args[@]}")
+if [[ -x "$REPO_ROOT/target/release/amai" ]]; then
+  fallback_command=("$REPO_ROOT/target/release/amai" observe client-budget-root-cause "${observe_passthrough_args[@]}")
+fi
+
+if [[ ! -x "${fallback_command[0]}" ]]; then
+  echo "client budget root cause: no root cause payload available" >&2
+  exit 12
+fi
+
 exec env \
   AMAI_EXEC_DISABLE_BUDGET_HELPERS=1 \
   AMI_CLIENT_BUDGET_OBSERVE_HTTP_TIMEOUT_MS=1500 \
@@ -291,6 +301,7 @@ exec env \
     }
 
     # The observe/CLI fallback is allowed to fail, but it must not hang the caller.
-    # 12s matches the guard-side maximum used by client_budget_gate.sh.
-    run_with_hard_timeout 12 "$@"
-  ' bash "$SCRIPT_DIR/amai_exec.sh" observe client-budget-root-cause "${observe_passthrough_args[@]}"
+    # Thread-bound root-cause evaluation can legitimately take around 12s on a live
+    # giant-thread contour, so keep a safety margin instead of failing on a near-edge timeout.
+    run_with_hard_timeout 20 "$@"
+  ' bash "${fallback_command[@]}"

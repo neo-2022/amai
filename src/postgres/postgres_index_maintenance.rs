@@ -1,4 +1,125 @@
 use super::*;
+use anyhow::Error;
+use tokio_postgres::{GenericClient, error::SqlState};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplaceDocumentIndexErrorPhase {
+    BeforeCommit,
+    CommitRolledBackAtCommit,
+    CommitOutcomeUnknown,
+}
+
+impl ReplaceDocumentIndexErrorPhase {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::BeforeCommit => "before_commit",
+            Self::CommitRolledBackAtCommit => "commit_rolled_back_at_commit",
+            Self::CommitOutcomeUnknown => "commit_outcome_unknown",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ReplaceDocumentIndexError {
+    pub(crate) phase: ReplaceDocumentIndexErrorPhase,
+    pub(crate) sqlstate_code: Option<String>,
+    pub(crate) error: Error,
+}
+
+impl ReplaceDocumentIndexError {
+    fn before_commit(error: Error) -> Self {
+        Self {
+            phase: ReplaceDocumentIndexErrorPhase::BeforeCommit,
+            sqlstate_code: extract_sqlstate_code(&error),
+            error,
+        }
+    }
+
+    fn commit_rolled_back_at_commit(sqlstate_code: Option<String>, error: Error) -> Self {
+        Self {
+            phase: ReplaceDocumentIndexErrorPhase::CommitRolledBackAtCommit,
+            sqlstate_code,
+            error,
+        }
+    }
+
+    fn commit_outcome_unknown(sqlstate_code: Option<String>, error: Error) -> Self {
+        Self {
+            phase: ReplaceDocumentIndexErrorPhase::CommitOutcomeUnknown,
+            sqlstate_code,
+            error,
+        }
+    }
+}
+
+fn classify_commit_error(error: tokio_postgres::Error) -> ReplaceDocumentIndexError {
+    if let Some(db_error) = error.as_db_error() {
+        let sqlstate_code = Some(db_error.code().code().to_string());
+        if commit_sqlstate_is_definite_rollback(db_error.code()) {
+            return ReplaceDocumentIndexError::commit_rolled_back_at_commit(
+                sqlstate_code,
+                error.into(),
+            );
+        }
+        return ReplaceDocumentIndexError::commit_outcome_unknown(sqlstate_code, error.into());
+    }
+    ReplaceDocumentIndexError::commit_outcome_unknown(None, error.into())
+}
+
+fn extract_sqlstate_code(error: &Error) -> Option<String> {
+    if let Some(pg_error) = error.downcast_ref::<tokio_postgres::Error>() {
+        return pg_error
+            .as_db_error()
+            .map(|db_error| db_error.code().code().to_string());
+    }
+    for cause in error.chain() {
+        if let Some(pg_error) = cause.downcast_ref::<tokio_postgres::Error>() {
+            return pg_error
+                .as_db_error()
+                .map(|db_error| db_error.code().code().to_string());
+        }
+    }
+    None
+}
+
+fn commit_sqlstate_is_definite_rollback(code: &SqlState) -> bool {
+    let code = code.code();
+    if code == SqlState::T_R_STATEMENT_COMPLETION_UNKNOWN.code() {
+        return false;
+    }
+    code.starts_with("40")
+        || code.starts_with("23")
+        || matches!(
+            code,
+            "25P01" // no_active_sql_transaction
+                | "25P02" // in_failed_sql_transaction
+                | "25P03" // idle_in_transaction_session_timeout
+                | "25P04" // transaction_timeout
+        )
+}
+
+pub async fn get_document_id_for_namespace_relative_path<C>(
+    client: &C,
+    namespace_id: Uuid,
+    relative_path: &str,
+) -> Result<Option<Uuid>>
+where
+    C: GenericClient + Sync,
+{
+    let row = client
+        .query_opt(
+            r#"
+            SELECT document_id
+            FROM ami.code_documents
+            WHERE namespace_id = $1
+              AND relative_path = $2
+            "#,
+            &[&namespace_id, &relative_path],
+        )
+        .await
+        .context("failed to load code document id for namespace/relative_path")?;
+    Ok(row.map(|row| row.get(0)))
+}
 
 pub async fn replace_document_index(
     client: &mut Client,
@@ -6,9 +127,171 @@ pub async fn replace_document_index(
     symbols: &[SymbolRecord],
     chunks: &[ChunkRecord],
 ) -> Result<Uuid> {
-    let inserted_document_id = Uuid::new_v4();
-    let transaction = client.transaction().await?;
-    let document_row = transaction
+    replace_document_index_with_document_id(client, document, symbols, chunks, Uuid::new_v4()).await
+}
+
+pub async fn replace_document_index_with_document_id(
+    client: &mut Client,
+    document: &DocumentRecord,
+    symbols: &[SymbolRecord],
+    chunks: &[ChunkRecord],
+    inserted_document_id: Uuid,
+) -> Result<Uuid> {
+    replace_document_index_with_document_id_detailed(
+        client,
+        document,
+        symbols,
+        chunks,
+        inserted_document_id,
+    )
+    .await
+    .map_err(|error| error.error)
+}
+
+pub(crate) async fn replace_document_index_with_document_id_detailed(
+    client: &mut Client,
+    document: &DocumentRecord,
+    symbols: &[SymbolRecord],
+    chunks: &[ChunkRecord],
+    inserted_document_id: Uuid,
+) -> std::result::Result<Uuid, ReplaceDocumentIndexError> {
+    let transaction_started = Instant::now();
+    let transaction = client
+        .transaction()
+        .await
+        .map_err(|error| ReplaceDocumentIndexError::before_commit(error.into()))?;
+    super::observability_profile_log(
+        "replace_document_index.transaction",
+        transaction_started.elapsed().as_millis(),
+        &format!("relative_path={}", document.relative_path),
+    );
+    let document_id = replace_document_index_with_document_id_in_client(
+        &transaction,
+        document,
+        symbols,
+        chunks,
+        inserted_document_id,
+    )
+    .await
+    .map_err(ReplaceDocumentIndexError::before_commit)?;
+
+    #[cfg(test)]
+    if let Some(forced_error) = forced_replace_document_index_error_for_tests(document) {
+        return Err(forced_error);
+    }
+
+    let commit_started = Instant::now();
+    transaction.commit().await.map_err(classify_commit_error)?;
+    super::observability_profile_log(
+        "replace_document_index.commit",
+        commit_started.elapsed().as_millis(),
+        &format!("relative_path={}", document.relative_path),
+    );
+    Ok(document_id)
+}
+
+#[cfg(test)]
+fn forced_replace_document_index_error_for_tests(
+    document: &DocumentRecord,
+) -> Option<ReplaceDocumentIndexError> {
+    let raw = std::env::var("AMAI_TEST_FORCE_REPLACE_DOCUMENT_INDEX_FAILURE").ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (phase_raw, sqlstate_raw) = trimmed.split_once(':').unwrap_or((trimmed, "XX000"));
+    let phase = match phase_raw.trim() {
+        "before_commit" => ReplaceDocumentIndexErrorPhase::BeforeCommit,
+        "commit_rolled_back_at_commit" => ReplaceDocumentIndexErrorPhase::CommitRolledBackAtCommit,
+        "commit_outcome_unknown" => ReplaceDocumentIndexErrorPhase::CommitOutcomeUnknown,
+        _ => return None,
+    };
+    let sqlstate_code = sqlstate_raw.trim();
+    Some(ReplaceDocumentIndexError {
+        phase,
+        sqlstate_code: Some(sqlstate_code.to_string()),
+        error: anyhow!(
+            "forced replace_document_index failure for tests relative_path={} phase={} sqlstate={}",
+            document.relative_path,
+            phase.as_str(),
+            sqlstate_code
+        ),
+    })
+}
+
+#[cfg(test)]
+mod replace_document_index_error_phase_tests {
+    use super::*;
+
+    #[test]
+    fn commit_sqlstate_statement_completion_unknown_is_not_definite_rollback() {
+        assert!(!commit_sqlstate_is_definite_rollback(
+            &SqlState::T_R_STATEMENT_COMPLETION_UNKNOWN
+        ));
+    }
+
+    #[test]
+    fn commit_sqlstate_transaction_rollback_family_is_definite_rollback() {
+        assert!(commit_sqlstate_is_definite_rollback(
+            &SqlState::T_R_SERIALIZATION_FAILURE
+        ));
+        assert!(commit_sqlstate_is_definite_rollback(
+            &SqlState::T_R_DEADLOCK_DETECTED
+        ));
+        assert!(commit_sqlstate_is_definite_rollback(
+            &SqlState::T_R_INTEGRITY_CONSTRAINT_VIOLATION
+        ));
+    }
+
+    #[test]
+    fn commit_sqlstate_integrity_constraint_family_is_definite_rollback() {
+        assert!(commit_sqlstate_is_definite_rollback(
+            &SqlState::INTEGRITY_CONSTRAINT_VIOLATION
+        ));
+        assert!(commit_sqlstate_is_definite_rollback(&SqlState::from_code(
+            "23514"
+        )));
+    }
+
+    #[test]
+    fn commit_sqlstate_non_rollback_family_stays_outcome_unknown() {
+        assert!(!commit_sqlstate_is_definite_rollback(&SqlState::from_code(
+            "08006"
+        )));
+        assert!(!commit_sqlstate_is_definite_rollback(&SqlState::from_code(
+            "57P01"
+        )));
+    }
+
+    #[test]
+    fn commit_sqlstate_transaction_state_timeouts_and_failed_transaction_are_definite_rollback() {
+        assert!(commit_sqlstate_is_definite_rollback(
+            &SqlState::NO_ACTIVE_SQL_TRANSACTION
+        ));
+        assert!(commit_sqlstate_is_definite_rollback(
+            &SqlState::IN_FAILED_SQL_TRANSACTION
+        ));
+        assert!(commit_sqlstate_is_definite_rollback(
+            &SqlState::IDLE_IN_TRANSACTION_SESSION_TIMEOUT
+        ));
+        assert!(commit_sqlstate_is_definite_rollback(&SqlState::from_code(
+            "25P04"
+        )));
+    }
+}
+
+pub(crate) async fn replace_document_index_with_document_id_in_client<C>(
+    client: &C,
+    document: &DocumentRecord,
+    symbols: &[SymbolRecord],
+    chunks: &[ChunkRecord],
+    inserted_document_id: Uuid,
+) -> Result<Uuid>
+where
+    C: GenericClient + Sync,
+{
+    let document_upsert_started = Instant::now();
+    let document_row = client
         .query_one(
             r#"
             INSERT INTO ami.code_documents(
@@ -64,22 +347,43 @@ pub async fn replace_document_index(
             ],
         )
         .await?;
+    super::observability_profile_log(
+        "replace_document_index.upsert_document",
+        document_upsert_started.elapsed().as_millis(),
+        &format!(
+            "relative_path={} byte_count={} line_count={}",
+            document.relative_path, document.byte_count, document.line_count
+        ),
+    );
     let document_id: Uuid = document_row.get(0);
-    transaction
+    let delete_symbols_started = Instant::now();
+    client
         .execute(
             "DELETE FROM ami.code_symbols WHERE document_id = $1",
             &[&document_id],
         )
         .await?;
-    transaction
+    super::observability_profile_log(
+        "replace_document_index.delete_symbols",
+        delete_symbols_started.elapsed().as_millis(),
+        &format!("relative_path={}", document.relative_path),
+    );
+    let delete_chunks_started = Instant::now();
+    client
         .execute(
             "DELETE FROM ami.code_chunks WHERE document_id = $1",
             &[&document_id],
         )
         .await?;
+    super::observability_profile_log(
+        "replace_document_index.delete_chunks",
+        delete_chunks_started.elapsed().as_millis(),
+        &format!("relative_path={}", document.relative_path),
+    );
 
+    let insert_symbols_started = Instant::now();
     for symbol in symbols {
-        transaction
+        client
             .execute(
                 r#"
                 INSERT INTO ami.code_symbols(
@@ -103,9 +407,19 @@ pub async fn replace_document_index(
             )
             .await?;
     }
+    super::observability_profile_log(
+        "replace_document_index.insert_symbols",
+        insert_symbols_started.elapsed().as_millis(),
+        &format!(
+            "relative_path={} symbol_count={}",
+            document.relative_path,
+            symbols.len()
+        ),
+    );
 
+    let insert_chunks_started = Instant::now();
     for chunk in chunks {
-        transaction
+        client
             .execute(
                 r#"
                 INSERT INTO ami.code_chunks(
@@ -136,8 +450,16 @@ pub async fn replace_document_index(
             )
             .await?;
     }
+    super::observability_profile_log(
+        "replace_document_index.insert_chunks",
+        insert_chunks_started.elapsed().as_millis(),
+        &format!(
+            "relative_path={} chunk_count={}",
+            document.relative_path,
+            chunks.len()
+        ),
+    );
 
-    transaction.commit().await?;
     Ok(document_id)
 }
 

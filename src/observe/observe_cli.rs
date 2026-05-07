@@ -7,6 +7,27 @@ pub async fn print_snapshot(cfg: &AppConfig) -> Result<()> {
     Ok(())
 }
 
+pub async fn print_regression_explain(
+    cfg: &AppConfig,
+    args: &ObserveRegressionExplainArgs,
+) -> Result<()> {
+    maybe_cleanup_local_artifacts().await?;
+    let snapshot = collect_snapshot(cfg).await?;
+    let payload = snapshot["regression_explain"].clone();
+    let rendered = match args.surface.as_str() {
+        "snapshot" => payload,
+        "dashboard" | "card" => dashboard::build_regression_explain_card(&snapshot),
+        "summary" => payload["summary"].clone(),
+        other => {
+            return Err(anyhow!(
+                "unsupported regression explain surface: {other} (expected snapshot|dashboard|card|summary)"
+            ));
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&rendered)?);
+    Ok(())
+}
+
 pub async fn print_snapshot_preview(cfg: &AppConfig) -> Result<()> {
     maybe_cleanup_local_artifacts().await?;
     let snapshot = collect_snapshot_preview(cfg).await?;

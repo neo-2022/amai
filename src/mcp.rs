@@ -11,7 +11,9 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
+use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -20,8 +22,10 @@ use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
 use crate::config::AppConfig;
+use crate::dashboard::CLIENT_TURN_PRESSURE_ROTATE_STATUS_LABELS;
 
 pub(crate) const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const MCP_LEGACY_COMPAT_PROTOCOL_VERSION: &str = "2025-03-26";
 pub(crate) const SERVER_NAME: &str = "Art-memory-agent-index";
 const MCP_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -30,6 +34,16 @@ use crate::mcp_errors::{
 };
 
 type McpToolResult<T> = std::result::Result<T, McpError>;
+
+fn append_mcp_debug_log(prefix: &str, payload: &str) {
+    let Some(path) = env::var_os("AMAI_MCP_DEBUG_LOG") else {
+        return;
+    };
+    let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let _ = writeln!(file, "{prefix} {payload}");
+}
 
 pub async fn serve(cfg: &AppConfig) -> Result<()> {
     let stdin = tokio::io::stdin();
@@ -51,12 +65,14 @@ pub async fn serve(cfg: &AppConfig) -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
+        append_mcp_debug_log("IN", &line);
 
         let incoming: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
             Err(error) => {
                 let response =
                     mcp_jsonrpc_error_response(Value::Null, &McpError::parse(error.to_string()));
+                append_mcp_debug_log("OUT", &response.to_string());
                 write_message(&mut writer, &response).await?;
                 continue;
             }
@@ -82,6 +98,7 @@ pub async fn serve(cfg: &AppConfig) -> Result<()> {
                 },
             ),
         };
+        append_mcp_debug_log("OUT", &response.to_string());
         write_message(&mut writer, &response).await?;
     }
 
@@ -90,15 +107,23 @@ pub async fn serve(cfg: &AppConfig) -> Result<()> {
 
 pub fn write_client_config(args: &McpConfigArgs) -> Result<()> {
     let rendered = render_client_config(args)?;
+    let shape = config_shape_for_client(&args.client)?;
     if let Some(output) = &args.output {
         if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        let shape = config_shape_for_client(&args.client)?;
-        let final_content = merge_existing_config(shape, args, &rendered, output)?;
-        std::fs::write(output, final_content.as_bytes())
-            .with_context(|| format!("failed to write {}", output.display()))?;
+        if matches!(shape, ConfigShape::OpenClawJson) && output.is_file() {
+            openclaw_cli_set_server(
+                output,
+                &normalized_server_name(&args.server_name)?,
+                &rendered,
+            )?;
+        } else {
+            let final_content = merge_existing_config(shape, args, &rendered, output)?;
+            std::fs::write(output, final_content.as_bytes())
+                .with_context(|| format!("failed to write {}", output.display()))?;
+        }
         println!("written: {}", output.display());
     } else {
         println!("{rendered}");
@@ -123,7 +148,9 @@ pub fn client_config_contains_server(args: &McpConfigArgs) -> Result<bool> {
         ConfigShape::GenericJson => generic_json_server_exists(&existing, &server_name),
         ConfigShape::VscodeJson => json_server_exists(&existing, "servers", &server_name),
         ConfigShape::McpServersJson => json_server_exists(&existing, "mcpServers", &server_name),
+        ConfigShape::OpenClawJson => openclaw_cli_server_exists(output, &server_name),
         ConfigShape::CodexToml => toml_server_exists(&existing, &server_name),
+        ConfigShape::HermesYaml => yaml_server_exists(&existing, "mcp_servers", &server_name),
     }
 }
 
@@ -155,7 +182,9 @@ pub fn remove_client_config(
         ConfigShape::GenericJson => remove_generic_json_server(&existing, &server_name)?,
         ConfigShape::VscodeJson => remove_json_server(&existing, "servers", &server_name)?,
         ConfigShape::McpServersJson => remove_json_server(&existing, "mcpServers", &server_name)?,
+        ConfigShape::OpenClawJson => remove_openclaw_server_via_cli(output, &server_name)?,
         ConfigShape::CodexToml => remove_toml_server(&existing, &server_name)?,
+        ConfigShape::HermesYaml => remove_yaml_server(&existing, "mcp_servers", &server_name)?,
     };
 
     if !removed {
@@ -199,6 +228,8 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         "claude-desktop",
         "claude-code",
         "codex",
+        "hermes",
+        "openclaw",
     ] {
         let config = render_client_config(&McpConfigArgs {
             client: client.to_string(),
@@ -214,6 +245,13 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "codex" => {
                 let _: toml::Value =
                     toml::from_str(&config).context("generated codex config is not valid TOML")?;
+            }
+            "hermes" => {
+                if !config.contains("mcp_servers:") {
+                    return Err(anyhow!(
+                        "generated hermes config is not valid YAML-shaped text"
+                    ));
+                }
             }
             _ => {
                 let _: Value = serde_json::from_str(&config)
@@ -324,6 +362,41 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     {
         return Err(anyhow!(
             "MCP startup contract is missing execctl_active_lease_summary from required summary fields"
+        ));
+    }
+    if !required_summary_fields
+        .iter()
+        .any(|field| field.as_str() == Some("required_task_set"))
+    {
+        return Err(anyhow!(
+            "MCP startup contract is missing required_task_set from required summary fields"
+        ));
+    }
+    if !required_summary_fields
+        .iter()
+        .any(|field| field.as_str() == Some("required_task_set_summary"))
+    {
+        return Err(anyhow!(
+            "MCP startup contract is missing required_task_set_summary from required summary fields"
+        ));
+    }
+    let restored_obligations = startup_contract["restored_obligations"]
+        .as_array()
+        .ok_or_else(|| anyhow!("MCP startup contract is missing restored_obligations"))?;
+    if !restored_obligations
+        .iter()
+        .any(|field| field.as_str() == Some("required_task_set"))
+    {
+        return Err(anyhow!(
+            "MCP startup contract is missing required_task_set from restored obligations"
+        ));
+    }
+    if !restored_obligations
+        .iter()
+        .any(|field| field.as_str() == Some("required_task_set_summary"))
+    {
+        return Err(anyhow!(
+            "MCP startup contract is missing required_task_set_summary from restored obligations"
         ));
     }
     if startup_contract["resume_enforcement"]["active_lease_field"].as_str()
@@ -653,12 +726,13 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         .ok_or_else(|| {
             anyhow!("MCP startup contract is missing live_client_budget_enforcement.rotate_status_labels")
         })?;
-    if !rotate_status_labels
+    if !CLIENT_TURN_PRESSURE_ROTATE_STATUS_LABELS
         .iter()
-        .any(|value| value.as_str() == Some("сожми текущий чат сейчас"))
-        || !rotate_status_labels
-            .iter()
-            .any(|value| value.as_str() == Some("сожми текущий чат"))
+        .all(|expected| {
+            rotate_status_labels
+                .iter()
+                .any(|value| value.as_str() == Some(*expected))
+        })
         || rotate_status_labels
             .iter()
             .any(|value| value.as_str() == Some("новый чат нужен сейчас"))
@@ -675,6 +749,10 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         != Some(true)
         || startup_contract["live_client_budget_enforcement"]
             ["fresh_chat_requires_continuity_startup"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["live_client_budget_enforcement"]
+            ["delivery_surface_requires_continuity_startup"]
             .as_bool()
             != Some(true)
         || startup_contract["live_client_budget_enforcement"]
@@ -1008,6 +1086,19 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP continuity startup did not surface required_return_task"
         ));
     }
+    if !continuity_startup["continuity_startup_summary"]["required_task_set"].is_array() {
+        return Err(anyhow!(
+            "MCP continuity startup did not surface required_task_set"
+        ));
+    }
+    if continuity_startup["continuity_startup_summary"]
+        .get("required_task_set_summary")
+        .is_none()
+    {
+        return Err(anyhow!(
+            "MCP continuity startup did not surface required_task_set_summary"
+        ));
+    }
     if continuity_startup["continuity_startup_summary"]["execctl_active_lease_summary"]
         .as_str()
         .is_none()
@@ -1074,13 +1165,12 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     let context_pack_id = context_pack["stats"]["context_pack_id"]
         .as_str()
         .ok_or_else(|| anyhow!("MCP context pack returned invalid stats.context_pack_id"))?;
-    let proof_thread_id = format!("proof-mcp-thread-{}", Uuid::new_v4().simple());
     let proof_turn_id = format!("proof-mcp-turn-attach-{}", Uuid::new_v4().simple());
     let turn_attach = session
         .tool_call(
             "amai_observe_whole_cycle_turn",
             json!({
-                "thread_id": proof_thread_id,
+                "thread_id": session.proof_thread_id.clone(),
                 "turn_id": proof_turn_id,
                 "context_pack_ids": [context_pack_id],
                 "assistant_generation_tokens": 41,
@@ -1171,6 +1261,32 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     {
         return Err(anyhow!(
             "MCP observe snapshot is not green: critical={critical}, unknown={unknown}"
+        ));
+    }
+    let observe_snapshot_summary = &snapshot["observe_snapshot_summary"];
+    let latest_memory_task_matrix_summary =
+        observe_snapshot_summary["latest_memory_task_matrix_summary"]
+            .as_str()
+            .ok_or_else(|| {
+                anyhow!("MCP observe snapshot summary is missing latest memory matrix")
+            })?;
+    if !latest_memory_task_matrix_summary.contains("compare=")
+        || !latest_memory_task_matrix_summary.contains("promotion=")
+        || !latest_memory_task_matrix_summary.contains("approval=")
+    {
+        return Err(anyhow!(
+            "MCP observe snapshot latest memory matrix summary lost lifecycle state: {latest_memory_task_matrix_summary}"
+        ));
+    }
+    let latest_mcp_task_matrix_summary = observe_snapshot_summary["latest_mcp_task_matrix_summary"]
+        .as_str()
+        .ok_or_else(|| anyhow!("MCP observe snapshot summary is missing latest MCP matrix"))?;
+    if !latest_mcp_task_matrix_summary.contains("compare=")
+        || !latest_mcp_task_matrix_summary.contains("promotion=")
+        || !latest_mcp_task_matrix_summary.contains("approval=")
+    {
+        return Err(anyhow!(
+            "MCP observe snapshot latest MCP matrix summary lost lifecycle state: {latest_mcp_task_matrix_summary}"
         ));
     }
 
@@ -1281,6 +1397,11 @@ pub(crate) struct McpProofSession {
     stdout: tokio::io::Lines<BufReader<ChildStdout>>,
     next_id: u64,
     protocol_manifest: Value,
+    proof_thread_id: String,
+}
+
+fn new_mcp_proof_thread_id() -> String {
+    format!("proof-mcp-thread-{}", Uuid::new_v4().simple())
 }
 
 fn inject_proof_tool_arguments(name: &str, arguments: Value) -> Value {
@@ -1404,9 +1525,11 @@ pub(crate) async fn spawn_proof_session(cfg: &AppConfig) -> Result<McpProofSessi
     compatibility::assert_supported(cfg).await?;
 
     let exe = std::env::current_exe().context("failed to resolve current amai executable")?;
+    let proof_thread_id = new_mcp_proof_thread_id();
     let mut child = ProcessCommand::new(&exe)
         .arg("mcp")
         .arg("serve")
+        .env("CODEX_THREAD_ID", &proof_thread_id)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -1428,6 +1551,7 @@ pub(crate) async fn spawn_proof_session(cfg: &AppConfig) -> Result<McpProofSessi
         stdout: BufReader::new(stdout).lines(),
         next_id: 1,
         protocol_manifest: Value::Null,
+        proof_thread_id,
     };
 
     let init = session
@@ -1450,12 +1574,14 @@ pub(crate) async fn spawn_proof_session(cfg: &AppConfig) -> Result<McpProofSessi
             server_info["name"]
         ));
     }
-    let protocol_manifest = init["amai_protocol_manifest"].clone();
     session
         .notify("notifications/initialized", json!({}))
         .await
         .context("failed to send MCP initialized notification")?;
-    session.protocol_manifest = protocol_manifest;
+    session.protocol_manifest = init
+        .get("amai_protocol_manifest")
+        .cloned()
+        .unwrap_or_else(protocol_manifest);
     Ok(session)
 }
 
@@ -1473,14 +1599,15 @@ async fn handle_request(cfg: &AppConfig, incoming: Value) -> Result<Value> {
     let params = incoming.get("params").cloned().unwrap_or_else(|| json!({}));
     let response = match method {
         "initialize" => {
-            if let Err(error) = validate_initialize_protocol_version(&params) {
-                return Ok(mcp_jsonrpc_error_response(id, &error));
-            }
+            let protocol_version = match validate_initialize_protocol_version(&params) {
+                Ok(version) => version,
+                Err(error) => return Ok(mcp_jsonrpc_error_response(id, &error)),
+            };
             json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
-                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "protocolVersion": protocol_version,
                     "serverInfo": {
                         "name": SERVER_NAME,
                         "version": env!("CARGO_PKG_VERSION"),
@@ -1491,7 +1618,6 @@ async fn handle_request(cfg: &AppConfig, incoming: Value) -> Result<Value> {
                         "prompts": { "listChanged": false },
                     },
                     "instructions": server_instructions(),
-                    "amai_protocol_manifest": protocol_manifest(),
                 }
             })
         }
@@ -1725,7 +1851,9 @@ fn client_budget_blocked_tool_result(tool_name: &str, guard: &Value) -> Value {
             "wait_for_global_client_budget_recovery" => {
                 "wait for global client budget recovery before retrying this tool"
             }
-            "rotate_chat_for_client_budget" => "rotate into a fresh chat before retrying this tool",
+            "rotate_chat_for_client_budget" => {
+                "rotate into a new clean work surface before retrying this tool"
+            }
             "compact_current_thread_for_client_budget" => {
                 "wait until current-thread compaction changes the live budget gate before retrying this tool"
             }
@@ -1933,6 +2061,7 @@ async fn tool_continuity_startup(
         json!({
             "continuity_startup": public_payload["continuity_startup"].clone(),
             "chat_start_restore": public_payload["chat_start_restore"].clone(),
+            "delivery_surface_restore": public_payload["delivery_surface_restore"].clone(),
             "working_state_restore": public_payload["working_state_restore"].clone(),
             "tool_runtime_reconcile": public_payload["tool_runtime_reconcile"].clone(),
             "continuity_startup_summary": summary_json
@@ -2146,6 +2275,8 @@ fn embedded_mcp_reconnect_client_display_name(client_key: &str) -> &str {
         "vscode" => "VS Code",
         "cursor" => "Cursor",
         "codex" => "Codex",
+        "hermes" => "Hermes",
+        "openclaw" => "OpenClaw",
         "claude-code" => "Claude Code",
         "claude-desktop" => "Claude Desktop",
         other => other,
@@ -2163,6 +2294,8 @@ fn resolve_embedded_mcp_reconnect_client_key(repo_root: &Path) -> (Option<String
     for (env_key, client_key) in [
         ("CODEX_HOME", "codex"),
         ("CURSOR_TRACE_ID", "cursor"),
+        ("HERMES_HOME", "hermes"),
+        ("OPENCLAW_CONFIG_PATH", "openclaw"),
         ("VSCODE_IPC_HOOK_CLI", "vscode"),
         ("CLAUDECODE", "claude-code"),
     ] {
@@ -2186,7 +2319,14 @@ fn resolve_embedded_mcp_reconnect_client_key(repo_root: &Path) -> (Option<String
 }
 
 fn build_embedded_mcp_reconnect_helper_surface(repo_root: &Path) -> Value {
-    let supported_clients = json!(["vscode", "cursor", "codex", "claude-code"]);
+    let supported_clients = json!([
+        "vscode",
+        "cursor",
+        "codex",
+        "hermes",
+        "openclaw",
+        "claude-code"
+    ]);
     let (preferred_client_key, resolution_source) =
         resolve_embedded_mcp_reconnect_client_key(repo_root);
     match preferred_client_key {
@@ -2295,25 +2435,19 @@ async fn tool_context_pack(cfg: &AppConfig, args: ContextPackToolArgs) -> Result
         retrieval::execute_context_pack_capture(cfg, &mut db, &context, args.persist).await?;
     let model_visible_payload = retrieval::model_visible_context_pack_payload(&result.payload);
     let context_summary = context_pack_summary(&result.payload);
-    let summary_block = json!({
-        "included_reasons_summary": context_summary.included_reasons_summary.clone(),
-        "excluded_reasons_summary": context_summary.excluded_reasons_summary.clone(),
-    });
-    let stats_block = context_pack_tool_stats_block(&result.stats);
-    let structured = json!({
-        "context_pack": model_visible_payload,
-        "context_pack_summary": summary_block.clone(),
-        "stats": stats_block.clone(),
-    });
-    let summary = context_pack_tool_summary(&result.stats);
+    let tool_result_payload =
+        context_pack_tool_result_payload(&result.stats, &model_visible_payload, &context_summary);
     token_budget::observe_context_pack_tool_overhead(
         &mut db,
         &result.stats.context_pack_id.to_string(),
-        &summary,
-        &structured,
+        &tool_result_payload.summary,
+        &tool_result_payload.structured,
     )
     .await?;
-    Ok(tool_result(summary, structured))
+    Ok(tool_result(
+        tool_result_payload.summary,
+        tool_result_payload.structured,
+    ))
 }
 
 fn context_pack_tool_stats_block(stats: &retrieval::ContextPackStats) -> Value {
@@ -2332,7 +2466,18 @@ fn context_pack_tool_stats_block(stats: &retrieval::ContextPackStats) -> Value {
     block
 }
 
-fn context_pack_tool_summary(stats: &retrieval::ContextPackStats) -> String {
+fn append_working_state_warning_to_compact_summary(summary: String, payload: &Value) -> String {
+    let warning = payload["working_state_write_status"]["warning"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match warning {
+        Some(warning) => format!("{summary} :: {warning}"),
+        None => summary,
+    }
+}
+
+fn context_pack_tool_summary(stats: &retrieval::ContextPackStats, payload: &Value) -> String {
     let mut summary = format!(
         "ctx d={} s={} l={} m={}",
         stats.exact_documents, stats.symbol_hits, stats.lexical_chunks, stats.semantic_chunks
@@ -2340,7 +2485,31 @@ fn context_pack_tool_summary(stats: &retrieval::ContextPackStats) -> String {
     if stats.cache_hit {
         summary.push_str(" c=1");
     }
-    summary
+    append_working_state_warning_to_compact_summary(summary, payload)
+}
+
+struct ContextPackToolResultPayload {
+    summary: String,
+    structured: Value,
+}
+
+fn context_pack_tool_result_payload(
+    stats: &retrieval::ContextPackStats,
+    model_visible_payload: &Value,
+    context_summary: &ContextPackSummary,
+) -> ContextPackToolResultPayload {
+    let summary_block = json!({
+        "included_reasons_summary": context_summary.included_reasons_summary.clone(),
+        "excluded_reasons_summary": context_summary.excluded_reasons_summary.clone(),
+    });
+    let stats_block = context_pack_tool_stats_block(stats);
+    let structured = json!({
+        "context_pack": model_visible_payload.clone(),
+        "context_pack_summary": summary_block,
+        "stats": stats_block,
+    });
+    let summary = context_pack_tool_summary(stats, model_visible_payload);
+    ContextPackToolResultPayload { summary, structured }
 }
 
 async fn tool_observe_whole_cycle(
@@ -2533,7 +2702,7 @@ async fn tool_memory_matrix(cfg: &AppConfig, args: MemoryMatrixToolArgs) -> Resu
     let payload = memory_task_matrix::collect_matrix(cfg, &args.to_verify_args()).await?;
     let matrix_summary = memory_matrix_summary(&payload);
     let summary = format!(
-        "memory matrix :: matrix={} tasks={}/{} failed={} success_rate={:.3} mean_score={:.3} p95_ms={:.3} gate_failures={} verdicts={}",
+        "memory matrix :: matrix={} tasks={}/{} failed={} success_rate={:.3} mean_score={:.3} p95_ms={:.3} gate_failures={} verdicts={} compare={} promotion={} approval={}",
         matrix_summary.matrix,
         matrix_summary.tasks_passed,
         matrix_summary.tasks_total,
@@ -2543,6 +2712,9 @@ async fn tool_memory_matrix(cfg: &AppConfig, args: MemoryMatrixToolArgs) -> Resu
         matrix_summary.p95_ms,
         matrix_summary.gate_failures_count,
         matrix_summary.compact_verdict_counts,
+        matrix_summary.statistics_drift_status,
+        matrix_summary.promotion_law_state,
+        matrix_summary.measured_approval_state,
     );
     Ok(tool_result(
         summary,
@@ -2559,6 +2731,9 @@ async fn tool_memory_matrix(cfg: &AppConfig, args: MemoryMatrixToolArgs) -> Resu
                 "p95_ms": matrix_summary.p95_ms,
                 "gate_failures_count": matrix_summary.gate_failures_count,
                 "compact_verdict_counts": matrix_summary.compact_verdict_counts,
+                "statistics_drift_status": matrix_summary.statistics_drift_status,
+                "promotion_law_state": matrix_summary.promotion_law_state,
+                "measured_approval_state": matrix_summary.measured_approval_state,
             }
         }),
     ))
@@ -2592,6 +2767,15 @@ async fn tool_observe_snapshot(cfg: &AppConfig) -> Result<Value> {
     if let Some(value) = &summary.excluded_reasons_summary {
         text.push_str(&format!(" excluded={value}"));
     }
+    if let Some(value) = &summary.latest_memory_task_matrix_summary {
+        text.push_str(&format!(" memory_matrix={value}"));
+    }
+    if let Some(value) = &summary.latest_mcp_task_matrix_summary {
+        text.push_str(&format!(" mcp_matrix={value}"));
+    }
+    if let Some(value) = &summary.lifecycle_risk_summary {
+        text.push_str(&format!(" lifecycle_risk={value}"));
+    }
     Ok(tool_result(
         text,
         json!({
@@ -2604,6 +2788,9 @@ async fn tool_observe_snapshot(cfg: &AppConfig) -> Result<Value> {
                 "compatibility_compatible": summary.compatibility_compatible,
                 "included_reasons_summary": summary.included_reasons_summary,
                 "excluded_reasons_summary": summary.excluded_reasons_summary,
+                "latest_memory_task_matrix_summary": summary.latest_memory_task_matrix_summary,
+                "latest_mcp_task_matrix_summary": summary.latest_mcp_task_matrix_summary,
+                "lifecycle_risk_summary": summary.lifecycle_risk_summary,
             }
         }),
     ))
@@ -2622,6 +2809,9 @@ struct ObserveSnapshotSummary {
     compatibility_compatible: Option<bool>,
     included_reasons_summary: Option<String>,
     excluded_reasons_summary: Option<String>,
+    latest_memory_task_matrix_summary: Option<String>,
+    latest_mcp_task_matrix_summary: Option<String>,
+    lifecycle_risk_summary: Option<String>,
 }
 
 fn observe_snapshot_summary(snapshot: &Value) -> ObserveSnapshotSummary {
@@ -2655,7 +2845,72 @@ fn observe_snapshot_summary(snapshot: &Value) -> ObserveSnapshotSummary {
             "excluded_reasons_summary",
             "not_included",
         ),
+        latest_memory_task_matrix_summary: observe_snapshot_matrix_summary(
+            snapshot,
+            "latest_memory_task_matrix",
+            "memory_task_matrix",
+        ),
+        latest_mcp_task_matrix_summary: observe_snapshot_matrix_summary(
+            snapshot,
+            "latest_mcp_task_matrix",
+            "mcp_task_matrix",
+        ),
+        lifecycle_risk_summary: observe_snapshot_lifecycle_risk_summary(snapshot),
     }
+}
+
+fn observe_snapshot_lifecycle_risk_summary(snapshot: &Value) -> Option<String> {
+    let risk = &snapshot["governance_surface"]["lifecycle_risk_summary"];
+    if risk["status"].as_str() != Some("advisory") {
+        return None;
+    }
+    Some(format!(
+        "scope={}/{} next={} pending_review_7d={} archive_30d={} prune_30d={}",
+        risk["project_code"].as_str().unwrap_or("unknown"),
+        risk["namespace_code"].as_str().unwrap_or("unknown"),
+        risk["top_expected_next_state"]
+            .as_str()
+            .unwrap_or("unknown"),
+        risk["max_pending_review_risk_7d"]
+            .as_f64()
+            .map(|v| format!("{:.2}%", v * 100.0))
+            .unwrap_or_else(|| "n/d".to_string()),
+        risk["max_archive_risk_30d"]
+            .as_f64()
+            .map(|v| format!("{:.2}%", v * 100.0))
+            .unwrap_or_else(|| "n/d".to_string()),
+        risk["max_prune_risk_30d"]
+            .as_f64()
+            .map(|v| format!("{:.2}%", v * 100.0))
+            .unwrap_or_else(|| "n/d".to_string()),
+    ))
+}
+
+fn observe_snapshot_matrix_summary(
+    snapshot: &Value,
+    snapshot_key: &str,
+    payload_key: &str,
+) -> Option<String> {
+    let root = &snapshot[snapshot_key][payload_key];
+    if !root.is_object() {
+        return None;
+    }
+    let compare = root["statistics"]["drift_summary"]["status"]
+        .as_str()
+        .unwrap_or("unknown");
+    let promotion = policy_state_or_missing(root.get("promotion_law"));
+    let approval = policy_state_or_missing(root.get("measured_approval"));
+    Some(format!(
+        "compare={compare} promotion={promotion} approval={approval}"
+    ))
+}
+
+fn policy_state_or_missing(value: Option<&Value>) -> String {
+    value
+        .and_then(|value| value["state"].as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("state_missing")
+        .to_string()
 }
 
 fn observe_snapshot_reason_summary(
@@ -2732,6 +2987,9 @@ struct MemoryMatrixSummary {
     p95_ms: f64,
     gate_failures_count: u64,
     compact_verdict_counts: String,
+    statistics_drift_status: String,
+    promotion_law_state: String,
+    measured_approval_state: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2789,6 +3047,8 @@ struct ContinuityStartupSummary {
     execctl_active_lease: Value,
     execctl_active_lease_summary: Option<String>,
     required_return_task: Value,
+    required_task_set: Value,
+    required_task_set_summary: Option<String>,
     project_task_tree: Value,
     project_task_tree_summary: Option<String>,
     project_task_ledger: Value,
@@ -2818,6 +3078,9 @@ fn fallback_startup_execution_gate(payload: &Value) -> Value {
     let required_action_kind = resume_enforcement["required_action_kind_when_resume_required"]
         .as_str()
         .unwrap_or("resume_required_return_task");
+    let required_task_set_count = payload["chat_start_restore"]["required_task_set"]
+        .as_array()
+        .map(|items| items.len());
     let must_follow = blocking
         || (must_resume_before_unrelated && action_kind == required_action_kind)
         || lease_owner_state == Some(previous_session_owner_value);
@@ -2834,6 +3097,9 @@ fn fallback_startup_execution_gate(payload: &Value) -> Value {
             .as_str(),
         "required_return_task_next_step": payload["chat_start_restore"]["required_return_task"]["next_step"]
             .as_str(),
+        "required_task_set_count": required_task_set_count,
+        "required_task_set_present": required_task_set_count.map(|count| count > 0),
+        "must_preserve_required_task_set": required_task_set_count.map(|count| count > 0),
         "lease_owner_state": lease_owner_state,
         "must_follow_startup_next_action": must_follow,
         "unrelated_work_allowed": !must_follow,
@@ -2848,6 +3114,11 @@ fn fallback_startup_execution_gate(payload: &Value) -> Value {
 }
 
 fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
+    let required_task_set = payload["chat_start_restore"]["required_task_set"].clone();
+    let required_task_set_summary = payload["chat_start_restore"]["required_task_set_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     ContinuityStartupSummary {
         project_code: payload["continuity_startup"]["project"]["code"]
             .as_str()
@@ -2902,6 +3173,9 @@ fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
                 "active_task_headline": Value::Null,
                 "required_return_headline": Value::Null,
                 "required_return_next_step": Value::Null,
+                "required_task_set_count": required_task_set.as_array().map(|items| items.len()),
+                "required_task_set": required_task_set.clone(),
+                "required_task_set_summary": required_task_set_summary,
             })
         },
         startup_execution_gate: if payload["startup_execution_gate"].is_object() {
@@ -2943,6 +3217,8 @@ fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
         } else {
             Value::Null
         },
+        required_task_set,
+        required_task_set_summary,
         project_task_tree: if payload["chat_start_restore"]["project_task_tree"].is_object() {
             payload["chat_start_restore"]["project_task_tree"].clone()
         } else {
@@ -2992,6 +3268,8 @@ pub(crate) fn continuity_startup_summary_json(payload: &Value) -> Value {
         "execctl_active_lease": summary.execctl_active_lease,
         "execctl_active_lease_summary": summary.execctl_active_lease_summary,
         "required_return_task": summary.required_return_task,
+        "required_task_set": summary.required_task_set,
+        "required_task_set_summary": summary.required_task_set_summary,
         "project_task_tree": summary.project_task_tree,
         "project_task_tree_summary": summary.project_task_tree_summary,
         "project_task_ledger": summary.project_task_ledger,
@@ -3018,6 +3296,13 @@ fn memory_matrix_summary(payload: &Value) -> MemoryMatrixSummary {
         compact_verdict_counts: summarize_verdict_counts(
             &matrix["canonical_eval"]["verdict_counts"],
         ),
+        statistics_drift_status: matrix["statistics"]["drift_summary"]["status"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        promotion_law_state: policy_state_or_missing(matrix.get("promotion_law")).to_string(),
+        measured_approval_state: policy_state_or_missing(matrix.get("measured_approval"))
+            .to_string(),
     }
 }
 
@@ -3399,7 +3684,7 @@ fn server_instructions() -> String {
         "Default law: keep projects isolated and prefer local_strict unless a related-project policy is explicitly required.",
         "Use amai_list_projects first when you do not know what is registered.",
         "Use amai_list_namespaces before querying an unfamiliar project.",
-        "Use amai_continuity_startup at the beginning of a new chat or when resuming a project, before substantive work.",
+        "Use amai_continuity_startup at the beginning of a new clean work surface or when resuming a project, before substantive work.",
         "Use amai_stack_preflight when you need to know what this machine can honestly support.",
         "Use amai_context_pack for retrieval instead of asking for whole repositories.",
         "Use amai_observe_whole_cycle when the client only learns assistant output tokens after the context-pack tool call and needs to attach real whole-cycle evidence back to the same event.",
@@ -3427,7 +3712,7 @@ fn protocol_manifest() -> Value {
                 "contract_version": "continuity-startup-contract-v19",
                 "tool": "amai_continuity_startup",
                 "prompt": "amai-continuity-startup",
-                "purpose": "project-scoped continuity restore plus live client-budget discipline before each substantive reply in a new, resumed, or ongoing chat",
+                "purpose": "project-scoped continuity restore plus live client-budget discipline before each substantive reply on a new, resumed, or ongoing work surface",
                 "must_call_before_substantive_work": true,
                 "project_binding_rule": "registered_project_fail_closed",
                 "default_namespace": "continuity",
@@ -3538,12 +3823,10 @@ fn protocol_manifest() -> Value {
                     "rotate_now_field": "should_rotate_chat_now",
                     "rotate_soon_field": "should_rotate_chat_soon",
                     "status_label_field": "status_label",
-                    "rotate_status_labels": [
-                        "сожми текущий чат",
-                        "сожми текущий чат сейчас"
-                    ],
+                    "rotate_status_labels": CLIENT_TURN_PRESSURE_ROTATE_STATUS_LABELS,
                     "save_handoff_before_rotate": true,
                     "fresh_chat_requires_continuity_startup": true,
+                    "delivery_surface_requires_continuity_startup": true,
                     "full_scale_client_truth_required": true,
                     "reply_blocking_removed": true,
                     "tool_turn_blocking_removed": true,
@@ -3598,6 +3881,8 @@ fn protocol_manifest() -> Value {
                     "execctl_active_lease",
                     "execctl_active_lease_summary",
                     "required_return_task",
+                    "required_task_set",
+                    "required_task_set_summary",
                     "project_task_tree",
                     "project_task_tree_summary",
                     "project_task_ledger",
@@ -3614,6 +3899,8 @@ fn protocol_manifest() -> Value {
                     "startup_next_action",
                     "execctl_active_lease_summary",
                     "required_return_task",
+                    "required_task_set",
+                    "required_task_set_summary",
                     "project_task_tree",
                     "project_task_tree_summary",
                     "project_task_ledger",
@@ -3825,7 +4112,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "amai_continuity_startup",
-            "description": "Build a project-scoped continuity startup/restore pack for a new chat or resumed workline.",
+            "description": "Build a project-scoped continuity startup/restore pack for a new clean work surface or resumed workline.",
             "inputSchema": continuity_startup_input_schema(),
             "annotations": {
                 "title": "Continuity Startup",
@@ -4604,6 +4891,18 @@ fn render_client_config(args: &McpConfigArgs) -> Result<String> {
             }
         }))
         .context("failed to render MCP config"),
+        ConfigShape::OpenClawJson => serde_json::to_string_pretty(&json!({
+            "mcp": {
+                "servers": {
+                    server_name: {
+                        "command": launcher.command,
+                        "args": launcher.args,
+                        "cwd": cwd
+                    }
+                }
+            }
+        }))
+        .context("failed to render OpenClaw MCP config"),
         ConfigShape::CodexToml => {
             let mut server_table = toml::map::Map::new();
             server_table.insert("command".to_string(), toml::Value::String(launcher.command));
@@ -4621,6 +4920,11 @@ fn render_client_config(args: &McpConfigArgs) -> Result<String> {
             toml::to_string_pretty(&toml::Value::Table(root))
                 .context("failed to render Codex TOML config")
         }
+        ConfigShape::HermesYaml => Ok(render_hermes_yaml_config(
+            &server_name,
+            &launcher.command,
+            &launcher.args,
+        )),
     }
 }
 
@@ -4629,7 +4933,9 @@ enum ConfigShape {
     GenericJson,
     VscodeJson,
     McpServersJson,
+    OpenClawJson,
     CodexToml,
+    HermesYaml,
 }
 
 fn config_shape_for_client(client: &str) -> Result<ConfigShape> {
@@ -4637,9 +4943,11 @@ fn config_shape_for_client(client: &str) -> Result<ConfigShape> {
         "generic" => Ok(ConfigShape::GenericJson),
         "vscode" => Ok(ConfigShape::VscodeJson),
         "cursor" | "claude-desktop" | "claude-code" => Ok(ConfigShape::McpServersJson),
+        "openclaw" => Ok(ConfigShape::OpenClawJson),
         "codex" => Ok(ConfigShape::CodexToml),
+        "hermes" => Ok(ConfigShape::HermesYaml),
         other => Err(anyhow!(
-            "unsupported MCP client config target: {other}; use generic|vscode|cursor|claude-desktop|claude-code|codex"
+            "unsupported MCP client config target: {other}; use generic|vscode|cursor|claude-desktop|claude-code|codex|hermes|openclaw"
         )),
     }
 }
@@ -4742,6 +5050,91 @@ fn shell_escape_single_quotes(value: &str) -> String {
     escaped
 }
 
+fn openclaw_cli_base_command(config_path: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("openclaw");
+    command.env("OPENCLAW_CONFIG_PATH", config_path);
+    command.env("OPENCLAW_HIDE_BANNER", "1");
+    command
+}
+
+fn openclaw_cli_set_server(config_path: &Path, server_name: &str, rendered: &str) -> Result<()> {
+    let rendered_json: Value =
+        serde_json::from_str(rendered).context("failed to parse rendered OpenClaw MCP config")?;
+    let server = nested_json_server(&rendered_json, &["mcp", "servers"], server_name)?
+        .cloned()
+        .ok_or_else(|| anyhow!("rendered OpenClaw config is missing server {server_name}"))?;
+    let server_json =
+        serde_json::to_string(&server).context("failed to serialize OpenClaw server payload")?;
+    let output = openclaw_cli_base_command(config_path)
+        .arg("mcp")
+        .arg("set")
+        .arg(server_name)
+        .arg(server_json)
+        .output()
+        .with_context(|| "failed to run openclaw mcp set")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "openclaw mcp set failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+fn openclaw_cli_server_exists(config_path: &Path, server_name: &str) -> Result<bool> {
+    let output = openclaw_cli_base_command(config_path)
+        .arg("mcp")
+        .arg("show")
+        .arg(server_name)
+        .arg("--json")
+        .output()
+        .with_context(|| "failed to run openclaw mcp show")?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stderr.contains("No MCP server named") || stdout.contains("No MCP server named") {
+        return Ok(false);
+    }
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim().to_string()
+    } else {
+        stderr.trim().to_string()
+    };
+    Err(anyhow!("openclaw mcp show failed: {}", detail))
+}
+
+fn remove_openclaw_server_via_cli(
+    config_path: &Path,
+    server_name: &str,
+) -> Result<(String, bool, bool)> {
+    let exists_before = openclaw_cli_server_exists(config_path, server_name)?;
+    if !exists_before {
+        let existing = fs::read_to_string(config_path)
+            .with_context(|| format!("failed to read {}", config_path.display()))?;
+        return Ok((existing, false, false));
+    }
+    let output = openclaw_cli_base_command(config_path)
+        .arg("mcp")
+        .arg("unset")
+        .arg(server_name)
+        .output()
+        .with_context(|| "failed to run openclaw mcp unset")?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "openclaw mcp unset failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let updated = fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let is_empty = serde_json::from_str::<Value>(&updated)
+        .ok()
+        .is_some_and(|value| value == json!({}));
+    Ok((updated, true, is_empty))
+}
+
 fn merge_existing_config(
     shape: ConfigShape,
     args: &McpConfigArgs,
@@ -4768,9 +5161,16 @@ fn merge_existing_config(
             "mcpServers",
             &normalized_server_name(&args.server_name)?,
         ),
+        ConfigShape::OpenClawJson => Ok(rendered.to_string()),
         ConfigShape::CodexToml => merge_toml_server(
             &existing,
             rendered,
+            &normalized_server_name(&args.server_name)?,
+        ),
+        ConfigShape::HermesYaml => merge_yaml_server(
+            &existing,
+            rendered,
+            "mcp_servers",
             &normalized_server_name(&args.server_name)?,
         ),
     }
@@ -4895,6 +5295,24 @@ fn remove_json_server(
     ))
 }
 
+fn nested_json_server<'a>(
+    value: &'a Value,
+    object_path: &[&str],
+    server_name: &str,
+) -> Result<Option<&'a Value>> {
+    let mut current = value;
+    for key in object_path {
+        let Some(next) = current.get(*key) else {
+            return Ok(None);
+        };
+        current = next;
+    }
+    let map = current
+        .as_object()
+        .ok_or_else(|| anyhow!("existing MCP JSON nested server map is not an object"))?;
+    Ok(map.get(server_name))
+}
+
 fn merge_toml_server(existing: &str, rendered: &str, server_name: &str) -> Result<String> {
     let mut existing_value: toml::Value =
         toml::from_str(existing).context("failed to parse existing Codex TOML config")?;
@@ -4953,6 +5371,247 @@ fn remove_toml_server(existing: &str, server_name: &str) -> Result<(String, bool
         removed,
         is_empty,
     ))
+}
+
+fn merge_yaml_server(
+    existing: &str,
+    rendered: &str,
+    top_level_key: &str,
+    server_name: &str,
+) -> Result<String> {
+    if top_level_key != "mcp_servers" {
+        return Err(anyhow!(
+            "unsupported Hermes YAML top-level key: {top_level_key}"
+        ));
+    }
+    let (rendered_start, rendered_end) =
+        find_yaml_server_block(rendered, top_level_key, server_name)
+            .ok_or_else(|| anyhow!("rendered Hermes config is missing server {server_name}"))?;
+    Ok(insert_or_replace_yaml_server(
+        existing,
+        top_level_key,
+        server_name,
+        &rendered[rendered_start..rendered_end],
+    ))
+}
+
+fn yaml_server_exists(existing: &str, top_level_key: &str, server_name: &str) -> Result<bool> {
+    if top_level_key != "mcp_servers" {
+        return Err(anyhow!(
+            "unsupported Hermes YAML top-level key: {top_level_key}"
+        ));
+    }
+    Ok(find_yaml_server_block(existing, top_level_key, server_name).is_some())
+}
+
+fn remove_yaml_server(
+    existing: &str,
+    top_level_key: &str,
+    server_name: &str,
+) -> Result<(String, bool, bool)> {
+    if top_level_key != "mcp_servers" {
+        return Err(anyhow!(
+            "unsupported Hermes YAML top-level key: {top_level_key}"
+        ));
+    }
+    let Some((server_start, server_end)) =
+        find_yaml_server_block(existing, top_level_key, server_name)
+    else {
+        return Ok((existing.to_string(), false, false));
+    };
+    let mut updated = format!("{}{}", &existing[..server_start], &existing[server_end..]);
+    if let Some((section_start, section_end)) = find_yaml_section_bounds(&updated, top_level_key) {
+        let section_body = &updated[section_start..section_end];
+        if !yaml_section_has_servers(section_body) {
+            updated = format!("{}{}", &updated[..section_start], &updated[section_end..]);
+        }
+    }
+    let is_empty = yaml_document_is_effectively_empty(&updated);
+    Ok((updated, true, is_empty))
+}
+
+fn render_hermes_yaml_config(server_name: &str, command: &str, args: &[String]) -> String {
+    format!(
+        "mcp_servers:\n{}",
+        render_hermes_yaml_server_block(server_name, Some(command), args)
+    )
+}
+
+fn render_hermes_yaml_server_block(
+    server_name: &str,
+    command: Option<&str>,
+    args: &[String],
+) -> String {
+    let key = yaml_key(server_name);
+    let mut lines = vec![format!("  {key}:")];
+    if let Some(command) = command {
+        lines.push(format!("    command: {}", yaml_scalar(command)));
+    }
+    if args.is_empty() {
+        lines.push("    args: []".to_string());
+    } else {
+        lines.push("    args:".to_string());
+        for arg in args {
+            lines.push(format!("      - {}", yaml_scalar(arg)));
+        }
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
+fn yaml_key(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        value.to_string()
+    } else {
+        yaml_scalar(value)
+    }
+}
+
+fn yaml_scalar(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn insert_or_replace_yaml_server(
+    existing: &str,
+    section_key: &str,
+    server_name: &str,
+    server_block: &str,
+) -> String {
+    if let Some((server_start, server_end)) =
+        find_yaml_server_block(existing, section_key, server_name)
+    {
+        return format!(
+            "{}{}{}",
+            &existing[..server_start],
+            server_block,
+            &existing[server_end..]
+        );
+    }
+
+    if let Some((_section_start, section_end)) = find_yaml_section_bounds(existing, section_key) {
+        let mut merged = String::new();
+        merged.push_str(&existing[..section_end]);
+        if !merged.is_empty() && !merged.ends_with('\n') {
+            merged.push('\n');
+        }
+        merged.push_str(server_block);
+        merged.push_str(&existing[section_end..]);
+        return merged;
+    }
+
+    let mut merged = existing.to_string();
+    if !merged.is_empty() && !merged.ends_with('\n') {
+        merged.push('\n');
+    }
+    merged.push_str(section_key);
+    merged.push_str(":\n");
+    merged.push_str(server_block);
+    merged
+}
+
+fn find_yaml_server_block(
+    existing: &str,
+    section_key: &str,
+    server_name: &str,
+) -> Option<(usize, usize)> {
+    let (section_start, section_end) = find_yaml_section_bounds(existing, section_key)?;
+    let spans = yaml_line_spans(existing);
+    let mut current_start = None;
+    let mut inside_section = false;
+    for (start, end) in spans {
+        if start < section_start {
+            continue;
+        }
+        if start >= section_end {
+            break;
+        }
+        let line = &existing[start..end];
+        if !inside_section {
+            inside_section = true;
+            continue;
+        }
+        if let Some(key) = parse_yaml_section_entry_key(line)
+            && key == server_name
+        {
+            current_start = Some(start);
+            continue;
+        }
+        if current_start.is_some() && parse_yaml_section_entry_key(line).is_some() {
+            return Some((current_start.unwrap_or(start), start));
+        }
+    }
+    current_start.map(|start| (start, section_end))
+}
+
+fn find_yaml_section_bounds(existing: &str, section_key: &str) -> Option<(usize, usize)> {
+    let spans = yaml_line_spans(existing);
+    for (index, (start, end)) in spans.iter().enumerate() {
+        let line = &existing[*start..*end];
+        if parse_yaml_top_level_key(line).is_some_and(|key| key == section_key) {
+            for (next_start, next_end) in spans.iter().skip(index + 1) {
+                let next_line = &existing[*next_start..*next_end];
+                if parse_yaml_top_level_key(next_line).is_some() {
+                    return Some((*start, *next_start));
+                }
+            }
+            return Some((*start, existing.len()));
+        }
+    }
+    None
+}
+
+fn yaml_line_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = 0;
+    for (index, byte) in text.as_bytes().iter().enumerate() {
+        if *byte == b'\n' {
+            spans.push((start, index + 1));
+            start = index + 1;
+        }
+    }
+    if start < text.len() {
+        spans.push((start, text.len()));
+    }
+    spans
+}
+
+fn parse_yaml_top_level_key(line: &str) -> Option<&str> {
+    if line.starts_with(' ') || line.starts_with('\t') {
+        return None;
+    }
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    trimmed.strip_suffix(':')
+}
+
+fn parse_yaml_section_entry_key(line: &str) -> Option<String> {
+    if !line.starts_with("  ") || line.starts_with("    ") {
+        return None;
+    }
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let key = trimmed.strip_suffix(':')?;
+    Some(key.trim_matches('\'').trim_matches('"').to_string())
+}
+
+fn yaml_section_has_servers(section: &str) -> bool {
+    section
+        .lines()
+        .skip(1)
+        .any(|line| parse_yaml_section_entry_key(line).is_some())
+}
+
+fn yaml_document_is_effectively_empty(document: &str) -> bool {
+    document
+        .lines()
+        .map(str::trim)
+        .all(|line| line.is_empty() || line.starts_with('#'))
 }
 
 fn required_prompt_arg(
@@ -5109,6 +5768,7 @@ impl ContinuityStartupToolArgs {
             json: true,
             runtime_state_json: false,
             token_source_kind: self.token_source_kind.clone(),
+            skip_live_client_budget_guard: false,
         }
     }
 }
@@ -5260,17 +5920,38 @@ fn default_warm_limit() -> usize {
     4
 }
 
-fn validate_initialize_protocol_version(params: &Value) -> McpToolResult<()> {
-    let protocol_version = params
-        .get("protocolVersion")
-        .and_then(Value::as_str)
-        .ok_or_else(|| McpError::invalid_params("initialize.params.protocolVersion is required"))?;
-    if protocol_version != MCP_PROTOCOL_VERSION {
-        return Err(McpError::invalid_params(format!(
-            "unsupported protocolVersion {protocol_version}; expected {MCP_PROTOCOL_VERSION}"
-        )));
+fn parse_mcp_protocol_version(version: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = version.split('-');
+    let year = parts.next()?.parse().ok()?;
+    let month = parts.next()?.parse().ok()?;
+    let day = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
     }
-    Ok(())
+    Some((year, month, day))
+}
+
+fn validate_initialize_protocol_version(params: &Value) -> McpToolResult<&'static str> {
+    let protocol_version = params.get("protocolVersion").and_then(Value::as_str);
+    let protocol_version = match protocol_version {
+        Some(version) => version,
+        None => return Ok(MCP_LEGACY_COMPAT_PROTOCOL_VERSION),
+    };
+    let requested = parse_mcp_protocol_version(protocol_version).ok_or_else(|| {
+        McpError::invalid_params(format!(
+            "unsupported protocolVersion {protocol_version}; expected YYYY-MM-DD not newer than {MCP_PROTOCOL_VERSION}"
+        ))
+    })?;
+    let current = parse_mcp_protocol_version(MCP_PROTOCOL_VERSION)
+        .expect("MCP_PROTOCOL_VERSION must stay YYYY-MM-DD");
+    if requested <= current {
+        return Ok(match protocol_version {
+            MCP_PROTOCOL_VERSION => MCP_PROTOCOL_VERSION,
+            MCP_LEGACY_COMPAT_PROTOCOL_VERSION => MCP_LEGACY_COMPAT_PROTOCOL_VERSION,
+            _ => Box::leak(protocol_version.to_string().into_boxed_str()),
+        });
+    }
+    Ok(MCP_PROTOCOL_VERSION)
 }
 
 fn tool_input_schema(tool_name: &str) -> Option<Value> {
@@ -5327,19 +6008,22 @@ fn validate_tool_request_arguments(
 mod tests {
     use super::{
         ContextPackToolArgs, ContinuityStartupToolArgs, McpConfigArgs, McpError,
+        ContextPackSummary, append_working_state_warning_to_compact_summary,
         benchmark_coverage_summary, context_pack_contains_primary_project,
-        context_pack_input_schema, context_pack_summary, context_pack_tool_stats_block,
-        context_pack_tool_summary, continuity_handoff_input_schema,
+        context_pack_input_schema, context_pack_summary, context_pack_tool_result_payload,
+        context_pack_tool_stats_block, context_pack_tool_summary,
+        continuity_handoff_input_schema,
         continuity_startup_input_schema, continuity_startup_summary, inject_proof_tool_arguments,
-        mcp_tool_error_result, memory_matrix_summary, normalized_server_name,
-        observe_snapshot_summary, observe_whole_cycle_input_schema,
-        observe_whole_cycle_turn_input_schema, prompt_result, protocol_manifest,
-        render_client_config, snapshot_has_only_ignored_critical_metrics, stack_preflight_summary,
-        summarize_codes, summarize_namespace_modes, token_benchmark_summary, token_report_summary,
-        tool_requires_live_client_budget_preflight, validate_initialize_protocol_version,
-        validate_tool_request_arguments, verify_mcp_scope_label,
-        verify_mcp_scope_requires_memory_matrix, verify_mcp_scope_requires_warm_cache,
-        warm_cache_summary,
+        mcp_tool_error_result, memory_matrix_summary, new_mcp_proof_thread_id,
+        normalized_server_name, observe_snapshot_matrix_summary, observe_snapshot_summary,
+        observe_whole_cycle_input_schema, observe_whole_cycle_turn_input_schema, prompt_result,
+        protocol_manifest, render_client_config, snapshot_has_only_ignored_critical_metrics,
+        stack_preflight_summary, summarize_codes, summarize_namespace_modes,
+        token_benchmark_summary, token_report_summary, tool_requires_live_client_budget_preflight,
+        tool_result,
+        validate_initialize_protocol_version, validate_tool_request_arguments,
+        verify_mcp_scope_label, verify_mcp_scope_requires_memory_matrix,
+        verify_mcp_scope_requires_warm_cache, warm_cache_summary,
     };
     use crate::cli::VerifyMcpScope;
     use crate::continuity;
@@ -5416,6 +6100,78 @@ mod tests {
     }
 
     #[test]
+    fn renders_hermes_config() {
+        let config = render_client_config(&McpConfigArgs {
+            client: "hermes".to_string(),
+            server_name: "amai".to_string(),
+            launcher_platform: "auto".to_string(),
+            ssh_destination: None,
+            remote_repo_root: None,
+            command: Some("/tmp/run_mcp_stdio.sh".to_string()),
+            cwd: Some(PathBuf::from("/tmp/amai")),
+            output: None,
+        })
+        .expect("render should succeed");
+        assert!(config.contains("mcp_servers:"));
+        assert!(config.contains("  amai:"));
+        assert!(config.contains("    command: '/tmp/run_mcp_stdio.sh'"));
+    }
+
+    #[test]
+    fn renders_openclaw_config() {
+        let config = render_client_config(&McpConfigArgs {
+            client: "openclaw".to_string(),
+            server_name: "amai".to_string(),
+            launcher_platform: "auto".to_string(),
+            ssh_destination: None,
+            remote_repo_root: None,
+            command: Some("/tmp/run_mcp_stdio.sh".to_string()),
+            cwd: Some(PathBuf::from("/tmp/amai")),
+            output: None,
+        })
+        .expect("render should succeed");
+        let json: serde_json::Value =
+            serde_json::from_str(&config).expect("config must be valid JSON");
+        assert_eq!(
+            json["mcp"]["servers"]["amai"]["command"],
+            "/tmp/run_mcp_stdio.sh"
+        );
+        assert_eq!(json["mcp"]["servers"]["amai"]["cwd"], "/tmp/amai");
+    }
+
+    #[test]
+    fn merges_openclaw_json5_config_with_comments() {
+        let temp_root = std::env::temp_dir().join(format!("amai-mcp-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let output = temp_root.join("openclaw.json");
+        fs::write(
+            &output,
+            "{\n  // comment\n  gateway: {\n    mode: 'local',\n  },\n}\n",
+        )
+        .expect("write openclaw config");
+        super::write_client_config(&McpConfigArgs {
+            client: "openclaw".to_string(),
+            server_name: "amai".to_string(),
+            launcher_platform: "auto".to_string(),
+            ssh_destination: None,
+            remote_repo_root: None,
+            command: Some("/tmp/run_mcp_stdio.sh".to_string()),
+            cwd: Some(PathBuf::from("/tmp/amai")),
+            output: Some(output.clone()),
+        })
+        .expect("merge config");
+        let value: Value =
+            serde_json::from_str(&fs::read_to_string(&output).expect("read updated config"))
+                .expect("parse updated config");
+        assert_eq!(value["gateway"]["mode"], json!("local"));
+        assert_eq!(
+            value["mcp"]["servers"]["amai"]["command"],
+            json!("/tmp/run_mcp_stdio.sh")
+        );
+        fs::remove_dir_all(&temp_root).expect("remove temp root");
+    }
+
+    #[test]
     fn renders_windows_powershell_config() {
         let config = render_client_config(&McpConfigArgs {
             client: "cursor".to_string(),
@@ -5457,6 +6213,49 @@ mod tests {
             serde_json::from_str(&config).expect("config must be valid JSON");
         assert_eq!(json["mcpServers"]["amai"]["command"], "ssh");
         let args = json["mcpServers"]["amai"]["args"]
+            .as_array()
+            .expect("args must be array");
+        assert_eq!(args[0], "ops@example-host");
+        assert_eq!(args[1], "cd '/srv/amai' && ./scripts/run_mcp_stdio.sh");
+    }
+
+    #[test]
+    fn renders_remote_ssh_hermes_config() {
+        let config = render_client_config(&McpConfigArgs {
+            client: "hermes".to_string(),
+            server_name: "amai".to_string(),
+            launcher_platform: "auto".to_string(),
+            ssh_destination: Some("ops@example-host".to_string()),
+            remote_repo_root: Some(PathBuf::from("/srv/amai")),
+            command: None,
+            cwd: Some(PathBuf::from("/tmp/amai")),
+            output: None,
+        })
+        .expect("render should succeed");
+        assert!(config.contains("mcp_servers:"));
+        assert!(config.contains("  amai:"));
+        assert!(config.contains("    command: 'ssh'"));
+        assert!(config.contains("    - 'ops@example-host'"));
+        assert!(config.contains("    - 'cd ''/srv/amai'' && ./scripts/run_mcp_stdio.sh'"));
+    }
+
+    #[test]
+    fn renders_remote_ssh_openclaw_config() {
+        let config = render_client_config(&McpConfigArgs {
+            client: "openclaw".to_string(),
+            server_name: "amai".to_string(),
+            launcher_platform: "auto".to_string(),
+            ssh_destination: Some("ops@example-host".to_string()),
+            remote_repo_root: Some(PathBuf::from("/srv/amai")),
+            command: None,
+            cwd: Some(PathBuf::from("/tmp/amai")),
+            output: None,
+        })
+        .expect("render should succeed");
+        let json: serde_json::Value =
+            serde_json::from_str(&config).expect("config must be valid JSON");
+        assert_eq!(json["mcp"]["servers"]["amai"]["command"], "ssh");
+        let args = json["mcp"]["servers"]["amai"]["args"]
             .as_array()
             .expect("args must be array");
         assert_eq!(args[0], "ops@example-host");
@@ -5574,19 +6373,54 @@ mod tests {
 
     #[test]
     fn initialize_protocol_version_rejects_mismatch() {
-        let error = validate_initialize_protocol_version(&json!({
-            "protocolVersion": "1900-01-01"
+        let negotiated = validate_initialize_protocol_version(&json!({
+            "protocolVersion": "3025-01-01"
         }))
-        .expect_err("protocol mismatch must fail");
-        assert!(error.detail.contains("unsupported protocolVersion"));
+        .expect("newer but valid version must negotiate down");
+        assert_eq!(negotiated, super::MCP_PROTOCOL_VERSION);
     }
 
     #[test]
     fn initialize_protocol_version_accepts_current_version() {
-        validate_initialize_protocol_version(&json!({
+        let negotiated = validate_initialize_protocol_version(&json!({
             "protocolVersion": super::MCP_PROTOCOL_VERSION
         }))
         .expect("current protocol version must pass");
+        assert_eq!(negotiated, super::MCP_PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn initialize_protocol_version_accepts_older_versions_without_hardcoded_list() {
+        let negotiated = validate_initialize_protocol_version(&json!({
+            "protocolVersion": "2025-03-26"
+        }))
+        .expect("older protocol version must pass");
+        assert_eq!(negotiated, "2025-03-26");
+    }
+
+    #[test]
+    fn initialize_protocol_version_accepts_missing_version_for_legacy_clients() {
+        let negotiated =
+            validate_initialize_protocol_version(&json!({})).expect("missing version must pass");
+        assert_eq!(negotiated, super::MCP_LEGACY_COMPAT_PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn initialize_protocol_version_echoes_supported_older_version() {
+        let negotiated = validate_initialize_protocol_version(&json!({
+            "protocolVersion": "2024-11-05"
+        }))
+        .expect("supported older version must echo back");
+        assert_eq!(negotiated, "2024-11-05");
+    }
+
+    #[test]
+    fn initialize_protocol_version_rejects_non_date_shape() {
+        let error = validate_initialize_protocol_version(&json!({
+            "protocolVersion": "legacy"
+        }))
+        .expect_err("malformed protocol version must fail");
+        assert!(error.detail.contains("YYYY-MM-DD"));
     }
 
     #[test]
@@ -5679,6 +6513,117 @@ mod tests {
                 .expect("parse updated config");
         assert_eq!(value["note"], json!("keep-me"));
         assert!(value.get("name").is_none());
+        fs::remove_dir_all(&temp_root).expect("remove temp root");
+    }
+
+    #[test]
+    fn removing_hermes_config_preserves_unrelated_keys() {
+        let temp_root = std::env::temp_dir().join(format!("amai-mcp-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let output = temp_root.join("config.yaml");
+        fs::write(
+            &output,
+            "model:\n  provider: ollama-cloud\nmcp_servers:\n  amai:\n    command: /tmp/run_mcp_stdio.sh\n    args: []\n",
+        )
+        .expect("write hermes config");
+        let result = super::remove_client_config(
+            &McpConfigArgs {
+                client: "hermes".to_string(),
+                server_name: "amai".to_string(),
+                launcher_platform: "auto".to_string(),
+                ssh_destination: None,
+                remote_repo_root: None,
+                command: None,
+                cwd: Some(temp_root.clone()),
+                output: Some(output.clone()),
+            },
+            false,
+        )
+        .expect("remove config");
+        assert!(result.removed);
+        assert!(!result.purged_file);
+        let updated = fs::read_to_string(&output).expect("read updated config");
+        assert!(updated.contains("model:\n  provider: ollama-cloud"));
+        assert!(!updated.contains("mcp_servers:"));
+        fs::remove_dir_all(&temp_root).expect("remove temp root");
+    }
+
+    #[test]
+    fn removing_openclaw_config_preserves_unrelated_keys() {
+        let temp_root = std::env::temp_dir().join(format!("amai-mcp-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let output = temp_root.join("openclaw.json");
+        fs::write(
+            &output,
+            serde_json::to_string_pretty(&json!({
+                "gateway": {"port": 18789},
+                "mcp": {
+                    "servers": {
+                        "amai": {
+                            "command": "/tmp/run_mcp_stdio.sh",
+                            "args": [],
+                            "cwd": "/tmp/amai"
+                        }
+                    }
+                }
+            }))
+            .expect("serialize openclaw config"),
+        )
+        .expect("write openclaw config");
+        let result = super::remove_client_config(
+            &McpConfigArgs {
+                client: "openclaw".to_string(),
+                server_name: "amai".to_string(),
+                launcher_platform: "auto".to_string(),
+                ssh_destination: None,
+                remote_repo_root: None,
+                command: None,
+                cwd: Some(temp_root.clone()),
+                output: Some(output.clone()),
+            },
+            false,
+        )
+        .expect("remove config");
+        assert!(result.removed);
+        assert!(!result.purged_file);
+        let value: Value =
+            serde_json::from_str(&fs::read_to_string(&output).expect("read updated config"))
+                .expect("parse updated config");
+        assert_eq!(value["gateway"]["port"], json!(18789));
+        assert!(value.get("mcp").is_none());
+        fs::remove_dir_all(&temp_root).expect("remove temp root");
+    }
+
+    #[test]
+    fn removing_openclaw_json5_config_preserves_unrelated_keys() {
+        let temp_root = std::env::temp_dir().join(format!("amai-mcp-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let output = temp_root.join("openclaw.json");
+        fs::write(
+            &output,
+            "{\n  gateway: {\n    mode: 'local',\n  },\n  mcp: {\n    servers: {\n      amai: {\n        command: '/tmp/run_mcp_stdio.sh',\n        args: [],\n      },\n    },\n  },\n}\n",
+        )
+        .expect("write openclaw config");
+        let result = super::remove_client_config(
+            &McpConfigArgs {
+                client: "openclaw".to_string(),
+                server_name: "amai".to_string(),
+                launcher_platform: "auto".to_string(),
+                ssh_destination: None,
+                remote_repo_root: None,
+                command: None,
+                cwd: Some(temp_root.clone()),
+                output: Some(output.clone()),
+            },
+            false,
+        )
+        .expect("remove config");
+        assert!(result.removed);
+        let value: Value =
+            serde_json::from_str(&fs::read_to_string(&output).expect("read updated config"))
+                .expect("parse updated config");
+        assert_eq!(value["gateway"]["mode"], json!("local"));
+        assert!(value.get("mcp").is_none());
         fs::remove_dir_all(&temp_root).expect("remove temp root");
     }
 
@@ -5794,6 +6739,47 @@ mod tests {
                         }]
                     }
                 }
+            },
+            "latest_memory_task_matrix": {
+                "memory_task_matrix": {
+                    "statistics": {
+                        "drift_summary": {
+                            "status": "measured"
+                        }
+                    },
+                    "promotion_law": {
+                        "state": "candidate_ready_for_measured_approval"
+                    },
+                    "measured_approval": {
+                        "state": "pending_human_review"
+                    }
+                }
+            },
+            "latest_mcp_task_matrix": {
+                "mcp_task_matrix": {
+                    "statistics": {
+                        "drift_summary": {
+                            "status": "measured"
+                        }
+                    },
+                    "promotion_law": {
+                        "state": "blocked_benchmark_gates"
+                    },
+                    "measured_approval": {
+                        "state": "not_applicable"
+                    }
+                }
+            },
+            "governance_surface": {
+                "lifecycle_risk_summary": {
+                    "status": "advisory",
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "top_expected_next_state": "pending_review",
+                    "max_pending_review_risk_7d": 0.42,
+                    "max_archive_risk_30d": 0.19,
+                    "max_prune_risk_30d": 0.03
+                }
             }
         });
 
@@ -5814,6 +6800,22 @@ mod tests {
         assert_eq!(
             summary.excluded_reasons_summary.as_deref(),
             Some("semantic_chunks — Semantic layer abstained.")
+        );
+        assert_eq!(
+            summary.latest_memory_task_matrix_summary.as_deref(),
+            Some(
+                "compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review"
+            )
+        );
+        assert_eq!(
+            summary.latest_mcp_task_matrix_summary.as_deref(),
+            Some("compare=measured promotion=blocked_benchmark_gates approval=not_applicable")
+        );
+        assert_eq!(
+            summary.lifecycle_risk_summary.as_deref(),
+            Some(
+                "scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00%"
+            )
         );
     }
 
@@ -5922,6 +6924,17 @@ mod tests {
                 "success_rate": 1.0,
                 "mean_score": 1.0,
                 "p95_ms": 418.778,
+                "statistics": {
+                    "drift_summary": {
+                        "status": "measured"
+                    }
+                },
+                "promotion_law": {
+                    "state": "candidate_ready_for_measured_approval"
+                },
+                "measured_approval": {
+                    "state": "pending_human_review"
+                },
                 "gate_failures": [],
                 "canonical_eval": {
                     "verdict_counts": {
@@ -5945,6 +6958,69 @@ mod tests {
         assert_eq!(
             summary.compact_verdict_counts,
             "hit_correct_target=4, recovered_useful=4"
+        );
+        assert_eq!(summary.statistics_drift_status, "measured");
+        assert_eq!(
+            summary.promotion_law_state,
+            "candidate_ready_for_measured_approval"
+        );
+        assert_eq!(summary.measured_approval_state, "pending_human_review");
+    }
+
+    #[test]
+    fn memory_matrix_summary_fail_closes_missing_policy_states() {
+        let payload = json!({
+            "memory_task_matrix": {
+                "matrix": "letta_memory_local",
+                "display_name": "Letta-style local memory matrix",
+                "tasks_total": 3,
+                "tasks_passed": 3,
+                "tasks_failed": 0,
+                "success_rate": 1.0,
+                "mean_score": 1.0,
+                "p95_ms": 120.0,
+                "statistics": {
+                    "drift_summary": {
+                        "status": "measured"
+                    }
+                },
+                "gate_failures": [],
+                "canonical_eval": {
+                    "verdict_counts": {
+                        "hit_correct_target": 3
+                    }
+                }
+            }
+        });
+
+        let summary = memory_matrix_summary(&payload);
+        assert_eq!(summary.statistics_drift_status, "measured");
+        assert_eq!(summary.promotion_law_state, "state_missing");
+        assert_eq!(summary.measured_approval_state, "state_missing");
+    }
+
+    #[test]
+    fn observe_snapshot_matrix_summary_fail_closes_missing_policy_states() {
+        let snapshot = json!({
+            "latest_memory_task_matrix": {
+                "memory_task_matrix": {
+                    "statistics": {
+                        "drift_summary": {
+                            "status": "measured"
+                        }
+                    }
+                }
+            }
+        });
+
+        assert_eq!(
+            observe_snapshot_matrix_summary(
+                &snapshot,
+                "latest_memory_task_matrix",
+                "memory_task_matrix",
+            )
+            .as_deref(),
+            Some("compare=measured promotion=state_missing approval=state_missing")
         );
     }
 
@@ -5981,6 +7057,69 @@ mod tests {
         assert_eq!(
             summary.next_priorities_summary,
             "SWE-bench Verified (swe_bench_verified), τ-bench (tau_bench)"
+        );
+    }
+
+    #[test]
+    fn benchmark_coverage_tool_result_keeps_summary_and_compact_text_aligned() {
+        let payload = json!({
+            "source": {
+                "display_name": "Benchmark Compendium"
+            },
+            "coverage_counts": {
+                "total": 19,
+                "materialized": 0,
+                "partial": 2,
+                "mapped": 12,
+                "next_priority": 1,
+                "future": 4
+            },
+            "families": [{
+                "next_priorities": [
+                    "SWE-bench Verified (swe_bench_verified)",
+                    "τ-bench (tau_bench)"
+                ]
+            }]
+        });
+
+        let summary = benchmark_coverage_summary(&payload);
+        let result = tool_result(
+            format!(
+                "benchmark coverage :: total={} materialized={} partial={} mapped={} next_priority={} future={} next={}",
+                summary.total_benchmarks,
+                summary.materialized,
+                summary.partial,
+                summary.mapped,
+                summary.next_priority,
+                summary.future,
+                summary.next_priorities_summary,
+            ),
+            json!({
+                "benchmark_coverage": payload,
+                "benchmark_coverage_summary": {
+                    "source_display_name": summary.source_display_name,
+                    "total_benchmarks": summary.total_benchmarks,
+                    "materialized": summary.materialized,
+                    "partial": summary.partial,
+                    "mapped": summary.mapped,
+                    "next_priority": summary.next_priority,
+                    "future": summary.future,
+                    "next_priorities_summary": summary.next_priorities_summary,
+                }
+            }),
+        );
+
+        assert_eq!(
+            result["content"][0]["text"],
+            json!("benchmark coverage :: total=19 materialized=0 partial=2 mapped=12 next_priority=1 future=4 next=SWE-bench Verified (swe_bench_verified), τ-bench (tau_bench)")
+        );
+        assert_eq!(
+            result["structuredContent"]["benchmark_coverage_summary"]["total_benchmarks"],
+            json!(19)
+        );
+        assert_eq!(
+            result["structuredContent"]["benchmark_coverage_summary"]["next_priorities_summary"],
+            json!("SWE-bench Verified (swe_bench_verified), τ-bench (tau_bench)")
         );
     }
 
@@ -6113,6 +7252,14 @@ mod tests {
     }
 
     #[test]
+    fn mcp_proof_thread_id_is_explicit_proof_scope() {
+        let thread_id = new_mcp_proof_thread_id();
+
+        assert!(thread_id.starts_with("proof-mcp-thread-"));
+        assert!(thread_id.len() > "proof-mcp-thread-".len());
+    }
+
+    #[test]
     fn context_pack_tool_payload_stays_compact_for_model_visible_output() {
         let stats = ContextPackStats {
             context_pack_id: Uuid::parse_str("12345678-1234-5678-9abc-123456789abc").expect("uuid"),
@@ -6141,7 +7288,7 @@ mod tests {
         };
 
         let compact_stats = context_pack_tool_stats_block(&stats);
-        let compact_summary = context_pack_tool_summary(&stats);
+        let compact_summary = context_pack_tool_summary(&stats, &json!({}));
         let legacy_stats = json!({
             "context_pack_id": stats.context_pack_id,
             "exact_documents": stats.exact_documents,
@@ -6185,6 +7332,180 @@ mod tests {
                     .len()
         );
         assert!(compact_summary.len() < legacy_summary.len());
+    }
+
+    #[test]
+    fn context_pack_tool_summary_appends_working_state_warning_when_present() {
+        let stats = ContextPackStats {
+            context_pack_id: Uuid::parse_str("12345678-1234-5678-9abc-123456789abc").expect("uuid"),
+            exact_documents: 2,
+            symbol_hits: 1,
+            lexical_chunks: 3,
+            semantic_chunks: 4,
+            cache_hit: false,
+            scope_signature: "scope-signature-heavy-value".to_string(),
+            timings: ContextPackTimings {
+                resolve_scope_ms: 11,
+                exact_lookup_ms: 12,
+                symbol_lookup_ms: 13,
+                lexical_lookup_ms: 14,
+                query_embed_ms: 15,
+                semantic_search_ms: 16,
+                semantic_hydrate_ms: 17,
+                ranking_ms: 18,
+                provenance_ms: 19,
+                pack_assembly_ms: 20,
+                cache_lookup_ms: 21,
+                serialize_ms: 22,
+                persist_ms: 23,
+            },
+            retrieval_lower_bound_ms_precise: None,
+        };
+
+        let compact_summary = context_pack_tool_summary(
+            &stats,
+            &json!({
+                "working_state_write_status": {
+                    "status": "degraded_after_primary_write",
+                    "warning": "context_pack.refresh_restore_snapshot degraded"
+                }
+            }),
+        );
+        assert_eq!(
+            compact_summary,
+            "ctx d=2 s=1 l=3 m=4 :: context_pack.refresh_restore_snapshot degraded"
+        );
+    }
+
+    #[test]
+    fn context_pack_tool_summary_keeps_cache_hit_prefix_when_warning_is_appended() {
+        let stats = ContextPackStats {
+            context_pack_id: Uuid::parse_str("12345678-1234-5678-9abc-123456789abc").expect("uuid"),
+            exact_documents: 2,
+            symbol_hits: 1,
+            lexical_chunks: 3,
+            semantic_chunks: 4,
+            cache_hit: true,
+            scope_signature: "scope-signature-heavy-value".to_string(),
+            timings: ContextPackTimings {
+                resolve_scope_ms: 11,
+                exact_lookup_ms: 12,
+                symbol_lookup_ms: 13,
+                lexical_lookup_ms: 14,
+                query_embed_ms: 15,
+                semantic_search_ms: 16,
+                semantic_hydrate_ms: 17,
+                ranking_ms: 18,
+                provenance_ms: 19,
+                pack_assembly_ms: 20,
+                cache_lookup_ms: 21,
+                serialize_ms: 22,
+                persist_ms: 23,
+            },
+            retrieval_lower_bound_ms_precise: None,
+        };
+
+        let compact_summary = context_pack_tool_summary(
+            &stats,
+            &json!({
+                "working_state_write_status": {
+                    "status": "degraded_after_primary_write",
+                    "warning": "context_pack.refresh_restore_snapshot degraded"
+                }
+            }),
+        );
+        assert_eq!(
+            compact_summary,
+            "ctx d=2 s=1 l=3 m=4 c=1 :: context_pack.refresh_restore_snapshot degraded"
+        );
+    }
+
+    #[test]
+    fn append_working_state_warning_to_compact_summary_keeps_compact_summary_without_warning() {
+        let summary =
+            append_working_state_warning_to_compact_summary("ctx d=1 s=0 l=0 m=0".to_string(), &json!({}));
+        assert_eq!(summary, "ctx d=1 s=0 l=0 m=0");
+    }
+
+    #[test]
+    fn append_working_state_warning_to_compact_summary_ignores_whitespace_warning() {
+        let summary = append_working_state_warning_to_compact_summary(
+            "ctx d=1 s=0 l=0 m=0".to_string(),
+            &json!({
+                "working_state_write_status": {
+                    "warning": "   "
+                }
+            }),
+        );
+        assert_eq!(summary, "ctx d=1 s=0 l=0 m=0");
+    }
+
+    #[test]
+    fn context_pack_tool_result_payload_preserves_write_status_in_structured_and_summary() {
+        let stats = ContextPackStats {
+            context_pack_id: Uuid::parse_str("12345678-1234-5678-9abc-123456789abc")
+                .expect("uuid"),
+            exact_documents: 2,
+            symbol_hits: 1,
+            lexical_chunks: 3,
+            semantic_chunks: 4,
+            cache_hit: true,
+            scope_signature: "scope-signature-heavy-value".to_string(),
+            timings: ContextPackTimings {
+                resolve_scope_ms: 11,
+                exact_lookup_ms: 12,
+                symbol_lookup_ms: 13,
+                lexical_lookup_ms: 14,
+                query_embed_ms: 15,
+                semantic_search_ms: 16,
+                semantic_hydrate_ms: 17,
+                ranking_ms: 18,
+                provenance_ms: 19,
+                pack_assembly_ms: 20,
+                cache_lookup_ms: 21,
+                serialize_ms: 22,
+                persist_ms: 23,
+            },
+            retrieval_lower_bound_ms_precise: None,
+        };
+        let model_visible_payload = json!({
+            "context_pack_id": "ctx-1",
+            "project": { "code": "amai" },
+            "namespace": { "code": "continuity" },
+            "working_state_write_status": {
+                "status": "degraded_after_primary_write",
+                "warning": "context_pack.refresh_restore_snapshot degraded"
+            },
+            "cache_reuse_reference": {
+                "state": "same_thread_context_pack_replay",
+                "source_context_pack_id": "ctx-0"
+            }
+        });
+        let context_summary = ContextPackSummary {
+            included_reasons_summary: Some("exact_documents=2".to_string()),
+            excluded_reasons_summary: Some("semantic_chunks".to_string()),
+        };
+
+        let payload =
+            context_pack_tool_result_payload(&stats, &model_visible_payload, &context_summary);
+        let result = tool_result(payload.summary, payload.structured);
+
+        assert_eq!(
+            result["structuredContent"]["context_pack"]["working_state_write_status"]["status"],
+            json!("degraded_after_primary_write")
+        );
+        assert_eq!(
+            result["structuredContent"]["context_pack"]["working_state_write_status"]["warning"],
+            json!("context_pack.refresh_restore_snapshot degraded")
+        );
+        assert_eq!(
+            result["structuredContent"]["context_pack_summary"]["included_reasons_summary"],
+            json!("exact_documents=2")
+        );
+        assert_eq!(
+            result["content"][0]["text"],
+            json!("ctx d=2 s=1 l=3 m=4 c=1 :: context_pack.refresh_restore_snapshot degraded")
+        );
     }
 
     #[test]
@@ -6279,6 +7600,177 @@ mod tests {
         assert!(!summary.remote_mode_recommended);
         assert_eq!(summary.unmet_minimums_count, 0);
         assert_eq!(summary.unmet_recommendations_count, 1);
+    }
+
+    #[test]
+    fn stack_preflight_tool_result_keeps_summary_and_compact_text_aligned() {
+        let payload = json!({
+            "profile_code": "default",
+            "profile": {
+                "display_name": "Workstation Full",
+                "supports_peak_benchmarks": true,
+                "start_monitoring_by_default": false,
+                "remote_mode_recommended": false
+            },
+            "host": {
+                "logical_cpus": 16,
+                "total_memory_gib": 31.5,
+                "available_disk_gib": 420.0
+            },
+            "verdict": "pass",
+            "unmet_minimums": [],
+            "unmet_recommendations": ["memory below recommendation"]
+        });
+
+        let summary = stack_preflight_summary(&payload);
+        let result = tool_result(
+            format!(
+                "stack preflight :: profile={} verdict={} cpu={} memory={:.2}GiB disk={:.2}GiB peak_benchmarks={} monitoring_default={} remote_recommended={}",
+                summary.profile_code,
+                summary.verdict,
+                summary.host_logical_cpus,
+                summary.host_total_memory_gib,
+                summary.host_available_disk_gib,
+                summary.supports_peak_benchmarks,
+                summary.start_monitoring_by_default,
+                summary.remote_mode_recommended,
+            ),
+            json!({
+                "preflight_report": payload,
+                "preflight_summary": {
+                    "profile_code": summary.profile_code,
+                    "profile_display_name": summary.profile_display_name,
+                    "verdict": summary.verdict,
+                    "host_logical_cpus": summary.host_logical_cpus,
+                    "host_total_memory_gib": summary.host_total_memory_gib,
+                    "host_available_disk_gib": summary.host_available_disk_gib,
+                    "supports_peak_benchmarks": summary.supports_peak_benchmarks,
+                    "start_monitoring_by_default": summary.start_monitoring_by_default,
+                    "remote_mode_recommended": summary.remote_mode_recommended,
+                    "unmet_minimums_count": summary.unmet_minimums_count,
+                    "unmet_recommendations_count": summary.unmet_recommendations_count,
+                }
+            }),
+        );
+
+        assert_eq!(
+            result["content"][0]["text"],
+            json!("stack preflight :: profile=default verdict=pass cpu=16 memory=31.50GiB disk=420.00GiB peak_benchmarks=true monitoring_default=false remote_recommended=false")
+        );
+        assert_eq!(
+            result["structuredContent"]["preflight_summary"]["profile_code"],
+            json!("default")
+        );
+        assert_eq!(
+            result["structuredContent"]["preflight_summary"]["host_total_memory_gib"],
+            json!(31.5)
+        );
+        assert_eq!(
+            result["structuredContent"]["preflight_summary"]["unmet_recommendations_count"],
+            json!(1)
+        );
+    }
+
+    #[test]
+    fn list_projects_tool_result_keeps_summary_and_compact_text_aligned() {
+        let structured = json!({
+            "projects_summary": {
+                "codes": ["amai", "bug_bounty"],
+                "compact_codes": "amai, bug_bounty",
+            },
+            "projects": [
+                {
+                    "project_id": "11111111-1111-1111-1111-111111111111",
+                    "code": "amai",
+                    "display_name": "Amai",
+                    "repo_root": "/home/art/agent-memory-index",
+                    "updated_at": "2026-05-06T00:00:00Z",
+                },
+                {
+                    "project_id": "22222222-2222-2222-2222-222222222222",
+                    "code": "bug_bounty",
+                    "display_name": "Bug Bounty",
+                    "repo_root": "/home/art/Bug-Bounty",
+                    "updated_at": "2026-05-05T00:00:00Z",
+                }
+            ]
+        });
+
+        let result = tool_result(
+            format!(
+                "registered projects: {} [{}]",
+                structured["projects"].as_array().map_or(0, Vec::len),
+                structured["projects_summary"]["compact_codes"]
+                    .as_str()
+                    .unwrap_or("none")
+            ),
+            structured,
+        );
+
+        assert_eq!(
+            result["content"][0]["text"],
+            json!("registered projects: 2 [amai, bug_bounty]")
+        );
+        assert_eq!(
+            result["structuredContent"]["projects_summary"]["compact_codes"],
+            json!("amai, bug_bounty")
+        );
+        assert_eq!(result["structuredContent"]["projects"][0]["code"], json!("amai"));
+    }
+
+    #[test]
+    fn list_namespaces_tool_result_keeps_summary_and_compact_text_aligned() {
+        let namespace_summary =
+            summarize_namespace_modes(&[("continuity", "local_strict"), ("artifacts", "local_strict")]);
+        let structured = json!({
+            "project": {
+                "code": "amai",
+                "display_name": "Amai",
+                "repo_root": "/home/art/agent-memory-index",
+            },
+            "namespaces_summary": {
+                "compact_codes": namespace_summary,
+            },
+            "namespaces": [
+                {
+                    "namespace_id": "33333333-3333-3333-3333-333333333333",
+                    "code": "continuity",
+                    "display_name": "Continuity",
+                    "retrieval_mode": "local_strict",
+                },
+                {
+                    "namespace_id": "44444444-4444-4444-4444-444444444444",
+                    "code": "artifacts",
+                    "display_name": "Artifacts",
+                    "retrieval_mode": "local_strict",
+                }
+            ]
+        });
+
+        let result = tool_result(
+            format!(
+                "namespaces for {}: {} [{}]",
+                "amai",
+                structured["namespaces"].as_array().map_or(0, Vec::len),
+                structured["namespaces_summary"]["compact_codes"]
+                    .as_str()
+                    .unwrap_or("none")
+            ),
+            structured,
+        );
+
+        assert_eq!(
+            result["content"][0]["text"],
+            json!(format!("namespaces for amai: 2 [{}]", summarize_namespace_modes(&[("continuity", "local_strict"), ("artifacts", "local_strict")])))
+        );
+        assert_eq!(
+            result["structuredContent"]["project"]["code"],
+            json!("amai")
+        );
+        assert_eq!(
+            result["structuredContent"]["namespaces"][0]["code"],
+            json!("continuity")
+        );
     }
 
     #[test]
@@ -7016,6 +8508,11 @@ mod tests {
                     "headline": "Same-meter spend control",
                     "next_step": "Materialize live assistant generation source."
                 },
+                "required_task_set": [
+                    "Materialize live assistant generation source.",
+                    "Reconcile downstream startup consumers."
+                ],
+                "required_task_set_summary": "2 задач(и): Materialize live assistant generation source.",
                 "project_task_tree": {
                     "open_tasks_count": 2,
                     "nodes": [
@@ -7094,6 +8591,16 @@ mod tests {
             summary.required_return_task["headline"],
             json!("Same-meter spend control")
         );
+        assert_eq!(
+            summary.required_task_set[0],
+            json!("Materialize live assistant generation source.")
+        );
+        assert!(
+            summary
+                .required_task_set_summary
+                .as_deref()
+                .is_some_and(|value| value.contains("2 задач(и)"))
+        );
         assert_eq!(summary.project_task_tree["open_tasks_count"], json!(2));
         assert!(
             summary
@@ -7114,6 +8621,151 @@ mod tests {
     }
 
     #[test]
+    fn continuity_startup_summary_preserves_missing_required_task_set_as_drift() {
+        let payload = json!({
+            "continuity_startup": {
+                "project": { "code": "art" },
+                "namespace": { "code": "continuity" }
+            },
+            "chat_start_restore": {
+                "headline": "Current active line",
+                "next_step": "Continue foundation work.",
+                "restore_confidence": "medium",
+                "prompt_text": "CHAT_START_RESTORE\nCurrent active line",
+                "execctl_resume_state": "clear",
+                "startup_next_action": {
+                    "action_kind": "continue_active_workline",
+                    "blocking": false
+                }
+            }
+        });
+
+        let summary = continuity_startup_summary(&payload);
+
+        assert!(summary.required_task_set.is_null());
+        assert!(summary.required_task_set_summary.is_none());
+        assert!(summary.execctl_resume_obligation["required_task_set"].is_null());
+        assert!(summary.execctl_resume_obligation["required_task_set_count"].is_null());
+        assert!(summary.startup_execution_gate["required_task_set_count"].is_null());
+        assert!(summary.startup_execution_gate["required_task_set_present"].is_null());
+        assert!(summary.startup_execution_gate["must_preserve_required_task_set"].is_null());
+    }
+
+    #[test]
+    fn continuity_startup_tool_result_carries_delivery_surface_restore_alias() {
+        let public_payload = json!({
+            "continuity_startup": {
+                "project": { "code": "amai" },
+                "namespace": { "code": "continuity" }
+            },
+            "chat_start_restore": {
+                "headline": "Current active line",
+                "next_step": "Continue bounded delivery-surface work.",
+                "restore_confidence": "high",
+                "thread_count": 1,
+                "prompt_text": "CHAT_START_RESTORE\nCurrent active line"
+            },
+            "delivery_surface_restore": {
+                "headline": "Current active line",
+                "next_step": "Continue bounded delivery-surface work.",
+                "restore_confidence": "high",
+                "thread_count": 1,
+                "prompt_text": "CHAT_START_RESTORE\nCurrent active line"
+            },
+            "working_state_restore": {
+                "current_goal": "Continue bounded delivery-surface work."
+            },
+            "tool_runtime_reconcile": {
+                "applied": true
+            }
+        });
+        let result = super::tool_result(
+            "continuity startup :: amai::continuity".to_string(),
+            json!({
+                "continuity_startup": public_payload["continuity_startup"].clone(),
+                "chat_start_restore": public_payload["chat_start_restore"].clone(),
+                "delivery_surface_restore": public_payload["delivery_surface_restore"].clone(),
+                "working_state_restore": public_payload["working_state_restore"].clone(),
+                "tool_runtime_reconcile": public_payload["tool_runtime_reconcile"].clone(),
+                "continuity_startup_summary": {
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "headline": "Current active line",
+                    "next_step": "Continue bounded delivery-surface work."
+                }
+            }),
+        );
+
+        assert_eq!(
+            result["structuredContent"]["delivery_surface_restore"],
+            result["structuredContent"]["chat_start_restore"]
+        );
+    }
+
+    #[test]
+    fn continuity_startup_tool_result_keeps_summary_and_delivery_surface_contract_aligned() {
+        let public_payload = json!({
+            "continuity_startup": {
+                "project": { "code": "amai" },
+                "namespace": { "code": "continuity" }
+            },
+            "chat_start_restore": {
+                "headline": "Current active line",
+                "next_step": "Continue bounded delivery-surface work.",
+                "restore_confidence": "high",
+                "thread_count": 1,
+                "prompt_text": "CHAT_START_RESTORE\nCurrent active line"
+            },
+            "delivery_surface_restore": {
+                "headline": "Current active line",
+                "next_step": "Continue bounded delivery-surface work.",
+                "restore_confidence": "high",
+                "thread_count": 1,
+                "prompt_text": "CHAT_START_RESTORE\nCurrent active line"
+            },
+            "working_state_restore": {
+                "current_goal": "Continue bounded delivery-surface work."
+            },
+            "tool_runtime_reconcile": {
+                "applied": true
+            }
+        });
+        let result = super::tool_result(
+            "continuity startup :: amai::continuity".to_string(),
+            json!({
+                "continuity_startup": public_payload["continuity_startup"].clone(),
+                "chat_start_restore": public_payload["chat_start_restore"].clone(),
+                "delivery_surface_restore": public_payload["delivery_surface_restore"].clone(),
+                "working_state_restore": public_payload["working_state_restore"].clone(),
+                "tool_runtime_reconcile": public_payload["tool_runtime_reconcile"].clone(),
+                "continuity_startup_summary": {
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "headline": "Current active line",
+                    "next_step": "Continue bounded delivery-surface work."
+                }
+            }),
+        );
+
+        assert_eq!(
+            result["content"][0]["text"],
+            json!("continuity startup :: amai::continuity")
+        );
+        assert_eq!(
+            result["structuredContent"]["continuity_startup_summary"]["headline"],
+            result["structuredContent"]["chat_start_restore"]["headline"]
+        );
+        assert_eq!(
+            result["structuredContent"]["continuity_startup_summary"]["next_step"],
+            result["structuredContent"]["delivery_surface_restore"]["next_step"]
+        );
+        assert_eq!(
+            result["structuredContent"]["delivery_surface_restore"],
+            result["structuredContent"]["chat_start_restore"]
+        );
+    }
+
+    #[test]
     fn continuity_startup_reconcile_subprocess_prefers_release_binary_under_repo_root() {
         let temp_root = std::env::temp_dir().join(format!("amai-mcp-test-{}", Uuid::new_v4()));
         let target_release = temp_root.join("target/release");
@@ -7127,6 +8779,317 @@ mod tests {
 
         assert_eq!(selected, release_binary);
         fs::remove_dir_all(&temp_root).expect("remove temp root");
+    }
+
+    #[test]
+    fn token_report_tool_result_keeps_summary_and_compact_text_aligned() {
+        let payload = json!({
+            "token_budget_report": {
+                "headline": {
+                    "metric_code": "verified_effective_savings_pct",
+                    "scope_label": "окно Обычная рабочая машина",
+                    "status": "pass",
+                    "value_percent": 99.48,
+                    "saved_tokens": 6923645,
+                    "events_count": 120,
+                    "counted_events": 75,
+                    "note": "Это главный честный KPI: live-only, quality-gated и с учётом recovery."
+                },
+                "rolling_window": {
+                    "events_total": 120
+                },
+                "agent_cycle_economics": {
+                    "status": "partial_lower_bound",
+                    "contract": {
+                        "note": "Это честная нижняя граница полного агентного цикла."
+                    },
+                    "rolling_window": {
+                        "scope_label": "окно Обычная рабочая машина",
+                        "verified_measured_saved_pct": 96.11,
+                        "verified_measured_saved_tokens": 6812345
+                    }
+                },
+                "contractual_statement_summaries": {
+                    "rolling_window": {
+                        "scope_label": "окно Обычная рабочая машина",
+                        "contractual_state": "report_only_preview_open",
+                        "coverage_state": "partially_confirmed",
+                        "metering_ingest_state": "soft_lag",
+                        "contractual_lag_state": "awaiting_late_events",
+                        "contractual_freshness_state": "provisional_open_window",
+                        "reconciliation_state": "awaiting_provider_usage_source",
+                        "margin_state": "awaiting_rate_card",
+                        "blocking_reasons": [
+                            "provider_usage_source_missing",
+                            "provider_rate_card_unpriced"
+                        ]
+                    }
+                },
+                "statement_export_previews": {
+                    "rolling_window": {
+                        "preview_state": "available"
+                    }
+                }
+            }
+        });
+
+        let summary = token_report_summary(&payload);
+        let result = tool_result(
+            format!(
+                "token report :: metric={} scope={} status={} value_percent={:.3} saved_tokens={} counted={}/{} agent_cycle_scope={} agent_cycle_verified_percent={:.3} contractual_scope={} contractual_state={} coverage={} freshness={} lag={} reconciliation={} margin={} blockers={} note={}",
+                summary.metric_code,
+                summary.scope_label,
+                summary.status,
+                summary.value_percent,
+                summary.saved_tokens,
+                summary.counted_events,
+                summary.events_count,
+                summary.agent_cycle_scope_label,
+                summary.agent_cycle_verified_saved_percent,
+                summary.contractual_scope_label,
+                summary.contractual_state,
+                summary.contractual_coverage_state,
+                summary.contractual_freshness_state,
+                summary.contractual_lag_state,
+                summary.contractual_reconciliation_state,
+                summary.contractual_margin_state,
+                summary.contractual_blockers_summary,
+                summary.note,
+            ),
+            json!({
+                "token_budget_report": payload["token_budget_report"].clone(),
+                "token_report_summary": {
+                    "metric_code": summary.metric_code,
+                    "scope_label": summary.scope_label,
+                    "status": summary.status,
+                    "value_percent": summary.value_percent,
+                    "saved_tokens": summary.saved_tokens,
+                    "events_count": summary.events_count,
+                    "counted_events": summary.counted_events,
+                    "agent_cycle_scope_label": summary.agent_cycle_scope_label,
+                    "agent_cycle_status": summary.agent_cycle_status,
+                    "agent_cycle_verified_saved_percent": summary.agent_cycle_verified_saved_percent,
+                    "agent_cycle_verified_saved_tokens": summary.agent_cycle_verified_saved_tokens,
+                    "agent_cycle_note": summary.agent_cycle_note,
+                    "contractual_scope_label": summary.contractual_scope_label,
+                    "contractual_state": summary.contractual_state,
+                    "contractual_coverage_state": summary.contractual_coverage_state,
+                    "contractual_metering_ingest_state": summary.contractual_metering_ingest_state,
+                    "contractual_lag_state": summary.contractual_lag_state,
+                    "contractual_freshness_state": summary.contractual_freshness_state,
+                    "contractual_reconciliation_state": summary.contractual_reconciliation_state,
+                    "contractual_margin_state": summary.contractual_margin_state,
+                    "contractual_blockers_summary": summary.contractual_blockers_summary,
+                    "contractual_statement_summary": payload["token_budget_report"]["contractual_statement_summaries"]["rolling_window"].clone(),
+                    "statement_export_preview": payload["token_budget_report"]["statement_export_previews"]["rolling_window"].clone(),
+                    "note": summary.note,
+                }
+            }),
+        );
+
+        assert_eq!(
+            result["content"][0]["text"],
+            json!("token report :: metric=verified_effective_savings_pct scope=окно Обычная рабочая машина status=pass value_percent=99.480 saved_tokens=6923645 counted=75/120 agent_cycle_scope=окно Обычная рабочая машина agent_cycle_verified_percent=96.110 contractual_scope=окно Обычная рабочая машина contractual_state=report_only_preview_open coverage=partially_confirmed freshness=provisional_open_window lag=awaiting_late_events reconciliation=awaiting_provider_usage_source margin=awaiting_rate_card blockers=provider_usage_source_missing, provider_rate_card_unpriced note=Это главный честный KPI: live-only, quality-gated и с учётом recovery.")
+        );
+        assert_eq!(
+            result["structuredContent"]["token_report_summary"]["metric_code"],
+            json!("verified_effective_savings_pct")
+        );
+        assert_eq!(
+            result["structuredContent"]["token_report_summary"]["counted_events"],
+            json!(75)
+        );
+        assert_eq!(
+            result["structuredContent"]["token_report_summary"]["contractual_blockers_summary"],
+            json!("provider_usage_source_missing, provider_rate_card_unpriced")
+        );
+    }
+
+    #[test]
+    fn memory_matrix_tool_result_keeps_summary_and_compact_text_aligned() {
+        let payload = json!({
+            "memory_task_matrix": {
+                "matrix": "letta_memory_local",
+                "display_name": "Letta-style local memory matrix",
+                "tasks_total": 8,
+                "tasks_passed": 8,
+                "tasks_failed": 0,
+                "success_rate": 1.0,
+                "mean_score": 1.0,
+                "p95_ms": 418.778,
+                "statistics": {
+                    "drift_summary": {
+                        "status": "measured"
+                    }
+                },
+                "promotion_law": {
+                    "state": "candidate_ready_for_measured_approval"
+                },
+                "measured_approval": {
+                    "state": "pending_human_review"
+                },
+                "gate_failures": [],
+                "canonical_eval": {
+                    "verdict_counts": {
+                        "hit_correct_target": 4,
+                        "recovered_useful": 4
+                    }
+                }
+            }
+        });
+
+        let summary = memory_matrix_summary(&payload);
+        let result = tool_result(
+            format!(
+                "memory matrix :: matrix={} tasks={}/{} failed={} success_rate={:.3} mean_score={:.3} p95_ms={:.3} gate_failures={} verdicts={} compare={} promotion={} approval={}",
+                summary.matrix,
+                summary.tasks_passed,
+                summary.tasks_total,
+                summary.tasks_failed,
+                summary.success_rate,
+                summary.mean_score,
+                summary.p95_ms,
+                summary.gate_failures_count,
+                summary.compact_verdict_counts,
+                summary.statistics_drift_status,
+                summary.promotion_law_state,
+                summary.measured_approval_state,
+            ),
+            json!({
+                "memory_task_matrix": payload["memory_task_matrix"].clone(),
+                "memory_matrix_summary": {
+                    "matrix": summary.matrix,
+                    "display_name": summary.display_name,
+                    "tasks_total": summary.tasks_total,
+                    "tasks_passed": summary.tasks_passed,
+                    "tasks_failed": summary.tasks_failed,
+                    "success_rate": summary.success_rate,
+                    "mean_score": summary.mean_score,
+                    "p95_ms": summary.p95_ms,
+                    "gate_failures_count": summary.gate_failures_count,
+                    "compact_verdict_counts": summary.compact_verdict_counts,
+                    "statistics_drift_status": summary.statistics_drift_status,
+                    "promotion_law_state": summary.promotion_law_state,
+                    "measured_approval_state": summary.measured_approval_state,
+                }
+            }),
+        );
+
+        assert_eq!(
+            result["content"][0]["text"],
+            json!("memory matrix :: matrix=letta_memory_local tasks=8/8 failed=0 success_rate=1.000 mean_score=1.000 p95_ms=418.778 gate_failures=0 verdicts=hit_correct_target=4, recovered_useful=4 compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review")
+        );
+        assert_eq!(
+            result["structuredContent"]["memory_matrix_summary"]["matrix"],
+            json!("letta_memory_local")
+        );
+        assert_eq!(
+            result["structuredContent"]["memory_matrix_summary"]["compact_verdict_counts"],
+            json!("hit_correct_target=4, recovered_useful=4")
+        );
+        assert_eq!(
+            result["structuredContent"]["memory_matrix_summary"]["promotion_law_state"],
+            json!("candidate_ready_for_measured_approval")
+        );
+    }
+
+    #[test]
+    fn observe_snapshot_tool_result_keeps_summary_and_compact_text_aligned() {
+        let snapshot = json!({
+            "sla": {
+                "summary": {
+                    "pass": 7,
+                    "alert": 1,
+                    "critical": 0,
+                    "unknown": 2
+                }
+            },
+            "continuity_correctness_model": {
+                "summary": {
+                    "status": "pass",
+                    "verified_probes": 4,
+                    "probe_count": 4
+                }
+            },
+            "compatibility": {
+                "profile": "vscode",
+                "compatible": true
+            },
+            "reason_coverage": {
+                "included": {
+                    "included_reasons_summary": "exact_documents (1) — Exact layer matched."
+                },
+                "not_included": {
+                    "excluded_reasons_summary": "semantic_chunks — Semantic layer abstained."
+                }
+            },
+            "latest_memory_task_matrix": {
+                "memory_task_matrix": {
+                    "statistics": {
+                        "drift_summary": { "status": "measured" }
+                    },
+                    "promotion_law": { "state": "candidate_ready_for_measured_approval" },
+                    "measured_approval": { "state": "pending_human_review" }
+                }
+            },
+            "latest_mcp_task_matrix": {
+                "mcp_task_matrix": {
+                    "statistics": {
+                        "drift_summary": { "status": "measured" }
+                    },
+                    "promotion_law": { "state": "blocked_benchmark_gates" },
+                    "measured_approval": { "state": "not_applicable" }
+                }
+            },
+            "governance_surface": {
+                "lifecycle_risk_summary": {
+                    "status": "advisory",
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "top_expected_next_state": "pending_review",
+                    "max_pending_review_risk_7d": 0.42,
+                    "max_archive_risk_30d": 0.19,
+                    "max_prune_risk_30d": 0.03
+                }
+            }
+        });
+
+        let summary = observe_snapshot_summary(&snapshot);
+        let result = tool_result(
+            "observe snapshot :: pass=7 alert=1 critical=0 unknown=2 compatibility=vscode:ok continuity=4/4:pass included=exact_documents (1) — Exact layer matched. excluded=semantic_chunks — Semantic layer abstained. memory_matrix=compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review mcp_matrix=compare=measured promotion=blocked_benchmark_gates approval=not_applicable lifecycle_risk=scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00%".to_string(),
+            json!({
+                "snapshot": snapshot,
+                "observe_snapshot_summary": {
+                    "continuity_status": summary.continuity_status,
+                    "continuity_verified_probes": summary.continuity_verified_probes,
+                    "continuity_total_probes": summary.continuity_total_probes,
+                    "compatibility_profile": summary.compatibility_profile,
+                    "compatibility_compatible": summary.compatibility_compatible,
+                    "included_reasons_summary": summary.included_reasons_summary,
+                    "excluded_reasons_summary": summary.excluded_reasons_summary,
+                    "latest_memory_task_matrix_summary": summary.latest_memory_task_matrix_summary,
+                    "latest_mcp_task_matrix_summary": summary.latest_mcp_task_matrix_summary,
+                    "lifecycle_risk_summary": summary.lifecycle_risk_summary,
+                }
+            }),
+        );
+
+        assert_eq!(
+            result["content"][0]["text"],
+            json!("observe snapshot :: pass=7 alert=1 critical=0 unknown=2 compatibility=vscode:ok continuity=4/4:pass included=exact_documents (1) — Exact layer matched. excluded=semantic_chunks — Semantic layer abstained. memory_matrix=compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review mcp_matrix=compare=measured promotion=blocked_benchmark_gates approval=not_applicable lifecycle_risk=scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00%")
+        );
+        assert_eq!(
+            result["structuredContent"]["observe_snapshot_summary"]["compatibility_profile"],
+            json!("vscode")
+        );
+        assert_eq!(
+            result["structuredContent"]["observe_snapshot_summary"]["latest_memory_task_matrix_summary"],
+            json!("compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review")
+        );
+        assert_eq!(
+            result["structuredContent"]["observe_snapshot_summary"]["lifecycle_risk_summary"],
+            json!("scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00%")
+        );
     }
 
     #[test]
@@ -7196,8 +9159,8 @@ mod tests {
                 "namespace": { "code": "continuity" }
             },
             "chat_start_restore": {
-                "headline": "Rotate into a fresh chat",
-                "next_step": "Open a clean thread.",
+                "headline": "Rotate into a new clean work surface",
+                "next_step": "Open a new clean work surface.",
                 "restore_confidence": "high",
                 "thread_count": 1,
                 "prompt_text": "CHAT_START_RESTORE\nRotate now",
@@ -7218,7 +9181,7 @@ mod tests {
                 },
                 "required_return_task": {
                     "headline": "MCP context pack now replaces verified legacy tool-overhead with truthful structured-content tokens",
-                    "next_step": "Continue the >90% 5h KPI line from a clean thread."
+                    "next_step": "Continue the >90% 5h KPI line from a new clean work surface."
                 }
             }
         });
@@ -7262,6 +9225,10 @@ mod tests {
         assert!(enforcement["blocking_reply_template"].is_null());
         assert!(enforcement["blocking_reply_response_kind"].is_null());
         assert_eq!(enforcement["blocking_reply_max_sentences"], json!(0));
+        assert_eq!(
+            enforcement["rotate_status_labels"],
+            json!(super::CLIENT_TURN_PRESSURE_ROTATE_STATUS_LABELS)
+        );
     }
 
     #[test]
@@ -7378,7 +9345,7 @@ mod tests {
         assert_eq!(
             result["content"][0]["text"].as_str(),
             Some(
-                "5ч KPI: переплата 6.62%\ntool blocked by live client budget gate: rotate into a fresh chat before retrying this tool"
+                "5ч KPI: переплата 6.62%\ntool blocked by live client budget gate: rotate into a new clean work surface before retrying this tool"
             )
         );
         assert!(
@@ -7493,7 +9460,7 @@ mod tests {
         assert_eq!(
             result["content"][0]["text"].as_str(),
             Some(
-                "5ч KPI: переплата 8.00%\ntool blocked by live client budget gate: rotate into a fresh chat before retrying this tool"
+                "5ч KPI: переплата 8.00%\ntool blocked by live client budget gate: rotate into a new clean work surface before retrying this tool"
             )
         );
     }

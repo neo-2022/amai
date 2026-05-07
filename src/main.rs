@@ -2,7 +2,11 @@
 
 mod artifact_cleanup;
 mod benchmark_matrix;
+mod benchmark_measured_approval;
+mod benchmark_promotion;
+mod benchmark_statistics;
 mod bootstrap;
+mod capacity_forecast;
 mod chat_question;
 mod cli;
 mod codex_threads;
@@ -34,6 +38,7 @@ mod onboarding;
 mod postgres;
 mod profiles;
 mod qdrant;
+mod regression_explain;
 mod retrieval;
 mod retrieval_science;
 mod s3;
@@ -130,6 +135,7 @@ async fn main() -> Result<()> {
                         &repo_root,
                         &args.benchmark,
                         &args.dataset,
+                        args.source_path.as_deref(),
                         args.download_missing,
                         args.output_dir.as_deref(),
                         args.limit,
@@ -142,6 +148,7 @@ async fn main() -> Result<()> {
                     external_benchmark::run_external_memory_benchmark_amai(
                         &cfg,
                         &db,
+                        &repo_root,
                         &args.requests,
                         &args.predictions,
                         &args.project,
@@ -160,6 +167,33 @@ async fn main() -> Result<()> {
                         args.output.as_deref(),
                     )
                     .await?
+                }
+                BenchmarkCommand::ExternalMemoryOfficialJudge(args) => {
+                    external_benchmark::run_external_memory_official_judge(
+                        &args.cases,
+                        &args.predictions,
+                        &args.eval_results,
+                        args.summary.as_deref(),
+                        args.allow_live,
+                        &args.api_base_url,
+                        &args.api_key_env,
+                        &args.model,
+                    )
+                    .await?
+                }
+                BenchmarkCommand::ExternalMemoryOfficialScore(args) => {
+                    external_benchmark::reconcile_external_memory_official_score(
+                        &args.cases,
+                        &args.eval_results,
+                        args.output.as_deref(),
+                    )?
+                }
+                BenchmarkCommand::ExternalMemorySecretScan(args) => {
+                    external_benchmark::scan_external_memory_secret_artifacts(
+                        &args.output_dir,
+                        &args.secret_env,
+                        args.min_secret_len,
+                    )?
                 }
                 BenchmarkCommand::ExternalMemorySchema(args) => {
                     external_benchmark::print_external_memory_schema(
@@ -2835,6 +2869,21 @@ async fn main() -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&entries)?);
                     }
                 }
+                MemoryCommand::TransitionStats(args) => {
+                    let report =
+                        forgetting::transition_stats(&db, &args.project, &args.namespace).await?;
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                MemoryCommand::CohortRisk(args) => {
+                    let report =
+                        forgetting::cohort_risk(&db, &args.project, &args.namespace).await?;
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                MemoryCommand::PolicySimulate(args) => {
+                    let report =
+                        forgetting::policy_simulate(&db, &args.project, &args.namespace).await?;
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
             }
         }
         Command::Context { command } => {
@@ -2977,6 +3026,16 @@ async fn main() -> Result<()> {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
                 observe::print_snapshot(&cfg).await?;
+            }
+            ObserveCommand::RegressionExplain(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                observe::print_regression_explain(&cfg, &args).await?;
+            }
+            ObserveCommand::CapacityForecast(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                observe::print_capacity_forecast(&cfg, &args).await?;
             }
             ObserveCommand::GetSnapshot(args) => {
                 let cfg = config::AppConfig::from_env()?;

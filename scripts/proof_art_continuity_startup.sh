@@ -31,16 +31,16 @@ printf '%s\n' "$startup_output" | jq -e '.continuity_startup.canonical_eval.prob
 printf '%s\n' "$startup_output" | jq -e '.continuity_startup.canonical_eval.probes[2].name == "working_state_restore_recovered_useful"' >/dev/null
 printf '%s\n' "$startup_output" | jq -e '.continuity_startup.canonical_eval.probes[3].name == "workspace_restore_pack_recovered_useful"' >/dev/null
 printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.prompt_text | contains("CHAT_START_RESTORE")' >/dev/null
-printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.included_reasons_summary != null' >/dev/null
-printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.excluded_reasons_summary != null' >/dev/null
-printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.workspace_restore_pack_summary != null' >/dev/null
+printf '%s\n' "$startup_output" | jq -e '.delivery_surface_restore.included_reasons_summary != null' >/dev/null
+printf '%s\n' "$startup_output" | jq -e '.delivery_surface_restore.excluded_reasons_summary != null' >/dev/null
+printf '%s\n' "$startup_output" | jq -e '.delivery_surface_restore.workspace_restore_pack_summary != null' >/dev/null
 printf '%s\n' "$startup_output" | jq -e '.working_state_restore.state_lineage.authoritative_event_id != ""' >/dev/null
 printf '%s\n' "$startup_output" | jq -e '.workspace_restore_pack.active_commitments != null' >/dev/null
 printf '%s\n' "$startup_output" | jq -e '.workspace_restore_pack.active_constraints != null' >/dev/null
 printf '%s\n' "$startup_output" | jq -e '.workspace_restore_pack.important_artifacts != null' >/dev/null
 printf '%s\n' "$startup_output" | jq -e '.workspace_restore_pack.procedural_restore_policy.raw_procedural_archive_forbidden == true' >/dev/null
 printf '%s\n' "$helper_json_output" | jq -e '.chat_start_restore.prompt_text | contains("CHAT_START_RESTORE")' >/dev/null
-printf '%s\n' "$helper_json_output" | jq -e '.chat_start_restore.project.code == "art"' >/dev/null
+printf '%s\n' "$helper_json_output" | jq -e '.delivery_surface_restore.project.code == "art"' >/dev/null
 reject_reserved_helper_arg --project --project amai
 reject_reserved_helper_arg --namespace --namespace=foreign
 reject_reserved_helper_arg --repo-root --repo-root /tmp/amai-art
@@ -57,6 +57,8 @@ jq -e '.startup_execution_gate.required_action_kind_when_resume_required == "res
 jq -e '.continuity_startup_summary.prompt_text_present == true' "${startup_state_artifact}" >/dev/null
 jq -e '.continuity_startup_summary.startup_next_action.action_kind != null' "${startup_state_artifact}" >/dev/null
 jq -e '.continuity_startup_summary | has("required_return_task")' "${startup_state_artifact}" >/dev/null
+jq -e '.continuity_startup_summary | has("required_task_set")' "${startup_state_artifact}" >/dev/null
+jq -e '.continuity_startup_summary | has("required_task_set_summary")' "${startup_state_artifact}" >/dev/null
 jq -e '.continuity_startup_summary.project_task_tree != null' "${startup_state_artifact}" >/dev/null
 jq -e '.continuity_startup_summary.project_task_tree_summary != null' "${startup_state_artifact}" >/dev/null
 jq -e '.continuity_startup_summary.project_task_ledger != null' "${startup_state_artifact}" >/dev/null
@@ -72,6 +74,13 @@ printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.no_silent_
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.gate_semantics_consistent == true' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.startup_execution_gate.action_kind != null' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state | has("required_return_task")' >/dev/null
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state | has("required_task_set")' >/dev/null
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state | has("required_task_set_summary")' >/dev/null
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.required_task_set_field_present == true' >/dev/null
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.required_task_set_summary_field_present == true' >/dev/null
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.required_task_set_count_consistent == true' >/dev/null
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.required_task_set_presence_consistent == true' >/dev/null
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.must_preserve_required_task_set_consistent == true' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.project_task_tree_summary_field_present == true' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.project_task_ledger_summary_field_present == true' >/dev/null
 

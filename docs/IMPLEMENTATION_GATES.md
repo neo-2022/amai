@@ -119,6 +119,78 @@
 нельзя закрывать этапы, где требуется долгосрочная память и агентная причинность.
 Если harness ещё нет, добавляем его и фиксируем источники данных.
 
+Текущая status-truth оговорка:
+- для уже отмеченных Stage 0-10 checkbox-ов отсутствие этих external harnesses не должно молча превращаться в fake-green external benchmark maturity;
+- пока registry/harness/source/real-runtime/real-score/upstream-parity lane не materialized, любой claim вида `external benchmark-grade long-term memory` обязан маркироваться как `proof-refresh-required` или `external-maturity-gap`;
+- если fresh audit показывает, что конкретный stage был закрыт только на внутреннем fixture/proof bundle при обязательном external benchmark requirement, `IMPLEMENTATION_STATUS.md` обязан явно отделить `internal-stage-closed` от `external-benchmark-maturity-not-proven`;
+- если fresh external harness после materialization падает, соответствующий stage claim снимается до root-cause, fix и повторного proof.
+
+Итог:
+- внутренний stage checkbox не заменяет external memory benchmark maturity;
+- external registry не является декоративным roadmap пунктом;
+- команда должна materialize-ить его как отдельный proof contour или честно держать gap открытым.
+
+Fresh status 2026-04-24:
+- `./scripts/proof_memory_external_benchmarks.sh` теперь является proof для `download + adapter workspace + normalized case preparation + synthetic runtime/score smoke`, а не для полного scored benchmark verdict;
+- LongMemEval `longmemeval_s_cleaned`, MemoryAgentBench (`accurate_retrieval`, `conflict_resolution`, `long_range_understanding`, `test_time_learning`) и LoCoMo `locomo10` обязаны иметь non-empty normalized cases with question/context/id before proof can pass;
+- LoCoMo converter должен раскрывать `qa[]` в отдельные cases и рендерить `conversation.session_*` as context; прежнее состояние `10 cases / missing question+context+answer` считается fixed proof-harness defect;
+- AMA-Bench now has proof-backed normalized cases and bounded runtime+baseline-score evidence from the manual HF dataset install; full dataset runtime and benchmark-grade maturity remain `external-maturity-gap`;
+- external memory benchmark-grade maturity остаётся не доказанной, пока не пройден полный real benchmark runtime+score contour и, где применимо, official upstream scorer parity.
+
+Fresh refresh 2026-04-25:
+- `./scripts/proof_memory_external_benchmarks.sh` rerun green in the same bounded lane; it did not add real benchmark predictions, real scored outputs or upstream scorer parity.
+- MemoryAgentBench prep is operationally heavy: `accurate_retrieval` produced multi-GiB normalized/request artifacts for 2000 cases. Future stage-close or regular benchmark automation must account for artifact size, runtime and cleanup separately from correctness.
+
+Fresh bounded real runtime 2026-04-26:
+- `./scripts/proof_memory_external_real_bounded.sh` materializes bounded, dataset-specific LongMemEval execution evidence: limited `longmemeval_s_cleaned` normalized cases, real `external-memory-run` predictions, runtime status/case metrics and `external-memory-score` baseline output.
+- `./scripts/proof_memory_external_real_bounded_ama_bench.sh` materializes bounded, dataset-specific AMA-Bench execution evidence: limited `ama_bench_manual` normalized cases, real `external-memory-run` predictions, runtime status/case metrics and `external-memory-score` baseline output, while keeping `official_scorer_boundary.source_kind=official_scorer_contract_unavailable`.
+- `./scripts/proof_memory_external_real_bounded_memoryagentbench.sh` materializes bounded, dataset-specific MemoryAgentBench execution evidence: limited `memoryagentbench_conflict_resolution`, `memoryagentbench_long_range_understanding`, and `memoryagentbench_test_time_learning` normalized cases, real `external-memory-run` predictions, runtime status/case metrics and `external-memory-score` baseline output, while keeping `official_scorer_boundary.source_kind=official_scorer_contract_unavailable`. Fresh reruns also materialize and bounded-proof-check the joint invariant `top_ranked_relevance_and_gold_answer_supported_retrieval_cases <= top_ranked_gold_answer_supported_retrieval_cases` for these named profiles, and now fail-closed on explicit boolean-typed `runtime_corpus_sha256` / `runtime_corpus_reused_from_previous_case` fields. On the current default bounded limit (`AMAI_EXTERNAL_MEMORY_REAL_LIMIT=3`), the bounded truth is profile-specific: `conflict_resolution` and `test_time_learning` must show one corpus hash with `2/3` reused cases and `index_project_ms=0` on the reused cases, while `long_range_understanding` must show three distinct corpus hashes with `0/3` reused cases. This is a bounded proof requirement for those datasets, not a general promotion gate or cache maturity claim.
+- `./scripts/proof_memory_external_real_bounded_memoryagentbench_accurate_retrieval_blocked.sh` materializes the bounded `memoryagentbench_accurate_retrieval` slice as a still-blocker-visible contour, but the benchmark-specific shaping blocker is now gone in the bounded run. On the current default bounded limit (`AMAI_EXTERNAL_MEMORY_REAL_LIMIT=3`), the slice carries perfect baseline answers plus proxy evidence of retrieval participation and relevance: `top_ranked_relevant_retrieval_cases=3/3`, `gold_answer_supported_retrieval_cases=3/3`, `top_ranked_gold_answer_supported_retrieval_cases=3/3`, `top_ranked_relevance_and_gold_answer_supported_retrieval_cases=3/3`, `top_ranked_structural_fact_supported_cases=3/3`, `benchmark_specific_query_override_cases=0`, `benchmark_specific_answer_extraction_cases=0`, `benchmark_specific_shaping_present=false` and `generic_runtime_maturity=true`. The runtime also now proves identical-corpus reuse on this default fixed slice: `runtime_corpus_unique_sha_count=1`, `runtime_corpus_reused_cases=2`, reused cases keep `index_project_ms=0`. The bounded latency story has also advanced further: after correcting the synthetic-runtime edge-cache skip gate to match the actual `.md` runtime corpus shape, the current bounded run now materializes cold first-case `index_project_ms` at about `0.87s`, bounded `index_project_ms.avg` at about `0.29s`, and bounded `total_case_ms.avg` at about `0.91s`. `latency_maturity=false` still stays blocker-visible, but no longer because cold indexing dominates the slice average; the remaining latency blocker is simply that this is not a latency-grade contour, only a fixed bounded slice. This reuse is intentionally narrow and fail-closed: it is same-process, same-run, byte-identical materialized runtime-corpus reuse guarded by the current `paths.txt` materialization, not a persistent cross-run cache, not a claim about hidden environment dependencies, and not semantic equivalence. That means the bounded slice is now generic on the runtime/query/extraction side, has no bounded top-rank gap on the current proxy surfaces, and now also carries a stronger `anchored_fact_shape_proxy` contract for the top-ranked snippet on this fixed three-case slice. It still must not be treated as fully trusted bounded-runtime maturity because both the query-overlap layer and the anchored fact-shape layer remain non-semantic proxies, benchmark-grade scorer parity is still absent, and the latency contour is improved but still bounded-only. The same proof writes `bounded-proof-contract.json`, and that contract must keep `benchmark_grade_maturity=false`, `official_upstream_scorer_parity=false`, `answer_source_rate_semantic_proof=false`, `latency_maturity=false` and blocker-visible semantic/scorer reasons. The script now also re-runs targeted Rust negative tests for malformed/missing resume identity fields and for the `paths.txt`/same-hash reuse gate, so the bounded contour no longer relies on a happy-path-only launcher story for those reject paths; those tests prove reject-path behavior, not a broader filesystem-stability guarantee.
+- `./scripts/proof_qdrant_postgres_failure_contract.sh` materializes the cross-store `Qdrant/Postgres` recovery-contract contour as a standalone harness instead of leaving it implicit inside the bounded MemoryAgentBench lane. It must keep the four branch classes explicit and green via targeted Rust tests: `before_qdrant_update` must surface `consistency_state=postgres_failure_before_qdrant_update` with `required_action=retry_or_investigate_postgres_before_retrying_qdrant_mutation`; compensated rollback branches must surface `cross_store_consistency_restored_by_compensation` with `no_further_cross_store_recovery_required`; `commit_outcome_unknown` branches must surface `cross_store_consistency_unknown_commit_outcome` with `manual_cross_store_investigation_required`; compensation-failure branches must surface `cross_store_inconsistent_after_compensation_failure` with the same manual-investigation action. The harness now also requires an emitter-level observability test for the live failure-verdict stage `index_project.qdrant_postgres_failure_verdict`, a real forced runtime test that enters `index_project_file_under_lock`, and proof that every `manual_cross_store_investigation_required` branch writes a durable remediation bundle instead of leaving operator recovery as a log-only hint. For the existing-document compensation-failure runtime lane that means `failure_mode=existing_document_inconsistent_state`, `compensation_ok=false`, and a surfaced remediation bundle path on the observability lane. It writes `tmp/qdrant-postgres-failure-contract/proof-contract.json`; use that artifact as the machine-readable disclaimer for explicit branch mapping, emitted observability fields, the forced runtime seam scope, the remediation-bundle requirement, and the fact that this remains forced-failure proof rather than distributed-transaction or crash-safe runtime maturity. This harness proves the explicit recovery contract, the shared log rendering for forced failure branches, one truthful runtime orchestration path, and the presence of a durable operator handoff artifact; it is not a distributed-transaction maturity claim and does not prove crash-safe or semantic benchmark behavior by itself.
+- This proof explicitly remains `bounded_real_runtime_score`, not full external benchmark-grade maturity: it is limited by `AMAI_EXTERNAL_MEMORY_REAL_LIMIT`, uses Amai baseline scoring, and still lacks official upstream scorer parity.
+- Runtime metrics must show at least one retrieval-backed case after relaxed benchmark-query retry; fallback-only real predictions are not accepted as retrieval/runtime evidence.
+- Runtime metrics must include `answer_source_boundary.boundary_version = external_memory_answer_source_boundary_v1`; `retrieval_answer_cases > 0` is required, while `semantic_precision_maturity` stays `false` until retrieval-answer coverage and semantic relevance are separately validated.
+- Runtime metrics must include `retrieval_relevance_boundary.boundary_version = external_memory_retrieval_relevance_boundary_v1`; `judge_kind=query_overlap_proxy`, `relevant_retrieval_evidence_cases > 0`, and `top_ranked_relevant_retrieval_cases <= relevant_retrieval_evidence_cases` are required, while `semantic_precision_maturity` stays `false` until gold-labeled semantic relevance is integrated.
+- Runtime metrics must include `gold_answer_relevance_boundary.boundary_version = external_memory_gold_answer_relevance_boundary_v1`; `judge_kind=gold_answer_lexical_overlap`, `label_source_kind=benchmark_answer_field`, non-empty `gold_labeled_cases`, `gold_answer_supported_retrieval_cases <= retrieval_evidence_cases`, and `top_ranked_relevance_and_gold_answer_supported_retrieval_cases <= top_ranked_gold_answer_supported_retrieval_cases` are required, while `semantic_precision_maturity` stays `false` because this is lexical answer-support accounting, not semantic/upstream scorer parity. Here `top_ranked_relevance_and_gold_answer_supported_retrieval_cases` means only cases whose top-ranked snippet passes both the bounded relevance proxy threshold and the lexical gold-answer support test; if top-ranked gold support exists without proxy relevance, blocker `top_ranked_gold_answer_support_without_relevance_proxy` must stay surfaced. A zero `gold_answer_supported_retrieval_cases` count is acceptable only as explicit blocker-visible evidence that the bounded retrieval did not surface answer-bearing snippets.
+- For bounded `memoryagentbench_accurate_retrieval`, runtime metrics must also include `structural_fact_relevance_boundary.boundary_version = external_memory_structural_fact_relevance_boundary_v1`; `judge_kind=anchored_fact_shape_proxy`, `proxy_applicable_cases > 0`, and `top_ranked_structural_fact_supported_cases <= proxy_applicable_cases` are required. This is a stronger bounded contract than raw query overlap because it checks whether the top-ranked snippet structurally expresses the asked fact shape, but it is explicitly limited to those structural fact question shapes. It does not redefine the benchmark name, does not prove generic retrieval accuracy outside that shape, still keeps `semantic_precision_maturity=false`, and must stay blocker-visible as `anchored_fact_shape_proxy_not_semantic_judgment`.
+- For bounded `memoryagentbench_accurate_retrieval`, proof must also keep the human-visible winner preview aligned with the support verdict: when `retrieval_payload_top_ranked_gold_answer_supported=true` on the bounded winner, `retrieval_payload_top_ranked_preview` must surface the answer-bearing span rather than an arbitrary leading excerpt. This is an explainability contract only, not a semantic-maturity gate.
+- Relaxed benchmark-query retry is recall recovery evidence only. Query-overlap and gold-answer lexical overlap relevance are bounded proxies only. Neither proves semantic precision, answer relevance or upstream scorer parity.
+- `external-memory-score.evidence_boundary.boundary_version` must be version-pinned; semantic changes to the bounded score boundary require proof/runbook updates.
+- `external-memory-score.evidence_boundary.maturity_blocking_reasons` must remain explicit while the scorer is baseline-only and full dataset/upstream parity lanes are absent.
+- `external-memory-score.official_scorer_boundary.boundary_version` must be version-pinned as `external_memory_official_scorer_boundary_v1`; for LongMemEval it records the official upstream scorer contract (`evaluate_qa.py`, `print_qa_metrics.py`, `gpt-4o-2024-08-06`) while keeping `official_upstream_scorer_parity=false`.
+- `external-memory-score.official_scorer_boundary.official_prompt_templates_embedded=false` is intentional for this slice: the boundary records input/output/model/metric contract only, not prompt-template parity.
+- `external-memory-score.official_scorer_boundary.maturity_blocking_reasons` must keep `live_official_llm_judge_not_run`, `official_eval_log_not_materialized`, `official_upstream_metrics_not_materialized` and `official_prompt_templates_not_embedded` visible until the live official scorer lane is run and reconciled.
+- `external-memory-official-judge.boundary_version` must be version-pinned as `external_memory_official_judge_execution_v1`; this lane embeds the upstream LongMemEval prompt templates and may write eval-results JSONL only when `--allow-live`, the official `gpt-4o-2024-08-06` model and the configured API key env are present. Its default proof must stay fail-closed without writing a synthetic live log.
+- `./scripts/proof_memory_external_official_judge.sh` must cover no-live, missing-key and non-official-model blockers before this lane can be cited as materialized.
+- `./scripts/proof_memory_external_official_judge_api_failure.sh` must cover local API-failure blockers for simulated HTTP 429, HTTP 5xx, HTTP 200 response-contract violations and connection-refused transport responses: summary status stays `blocked`, `official_judge_live_execution_failed` plus the classified failure are visible, eval-results JSONL is absent, and the configured dummy key value is not written to the summary, including hostile fake error bodies that echo the key.
+- `./scripts/proof_memory_external_official_judge_live_bounded.sh` is the bounded live-operator guard: without the configured API key it must prove `official_judge_api_key_not_materialized` and no eval log; with the key it must materialize the bounded official eval log, verify provenance fields do not persist the key value, and run `external-memory-official-score` on that log.
+- Missing-key/offline official judge summaries, including the default proof plus bounded and balanced live-operator summaries, must not contain `[REDACTED_OFFICIAL_JUDGE_API_KEY]`; the marker is allowed only in hostile echo-key or key-backed response redaction paths where a materialized key value was actually removed.
+- This no-key/offline hygiene guard validates artifact cleanliness only. It does not prove live/API-dependent judge execution, upstream scorer parity, or benchmark-grade maturity.
+- Key-backed live-operator proofs must also run the Rust `external-memory-secret-scan` verifier across every regular file in the proof output directory and fail closed on any configured API key value match. This check verifies absence of the secret value, not merely `api_key_value_persisted=false` metadata, and prevents unlisted intermediate artifacts from bypassing the guard.
+- `./scripts/proof_memory_external_official_judge_live_balanced.sh` is the six-type bounded guard: it must select one raw `longmemeval_s_cleaned` record for each official question type, normalize through `external-memory-prepare --source-path`, run six Amai runtime predictions, and then enforce the same live/no-key official judge boundary. This is required before citing bounded live evidence as capable of a full official-score reconciliation.
+- `external-memory-official-score.boundary_version` must be version-pinned as `external_memory_official_score_reconciliation_v1`; it reconciles upstream-style LongMemEval eval-results JSONL only and must not convert a synthetic or manually supplied log into a live scorer parity claim.
+- `./scripts/proof_memory_external_official_score_reconcile.sh` must cover the reconciled path, missing eval-log path and invalid eval-log path before this lane can be cited as materialized.
+
+Accepted evidence boundary для этого registry:
+- `external-check` = source/tool preflight only;
+- non-empty normalized cases + clean manifest = prep lane only;
+- synthetic `external-memory-run/score` exact-match smoke = command-contract only;
+- `external-memory-official-judge` default/offline proof = live-judge execution/log lane contract plus fail-closed blockers only; scorer parity still requires a real live run, reconciliation and full dataset runtime evidence;
+- local official judge API-failure proof = deterministic fake-provider contract only; it must not be cited as live provider evidence or benchmark-grade maturity;
+- bounded live official judge proof = operator lane for the current `longmemeval_s_cleaned` bounded artifacts only; no-key success is a secret-gate proof, while key-backed success remains bounded and does not close full dataset/upstream parity;
+- balanced six-type live official judge proof = bounded official-question-type coverage and source-path normalization proof only; it avoids first-N sample type gaps but still does not prove distributional representativeness, full runtime, or upstream parity;
+- synthetic `external-memory-official-score` eval-log reconciliation = official log schema/metric contract only;
+- bounded real `external-memory-run/score` proof = named dataset/limit runtime+baseline-score evidence plus answer-source accounting only, not full retrieval precision or benchmark maturity;
+- empty `cases.jsonl`, `total=0` manifest, manual marker or stale `stage=running` status = no closure evidence;
+- full maturity = real dataset predictions + real scored outputs + upstream scorer parity.
+
+Current consensus record ids:
+- `AMAI-AUDIT-EXTMEM-001`: internal stage closure split from external benchmark maturity;
+- `AMAI-AUDIT-EXTMEM-002`: LoCoMo normalized-case prep verified, full maturity still open;
+- `AMAI-AUDIT-EXTMEM-003`: AMA-Bench bounded prep/runtime/score evidence is materialized, but full dataset and benchmark-grade maturity remain open;
+- `AMAI-AUDIT-EXTMEM-004`: runtime/score CLI is synthetic command-contract smoke until real benchmark runs exist.
+- `AMAI-AUDIT-EXTMEM-005`: bounded, dataset-specific LongMemEval real runtime+baseline-score proof exists; full-dataset, semantic retrieval precision and upstream-parity maturity stay open.
+
 #### LongMemEval
 
 Ссылки:
@@ -336,6 +408,31 @@ TODO:
 - `proof` отвечает на вопрос `контур реально работает?`
 - `verify` отвечает на вопрос `контур проходит измеряемую проверку?`
 - `observe/debug/reconcile` отвечают на вопрос `почему он ведёт себя именно так?`
+
+## Team consensus protocol для docs-vs-code audit
+
+Если задача требует проверить, что документация глубоко соответствует реализации, один агент не имеет права закрывать finding только своим впечатлением.
+
+Для каждого найденного недостатка нужен consensus record:
+- `claim_owner`: фиксирует исходный doc claim, путь, строку/heading и точную формулировку статуса;
+- `implementation_verifier`: указывает code/schema/runtime surface, который должен реализовывать claim;
+- `proof_owner`: указывает proof/verify/dashboard/raw lane и свежесть результата;
+- `consensus_verdict`: одно из `verified_working`, `internal_closed_proof_refresh_required`, `partial`, `not_materialized`, `failing`, `stale_doc_claim`;
+- `required_doc_action`: `keep`, `downgrade`, `remove_checkbox`, `add_gap`, `move_to_roadmap`, `split_internal_vs_external_maturity`;
+- `required_implementation_action`: exact next implementation/proof step, если claim не подтверждён.
+
+Правило принятия:
+- если verifier и proof_owner не могут показать реализацию и свежий proof, claim нельзя оставлять как `работает / green / доказано`;
+- если code surface есть, но proof устарел или не покрывает negative path, status = `internal_closed_proof_refresh_required`;
+- если proof показывает failing path, status = `failing`, checkbox снимается, а docs обязаны описать root-cause и recovery plan;
+- если claim относится только к design/roadmap, он должен жить в roadmap как `planned / required`, а не в baseline/status как `materialized`;
+- если claim покрыт внутренним harness, но не внешним benchmark registry, он должен явно разделять `internal-stage-closed` и `external-benchmark-maturity-not-proven`.
+
+Этот protocol обязателен для:
+- audit work по `IMPLEMENTATION_STATUS.md`;
+- любого снятия или постановки stage checkbox;
+- claims про `closed`, `green`, `materialized`, `real works`, `verified`, `production-visible`;
+- claims, которые surfaced в README, MCP summaries, dashboard или startup/preflight machine-readable artifacts.
 
 ## Базовые механизмы для любого этапа
 
@@ -781,6 +878,105 @@ Companion non-regression:
 - `./scripts/proof_mcp_task_matrix.sh`
 - `./scripts/proof_observability.sh`
 
+Fresh proof-refresh status 2026-04-24:
+- `proof_hostile.sh` and `proof_memory_task_matrix.sh` passed;
+- `proof_benchmark_contamination_preflight.sh` passed, including the strict-heavy fail-closed path;
+- `proof_mcp_task_matrix.sh` passed after strict-heavy contamination preflight and explicit failed-run artifact handling;
+- `proof_observability.sh` passed after dashboard `MCP task matrix compare` was revalidated from fresh matrix snapshots.
+
+Regression contract behind the restored green Stage 10 claim:
+- latency-sensitive benchmark proofs must detect or isolate heavy unrelated local-model runners instead of silently producing contaminated SLA verdicts;
+- MCP task matrix failure must publish or preserve an explicit red-state artifact for observe/dashboard surfaces, not erase the compare lane into no-data;
+- only a clean rerun of the full Stage 10 bundle may keep the public claim `governance/safety/evaluator loop fresh green`.
+
+Scientific Queue 4/5 status-truth boundary:
+- `proof_observability.sh` may prove the Queue 4/5 dashboard cards and raw snapshot contracts are present and fail-closed;
+- this proof does not prove measured regression quality or durable measured capacity quality;
+- Queue 4 accepted statuses in raw proof remain `measured | insufficient_sample | not_materialized`;
+- Queue 5 accepted window statuses in raw proof remain `measured | insufficient_sample`;
+- exact live values such as `history_points`, `sample_count`, `lambda`, `capacity_margin`, sample pool size and per-outcome class mix must be cited only from the raw artifact of the current run;
+- documentation must keep `AMAI-AUDIT-SCI-Q45-001..003` separate from any future measured-quality claim.
+
+Fresh refresh 2026-04-25:
+- `./scripts/proof_observability.sh` passed and still validates Queue 4/5 read-only guardrails rather than measured scientific quality.
+- The raw snapshot is volatile by design. The 2026-04-25 spot-check observed Queue 5 `history_points=44`, `nats_events.1m=measured`, `nats_events.5m=insufficient_sample`, `sample_count=3`, while Queue 4 remained `measured_outcomes=0`, `insufficient_sample_outcomes=3`, `sample_pool_size=31`. These numbers are evidence for that run only.
+
+Host-side clean-chat / client startup boundary:
+- `proof_mcp_orphan_cleanup.sh`, `proof_client_reconnect.sh` and `proof_client_clean_chat_launch.sh` prove orphan MCP cleanup with spaced `amai mcp serve` argv0, client install/remove, reconnect assist, VS Code clean-chat launch command-contract and non-VSCode manual-only boundary, not fully seamless clean-chat migration;
+- `proof_vscode_compact_chat_extension_bridge.sh` proves a narrower precursor only: the installed VS Code Codex extension bundle really contains `chatgpt.newChat`, `chatgpt.newCodexPanel`, and the internal `composer_prefill` bridge path in `use-start-new-conversation-*`; this is existence evidence for an extension-native bridge candidate, not seamless user-path proof;
+- `proof_vscode_compact_chat_external_bridge_boundary.sh` proves the old negative boundary on the live upstream bundle itself: `code --help` still exposes no external `--command` front-door, the installed `openai.chatgpt` extension `onUri` handler still routes only `uri.path` into `navigateToRoute(path)`, and the stronger `composer_prefill` bridge is still internal-only inside the webview bundle; this is blocker-sharpening evidence for upstream/public surfaces, not a seamless-host claim;
+- `proof_vscode_compact_chat_public_bridge.sh` now proves that Amai materializes its own public VS Code bridge as a repo-local extension install contour: `scripts/install_vscode_amai_bridge.sh` installs `amai.amai-vscode-bridge`, the bridge contributes `amaiVscodeBridge.openCleanChat`, exposes public `onUri`, and drives only public VS Code/Codex commands (`chatgpt.openSidebar`, `chatgpt.newChat`, `chatgpt.newCodexPanel`, `type`) plus result-file truth for launch status; this upgrades the blocker from “missing public bridge” to “missing live client UX proof that the bridge really opens a clean surface and lands restore end-to-end”;
+- the same `proof_vscode_compact_chat_public_bridge.sh` now also proves install/registration truth instead of only file presence: after installing into an isolated `extensions_dir`, `code --extensions-dir ... --list-extensions --show-versions` must surface the exact current `amai.amai-vscode-bridge@<version>` bundle, so version drift or copy-only false positives fail closed before live UX claims;
+- `proof_vscode_amai_bridge_install_live_safe.sh` now proves the lower install contour does not reintroduce the old live reinstall race on the running local VS Code host: `scripts/install_vscode_amai_bridge.sh` must leave `~/.vscode/extensions/amai.amai-vscode-bridge-<version>/package.json` present after install and must not append a fresh `Unable to read file .../amai.amai-vscode-bridge-<version>/package.json` error to the current `sharedprocess.log`;
+- `proof_vscode_compact_chat_public_bridge_live.sh` now proves the stronger bounded live lane on a real VS Code host: direct `code --open-url vscode://amai.amai-vscode-bridge/open-clean-chat?...` reaches the bridge, the bridge reads `prompt_file`, executes `chatgpt.openSidebar` + `chatgpt.newChat` + `type`, writes `launch_requested`, records workspace-local verification artifact `.amai/onboarding/vscode-public-bridge-live-state.json`, and must not increase the known dirty-surface renderer counter for `untitled:/.../vscode:/amai.amai-vscode-bridge/open-clean-chat...`;
+- `proof_vscode_compact_chat_isolated_host_uri_delivery_boundary.sh` now proves the sharper opposite boundary for fresh-host UX work: a brand-new isolated VS Code host with temporary `user-data-dir` and copied `openai.chatgpt` + `amai.amai-vscode-bridge` bundles does reach `openai.chatgpt` activation in `exthost.log`, but a follow-up `code --open-url vscode://amai.amai-vscode-bridge/...` still does not materialize the bridge result file in that isolated host within the bounded timeout; this keeps the remaining beta blocker localized to isolated-host URI delivery instead of vague clean-surface UX uncertainty;
+- `scripts/proof_vscode_compact_chat_isolated_direct_uri_startup_boundary.sh` now proves the sibling cold-start boundary for the same contour: even one-shot `code --user-data-dir ... --extensions-dir ... --open-url vscode://amai.amai-vscode-bridge/...` on a brand-new isolated host still does not materialize the bridge result file within the bounded timeout, while `openai.chatgpt` activation is present in `exthost.log`; this removes the false hope that the missing pickup path is simply “launch the URI as the first startup action”;
+- the isolated-host proof pair must now also be non-leaking: temporary VS Code proof windows are closed on exit through a dedicated targeted teardown keyed by the temporary `user-data-dir`, and `scripts/proof_vscode_compact_chat_isolated_window_cleanup.sh` fail-closes if running the isolated warm/follow-up and cold/one-shot proofs leaves behind a different set of temp `--user-data-dir /tmp/tmp...` VS Code host processes;
+- `scripts/proof_vscode_code_chat_isolation_boundary.sh` now proves the sibling CLI boundary for the fallback `vscode_code_chat_cli` path: the current `code chat` subcommand still exposes `--profile` and `--new-window`, but does not surface `--user-data-dir` or `--extensions-dir` in its supported help contract, so this fallback cannot be promoted into an automation-safe isolated startup/front-door proof on this VS Code build;
+- `scripts/proof_vscode_code_chat_cli_isolation_boundary.sh` now proves the sibling CLI boundary for the remaining VS Code fallback path: `code chat` currently treats `--user-data-dir` and `--extensions-dir` as unknown subcommand options, and an isolated temp `user-data-dir` therefore does not receive `exthost.log`; this means `vscode_code_chat_cli` cannot currently serve as the clean isolated beta-startup proof lane for VS Code.
+- that same live lane is now version-truth-sensitive: the bridge runtime must report the exact current `public_bridge.version` from the source bundle, otherwise the proof fails closed with an explicit `bridge runtime version mismatch` verdict instead of silently treating a stale already-loaded VS Code host as “cleanup missing” noise;
+- the same live lane must treat disk install truth and runtime truth as authoritative over default-profile registration noise: verifier prechecks may read `~/.vscode/extensions/<bundle>/package.json` plus the bridge result payload, but must not fail solely because `code --list-extensions --show-versions` on the default running profile surfaces a stale bridge version unrelated to the source bundle or loaded runtime;
+- the same live verifier must also treat two bounded negative paths truthfully instead of red-by-harness: zero dirty-surface matches in `renderer.log` are a legitimate `0`, not a `pipefail/xargs` early-exit, and `ui_cleanup.active_editor_matches_bridge_uri_after = false` must remain exact `false`, not be rewritten into a fallback `true` by jq boolean-default drift;
+- the same live verifier must preserve the full bridge runtime payload plus machine-readable capability drift, because the next beta blocker is no longer lower bridge launch truth but higher `visible_surface` UX observability; `scripts/proof_vscode_compact_chat_visible_surface_runtime_boundary.sh` is the bounded proof that the installed bridge bundle already supports `visible_surface` while the currently loaded runtime still omits it from the live result on this machine;
+- `scripts/proof_vscode_compact_chat_runtime_refresh_boundary.sh` now proves the next sharper boundary for that same contour: public refresh candidates `command:workbench.action.restartExtensionHost` and `command:workbench.action.reloadWindow` both return through `code --open-url`, but on this machine they still do not make the loaded bridge runtime pick up `visible_surface`; after each refresh probe the bounded live verifier remains green on lower launch truth and still records `runtime_capability_drift.visible_surface_missing_from_runtime_result = true`;
+- compact-chat host launch is now a fail-closed state machine: no launch request emits `available_not_requested`, missing launch command emits `bridge_unavailable`, default policy gate emits `disabled_by_policy`, opt-in command success emits `requested`, and opt-in command failure emits `launch_failed`; API notice-kind mapping must preserve those states instead of collapsing policy-disabled launches into a generic requested notice;
+- `requested` / `launch_failed` are host command-contract proof states only; VS Code `vscode_code_chat_cli` stays command-contract proof, while `vscode_uri_amai_bridge` is now promoted only after workspace-local live verification artifact exists and otherwise fail-closes back to CLI/manual fallback. Even after that promotion, it is still not a full seamless UX proof without higher-level visible-surface / startup-restore outcome evidence;
+- Hermes proof may validate sticky project profile, compact `.hermes.md`, MCP config and reconnect helpers, but that is not live Hermes agent behavior proof;
+- remote onboarding proof must remain offline-deterministic: `proof_remote_onboarding.sh` validates remote SSH config plus sync flow through a fake-ssh harness, while `proof_remote_repo_sync_payload.sh` validates payload boundaries;
+- documentation must keep `AMAI-AUDIT-CLIENT-001..004` separate from any future full seamless-host claim.
+
+Local stack autostart boundary:
+- `proof_stack_autostart.sh` proves deterministic `amai-stack.service` unit rendering only;
+- `proof_bootstrap_volume_dirs.sh` proves `run_stack_service.sh` / `bootstrap_stack.sh` prepares required volume and rendered config paths before compose startup;
+- `proof_onboarding.sh` may prove the real onboarding path printed and activated the user service on a host with working `systemd --user`;
+- these proofs do not prove unattended headless boot after reboot without user login;
+- docs must keep `AMAI-AUDIT-AUTOSTART-001` separate from any future linger/system-service reboot guarantee;
+- broad reboot claims require an explicit `loginctl enable-linger` opt-in or system-level service mode plus a dedicated proof.
+
+Fresh refresh 2026-04-25:
+- `./scripts/proof_stack_autostart.sh` passed for deterministic service rendering.
+- `./scripts/proof_bootstrap_volume_dirs.sh` passed for pre-compose volume/config path preparation.
+- `./scripts/proof_onboarding.sh` passed on the live host and confirmed the install output includes `Amai stack autostart ready: amai-stack.service`.
+- The accepted claim remains `systemd --user` user-manager autostart. A future claim about boot without login must add a separate linger/system-service proof and cannot reuse these results as reboot evidence.
+
+Compatibility memory bridge boundary:
+- `proof_memory_bridge_search.sh` is the required proof for `memory search` compatibility output;
+- it must rebuild `target/release/amai` and `target/release/memory` before checking output, otherwise stale release binaries can hide source changes;
+- `memory search` must always print `Почему вошло` and `Почему часть не вошла`, including zero-hit, cache-hit and missing-decision-trace paths;
+- targeted `cargo test --bin memory` should cover explanation fallbacks when bridge output formatting changes;
+- docs must keep `AMAI-AUDIT-BRIDGE-001` tied to release bridge behavior, not to a `cargo run` developer path.
+
+Fresh refresh 2026-04-25:
+- `./scripts/proof_memory_bridge_search.sh` passed after rebuilding release binaries.
+- `cargo test --quiet --bin memory` passed with 11 tests.
+- This proves the compatibility bridge output/explainability contract only; retrieval relevance quality remains governed by context-pack/retrieval proofs.
+
+Operational MCP launcher freshness boundary:
+- `proof_mcp_launcher_freshness.sh` is the required proof for MCP stdio launcher changes;
+- when `cargo` is available, `scripts/run_mcp_stdio.sh` and `scripts/run_mcp_stdio.ps1` must prefer `cargo run --release --quiet -- mcp serve` over `target/release/amai`;
+- `target/release/amai` is allowed only as a no-cargo degrade path, not as the default onboarding path;
+- shell startup diagnostics must not write to stdout before JSON-RPC, because stdout is the MCP protocol stream;
+- docs must keep `AMAI-AUDIT-MCP-LAUNCHER-001` separate from any future cross-client live-host behavior claim.
+
+Fresh refresh 2026-04-25:
+- `./scripts/proof_mcp_launcher_freshness.sh` passed.
+- It verified JSON-RPC initialize and repeated `amai_continuity_startup` through `scripts/run_mcp_stdio.sh` while a cargo shim proved the selected command was `cargo run --release --quiet -- mcp serve`.
+- This proof does not validate every IDE/client host; it validates the shared stdio launcher path and the protocol-clean startup boundary.
+
+MCP handshake/runtime contract boundary:
+- `proof_mcp.sh` is the required proof for MCP tool/prompt/manifest/startup contract changes;
+- `prompts/list` must expose exactly `amai-onboarding`, `amai-continuity-startup` and `amai-context-pack`;
+- runtime startup artifact references must stay synchronized across `src/mcp.rs`, `.amai/onboarding/project-chat-startup-contract.json`, `.amai/onboarding/project-chat-startup-agent-contract.json`, managed startup instructions and docs;
+- current runtime artifact version is `workspace-startup-runtime-state-v4`; stale `v3` wording is a documentation defect;
+- startup must not require every registered target project to carry its own `config/token_budget_profiles.toml`; if the target project lacks that file, token-budget accounting must fall back to Amai's own config so `amai_continuity_startup` stays usable for normal external projects;
+- MCP proof sessions must bind the spawned MCP server to an explicit generated `CODEX_THREAD_ID` and reuse that same id for `amai_observe_whole_cycle_turn`, otherwise proof token events can inherit an unrelated live-thread scope and fail the observed-scope contract;
+- docs must keep `AMAI-AUDIT-MCP-CONTRACT-001` and `AMAI-AUDIT-MCP-CONTRACT-002` separate from launcher freshness and from live client behavior claims.
+
+Fresh refresh 2026-04-25:
+- `./scripts/proof_mcp.sh` passed with `proof_scope=full`, `critical=0`, `unknown=0`, `memory_matrix_tasks_failed=0`.
+- The proof observed prompts `amai-context-pack`, `amai-continuity-startup`, `amai-onboarding`, 14 MCP tools and `83.69098712446352%` token savings.
+- This is accepted as MCP handshake/runtime/proof-session evidence only; client UX and host launcher behavior stay in their own proof lanes.
+
 Дополнительно смотреть:
 - token-contract proofs;
 - privacy/safety specific traces;
@@ -817,6 +1013,8 @@ Companion non-regression:
 - significance и drift проверяются на raw-run данных, а не на красивом summary;
 - lifecycle/forgetting math остаётся explainable и audit-safe;
 - regression используется только как explain/forecast surface, а не как authoritative routing/truth layer;
+- KAN-style context-pack utility explain остаётся read-only shadow projection
+  поверх already allowed candidates, а не ranking/routing/truth layer;
 - capacity/arrival model не превращается в runtime enforcement truth до observed validation.
 
 ### Какой proof path обязателен
@@ -826,6 +1024,99 @@ Companion non-regression:
 - drift report по score/latency/verdict distributions;
 - explain trace для lifecycle transitions и forgetting decisions;
 - companion non-regression bundle по затронутым соседним осям (`speed / accuracy / quality / truth`).
+
+Если contour конкретно про `KAN-style context-pack utility explain` из
+`Candidate Queue 4A`, дополнительно обязательны:
+- этот gate additive and narrower than the existing truth/policy/retrieval
+  gates; он не отменяет и не ослабляет обычные gates для schema, policy,
+  routing, retrieval, scope, provenance или truth-sensitive changes;
+- все поля ниже являются target contract for a not-yet-materialized surface,
+  not evidence that the surface already exists;
+- any future implementation that consumes these fields must mark the path as
+  speculative/contract-based until `shadow_approved` exists and must not let the
+  fields affect critical truth, policy, retrieval or write paths;
+- future code must include an explicit compile-time or runtime guard that blocks
+  serializers, logging helpers, dashboard helpers and other consumers from using
+  these fields in live decision paths before `shadow_approved`;
+- state machine:
+  - `spec_only`;
+  - `trace_only`;
+  - `offline_replay`;
+  - `shadow_observe`;
+  - `dashboard_internal`;
+  - `user_visible_opt_in`;
+- no-authority flags в каждом payload:
+  - `truth_authority = false`;
+  - `routing_authority = false`;
+  - `ranking_authority = false`;
+  - `runtime_authority = false`;
+  - `forgetting_authority = false`;
+  - `promotion_authority = false`;
+- allowed-candidate contract:
+  - only candidates already admitted by project/namespace/scope filters;
+  - no semantic/Qdrant-only scope expansion;
+  - lexical/symbol-first law remains binding;
+  - enabled-vs-disabled context-pack output and candidate order stay byte/JSON
+    equivalent until a separate adoption approval exists;
+- raw trace contract:
+  - `context_pack_id`;
+  - `correlation_id`;
+  - `decision_trace_id`;
+  - `project_code`;
+  - `namespace_code`;
+  - `retrieval_mode`;
+  - `allowed_candidate_scope`;
+  - `candidate_summary`;
+  - `rerank_summary`;
+  - `evidence_sufficiency`;
+  - `final_decision`;
+  - `model_visible_context_pack_payload_sha256`;
+  - `candidate_order_sha256`;
+  - `feature_schema_version`;
+- output status contract:
+  - accepted states are only `measured`, `insufficient_sample`, `ood`,
+    `not_materialized` and `unknown`;
+  - missing raw trace, stale schema, one-sided labels, OOD, Qdrant dependency
+    failure, scope mismatch or raw/dashboard SHA drift must fail closed instead
+    of producing best-guess explanations;
+- dashboard/raw parity:
+  - raw snapshot payload is source of truth for the projection;
+  - dashboard card may only render raw/observe fields;
+  - no dashboard-only computed truth;
+  - raw payload SHA and dashboard payload SHA must be surfaced;
+- baseline/challenger proof:
+  - compare current explain summary, simple transparent baseline and KAN-style
+    candidate on held-out traces;
+  - include feature-family ablation;
+  - include perturbation/stability checks for top contributors;
+  - include CI/sample-size/drift metadata before any `measured` claim.
+
+Proof bundle for `KAN-style context-pack utility explain`:
+- targeted Rust contract tests for trace schema, feature extraction, status
+  states and authority flags;
+- enabled-vs-disabled context-pack equality test;
+- adversarial empty/ambiguous trace tests;
+- cross-project and namespace leak guard;
+- Qdrant unavailable degradation test;
+- redaction/secret hygiene check;
+- baseline-vs-candidate raw-result lane with CI/sample-size/drift;
+- `./scripts/proof_memory_task_matrix.sh`;
+- `./scripts/proof_mcp_task_matrix.sh`;
+- `./scripts/proof_observability.sh`;
+- `cargo run -- observe snapshot`;
+- `cargo run -- observe sla-check`.
+
+If that contour touches retrieval/vector/context-pack runtime, add:
+- `./scripts/proof_accuracy.sh`;
+- `./scripts/proof_performance.sh`;
+- `./scripts/proof_load.sh`;
+- cold benchmark bundle;
+- external/Qdrant bundle.
+
+Passing this gate means `evidence-only internal shadow explanation is safe to
+surface as read-only projection`.
+It does not mean KAN is adopted as core ranking, routing, truth, lifecycle or
+promotion authority.
 
 Если contour конкретно про `Markov / hazard lifecycle`, дополнительно обязательны:
 - canonical state-model contract:

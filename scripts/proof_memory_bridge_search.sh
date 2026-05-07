@@ -3,9 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-if [[ ! -x ./target/release/memory || ! -x ./target/release/amai ]]; then
-  cargo build --quiet --release --bin amai --bin memory
-fi
+cargo build --quiet --release --bin amai --bin memory
 
 output="$(
   AMAI_REPO_ROOT="$(pwd)" \

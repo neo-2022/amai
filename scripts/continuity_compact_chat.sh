@@ -9,6 +9,34 @@ source "$SCRIPT_DIR/load_env.sh"
 
 original_args=("$@")
 
+extract_compact_chat_projection() {
+  local payload="${1:-}"
+  [[ -n "$payload" ]] || return 1
+  printf '%s\n' "$payload" | jq -c '
+    if (.continuity_compact_chat | type) == "object" then
+      .continuity_compact_chat as $projection
+      | if (($projection.project.code | type) == "string" and (($projection.project.code | gsub("^\\s+|\\s+$"; "")) | length) > 0)
+          and (($projection.namespace.code | type) == "string" and (($projection.namespace.code | gsub("^\\s+|\\s+$"; "")) | length) > 0)
+          and (($projection.operator_notice.kind | type) == "string" and (($projection.operator_notice.kind | gsub("^\\s+|\\s+$"; "")) | length) > 0)
+          and (($projection.handoff.headline | type) == "string" and (($projection.handoff.headline | gsub("^\\s+|\\s+$"; "")) | length) > 0)
+          and (($projection.handoff.next_step | type) == "string" and (($projection.handoff.next_step | gsub("^\\s+|\\s+$"; "")) | length) > 0)
+          and (($projection.chat_start_restore.prompt_text | type) == "string" and (($projection.chat_start_restore.prompt_text | gsub("^\\s+|\\s+$"; "")) | length) > 0)
+          and (
+            (($projection.operator_notice.launch_clean_chat_command | type) == "string" and (($projection.operator_notice.launch_clean_chat_command | gsub("^\\s+|\\s+$"; "")) | length) > 0)
+            or
+            (($projection.operator_notice.required_host_action | type) == "string" and (($projection.operator_notice.required_host_action | gsub("^\\s+|\\s+$"; "")) | length) > 0)
+          )
+        then
+          $projection
+        else
+          empty
+        end
+    else
+      empty
+    end
+  ' 2>/dev/null
+}
+
 project=""
 namespace="continuity"
 repo_root=""
@@ -65,6 +93,8 @@ case "$observe_host" in
     ;;
 esac
 
+"$SCRIPT_DIR/ensure_observe_frontdoor.sh" --path "/api/client-budget-compact-chat" >/dev/null 2>&1 || true
+
 if [[ "$api_supported" == "true" ]] \
   && [[ "$json_requested" == "true" ]] \
   && { [[ -z "$repo_root" ]] || [[ "$repo_root" == "$REPO_ROOT" ]]; } \
@@ -93,10 +123,19 @@ if [[ "$api_supported" == "true" ]] \
         "http://${observe_host}:${observe_port}/api/client-budget-compact-chat" 2>/dev/null || true
     )"
     if [[ -n "$api_payload" ]]; then
-      printf '%s\n' "$api_payload" | jq '.continuity_compact_chat'
+      compact_chat_projection="$(extract_compact_chat_projection "$api_payload" || true)"
+      if [[ -z "$compact_chat_projection" ]]; then
+        echo "continuity compact chat: invalid API payload" >&2
+        exit 12
+      fi
+      printf '%s\n' "$compact_chat_projection"
       exit 0
     fi
   fi
+fi
+
+if [[ -x "$REPO_ROOT/target/release/amai" ]]; then
+  exec "$REPO_ROOT/target/release/amai" continuity compact-chat "${original_args[@]}"
 fi
 
 exec "$SCRIPT_DIR/amai_exec.sh" continuity compact-chat "${original_args[@]}"

@@ -1,5 +1,61 @@
 use super::*;
 
+enum ServiceSourceKind<'a> {
+    LiveProbe {
+        system: &'a str,
+    },
+    LiveMetrics {
+        system: &'a str,
+    },
+    LiveSnapshot {
+        field: &'a str,
+    },
+    DurableArtifacts {
+        detail: &'a str,
+    },
+    ExternalBenchmarkWorkspace {
+        mode: ExternalBenchmarkWorkspaceMode<'a>,
+    },
+}
+
+enum ExternalBenchmarkWorkspaceMode<'a> {
+    LiveWithWorkspace { endpoint: &'a str },
+    LastRunWorkspace { endpoint: &'a str },
+    SavedResultAndSlice { endpoint: &'a str },
+    ExternalOnly,
+}
+
+fn service_source_sentence(source: ServiceSourceKind<'_>) -> String {
+    match source {
+        ServiceSourceKind::LiveProbe { system } => {
+            format!("Источник: живой {system} probe, обновляется на каждом refresh dashboard")
+        }
+        ServiceSourceKind::LiveMetrics { system } => {
+            format!("Источник: live {system}, обновляется на каждом refresh dashboard")
+        }
+        ServiceSourceKind::LiveSnapshot { field } => {
+            format!("Источник: {field} из live snapshot.")
+        }
+        ServiceSourceKind::DurableArtifacts { detail } => {
+            format!("Источник: durable {detail}.")
+        }
+        ServiceSourceKind::ExternalBenchmarkWorkspace { mode } => match mode {
+            ExternalBenchmarkWorkspaceMode::LiveWithWorkspace { endpoint } => format!(
+                "Источник: live Qdrant /metrics + workspace последнего внешнего прогона ({endpoint}). Карточка обновляется при refresh dashboard."
+            ),
+            ExternalBenchmarkWorkspaceMode::LastRunWorkspace { endpoint } => format!(
+                "Источник: workspace последнего внешнего прогона + последний известный срез benchmark-Qdrant ({endpoint})."
+            ),
+            ExternalBenchmarkWorkspaceMode::SavedResultAndSlice { endpoint } => format!(
+                "Источник: последний сохранённый результат и срез benchmark-Qdrant ({endpoint})."
+            ),
+            ExternalBenchmarkWorkspaceMode::ExternalOnly => {
+                "Источник: отдельный benchmark-Qdrant и workspace внешнего benchmark-прогона. Эта карточка не берёт данные из Amai live.".to_string()
+            }
+        },
+    }
+}
+
 pub(super) fn build_service_cards(snapshot: &Value) -> Vec<Value> {
     let postgres_status = combine_statuses(&[
         status_for_metric_name(snapshot, "postgres.query_probe_p95_ms"),
@@ -12,7 +68,9 @@ pub(super) fn build_service_cards(snapshot: &Value) -> Vec<Value> {
         format_ms(snapshot, snapshot["postgres"]["query_probe_p95_ms"].as_f64()),
         "Живой probe базы метаданных, policy, проектов и continuity-снимков.".to_string(),
         postgres_status,
-        Some("Источник: живой PostgreSQL probe, обновляется на каждом refresh dashboard".to_string()),
+        Some(service_source_sentence(ServiceSourceKind::LiveProbe {
+            system: "PostgreSQL",
+        })),
         Some("PostgreSQL probe — это короткий живой замер базы метаданных, а не исторический benchmark.".to_string()),
         vec![
             metric_row(
@@ -83,7 +141,9 @@ pub(super) fn build_service_cards(snapshot: &Value) -> Vec<Value> {
         format_optional(snapshot["qdrant"]["memory_resident_bytes"].as_f64(), human_bytes),
         "Живые системные показатели векторного слоя. Здесь показаны только действительно живые системные числа, а не исторический search-benchmark.".to_string(),
         qdrant_live_status,
-        Some("Источник: live Qdrant /metrics Amai, обновляется на каждом refresh dashboard".to_string()),
+        Some(service_source_sentence(ServiceSourceKind::LiveMetrics {
+            system: "Qdrant /metrics Amai",
+        })),
         Some("Qdrant — векторный слой. Он помогает recall, но не является source of truth для continuity или кода.".to_string()),
         vec![
             metric_row(
@@ -149,10 +209,9 @@ pub(super) fn build_service_cards(snapshot: &Value) -> Vec<Value> {
         format_ms(snapshot, snapshot["nats"]["publish_probe_p95_ms"].as_f64()),
         "Живой probe очереди событий и фонового work plane.".to_string(),
         nats_status,
-        Some(
-            "Источник: живой NATS/JetStream probe, обновляется на каждом refresh dashboard"
-                .to_string(),
-        ),
+        Some(service_source_sentence(ServiceSourceKind::LiveProbe {
+            system: "NATS/JetStream",
+        })),
         Some("NATS / JetStream — event и work plane для фоновых событий и очередей.".to_string()),
         vec![
             metric_row(
@@ -209,13 +268,374 @@ pub(super) fn build_service_cards(snapshot: &Value) -> Vec<Value> {
         nats_card = with_status_tooltip(nats_card, &tooltip);
     }
 
+    let remediation_card = build_remediation_inbox_card();
+
     vec![
         postgres_card,
         qdrant_live_card,
         benchmark_qdrant_card,
         nats_card,
+        remediation_card,
+        build_capacity_forecast_card(snapshot),
         build_governance_card(snapshot),
+        build_regression_explain_card(snapshot),
     ]
+}
+
+fn build_remediation_inbox_card() -> Value {
+    let repo_root = config::discover_repo_root(None)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let bundle_dir = crate::indexer::qdrant_postgres_remediation_bundle_dir(&repo_root);
+    let summary = collect_remediation_inbox_summary(&bundle_dir);
+    let status = if summary.invalid_items > 0 {
+        "critical"
+    } else if summary.total_items > 0 {
+        "alert"
+    } else {
+        "pass"
+    };
+    let value = if summary.invalid_items > 0 {
+        format!(
+            "{} incident bundle(s), {} invalid artifact(s)",
+            summary.total_items, summary.invalid_items
+        )
+    } else if summary.total_items > 0 {
+        format!(
+            "{} incident bundle(s) требуют просмотра",
+            summary.total_items
+        )
+    } else {
+        "открытых remediation bundles нет".to_string()
+    };
+    let note = if summary.total_items > 0 {
+        "Read-only operator inbox для cross-store manual recovery: только inspect path, без retry и reconcile semantics.".to_string()
+    } else {
+        "Read-only operator inbox пуст: новых qdrant/postgres manual recovery bundles сейчас не видно.".to_string()
+    };
+    let latest_created_label = summary
+        .latest_created_at_epoch_ms
+        .map(human_timestamp)
+        .unwrap_or_else(|| "ещё нет данных".to_string());
+    let mut details = vec![
+        format!(
+            "Inspect API: /api/remediation-bundles?limit={}",
+            summary.suggested_limit
+        ),
+        format!("Bundle dir: {}", bundle_dir.display()),
+    ];
+    if summary.total_items > 0 {
+        details.push(
+            "Surface остаётся read-only: решение и reconcile operator делает отдельно, не из dashboard."
+                .to_string(),
+        );
+    }
+    let mut card = card_with_rows(
+        "Remediation inbox",
+        value,
+        note,
+        status,
+        Some(
+            service_source_sentence(ServiceSourceKind::DurableArtifacts {
+                detail: "remediation bundle artifacts из state/incidents/qdrant-postgres-remediation",
+            }),
+        ),
+        Some(
+            "Этот surface показывает только operator-facing incident inbox и не делает qdrant/postgres recovery автоматически."
+                .to_string(),
+        ),
+        vec![
+            metric_row(
+                "Открытых bundles",
+                summary.total_items.to_string(),
+                Some("Сколько remediation bundle artifacts сейчас видно в durable inbox."),
+            ),
+            metric_row(
+                "Invalid artifacts",
+                summary.invalid_items.to_string(),
+                Some("Сколько artifacts не читаются или не проходят минимальную schema/semantic validation."),
+            ),
+            metric_row(
+                "Последний bundle",
+                latest_created_label,
+                Some("Время newest remediation artifact по created_at_epoch_ms."),
+            ),
+        ],
+    );
+    if let Some(root) = card.as_object_mut() {
+        root.insert("details".to_string(), json!(details));
+    }
+    card
+}
+
+#[derive(Debug, Default)]
+struct RemediationInboxSummary {
+    total_items: usize,
+    invalid_items: usize,
+    latest_created_at_epoch_ms: Option<u64>,
+    suggested_limit: usize,
+}
+
+fn collect_remediation_inbox_summary(bundle_dir: &Path) -> RemediationInboxSummary {
+    let mut summary = RemediationInboxSummary {
+        suggested_limit: 20,
+        ..RemediationInboxSummary::default()
+    };
+    let Ok(entries) = std::fs::read_dir(bundle_dir) else {
+        return summary;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        summary.total_items += 1;
+        match std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        {
+            Some(payload)
+                if payload["artifact_version"]
+                    == json!(
+                        crate::indexer::QDRANT_POSTGRES_REMEDIATION_BUNDLE_ARTIFACT_VERSION
+                    )
+                    && remediation_payload_has_required_dashboard_fields(&payload) =>
+            {
+                let created_at = payload["created_at_epoch_ms"].as_u64();
+                summary.latest_created_at_epoch_ms =
+                    std::cmp::max(summary.latest_created_at_epoch_ms, created_at);
+            }
+            _ => {
+                summary.invalid_items += 1;
+            }
+        }
+    }
+    summary
+}
+
+fn remediation_payload_has_required_dashboard_fields(payload: &Value) -> bool {
+    [
+        "bundle_id",
+        "relative_path",
+        "document_id",
+        "failure_mode",
+        "failure_phase",
+        "consistency_state",
+        "required_action",
+        "operator_summary",
+        "observability_stage",
+    ]
+    .into_iter()
+    .all(|field| payload[field].as_str().is_some())
+        && payload["created_at_epoch_ms"].as_u64().is_some()
+        && payload["had_existing_document"].as_bool().is_some()
+        && payload["compensation_attempted"].as_bool().is_some()
+        && payload["operator_checklist"].is_array()
+}
+
+pub(crate) fn build_capacity_forecast_card(snapshot: &Value) -> Value {
+    let forecast = &snapshot["capacity_forecast"];
+    if !forecast.is_object() {
+        return card_with_rows(
+            "Capacity forecast",
+            "ещё нет данных".to_string(),
+            "Queue 5 capacity/arrival contour ещё не surfaced в live snapshot.".to_string(),
+            "unknown",
+            Some(service_source_sentence(ServiceSourceKind::LiveSnapshot {
+                field: "capacity_forecast",
+            })),
+            Some(
+                "Forecast-only surface для arrival pressure и пропускной способности без runtime authority."
+                    .to_string(),
+            ),
+            vec![],
+        );
+    }
+    let family = forecast["families"]
+        .as_array()
+        .and_then(|families| families.first());
+    let Some(family) = family else {
+        return card_with_rows(
+            "Capacity forecast",
+            "ещё нет данных".to_string(),
+            "В live snapshot пока нет ни одного supported family для Queue 5.".to_string(),
+            "unknown",
+            Some(service_source_sentence(ServiceSourceKind::LiveSnapshot {
+                field: "capacity_forecast",
+            })),
+            Some(
+                "Forecast-only surface для arrival pressure и пропускной способности без runtime authority."
+                    .to_string(),
+            ),
+            vec![],
+        );
+    };
+    let windows = family["windows"].as_array().cloned().unwrap_or_default();
+    let measured_window = windows
+        .iter()
+        .find(|item| item["window_key"].as_str() == Some("5m"))
+        .or_else(|| {
+            windows
+                .iter()
+                .find(|item| item["status"].as_str() == Some("measured"))
+        });
+    let headline = measured_window
+        .map(|window| {
+            format!(
+                "5м λ {} • запас {}",
+                format_optional(window["lambda"].as_f64(), |value| format!("{value:.2}/s")),
+                format_optional(window["capacity_margin"].as_f64(), |value| format!(
+                    "{value:.2}/s"
+                )),
+            )
+        })
+        .unwrap_or_else(|| {
+            let insufficient = forecast["summary"]["insufficient_families"]
+                .as_u64()
+                .unwrap_or(0);
+            format!(
+                "0 measured • {} insufficient",
+                format_u64(Some(insufficient))
+            )
+        });
+    let status = measured_window
+        .and_then(|window| window["capacity_margin"].as_f64())
+        .map(|margin| if margin >= 0.0 { "pass" } else { "warning" })
+        .unwrap_or("unknown");
+    let mut rows = Vec::new();
+    for window_key in ["1m", "5m"] {
+        if let Some(window) = windows
+            .iter()
+            .find(|item| item["window_key"].as_str() == Some(window_key))
+        {
+            let value = if window["status"].as_str() == Some("measured") {
+                format!(
+                    "λ {} • запас {} • n={}",
+                    format_optional(window["lambda"].as_f64(), |value| format!("{value:.2}/s")),
+                    format_optional(window["capacity_margin"].as_f64(), |value| format!(
+                        "{value:.2}/s"
+                    )),
+                    format_u64(window["sample_count"].as_u64())
+                )
+            } else {
+                format!(
+                    "insufficient • span {} • n={}",
+                    format_optional(window["observed_span_seconds"].as_f64(), |value| format!(
+                        "{value:.0}s"
+                    )),
+                    format_u64(window["sample_count"].as_u64())
+                )
+            };
+            rows.push(metric_row(
+                &format!("Окно {window_key}"),
+                value,
+                Some("Forecast-only оценка arrivals и service rate по history system_snapshot."),
+            ));
+        }
+    }
+    rows.push(metric_row(
+        "History scope",
+        humanize_identifier(
+            forecast["history_scope"]["mode"]
+                .as_str()
+                .unwrap_or("unknown"),
+        ),
+        Some("Откуда взята history для расчёта Queue 5."),
+    ));
+    card_with_rows(
+        "Capacity forecast",
+        headline,
+        "Forecast-only contour для arrival pressure в NATS event plane без runtime enforcement."
+            .to_string(),
+        status,
+        Some(service_source_sentence(ServiceSourceKind::LiveSnapshot {
+            field: "capacity_forecast",
+        })),
+        Some(
+            "Read-only capacity surface. Не authority для throttling, routing или truth claims."
+                .to_string(),
+        ),
+        rows,
+    )
+}
+
+pub(crate) fn build_regression_explain_card(snapshot: &Value) -> Value {
+    let explain = &snapshot["regression_explain"];
+    if !explain.is_object() {
+        return card_with_rows(
+            "Regression explain",
+            "ещё нет данных".to_string(),
+            "Queue 4 explainability contour ещё не surfaced в live snapshot.".to_string(),
+            "unknown",
+            Some(service_source_sentence(ServiceSourceKind::LiveSnapshot {
+                field: "regression_explain",
+            })),
+            Some(
+                "Read-only explain surface для helpful/stale/benchmark outcomes без routing или truth authority."
+                    .to_string(),
+            ),
+            vec![],
+        );
+    }
+    let outcomes = explain["outcomes"].as_array().cloned().unwrap_or_default();
+    let measured = explain["summary"]["measured_outcomes"]
+        .as_u64()
+        .unwrap_or(0);
+    let insufficient = explain["summary"]["insufficient_sample_outcomes"]
+        .as_u64()
+        .unwrap_or(0);
+    let status = if measured > 0 { "pass" } else { "unknown" };
+    let headline = format!(
+        "{} measured • {} insufficient",
+        format_u64(Some(measured)),
+        format_u64(Some(insufficient))
+    );
+    let mut rows = Vec::new();
+    for key in ["benchmark_pass", "stale_error", "retrieval_helpful"] {
+        let maybe_outcome = outcomes
+            .iter()
+            .find(|item| item["outcome_key"].as_str() == Some(key));
+        if let Some(outcome) = maybe_outcome {
+            let label = outcome["title"].as_str().unwrap_or(key);
+            let value = match outcome["status"].as_str().unwrap_or("unknown") {
+                "measured" => format!(
+                    "AUC {} • n={}",
+                    format_optional(outcome["auc"].as_f64(), |v| format!("{v:.3}")),
+                    format_u64(outcome["sample_size"].as_u64())
+                ),
+                "insufficient_sample" => format!(
+                    "insufficient • n={} • +={}",
+                    format_u64(outcome["sample_size"].as_u64()),
+                    format_u64(outcome["positive_count"].as_u64())
+                ),
+                _ => "not materialized".to_string(),
+            };
+            rows.push(metric_row(
+                label,
+                value,
+                Some(
+                    "Queue 4 read-only explain contour. Метрика не имеет routing/truth authority.",
+                ),
+            ));
+        }
+    }
+    card_with_rows(
+        "Regression explain",
+        headline,
+        "Карточка показывает, какие explanatory модели уже честно materialized поверх live snapshot surfaces. Если outcome пустой или одноклассный, surface обязан явно показать insufficient sample."
+            .to_string(),
+        status,
+        Some(service_source_sentence(ServiceSourceKind::LiveSnapshot {
+            field: "regression_explain",
+        })),
+        Some(
+            "Queue 4: logistic-regression explain surface с quality metrics, coefficient table и fail-closed insufficient-sample semantics."
+                .to_string(),
+        ),
+        rows,
+    )
 }
 
 pub(super) fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
@@ -448,28 +868,38 @@ pub(super) fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
         "Отдельный benchmark-Qdrant ещё не настроен.".to_string()
     };
     let source_label = if active && available {
-        Some(format!(
-            "Источник: live Qdrant /metrics + workspace последнего внешнего прогона ({}). Карточка обновляется при refresh dashboard.",
-            benchmark["http_url"].as_str().unwrap_or("unknown")
+        Some(service_source_sentence(
+            ServiceSourceKind::ExternalBenchmarkWorkspace {
+                mode: ExternalBenchmarkWorkspaceMode::LiveWithWorkspace {
+                    endpoint: benchmark["http_url"].as_str().unwrap_or("unknown"),
+                },
+            },
         ))
     } else if run_state == "finished_ok"
         || run_state == "finished_error"
         || run_state == "finished_benchmark_failed"
     {
-        Some(format!(
-            "Источник: workspace последнего внешнего прогона + последний известный срез benchmark-Qdrant ({}).",
-            benchmark["http_url"].as_str().unwrap_or("unknown")
+        Some(service_source_sentence(
+            ServiceSourceKind::ExternalBenchmarkWorkspace {
+                mode: ExternalBenchmarkWorkspaceMode::LastRunWorkspace {
+                    endpoint: benchmark["http_url"].as_str().unwrap_or("unknown"),
+                },
+            },
         ))
     } else if from_last_success {
-        Some(format!(
-            "Источник: последний сохранённый результат и срез benchmark-Qdrant ({}).",
-            benchmark["http_url"].as_str().unwrap_or("unknown")
+        Some(service_source_sentence(
+            ServiceSourceKind::ExternalBenchmarkWorkspace {
+                mode: ExternalBenchmarkWorkspaceMode::SavedResultAndSlice {
+                    endpoint: benchmark["http_url"].as_str().unwrap_or("unknown"),
+                },
+            },
         ))
     } else {
-        Some(
-            "Источник: отдельный benchmark-Qdrant и workspace внешнего benchmark-прогона. Эта карточка не берёт данные из Amai live."
-                .to_string(),
-        )
+        Some(service_source_sentence(
+            ServiceSourceKind::ExternalBenchmarkWorkspace {
+                mode: ExternalBenchmarkWorkspaceMode::ExternalOnly,
+            },
+        ))
     };
     let result_row_label = if aggregate_result.is_object() || last_result.is_object() {
         "Последний результат"
@@ -661,6 +1091,54 @@ fn benchmark_qdrant_status_tooltip(snapshot: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn service_source_sentence_renders_live_snapshot_and_durable_artifacts() {
+        let live_snapshot = service_source_sentence(ServiceSourceKind::LiveSnapshot {
+            field: "capacity_forecast",
+        });
+        let live_probe = service_source_sentence(ServiceSourceKind::LiveProbe {
+            system: "PostgreSQL",
+        });
+        let live_metrics = service_source_sentence(ServiceSourceKind::LiveMetrics {
+            system: "Qdrant /metrics Amai",
+        });
+        let durable = service_source_sentence(ServiceSourceKind::DurableArtifacts {
+            detail: "remediation bundle artifacts из state/incidents/qdrant-postgres-remediation",
+        });
+
+        assert_eq!(
+            live_snapshot,
+            "Источник: capacity_forecast из live snapshot."
+        );
+        assert_eq!(
+            live_probe,
+            "Источник: живой PostgreSQL probe, обновляется на каждом refresh dashboard"
+        );
+        assert_eq!(
+            live_metrics,
+            "Источник: live Qdrant /metrics Amai, обновляется на каждом refresh dashboard"
+        );
+        assert!(durable.contains("Источник: durable remediation bundle artifacts"));
+    }
+
+    #[test]
+    fn service_source_sentence_renders_external_benchmark_workspace_variants() {
+        let live = service_source_sentence(ServiceSourceKind::ExternalBenchmarkWorkspace {
+            mode: ExternalBenchmarkWorkspaceMode::LiveWithWorkspace {
+                endpoint: "http://127.0.0.1:7633",
+            },
+        });
+        let external_only =
+            service_source_sentence(ServiceSourceKind::ExternalBenchmarkWorkspace {
+                mode: ExternalBenchmarkWorkspaceMode::ExternalOnly,
+            });
+
+        assert!(live.contains("live Qdrant /metrics + workspace последнего внешнего прогона"));
+        assert!(live.contains("http://127.0.0.1:7633"));
+        assert!(external_only.contains("Эта карточка не берёт данные из Amai live"));
+    }
 
     #[test]
     fn benchmark_qdrant_card_uses_last_success_snapshot_without_error_rows() {
@@ -708,6 +1186,9 @@ mod tests {
                 .unwrap_or_default()
                 .contains("последнего успешного прогона")
         );
+        assert!(card["source_label"].as_str().unwrap_or_default().contains(
+            "workspace последнего внешнего прогона + последний известный срез benchmark-Qdrant"
+        ));
         let empty_rows = Vec::new();
         let labels = card["rows"]
             .as_array()
@@ -926,8 +1407,289 @@ mod tests {
         assert!(titles.contains(&"Qdrant Amai live"));
         assert!(titles.contains(&"Qdrant внешнего бенча"));
         assert!(titles.contains(&"NATS / JetStream"));
+        assert!(titles.contains(&"Remediation inbox"));
         assert!(titles.contains(&"Жизненный цикл памяти"));
         assert!(!titles.contains(&"Поведение при сбоях"));
         assert!(!titles.contains(&"Правильное продолжение"));
+        let postgres = cards
+            .iter()
+            .find(|card| card["title"].as_str() == Some("PostgreSQL"))
+            .expect("postgres card");
+        assert_eq!(
+            postgres["source_label"].as_str(),
+            Some("Источник: живой PostgreSQL probe, обновляется на каждом refresh dashboard")
+        );
+        let forecast = cards
+            .iter()
+            .find(|card| card["title"].as_str() == Some("Capacity forecast"))
+            .expect("capacity forecast card");
+        assert_eq!(
+            forecast["source_label"].as_str(),
+            Some("Источник: capacity_forecast из live snapshot.")
+        );
+    }
+
+    #[test]
+    fn remediation_inbox_card_surfaces_open_and_invalid_bundles() {
+        let bundle_dir =
+            std::env::temp_dir().join(format!("amai-dashboard-remediation-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&bundle_dir).expect("create remediation dir");
+        std::fs::write(
+            bundle_dir.join("200_open.json"),
+            serde_json::to_string_pretty(&json!({
+                "artifact_version": crate::indexer::QDRANT_POSTGRES_REMEDIATION_BUNDLE_ARTIFACT_VERSION,
+                "bundle_id": "bundle-open",
+                "created_at_epoch_ms": 200,
+                "relative_path": "src/open.rs",
+                "document_id": "00000000-0000-0000-0000-000000000010",
+                "had_existing_document": true,
+                "failure_mode": "existing_document_inconsistent_state",
+                "failure_phase": "before_commit",
+                "consistency_state": "cross_store_inconsistent_after_compensation_failure",
+                "required_action": "manual_cross_store_investigation_required",
+                "operator_summary": "manual recovery required",
+                "operator_checklist": ["inspect"],
+                "compensation_attempted": true,
+                "observability_stage": "index_project.qdrant_postgres_failure_verdict"
+            }))
+            .expect("serialize remediation bundle"),
+        )
+        .expect("write remediation bundle");
+        std::fs::write(bundle_dir.join("300_invalid.json"), "{")
+            .expect("write invalid remediation bundle");
+        let dir_value = bundle_dir.display().to_string();
+        unsafe {
+            std::env::set_var("AMAI_QDRANT_POSTGRES_REMEDIATION_DIR", &dir_value);
+        }
+
+        let card = build_remediation_inbox_card();
+        assert_eq!(card["status"].as_str(), Some("critical"));
+        assert!(
+            card["value"]
+                .as_str()
+                .is_some_and(|value| value.contains("invalid artifact"))
+        );
+        assert_eq!(card["rows"][0]["value"].as_str(), Some("2"));
+        assert_eq!(card["rows"][1]["value"].as_str(), Some("1"));
+        assert!(
+            card["details"]
+                .as_array()
+                .is_some_and(|details| details.iter().any(|item| {
+                    item.as_str()
+                        .is_some_and(|text| text.contains("/api/remediation-bundles"))
+                }))
+        );
+
+        unsafe {
+            std::env::remove_var("AMAI_QDRANT_POSTGRES_REMEDIATION_DIR");
+        }
+        std::fs::remove_dir_all(&bundle_dir).expect("cleanup remediation dir");
+    }
+
+    #[test]
+    fn capacity_forecast_card_surfaces_missing_family_as_no_data() {
+        let snapshot = json!({
+            "capacity_forecast": {
+                "summary": {
+                    "status": "unknown",
+                    "measured_families": 0,
+                    "insufficient_families": 0
+                },
+                "families": []
+            }
+        });
+
+        let card = build_capacity_forecast_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("unknown"));
+        assert_eq!(card["value"].as_str(), Some("ещё нет данных"));
+        assert_eq!(
+            card["source_label"].as_str(),
+            Some("Источник: capacity_forecast из live snapshot.")
+        );
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("нет ни одного supported family")
+        );
+    }
+
+    #[test]
+    fn capacity_forecast_card_prefers_measured_five_minute_window_for_headline() {
+        let snapshot = json!({
+            "capacity_forecast": {
+                "summary": {
+                    "status": "pass",
+                    "measured_families": 1,
+                    "insufficient_families": 0
+                },
+                "history_scope": {
+                    "mode": "project_scoped_observe_history"
+                },
+                "families": [{
+                    "family_key": "nats_events",
+                    "status": "measured",
+                    "windows": [
+                        {
+                            "window_key": "1m",
+                            "status": "insufficient_sample",
+                            "sample_count": 1,
+                            "observed_span_seconds": 30.0
+                        },
+                        {
+                            "window_key": "5m",
+                            "status": "measured",
+                            "sample_count": 6,
+                            "lambda": 2.5,
+                            "capacity_margin": 0.75
+                        }
+                    ]
+                }]
+            }
+        });
+
+        let card = build_capacity_forecast_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("pass"));
+        assert_eq!(card["value"].as_str(), Some("5м λ 2.50/s • запас 0.75/s"));
+        let empty_rows = Vec::new();
+        let rows = card["rows"].as_array().unwrap_or(&empty_rows);
+        let five_minute_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Окно 5m"))
+            .expect("5m row");
+        assert!(
+            five_minute_row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("λ 2.50/s • запас 0.75/s • n=6")
+        );
+        let scope_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("History scope"))
+            .expect("history scope row");
+        assert_eq!(
+            scope_row["value"].as_str(),
+            Some("Project Scoped Observe History")
+        );
+    }
+
+    #[test]
+    fn capacity_forecast_card_handles_family_without_windows_fail_closed() {
+        let snapshot = json!({
+            "capacity_forecast": {
+                "summary": {
+                    "status": "unknown",
+                    "measured_families": 0,
+                    "insufficient_families": 1
+                },
+                "history_scope": {
+                    "mode": "project_scoped_observe_history"
+                },
+                "families": [{
+                    "family_key": "nats_events",
+                    "status": "insufficient_sample",
+                    "windows": []
+                }]
+            }
+        });
+
+        let card = build_capacity_forecast_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("unknown"));
+        assert_eq!(card["value"].as_str(), Some("0 measured • 1 insufficient"));
+        let empty_rows = Vec::new();
+        let rows = card["rows"].as_array().unwrap_or(&empty_rows);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["label"].as_str(), Some("History scope"));
+        assert_eq!(
+            rows[0]["value"].as_str(),
+            Some("Project Scoped Observe History")
+        );
+    }
+
+    #[test]
+    fn regression_explain_card_surfaces_insufficient_sample_outcomes() {
+        let snapshot = json!({
+            "regression_explain": {
+                "summary": {
+                    "status": "unknown",
+                    "measured_outcomes": 0,
+                    "insufficient_sample_outcomes": 3
+                },
+                "outcomes": [
+                    {
+                        "outcome_key": "benchmark_pass",
+                        "title": "Benchmark pass",
+                        "status": "insufficient_sample",
+                        "sample_size": 17,
+                        "positive_count": 17
+                    },
+                    {
+                        "outcome_key": "stale_error",
+                        "title": "Stale error",
+                        "status": "insufficient_sample",
+                        "sample_size": 31,
+                        "positive_count": 0
+                    },
+                    {
+                        "outcome_key": "retrieval_helpful",
+                        "title": "Retrieval helpful",
+                        "status": "insufficient_sample",
+                        "sample_size": 31,
+                        "positive_count": 31
+                    }
+                ]
+            }
+        });
+
+        let card = build_regression_explain_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("unknown"));
+        assert_eq!(card["value"].as_str(), Some("0 measured • 3 insufficient"));
+        assert_eq!(
+            card["source_label"].as_str(),
+            Some("Источник: regression_explain из live snapshot.")
+        );
+        let empty_rows = Vec::new();
+        let rows = card["rows"].as_array().unwrap_or(&empty_rows);
+        assert_eq!(rows.len(), 3);
+        for (label, expected) in [
+            ("Benchmark pass", "insufficient • n=17 • +=17"),
+            ("Stale error", "insufficient • n=31 • +=0"),
+            ("Retrieval helpful", "insufficient • n=31 • +=31"),
+        ] {
+            let row = rows
+                .iter()
+                .find(|row| row["label"].as_str() == Some(label))
+                .unwrap_or_else(|| panic!("missing row for {label}"));
+            assert_eq!(row["value"].as_str(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn regression_explain_card_omits_unrelated_outcomes_fail_closed() {
+        let snapshot = json!({
+            "regression_explain": {
+                "summary": {
+                    "status": "unknown",
+                    "measured_outcomes": 0,
+                    "insufficient_sample_outcomes": 1
+                },
+                "outcomes": [
+                    {
+                        "outcome_key": "some_future_metric",
+                        "title": "Future metric",
+                        "status": "measured",
+                        "sample_size": 9,
+                        "auc": 0.91
+                    }
+                ]
+            }
+        });
+
+        let card = build_regression_explain_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("unknown"));
+        assert_eq!(card["value"].as_str(), Some("0 measured • 1 insufficient"));
+        let empty_rows = Vec::new();
+        let rows = card["rows"].as_array().unwrap_or(&empty_rows);
+        assert!(rows.is_empty());
     }
 }

@@ -228,7 +228,7 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
     match continuity::inspect_startup_runtime_state(&repo_root) {
         Ok(audit) => {
             println!(
-                "startup_runtime_state: {} (artifact_present={}, contract_sha_match={}, source_summary_field_match={}, prompt_text_present={}, startup_next_action_present={}, startup_execution_gate_present={}, required_return_task_field_present={}, execctl_active_lease_field_present={}, project_task_tree_field_present={}, project_task_tree_summary_field_present={}, project_task_ledger_field_present={}, project_task_ledger_summary_field_present={}, resume_state={}, action_kind={}, lease_owner_state={}, must_follow_startup_next_action={}, unrelated_work_allowed={}, must_read_prompt_text_before_reply={}, required_action_kind_when_resume_required={}, no_silent_drop={}, artifact_gate_semantics_consistent_present={}, artifact_gate_semantics_consistent_matches_recomputed={}, gate_semantics_consistent={}, path={})",
+                "startup_runtime_state: {} (artifact_present={}, contract_sha_match={}, source_summary_field_match={}, prompt_text_present={}, startup_next_action_present={}, startup_execution_gate_present={}, required_return_task_field_present={}, required_task_set_field_present={}, required_task_set_summary_field_present={}, execctl_active_lease_field_present={}, project_task_tree_field_present={}, project_task_tree_summary_field_present={}, project_task_ledger_field_present={}, project_task_ledger_summary_field_present={}, resume_state={}, action_kind={}, lease_owner_state={}, must_follow_startup_next_action={}, unrelated_work_allowed={}, must_read_prompt_text_before_reply={}, required_task_set_count_consistent={}, required_task_set_presence_consistent={}, must_preserve_required_task_set_consistent={}, required_action_kind_when_resume_required={}, no_silent_drop={}, artifact_gate_semantics_consistent_present={}, artifact_gate_semantics_consistent_matches_recomputed={}, gate_semantics_consistent={}, path={})",
                 audit.status,
                 audit.artifact_exists,
                 audit
@@ -239,6 +239,10 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
                 audit.startup_next_action_present.unwrap_or(false),
                 audit.startup_execution_gate_present.unwrap_or(false),
                 audit.required_return_task_field_present.unwrap_or(false),
+                audit.required_task_set_field_present.unwrap_or(false),
+                audit
+                    .required_task_set_summary_field_present
+                    .unwrap_or(false),
                 audit.execctl_active_lease_field_present.unwrap_or(false),
                 audit.project_task_tree_field_present.unwrap_or(false),
                 audit
@@ -254,6 +258,11 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
                 audit.must_follow_startup_next_action.unwrap_or(false),
                 audit.unrelated_work_allowed.unwrap_or(false),
                 audit.must_read_prompt_text_before_reply.unwrap_or(false),
+                audit.required_task_set_count_consistent.unwrap_or(false),
+                audit.required_task_set_presence_consistent.unwrap_or(false),
+                audit
+                    .must_preserve_required_task_set_consistent
+                    .unwrap_or(false),
                 audit
                     .required_action_kind_when_resume_required
                     .as_deref()

@@ -27,6 +27,7 @@ pub struct ContextPackInsert<'a> {
     pub query_text: &'a str,
     pub visible_projects: &'a Value,
     pub payload: &'a Value,
+    #[allow(dead_code)]
     pub artifact_ref_id: Option<Uuid>,
 }
 

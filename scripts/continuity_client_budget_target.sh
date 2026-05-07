@@ -9,6 +9,28 @@ source "$SCRIPT_DIR/load_env.sh"
 
 original_args=("$@")
 
+extract_client_budget_target_projection() {
+  local payload="${1:-}"
+  [[ -n "$payload" ]] || return 1
+  printf '%s\n' "$payload" | jq -c '
+    if (.client_budget_target_update | type) == "object" then
+      .client_budget_target_update as $projection
+      | if (($projection.target_percent | type) == "number" and ($projection.target_percent | floor) == $projection.target_percent and ($projection.target_percent >= 0 and $projection.target_percent <= 100) and (($projection.target_percent % 10) == 0))
+          and (($projection.project.code | type) == "string" and (($projection.project.code | gsub("^\\s+|\\s+$"; "")) | length) > 0)
+          and (($projection.namespace.code | type) == "string" and (($projection.namespace.code | gsub("^\\s+|\\s+$"; "")) | length) > 0)
+          and (($projection.operator_notice.exact_chat_command | type) == "string" and (($projection.operator_notice.exact_chat_command | gsub("^\\s+|\\s+$"; "")) | length) > 0)
+          and (($projection.operator_notice.message_text | type) == "string" and (($projection.operator_notice.message_text | gsub("^\\s+|\\s+$"; "")) | length) > 0)
+        then
+          $projection
+        else
+          empty
+        end
+    else
+      empty
+    end
+  ' 2>/dev/null
+}
+
 project=""
 namespace="continuity"
 repo_root=""
@@ -69,6 +91,8 @@ case "$observe_host" in
     ;;
 esac
 
+"$SCRIPT_DIR/ensure_observe_frontdoor.sh" --path "/api/client-budget-target" >/dev/null 2>&1 || true
+
 if [[ "$api_supported" == "true" ]] \
   && [[ -n "$percent" ]] \
   && { [[ -z "$repo_root" ]] || [[ "$repo_root" == "$REPO_ROOT" ]]; } \
@@ -98,10 +122,19 @@ if [[ "$api_supported" == "true" ]] \
         "http://${observe_host}:${observe_port}/api/client-budget-target" 2>/dev/null || true
     )"
     if [[ -n "$api_payload" ]]; then
-      printf '%s\n' "$api_payload" | jq '.client_budget_target_update'
+      target_projection="$(extract_client_budget_target_projection "$api_payload" || true)"
+      if [[ -z "$target_projection" ]]; then
+        echo "continuity client budget target: invalid API payload" >&2
+        exit 12
+      fi
+      printf '%s\n' "$target_projection"
       exit 0
     fi
   fi
+fi
+
+if [[ -x "$REPO_ROOT/target/release/amai" ]]; then
+  exec "$REPO_ROOT/target/release/amai" continuity client-budget-target "${original_args[@]}"
 fi
 
 exec "$SCRIPT_DIR/amai_exec.sh" continuity client-budget-target "${original_args[@]}"

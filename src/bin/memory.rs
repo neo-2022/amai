@@ -724,18 +724,41 @@ fn contains_legacy_bridge_marker(hit: &SearchHit) -> bool {
         || lowered.contains("echovault-project-bootstrap")
 }
 
+fn included_reason_line(summary: Option<&str>, hit_count: usize) -> String {
+    match summary.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => value.to_string(),
+        None if hit_count == 0 => {
+            "записей не найдено; exact/symbol/lexical/semantic lanes не добавили hits для этого запроса.".to_string()
+        }
+        None => {
+            "context pack вернул hits без compact included decision_trace; смотри детали записей ниже.".to_string()
+        }
+    }
+}
+
+fn excluded_reason_line(summary: Option<&str>) -> String {
+    match summary.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => value.to_string(),
+        None => {
+            "context pack не вернул compact not_included decision_trace; отдельные исключённые кандидаты не surfaced.".to_string()
+        }
+    }
+}
+
 fn print_search_state(state: &SearchState) {
     println!("Amai memory search");
     println!();
     println!("Проект: {}", state.project_code);
     println!("Namespace: {}", state.namespace);
     println!("Запрос: {}", state.query);
-    if let Some(summary) = &state.included_reasons_summary {
-        println!("Почему вошло: {summary}");
-    }
-    if let Some(summary) = &state.excluded_reasons_summary {
-        println!("Почему часть не вошла: {summary}");
-    }
+    println!(
+        "Почему вошло: {}",
+        included_reason_line(state.included_reasons_summary.as_deref(), state.hits.len())
+    );
+    println!(
+        "Почему часть не вошла: {}",
+        excluded_reason_line(state.excluded_reasons_summary.as_deref())
+    );
     println!("Найдено записей: {}", state.hits.len());
     println!();
     for hit in &state.hits {
@@ -920,8 +943,8 @@ fn now_epoch_ms() -> u128 {
 mod tests {
     use super::{
         BridgePaths, Cli, append_whole_cycle_observed_args, build_search_hits,
-        decision_trace_summary, is_amai_root, match_project_code_by_repo_roots,
-        render_save_details,
+        decision_trace_summary, excluded_reason_line, included_reason_line, is_amai_root,
+        match_project_code_by_repo_roots, render_save_details,
     };
     use clap::Parser;
     use serde_json::json;
@@ -1007,6 +1030,18 @@ mod tests {
             decision_trace_summary(&trace, "not_included").as_deref(),
             Some("смысловые фрагменты — Semantic layer честно abstained и не добавил фрагменты.")
         );
+    }
+
+    #[test]
+    fn memory_search_explainability_lines_have_fallbacks() {
+        assert_eq!(included_reason_line(Some(" exact hit "), 1), "exact hit");
+        assert!(included_reason_line(None, 0).contains("записей не найдено"));
+        assert!(included_reason_line(None, 2).contains("вернул hits"));
+        assert_eq!(
+            excluded_reason_line(Some(" semantic abstained ")),
+            "semantic abstained"
+        );
+        assert!(excluded_reason_line(None).contains("not_included decision_trace"));
     }
 
     #[test]

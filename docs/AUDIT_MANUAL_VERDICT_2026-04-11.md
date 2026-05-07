@@ -2,7 +2,7 @@
 
 Дата ручной сверки: 2026-04-11
 
-Источник checklist: `/home/art/Загрузки/amai_full_audit_report.md`
+Источник checklist: `amai_full_audit_report.md`
 
 ## Короткий итог
 

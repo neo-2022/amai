@@ -300,6 +300,18 @@ async fn build_snapshot_with_connected_admin_db(
         postgres::latest_observability_snapshot(db, "memory_benchmark_score"),
     )
     .await?;
+    let latest_memory_task_matrix = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_memory_task_matrix",
+        postgres::latest_observability_snapshot(db, "memory_task_matrix"),
+    )
+    .await?;
+    let latest_mcp_task_matrix = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_mcp_task_matrix",
+        postgres::latest_observability_snapshot(db, "mcp_task_matrix"),
+    )
+    .await?;
     let latest_cold_path_benchmark = timed_future(
         &mut observe_refresh_stage_ms,
         "latest_cold_path_benchmark",
@@ -425,6 +437,8 @@ async fn build_snapshot_with_connected_admin_db(
         "latest_procedural_benchmark": latest_procedural_benchmark,
         "procedural_benchmark_history": procedural_benchmark_history,
         "latest_memory_benchmark_score": latest_memory_benchmark_score,
+        "latest_memory_task_matrix": latest_memory_task_matrix,
+        "latest_mcp_task_matrix": latest_mcp_task_matrix,
         "latest_cold_path_benchmark": latest_cold_path_benchmark,
         "cold_path_benchmark_progress": cold_path_benchmark_progress,
         "latest_working_state_restore": latest_working_state_restore,
@@ -439,13 +453,20 @@ async fn build_snapshot_with_connected_admin_db(
     let governance_surface = timed_future(
         &mut observe_refresh_stage_ms,
         "governance_surface",
-        collect_governance_surface(db),
+        collect_governance_surface(db, repo_root),
+    )
+    .await?;
+    let observe_scope = timed_future(
+        &mut observe_refresh_stage_ms,
+        "resolve_observe_scope",
+        resolve_observe_scope(db, repo_root),
     )
     .await?;
     let degradation_model = build_degradation_model(&payload)?;
     let continuity_correctness_model = build_continuity_correctness_model(&payload)?;
+    let regression_explain = regression_explain::build_regression_explain(&payload)?;
     let sla = evaluate_sla(&payload, profile);
-    let snapshot = json!({
+    let mut snapshot = json!({
         "captured_at_epoch_ms": captured_at_epoch_ms,
         "stack_name": cfg.stack_name,
         "thresholds": payload["thresholds"].clone(),
@@ -467,6 +488,8 @@ async fn build_snapshot_with_connected_admin_db(
         "latest_procedural_benchmark": payload["latest_procedural_benchmark"].clone(),
         "procedural_benchmark_history": payload["procedural_benchmark_history"].clone(),
         "latest_memory_benchmark_score": payload["latest_memory_benchmark_score"].clone(),
+        "latest_memory_task_matrix": payload["latest_memory_task_matrix"].clone(),
+        "latest_mcp_task_matrix": payload["latest_mcp_task_matrix"].clone(),
         "latest_cold_path_benchmark": payload["latest_cold_path_benchmark"].clone(),
         "cold_path_benchmark_progress": payload["cold_path_benchmark_progress"].clone(),
         "latest_working_state_restore": payload["latest_working_state_restore"].clone(),
@@ -484,11 +507,37 @@ async fn build_snapshot_with_connected_admin_db(
         },
         "degradation_model": degradation_model,
         "continuity_correctness_model": continuity_correctness_model,
+        "regression_explain": regression_explain,
         "governance_surface": governance_surface,
         "sla": sla,
     });
+    if let Some((project_code, namespace_code)) = observe_scope {
+        snapshot["_observability"] = json!({
+            "scope_project_code": project_code,
+            "scope_namespace_code": namespace_code,
+            "captured_at_epoch_ms": captured_at_epoch_ms,
+        });
+    }
+    let capacity_forecast = timed_future(
+        &mut observe_refresh_stage_ms,
+        "capacity_forecast",
+        capacity_forecast::build_capacity_forecast(db, &snapshot),
+    )
+    .await?;
+    snapshot["capacity_forecast"] = capacity_forecast;
+    snapshot["observe_refresh"]["stage_ms"]["capacity_forecast"] =
+        json!(observe_refresh_stage_ms["capacity_forecast"].clone());
     if persist_snapshot {
         let _ = postgres::insert_observability_snapshot(db, "system_snapshot", &snapshot).await?;
     }
     Ok(snapshot)
+}
+
+async fn resolve_observe_scope(db: &Client, repo_root: &Path) -> Result<Option<(String, String)>> {
+    let repo_root_string = repo_root.display().to_string();
+    let project = match postgres::get_project_by_repo_root(db, &repo_root_string).await {
+        Ok(project) => project,
+        Err(_) => return Ok(None),
+    };
+    Ok(Some((project.code, "observe".to_string())))
 }

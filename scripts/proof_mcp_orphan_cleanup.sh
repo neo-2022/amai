@@ -17,8 +17,12 @@ repo_root = ${repo_root@Q}
 def orphan_parent_kind(pid: int) -> str | None:
     try:
         with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as fh:
-            ppid = fh.read().split()[3]
+            stat = fh.read()
     except FileNotFoundError:
+        return None
+    try:
+        ppid = stat.rsplit(") ", 1)[1].split()[1]
+    except IndexError:
         return None
     if ppid == "1":
         return "pid1"
@@ -81,7 +85,11 @@ try:
     parent_kind = orphan_parent_kind(orphan_pid)
     if not parent_kind:
         with open(f"/proc/{orphan_pid}/stat", "r", encoding="utf-8") as fh:
-            ppid = fh.read().split()[3]
+            stat = fh.read()
+        try:
+            ppid = stat.rsplit(") ", 1)[1].split()[1]
+        except IndexError:
+            ppid = "<unparseable>"
         raise RuntimeError(f"fake MCP process did not become orphaned (ppid={ppid})")
 
     subprocess.run(

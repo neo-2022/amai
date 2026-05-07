@@ -18,6 +18,15 @@
 - убрать двусмысленность для любого агента;
 - показать, что делать прямо сейчас.
 
+Если нужен не только status/startup вход, но и целостная картина того, что вообще заложено в
+`Amai`, отдельно открыть `AMAI_SYSTEM_OVERVIEW.md`.
+
+Этот обзорный документ нужен затем, чтобы новый агент не сужал проект до одной из частей:
+- не сводил `Amai` только к continuity;
+- не сводил `Amai` только к retrieval;
+- не сводил `Amai` только к task-memory;
+- не забывал про интеграции, платформенную нейтральность, host/OS слой и научный advisory contour.
+
 И отдельный языковой закон:
 - этот проект развивается как `Rust-first` system;
 - новый внутренний runtime/proof/verify/eval слой по умолчанию нельзя уводить в `python`;
@@ -81,11 +90,13 @@
 В корне лежат главные документы:
 - `AGENTS.md`
 - `README.md`
+- `AMAI_SYSTEM_OVERVIEW.md`
 - `AGENT_START_HERE.md`
 - `IMPLEMENTATION_STATUS.md`
 
 Смысл корня:
 - понять, что это за проект;
+- понять общую концептуальную картину;
 - понять current-state;
 - понять target-state;
 - понять, что делать прямо сейчас.
@@ -103,6 +114,9 @@
 Простое правило:
 - если агент не понял, на каком этапе проект находится сейчас, он ещё не дошёл даже до ствола;
 - начинать работу в коде раньше этого нельзя.
+- canonical implementation ladder и запрет dashboard-first drift держатся не здесь, а в
+  `IMPLEMENTATION_STATUS.md`; если работа началась с витрины раньше foundation/workline слоя, это
+  считается ошибкой, а не допустимым ускорением.
 
 ### Ветви
 
@@ -154,7 +168,7 @@
 `Amai` — это отдельный внешний memory/retrieval/continuity инструмент для ИИ-агентов.
 
 Он нужен затем, чтобы агент:
-- не терял рабочую линию между чатами и сессиями;
+- не терял рабочую линию между разными рабочими поверхностями и сессиями;
 - не смешивал разные проекты по умолчанию;
 - поднимал полезный context pack вместо лишнего шума;
 - имел source-of-truth вне IDE и вне одного конкретного чата;
@@ -166,6 +180,12 @@
 - это не “только task tree”.
 
 Это отдельный backend/tooling contour памяти и continuity для агентов.
+
+Каноническая framing здесь такая:
+- `Amai` — независимое ядро памяти и continuity;
+- чат, окно IDE, новая сессия, `.txt` файл или другой client surface — только способ получить из
+  `Amai` уже восстановленное рабочее состояние;
+- transcript/history чата не является source of truth для памяти проекта.
 
 ## В каком состоянии проект сейчас
 
@@ -190,30 +210,44 @@
 - `Этап 1` `scope / identity control plane` закрыт и подтверждён proof bundle;
 - `Этап 2` `typed memory envelope + provenance` закрыт и materialized в truth/read pipeline;
 - `Этап 3` `commitment / task graph` и `Этап 3A` `procedural seed contour` уже закрыты;
-- `Этап 4` `workspace restore pack`, `Этап 5` `semantic + temporal strengthening`, `Этап 6` `multi-agent shared/private memory` и `Этап 7` `compare + benchmark plane` тоже уже закрыты по текущему status checklist.
+- `Этап 4` `workspace restore pack`, `Этап 5` `semantic + temporal strengthening`, `Этап 6` `multi-agent shared/private memory`, `Этап 7` `compare + benchmark plane`, `Этап 8` `procedural memory`, `Этап 9` `forgetting / consolidation / pruning` и `Этап 10` `governance / safety / evaluator loop` закрыты по текущему internal status checklist и fresh proof bundle.
+
+Важная оговорка:
+- `closed` здесь означает `закрыто по внутреннему status/proof контурy проекта`;
+- если текущая задача требует свежий эксплуатационный verdict, агент обязан заново прогнать matching bundle из `IMPLEMENTATION_GATES.md`;
+- если fresh proof, dashboard/raw lane или external benchmark maturity не подтверждены, агент обязан пометить claim как `proof-refresh-required` или `not-fully-materialized`, а не повторять старый green verdict.
 
 ### Что уже есть, но ещё не является полной целевой реализацией
 
 Есть сильный промежуточный baseline:
-- continuity между чатами работает частично;
+- continuity между рабочими поверхностями уже работает на prompt/machine-readable стороне, но
+  host-side clean-chat handoff ещё не полностью бесшовный во всех клиентах и средах;
+- даже там, где automatic clean-chat bridge ещё не materialized, compact-chat уже не сводит manual fallback к codex-only подсказке: current client surface, startup path и reconnect/fresh-chat assist теперь surfaced по реальному клиенту, а dashboard KPI selector ещё и показывает текущий auto-launch status / unavailable reason / UX boundary для clean-chat path;
 - pending return и resume obligations уже surfaced;
 - dashboard/eval/compare contours уже есть;
-- graph-first task-memory baseline уже materialized, но вся memory fabric ещё не доведена до финального target-state;
-- startup/restore уже сильный, но ещё не даёт полную memory fabric.
+- scientific reinforcement overlay уже начат как отдельная queue-driven надстройка поверх Stage 7 / 9 / 10;
+- часть probabilistic/statistical surfaces уже production-visible только как bounded advisory/read-only slices, а не как truth-authoritative decision layer.
+- `KAN-style context-pack utility explain` уже зафиксирован в
+  `AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md` как `Candidate Queue 4A`, но только
+  со статусом `research_candidate / spec_only / not_materialized`; это не live
+  runtime contour и не core roadmap promise.
 
 ### Что ещё не materialized полностью
 
 Пока ещё не доведены до полного target-state:
-- `Memory Fabric` как общая рабочая архитектура;
 - полноценный graph-wide restore continuity beyond уже materialized `workspace_restore_pack`;
-- полноценная `procedural memory` c evaluator/trust contour;
-- forgetting / consolidation / pruning;
-- governance / safety / poisoning defense как материализованный enforcement layer;
-- по-настоящему бесшовное продолжение длинных чатов с несколькими старыми линиями работы.
+- по-настоящему бесшовное продолжение длинной работы через новые client/runtime surfaces с
+  несколькими старыми линиями работы.
+- external long-term memory benchmark registry из `IMPLEMENTATION_GATES.md` уже surfaced как отдельный prep/proof contour, но не как полный scored maturity verdict: LongMemEval/MemoryAgentBench/LoCoMo и AMA-Bench имеют guarded normalized cases, `external-memory-run/score` покрыты synthetic smoke, LongMemEval, AMA-Bench и bounded `MemoryAgentBench / conflict_resolution` plus `long_range_understanding` and `test_time_learning` имеют initial, dataset-specific runtime+baseline-score proof, а benchmark-grade claim всё ещё требует full dataset runtime+score proof, semantic retrieval precision и upstream parity.
+- bounded `MemoryAgentBench / accurate_retrieval` теперь тоже materialized как отдельный blocked profile: bounded runtime+score slice завершается с `3/3` baseline answers, retrieval-backed predictions по всем трём bounded cases, `top_ranked_relevant_retrieval_cases=3/3`, `gold_answer_supported_retrieval_cases=3/3` и `top_ranked_relevance_and_gold_answer_supported_retrieval_cases=3/3`, а benchmark-specific shaping на bounded slice уже отсутствует (`query_override_cases=0`, `window_override_cases=0`, `answer_extraction_cases=0`, `benchmark_specific_shaping_present=false`, `generic_runtime_maturity=true`). Boundary driven explicit runtime metric flags вместо повторного вывода по question text. Profiling-guided runtime hardening additionally dropped the current bounded cold first-case `index_project_ms` to about `0.87s` and bounded `total_case_ms.avg` to about `0.91s`, but this still remains bounded-only latency evidence rather than latency-grade maturity. Semantic relevance maturity остаётся proxy/lexical-only, а upstream scorer parity всё ещё отсутствует, поэтому этот contour всё ещё нельзя silently считать fully trusted positive bounded proof.
+- Queue 1 scientific benchmark honesty ещё не равна финальному automatic promotion: measured approval остаётся human-gated.
+- Queue 4 regression explain surface production-visible, но measured regression quality на live sample остаётся `insufficient_sample`, пока не накоплен двусторонний sample contour.
+- Queue 5 capacity forecast surface production-visible только как forecast-only/read-only contour; exact live window values из `observe snapshot` не являются долговечным implementation-status claim.
+- host-side clean-chat migration всё ещё не полностью seamless: current compact-chat runtime/API truthfully distinguishes `available_not_requested`, `bridge_unavailable`, `disabled_by_policy`, `requested` and `launch_failed`; VS Code `vscode_code_chat_cli` and non-VSCode `manual_only` boundaries are command-contract evidence only, while live client-open/session UX still requires separate proof before any seamless claim.
 
 ### Главная честная оговорка
 
-Полноценный бесшовный переход в новый чат пока ещё не решён до конца.
+Полноценный бесшовный переход в новую рабочую поверхность пока ещё не решён до конца.
 
 То есть:
 - continuity и restore уже есть;
@@ -287,31 +321,52 @@
 
 ## Какой этап следующий
 
-Сейчас проект уже прошёл ранние этапы memory fabric и дошёл до следующего незакрытого большого модуля.
+Сейчас основной Stage 0-10 checklist закрыт по текущему internal status snapshot и fresh proof-refresh bundle.
 
-### Ближайший обязательный этап
+### Ближайший обязательный контур
 
-`Этап 8. Procedural memory`
+Ближайшая работа теперь не новый Stage 11 и не возврат к Stage 8.
 
-Это значит:
-- procedural seed и compare-plane proof уже materialized, но этого ещё недостаточно для честного full procedural memory;
-- следующий обязательный шаг теперь не про scope/provenance base, а про executable procedural memory с trust/evaluator discipline.
+Текущий обязательный контур:
+- scientific reinforcement overlay из `AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md`;
+- если задача касается `KAN` / Kolmogorov-Arnold / context-pack utility
+  explainability, source-of-truth сейчас живёт именно в `Candidate Queue 4A`
+  этого документа, а не в `IMPLEMENTATION_STATUS.md` как materialized feature;
+- status-truth / proof-refresh аудит для claims, которые в документах названы `закрыто`, `green`, `materialized` или `работает`;
+- устранение cross-doc drift между `IMPLEMENTATION_STATUS.md`, `AGENT_START_HERE.md`, `AMAI_GLOBAL_MEMORY_ROADMAP.md`, `IMPLEMENTATION_GATES.md`, `README.md` и machine-readable preflight state.
 
-Что должно войти в этот этап:
-- executable skill memory как first-class truth contour, а не text-only заметки;
-- trigger/precondition/execution/stop/forbidden/expected-outcome contract;
-- evaluator/trust contour для shadow -> trial -> verified promotion;
-- suppression плохих и устаревших навыков;
-- сохранение procedural provenance и version history;
-- non-regression against already closed compare-plane and procedural-seed proofs.
+Что это значит practically:
+- если claim уже закрыт, но fresh proof не прогнан в текущей рабочей линии, он не должен звучать как свежий green verdict;
+- если claim закрыт только внутренним harness или только external prep/synthetic smoke proof без real benchmark runtime+score lane, его нельзя называть внешне benchmark-grade;
+- если runtime surface возвращает `insufficient_sample`, `pending_human_review`, `blocked`, `partial` или `proof-refresh-required`, документация должна показывать именно это состояние;
+- если proof реально красный, соответствующий checkbox или status claim должен быть снят до исправления и повторной проверки.
 
-### Что нельзя делать раньше этого этапа
+Fresh proof-refresh 2026-04-24:
+- `proof_benchmark_contamination_preflight.sh` is green;
+- `proof_mcp_task_matrix.sh` is green after strict-heavy contamination preflight and explicit failed-run artifact handling;
+- `proof_observability.sh` is green; dashboard `MCP task matrix compare` no longer degrades to `ещё нет данных`;
+- `proof_memory_external_benchmarks.sh` is green for dataset download, adapter workspace preparation, normalized case preparation and one synthetic runtime+baseline-score smoke only; it is explicitly not a full scored external benchmark verdict;
+- therefore Stage 10 is again fresh-green, while historical red runs remain useful root-cause context only.
+
+Fresh proof-refresh 2026-04-25:
+- `proof_memory_external_benchmarks.sh` reran green in the same prep/synthetic-smoke boundary only.
+- MemoryAgentBench prep produced multi-GiB normalized/request artifacts, so agents must not treat this proof as a cheap recurring full benchmark runtime or as external maturity.
+- `proof_observability.sh` reran green for Queue 4/5 read-only dashboard/raw snapshot guardrails only. It does not prove measured regression quality or durable capacity-quality numbers.
+
+Fresh bounded real runtime 2026-04-26:
+- `proof_memory_external_real_bounded.sh` proves a limited, dataset-specific LongMemEval `longmemeval_s_cleaned` runtime+baseline-score lane with retrieval-backed relaxed query retry.
+- `proof_memory_external_real_bounded_ama_bench.sh` proves a limited, dataset-specific AMA-Bench `ama_bench_manual` runtime+baseline-score lane while keeping the official scorer contract unavailable/blocker-visible.
+- It does not prove full external benchmark-grade maturity or official upstream scorer parity.
+- Relaxed retry proves retrieval participation only, not semantic precision.
+
+### Что нельзя делать сейчас
 
 Нельзя:
-- считать, что `proof_procedural_seed.sh` или compare-plane procedural benchmark уже равны full procedural memory;
-- продвигать skill в shared/verified path без evaluator/trust contour;
-- подменять executable procedural object обычной заметкой или summary-only карточкой;
-- перепрыгивать из compare-plane сразу в forgetting/governance, не закрыв procedural stage.
+- продолжать писать, что ближайший этап `Этап 8` или `Этап 1`;
+- считать Stage 0-10 fresh-green без matching fresh proof bundle и dashboard/raw parity;
+- принимать old docs line anchors за source-of-truth;
+- замалчивать remaining external benchmark maturity gap after prep/synthetic-smoke/bounded-real proof;
+- выдавать advisory/projection surfaces за truth-authoritative runtime.
 
 ## Короткая карта внедрения
 
@@ -376,9 +431,11 @@ Upgrade-law для любого нового слоя простой:
 Если совсем коротко:
 - `Amai` уже имеет сильный current-state baseline;
 - глобальная memory fabric уже спроектирована;
-- проект готов к началу `Этапа 1`;
+- Stage 0-10 закрыты по internal status checklist и fresh proof bundle, а fresh proof всегда берётся из matching bundle, а не из старой фразы в документации;
 - главный ближайший фокус:
-  - `scope / identity control plane`;
+  - scientific reinforcement overlay;
+  - status-truth / proof-refresh аудит;
+  - устранение cross-doc drift;
 - главный общий закон:
   - скорость, точность, качество и правдивость нельзя разменивать друг на друга;
 - главный продуктовый недостающий outcome:

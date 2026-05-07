@@ -24,6 +24,388 @@ use axum::{
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
+fn append_working_state_warning_to_message(base_message: &str, write_status: &Value) -> String {
+    let warning = write_status["warning"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match warning {
+        Some(warning) => format!("{base_message} {warning}"),
+        None => base_message.to_string(),
+    }
+}
+
+fn client_budget_target_notice_message(update: &Value) -> String {
+    update["client_budget_target_update"]["operator_notice"]["message_text"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            append_working_state_warning_to_message(
+                "Целевая экономия переключена.",
+                &update["client_budget_target_update"]["working_state_write_status"],
+            )
+        })
+}
+
+fn client_budget_target_notice_kind(update: &Value) -> String {
+    update["client_budget_target_update"]["operator_notice"]["kind"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "client_budget_target_changed".to_string())
+}
+
+fn client_budget_target_notice_thread_id(update: &Value, thread_id: Option<&str>) -> Value {
+    update["client_budget_target_update"]["operator_notice"]["thread_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| json!(value))
+        .or_else(|| thread_id.map(|value| json!(value)))
+        .unwrap_or(Value::Null)
+}
+
+fn client_budget_target_notice_reply_prefix(update: &Value) -> String {
+    update["client_budget_target_update"]["operator_notice"]["reply_prefix"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            update["client_budget_target_update"]["client_budget_guard"]["reply_prefix"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+}
+
+fn client_budget_target_chat_notice_payload(update: &Value, thread_id: Option<&str>) -> Value {
+    json!({
+        "kind": client_budget_target_notice_kind(update),
+        "thread_id": client_budget_target_notice_thread_id(update, thread_id),
+        "message_text": client_budget_target_notice_message(update),
+        "reply_prefix": client_budget_target_notice_reply_prefix(update),
+        "exact_chat_command": update["client_budget_target_update"]["operator_notice"]["exact_chat_command"].clone(),
+        "target_percent": update["client_budget_target_update"]["target_percent"].clone(),
+        "working_state_write_status": update["client_budget_target_update"]["working_state_write_status"].clone(),
+    })
+}
+
+fn agent_display_name_update_notice_payload(
+    agent_scope: &str,
+    display_name: &str,
+    thread_id: Option<&str>,
+) -> Value {
+    json!({
+        "kind": "agent_display_name_updated",
+        "thread_id": thread_id.map(str::to_string),
+        "message_text": format!("Имя агента сохранено: {display_name}."),
+        "agent_scope": agent_scope,
+        "display_name": display_name,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_working_state_warning_to_message_keeps_base_without_warning() {
+        let message =
+            append_working_state_warning_to_message("Target switched.", &json!({}));
+        assert_eq!(message, "Target switched.");
+    }
+
+    #[test]
+    fn append_working_state_warning_to_message_appends_degraded_warning() {
+        let message = append_working_state_warning_to_message(
+            "Target switched.",
+            &json!({
+                "status": "degraded_after_primary_write",
+                "warning": "restore refresh degraded"
+            }),
+        );
+        assert_eq!(message, "Target switched. restore refresh degraded");
+    }
+
+    #[test]
+    fn client_budget_target_notice_message_prefers_source_level_notice_without_reappending() {
+        let message = client_budget_target_notice_message(&json!({
+            "client_budget_target_update": {
+                "operator_notice": {
+                    "message_text": "Target switched. restore refresh degraded"
+                },
+                "working_state_write_status": {
+                    "warning": "restore refresh degraded"
+                }
+            }
+        }));
+        assert_eq!(message, "Target switched. restore refresh degraded");
+    }
+
+    #[test]
+    fn client_budget_target_notice_message_falls_back_to_default_with_warning() {
+        let message = client_budget_target_notice_message(&json!({
+            "client_budget_target_update": {
+                "operator_notice": {
+                    "message_text": "   "
+                },
+                "working_state_write_status": {
+                    "warning": "restore refresh degraded"
+                }
+            }
+        }));
+        assert_eq!(message, "Целевая экономия переключена. restore refresh degraded");
+    }
+
+    #[test]
+    fn client_budget_target_notice_message_falls_back_when_source_notice_is_null() {
+        let message = client_budget_target_notice_message(&json!({
+            "client_budget_target_update": {
+                "operator_notice": {
+                    "message_text": Value::Null
+                },
+                "working_state_write_status": {
+                    "warning": "restore refresh degraded"
+                }
+            }
+        }));
+        assert_eq!(message, "Целевая экономия переключена. restore refresh degraded");
+    }
+
+    #[test]
+    fn client_budget_target_notice_kind_prefers_source_notice_kind() {
+        let kind = client_budget_target_notice_kind(&json!({
+            "client_budget_target_update": {
+                "operator_notice": {
+                    "kind": "client_budget_target_changed"
+                }
+            }
+        }));
+        assert_eq!(kind, "client_budget_target_changed");
+    }
+
+    #[test]
+    fn client_budget_target_notice_kind_falls_back_when_source_kind_missing() {
+        let kind = client_budget_target_notice_kind(&json!({
+            "client_budget_target_update": {
+                "operator_notice": {
+                    "kind": "   "
+                }
+            }
+        }));
+        assert_eq!(kind, "client_budget_target_changed");
+    }
+
+    #[test]
+    fn client_budget_target_notice_kind_falls_back_when_source_kind_is_null() {
+        let kind = client_budget_target_notice_kind(&json!({
+            "client_budget_target_update": {
+                "operator_notice": {
+                    "kind": Value::Null
+                }
+            }
+        }));
+        assert_eq!(kind, "client_budget_target_changed");
+    }
+
+    #[test]
+    fn client_budget_target_notice_thread_id_prefers_source_notice_thread_id() {
+        let thread_id = client_budget_target_notice_thread_id(
+            &json!({
+                "client_budget_target_update": {
+                    "operator_notice": {
+                        "thread_id": "source-thread-id"
+                    }
+                }
+            }),
+            Some("query-thread-id"),
+        );
+        assert_eq!(thread_id, json!("source-thread-id"));
+    }
+
+    #[test]
+    fn client_budget_target_notice_thread_id_falls_back_to_query_thread_id() {
+        let thread_id = client_budget_target_notice_thread_id(
+            &json!({
+                "client_budget_target_update": {
+                    "operator_notice": {
+                        "thread_id": "   "
+                    }
+                }
+            }),
+            Some("query-thread-id"),
+        );
+        assert_eq!(thread_id, json!("query-thread-id"));
+    }
+
+    #[test]
+    fn client_budget_target_notice_thread_id_falls_back_when_source_thread_id_is_null() {
+        let thread_id = client_budget_target_notice_thread_id(
+            &json!({
+                "client_budget_target_update": {
+                    "operator_notice": {
+                        "thread_id": Value::Null
+                    }
+                }
+            }),
+            Some("query-thread-id"),
+        );
+        assert_eq!(thread_id, json!("query-thread-id"));
+    }
+
+    #[test]
+    fn client_budget_target_notice_reply_prefix_prefers_source_notice_reply_prefix() {
+        let reply_prefix = client_budget_target_notice_reply_prefix(&json!({
+            "client_budget_target_update": {
+                "operator_notice": {
+                    "reply_prefix": "5ч KPI: экономия 12.00%"
+                },
+                "client_budget_guard": {
+                    "reply_prefix": "5ч KPI: переплата 7.00%"
+                }
+            }
+        }));
+        assert_eq!(reply_prefix, "5ч KPI: экономия 12.00%");
+    }
+
+    #[test]
+    fn client_budget_target_notice_reply_prefix_falls_back_to_guard_when_source_missing() {
+        let reply_prefix = client_budget_target_notice_reply_prefix(&json!({
+            "client_budget_target_update": {
+                "operator_notice": {
+                    "reply_prefix": "   "
+                },
+                "client_budget_guard": {
+                    "reply_prefix": "5ч KPI: переплата 7.00%"
+                }
+            }
+        }));
+        assert_eq!(reply_prefix, "5ч KPI: переплата 7.00%");
+    }
+
+    #[test]
+    fn client_budget_target_chat_notice_payload_prefers_source_notice_fields() {
+        let notice = client_budget_target_chat_notice_payload(
+            &json!({
+                "client_budget_target_update": {
+                    "operator_notice": {
+                        "kind": "source-kind",
+                        "thread_id": "source-thread",
+                        "message_text": "source message",
+                        "reply_prefix": "5ч KPI: экономия 12.00%",
+                        "exact_chat_command": "/source"
+                    },
+                    "target_percent": 12,
+                    "working_state_write_status": {
+                        "status": "degraded_after_primary_write"
+                    },
+                    "client_budget_guard": {
+                        "reply_prefix": "5ч KPI: переплата 7.00%"
+                    }
+                }
+            }),
+            Some("query-thread"),
+        );
+        assert_eq!(notice["kind"], json!("source-kind"));
+        assert_eq!(notice["thread_id"], json!("source-thread"));
+        assert_eq!(notice["message_text"], json!("source message"));
+        assert_eq!(notice["reply_prefix"], json!("5ч KPI: экономия 12.00%"));
+        assert_eq!(notice["exact_chat_command"], json!("/source"));
+        assert_eq!(notice["target_percent"], json!(12));
+        assert_eq!(
+            notice["working_state_write_status"]["status"],
+            json!("degraded_after_primary_write")
+        );
+    }
+
+    #[test]
+    fn client_budget_target_chat_notice_payload_falls_back_when_source_notice_fields_blank() {
+        let notice = client_budget_target_chat_notice_payload(
+            &json!({
+                "client_budget_target_update": {
+                    "operator_notice": {
+                        "kind": "   ",
+                        "thread_id": Value::Null,
+                        "message_text": "   ",
+                        "reply_prefix": "   ",
+                        "exact_chat_command": Value::Null
+                    },
+                    "target_percent": 7,
+                    "working_state_write_status": {
+                        "warning": "restore refresh degraded"
+                    },
+                    "client_budget_guard": {
+                        "reply_prefix": "5ч KPI: переплата 7.00%"
+                    }
+                }
+            }),
+            Some("query-thread"),
+        );
+        assert_eq!(notice["kind"], json!("client_budget_target_changed"));
+        assert_eq!(notice["thread_id"], json!("query-thread"));
+        assert_eq!(
+            notice["message_text"],
+            json!("Целевая экономия переключена. restore refresh degraded")
+        );
+        assert_eq!(notice["reply_prefix"], json!("5ч KPI: переплата 7.00%"));
+        assert!(notice["exact_chat_command"].is_null());
+        assert_eq!(notice["target_percent"], json!(7));
+    }
+
+    #[test]
+    fn client_budget_target_chat_notice_payload_handles_missing_operator_notice() {
+        let notice = client_budget_target_chat_notice_payload(
+            &json!({
+                "client_budget_target_update": {
+                    "target_percent": 9,
+                    "working_state_write_status": {
+                        "status": "ok"
+                    },
+                    "client_budget_guard": {
+                        "reply_prefix": "5ч KPI: переплата 7.00%"
+                    }
+                }
+            }),
+            Some("query-thread"),
+        );
+        assert_eq!(notice["kind"], json!("client_budget_target_changed"));
+        assert_eq!(notice["thread_id"], json!("query-thread"));
+        assert_eq!(notice["message_text"], json!("Целевая экономия переключена."));
+        assert_eq!(notice["reply_prefix"], json!("5ч KPI: переплата 7.00%"));
+        assert!(notice["exact_chat_command"].is_null());
+        assert_eq!(notice["target_percent"], json!(9));
+        assert_eq!(notice["working_state_write_status"]["status"], json!("ok"));
+    }
+
+    #[test]
+    fn agent_display_name_update_notice_payload_preserves_thread_id() {
+        let notice = agent_display_name_update_notice_payload(
+            "agent.scope",
+            "Agent Name",
+            Some("thread-1"),
+        );
+        assert_eq!(notice["kind"], json!("agent_display_name_updated"));
+        assert_eq!(notice["thread_id"], json!("thread-1"));
+        assert_eq!(notice["agent_scope"], json!("agent.scope"));
+        assert_eq!(notice["display_name"], json!("Agent Name"));
+        assert_eq!(
+            notice["message_text"],
+            json!("Имя агента сохранено: Agent Name.")
+        );
+    }
+
+    #[test]
+    fn agent_display_name_update_notice_payload_preserves_missing_thread_id_as_null() {
+        let notice =
+            agent_display_name_update_notice_payload("agent.scope", "Agent Name", None);
+        assert!(notice["thread_id"].is_null());
+    }
+}
+
 pub(super) async fn dashboard_page_handler(State(state): State<ObserveState>) -> impl IntoResponse {
     mark_observe_http_activity(&state).await;
     super::spawn_client_live_meter_refresh(&state).await;
@@ -330,20 +712,20 @@ pub(super) async fn agent_display_name_update_api_handler(
         .await?;
         let live_summary =
             dashboard_live_summary_payload_for_request(&state, query.thread_id.as_deref()).await?;
+        let operator_notice = agent_display_name_update_notice_payload(
+            agent_scope,
+            &display_name,
+            query.thread_id.as_deref(),
+        );
         Ok(json!({
             "status": "ok",
             "agent_display_name_update": {
                 "agent_scope": agent_scope,
                 "display_name": display_name,
+                "operator_notice": operator_notice.clone(),
             },
             "dashboard_live_summary": live_summary,
-            "chat_notice": {
-                "kind": "agent_display_name_updated",
-                "thread_id": query.thread_id.clone(),
-                "message_text": format!("Имя агента сохранено: {display_name}."),
-                "agent_scope": agent_scope,
-                "display_name": display_name,
-            }
+            "chat_notice": operator_notice
         }))
     }
     .await;
@@ -423,14 +805,10 @@ pub(super) async fn client_budget_target_update_api_handler(
             "status": "ok",
             "client_budget_target_update": update["client_budget_target_update"].clone(),
             "client_budget_live": dashboard::client_budget_live_payload(&snapshot),
-            "chat_notice": {
-                "kind": "client_budget_target_changed",
-                "thread_id": query.thread_id.clone(),
-                "message_text": update["client_budget_target_update"]["operator_notice"]["message_text"].clone(),
-                "reply_prefix": update["client_budget_target_update"]["client_budget_guard"]["reply_prefix"].clone(),
-                "exact_chat_command": update["client_budget_target_update"]["operator_notice"]["exact_chat_command"].clone(),
-                "target_percent": update["client_budget_target_update"]["target_percent"].clone(),
-            }
+            "chat_notice": client_budget_target_chat_notice_payload(
+                &update,
+                query.thread_id.as_deref(),
+            )
         }))
     }
     .await;

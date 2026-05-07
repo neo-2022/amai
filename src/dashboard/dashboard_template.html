@@ -328,6 +328,154 @@
       text-align: right;
     }
 
+    .remediation-panel-stack {
+      display: grid;
+      gap: 10px;
+    }
+
+    .remediation-panel-empty {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .remediation-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .remediation-toolbar-copy {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .remediation-filter-group {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .remediation-filter-chip {
+      border: 1px solid var(--surface-border);
+      background: var(--surface);
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      cursor: pointer;
+      transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+    }
+
+    .remediation-filter-chip:hover,
+    .remediation-filter-chip:focus-visible {
+      border-color: rgba(121, 210, 197, 0.38);
+      color: var(--ink);
+      outline: none;
+    }
+
+    .remediation-filter-chip.is-active {
+      background: var(--accent-soft);
+      color: var(--ink);
+      border-color: rgba(121, 210, 197, 0.55);
+    }
+
+    .remediation-filter-chip.is-invalid.is-active {
+      background: var(--critical-soft);
+      border-color: rgba(255, 143, 130, 0.45);
+    }
+
+    .remediation-summary-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .remediation-summary-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      background: var(--surface);
+      border: 1px solid var(--surface-border);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .remediation-detail-panel {
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: var(--surface);
+    }
+
+    .remediation-detail-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    .remediation-detail-title {
+      margin: 0;
+      font-size: 17px;
+      line-height: 1.3;
+    }
+
+    .remediation-detail-note {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .remediation-detail-grid {
+      display: grid;
+      gap: 8px;
+    }
+
+    .remediation-detail-row {
+      display: grid;
+      grid-template-columns: minmax(140px, 180px) minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+      padding-top: 8px;
+      border-top: 1px solid var(--surface-border);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .remediation-detail-label {
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .remediation-detail-value {
+      color: var(--ink);
+      word-break: break-word;
+    }
+
+    .remediation-checklist {
+      margin: 0;
+      padding-left: 18px;
+      display: grid;
+      gap: 6px;
+      color: var(--ink);
+    }
+
+    .remediation-row-selected td {
+      background: var(--accent-soft);
+    }
+
     .section {
       padding: 14px;
       margin-bottom: 8px;
@@ -1933,6 +2081,25 @@
     </section>
 
     <section class="panel section">
+      <h2>Remediation Inbox Detail</h2>
+      <p class="muted">
+        Это read-only inspect panel поверх durable remediation bundles. Здесь нет retry, reconcile или cleanup действий:
+        только operator-facing список и детали для ручного расследования cross-store incident branches.
+      </p>
+      <div class="remediation-panel-stack">
+        <div class="remediation-toolbar" id="remediation-panel-toolbar">
+          <div class="remediation-filter-group" id="remediation-panel-filters"></div>
+          <div class="remediation-summary-strip" id="remediation-panel-summary"></div>
+        </div>
+        <div id="remediation-panel-empty" class="remediation-panel-empty">Панель ещё не загрузила remediation bundles.</div>
+        <div class="compare-table-wrap" id="remediation-panel-table-wrap" hidden>
+          <table class="compare-table" id="remediation-panel-table"></table>
+        </div>
+        <div class="remediation-detail-panel" id="remediation-panel-detail" hidden></div>
+      </div>
+    </section>
+
+    <section class="panel section">
       <h2>Машина И Установка</h2>
       <p class="muted">
         Здесь видно, на каком железе сейчас всё работает и к какому клиенту уже привязана установка.
@@ -1982,6 +2149,13 @@
     const tooltipLayerContent = document.getElementById("tooltip-layer-content");
     const tooltipCopyBtn = document.getElementById("tooltip-copy-btn");
     const dashboardToast = document.getElementById("dashboard-toast");
+    const remediationPanelEmpty = document.getElementById("remediation-panel-empty");
+    const remediationPanelToolbar = document.getElementById("remediation-panel-toolbar");
+    const remediationPanelFilters = document.getElementById("remediation-panel-filters");
+    const remediationPanelSummary = document.getElementById("remediation-panel-summary");
+    const remediationPanelTableWrap = document.getElementById("remediation-panel-table-wrap");
+    const remediationPanelTable = document.getElementById("remediation-panel-table");
+    const remediationPanelDetail = document.getElementById("remediation-panel-detail");
     let refreshInFlight = false;
     let interactionHoldUntil = 0;
     let pendingForcedDashboardRefreshReason = null;
@@ -2010,6 +2184,24 @@
       }
       element.textContent = text;
       return element;
+    }
+
+    function formatTimestamp(epochMs) {
+      if (typeof epochMs !== "number") {
+        return "ещё нет данных";
+      }
+      try {
+        return new Date(epochMs).toLocaleString("ru-RU", {
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        });
+      } catch (_error) {
+        return "ещё нет данных";
+      }
     }
 
     function dashboardLiveCompareCard(payload) {
@@ -2250,7 +2442,7 @@
         }
         const notice = payload?.chat_notice;
         if (notice) {
-          emitClientBudgetChatNotice(notice);
+          emitClientBudgetChatNotice(notice, "dashboard_agent_display_name");
         }
         showDashboardToast(
           (notice && notice.message_text) || `Имя агента сохранено: ${nextDisplayName}.`
@@ -2552,6 +2744,11 @@
 
     let clientBudgetLiveRefreshPromise = null;
     let dashboardLiveSummaryRefreshPromise = null;
+    let remediationPanelRefreshPromise = null;
+    let remediationDetailRefreshPromise = null;
+    let remediationDetailRefreshFileName = null;
+    let selectedRemediationFileName = null;
+    let remediationPanelFilter = "invalid";
     const dashboardThreadId = new URLSearchParams(window.location.search).get("thread_id");
 
     function apiPathWithThreadHint(path) {
@@ -2631,6 +2828,68 @@
       }
     }
 
+    async function fetchRemediationBundlesPayload(force = false) {
+      if (!force && !isDocumentVisibleForRefresh()) {
+        return null;
+      }
+      if (remediationPanelRefreshPromise) {
+        return remediationPanelRefreshPromise;
+      }
+      remediationPanelRefreshPromise = (async () => {
+        const response = await fetchWithTimeout(
+          apiPathWithThreadHint("/api/remediation-bundles?limit=20"),
+          DASHBOARD_FETCH_TIMEOUT_MS,
+          {
+            cache: "no-store",
+          },
+        );
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return response.json();
+      })();
+      try {
+        return await remediationPanelRefreshPromise;
+      } finally {
+        remediationPanelRefreshPromise = null;
+      }
+    }
+
+    async function fetchRemediationBundleDetailPayload(fileName, force = false) {
+      if (!fileName) {
+        return null;
+      }
+      if (!force && !isDocumentVisibleForRefresh()) {
+        return null;
+      }
+      if (remediationDetailRefreshPromise && remediationDetailRefreshFileName === fileName) {
+        return remediationDetailRefreshPromise;
+      }
+      remediationDetailRefreshFileName = fileName;
+      remediationDetailRefreshPromise = (async () => {
+        const params = new URLSearchParams();
+        params.set("file_name", fileName);
+        const response = await fetchWithTimeout(
+          apiPathWithThreadHint(`/api/remediation-bundles/item?${params.toString()}`),
+          DASHBOARD_FETCH_TIMEOUT_MS,
+          {
+            cache: "no-store",
+          },
+        );
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null);
+          throw new Error(payload && payload.error ? payload.error : `HTTP ${response.status}`);
+        }
+        return response.json();
+      })();
+      try {
+        return await remediationDetailRefreshPromise;
+      } finally {
+        remediationDetailRefreshPromise = null;
+        remediationDetailRefreshFileName = null;
+      }
+    }
+
     async function syncClientBudgetLiveRows(force = false, payload = null) {
       if (!force && !isDocumentVisibleForRefresh()) {
         return null;
@@ -2668,6 +2927,256 @@
       } catch (error) {
         if (force) {
           console.warn(`Не удалось обновить live summary дашборда: ${error.message}`);
+        }
+        return null;
+      }
+    }
+
+    function renderRemediationDetail(item) {
+      clearNode(remediationPanelDetail);
+      if (!item) {
+        remediationPanelDetail.hidden = true;
+        return;
+      }
+      remediationPanelDetail.hidden = false;
+      const head = document.createElement("div");
+      head.className = "remediation-detail-head";
+      const textWrap = document.createElement("div");
+      const title = document.createElement("h3");
+      title.className = "remediation-detail-title";
+      title.textContent = item.relative_path || item.file_name || item.artifact_path || "Remediation artifact";
+      textWrap.appendChild(title);
+      const note = document.createElement("p");
+      note.className = "remediation-detail-note";
+      note.textContent = item.status === "invalid"
+        ? "Artifact не прошёл validation и требует ручной проверки источника."
+        : (item.operator_summary || "Cross-store bundle surfaced for operator inspection.");
+      textWrap.appendChild(note);
+      head.appendChild(textWrap);
+      const pill = statusPill(item.status === "invalid" ? "critical" : "alert", item.status, null);
+      if (pill) {
+        head.appendChild(pill);
+      }
+      remediationPanelDetail.appendChild(head);
+
+      const grid = document.createElement("div");
+      grid.className = "remediation-detail-grid";
+      const rows = [
+        ["Artifact path", item.artifact_path || "ещё нет данных"],
+        ["Document id", item.document_id || "ещё нет данных"],
+        ["Failure mode", item.failure_mode || "ещё нет данных"],
+        ["Failure phase", item.failure_phase || "ещё нет данных"],
+        ["Consistency state", item.consistency_state || "ещё нет данных"],
+        ["Required action", item.required_action || "ещё нет данных"],
+      ];
+      if (item.error) {
+        rows.push(["Validation error", item.error]);
+      }
+      rows.forEach(([label, value]) => {
+        const row = document.createElement("div");
+        row.className = "remediation-detail-row";
+        row.appendChild(textNode("div", "remediation-detail-label", label));
+        row.appendChild(textNode("div", "remediation-detail-value", value));
+        grid.appendChild(row);
+      });
+      if (Array.isArray(item.operator_checklist) && item.operator_checklist.length > 0) {
+        const row = document.createElement("div");
+        row.className = "remediation-detail-row";
+        row.appendChild(textNode("div", "remediation-detail-label", "Checklist"));
+        const list = document.createElement("ul");
+        list.className = "remediation-checklist";
+        item.operator_checklist.forEach((entry) => {
+          list.appendChild(textNode("li", "", entry));
+        });
+        row.appendChild(list);
+        grid.appendChild(row);
+      }
+      remediationPanelDetail.appendChild(grid);
+    }
+
+    function renderRemediationDetailError(selectedItem, message) {
+      const fallbackItem = selectedItem ? { ...selectedItem } : {};
+      fallbackItem.status = "invalid";
+      fallbackItem.error = message;
+      fallbackItem.operator_summary = "Detail endpoint не смог materialize selected remediation artifact.";
+      renderRemediationDetail(fallbackItem);
+    }
+
+    function remediationFilterOptions(payload, items) {
+      const invalidCount = payload && typeof payload.invalid_items === "number"
+        ? payload.invalid_items
+        : items.filter((item) => item.status === "invalid").length;
+      return [
+        {
+          key: "invalid",
+          label: "Invalid first",
+          count: invalidCount,
+          toneClass: "is-invalid",
+        },
+        {
+          key: "all",
+          label: "All artifacts",
+          count: items.length,
+          toneClass: "",
+        },
+      ];
+    }
+
+    function filteredRemediationItems(items) {
+      if (remediationPanelFilter === "invalid") {
+        return items.filter((item) => item.status === "invalid");
+      }
+      return items;
+    }
+
+    function renderRemediationToolbar(payload, items, visibleItems) {
+      clearNode(remediationPanelFilters);
+      clearNode(remediationPanelSummary);
+      const options = remediationFilterOptions(payload, items);
+      options.forEach((option) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `remediation-filter-chip ${option.toneClass}`.trim();
+        if (option.key === remediationPanelFilter) {
+          button.className += " is-active";
+        }
+        button.textContent = `${option.label} (${option.count})`;
+        button.addEventListener("click", () => {
+          remediationPanelFilter = option.key;
+          const selectedAfterFilter = renderRemediationPanel(payload);
+          if (selectedAfterFilter) {
+            void syncRemediationDetail(false, selectedAfterFilter);
+          }
+        });
+        remediationPanelFilters.appendChild(button);
+      });
+
+      const summaryItems = [
+        `Visible ${visibleItems.length}`,
+        `Invalid ${payload.invalid_items ?? 0}`,
+        `Total ${payload.total_items ?? items.length}`,
+      ];
+      summaryItems.forEach((label) => {
+        remediationPanelSummary.appendChild(textNode("div", "remediation-summary-pill", label));
+      });
+    }
+
+    function renderRemediationPanel(payload) {
+      clearNode(remediationPanelTable);
+      remediationPanelToolbar.hidden = false;
+      if (!payload || payload.status !== "ok") {
+        clearNode(remediationPanelFilters);
+        clearNode(remediationPanelSummary);
+        remediationPanelTableWrap.hidden = true;
+        remediationPanelDetail.hidden = true;
+        remediationPanelEmpty.textContent = payload && payload.error
+          ? `Не удалось загрузить remediation bundles: ${payload.error}`
+          : "Не удалось загрузить remediation bundles.";
+        return;
+      }
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      const visibleItems = filteredRemediationItems(items);
+      renderRemediationToolbar(payload, items, visibleItems);
+      if (items.length === 0) {
+        remediationPanelTableWrap.hidden = true;
+        remediationPanelDetail.hidden = true;
+        remediationPanelEmpty.textContent = "Открытых remediation bundles сейчас нет.";
+        return;
+      }
+      if (visibleItems.length === 0) {
+        remediationPanelTableWrap.hidden = true;
+        remediationPanelDetail.hidden = true;
+        remediationPanelEmpty.textContent = remediationPanelFilter === "invalid"
+          ? "Invalid artifacts сейчас не найдены. Переключите фильтр на All artifacts, если нужен полный inbox."
+          : "После фильтрации remediation artifacts не осталось.";
+        return;
+      }
+      remediationPanelEmpty.textContent =
+        remediationPanelFilter === "invalid"
+          ? `Invalid artifacts surfaced first: ${visibleItems.length}.`
+          : `Visible bundles: ${visibleItems.length}. Invalid artifacts: ${payload.invalid_items ?? 0}.`;
+      remediationPanelTableWrap.hidden = false;
+      const selectedItem =
+        visibleItems.find((item) => item.file_name === selectedRemediationFileName) || visibleItems[0];
+      selectedRemediationFileName = selectedItem.file_name || null;
+
+      const thead = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      ["Created", "Status", "Path", "Failure", "Required action"].forEach((label) => {
+        headRow.appendChild(textNode("th", "", label));
+      });
+      thead.appendChild(headRow);
+      remediationPanelTable.appendChild(thead);
+
+      const tbody = document.createElement("tbody");
+      visibleItems.forEach((item) => {
+        const row = document.createElement("tr");
+        if (item.file_name === selectedRemediationFileName) {
+          row.className = "remediation-row-selected";
+        }
+        row.tabIndex = 0;
+        row.addEventListener("click", () => {
+          selectedRemediationFileName = item.file_name || null;
+          renderRemediationPanel(payload);
+          void syncRemediationDetail(false, item);
+        });
+        row.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            selectedRemediationFileName = item.file_name || null;
+            renderRemediationPanel(payload);
+            void syncRemediationDetail(false, item);
+          }
+        });
+        const created = typeof item.created_at_epoch_ms === "number"
+          ? formatTimestamp(item.created_at_epoch_ms)
+          : "ещё нет данных";
+        const statusText = item.status === "invalid" ? "invalid" : "ok";
+        const pathText = item.relative_path || item.file_name || item.artifact_path || "ещё нет данных";
+        const failureText = item.failure_mode || item.error || "ещё нет данных";
+        const actionText = item.required_action || "manual inspect";
+        [created, statusText, pathText, failureText, actionText].forEach((value) => {
+          row.appendChild(textNode("td", "", value));
+        });
+        tbody.appendChild(row);
+      });
+      remediationPanelTable.appendChild(tbody);
+      return selectedItem;
+    }
+
+    async function syncRemediationDetail(force = false, selectedItem = null) {
+      if (!selectedItem || !selectedItem.file_name) {
+        renderRemediationDetail(selectedItem);
+        return null;
+      }
+      try {
+        const detailPayload = await fetchRemediationBundleDetailPayload(selectedItem.file_name, force);
+        renderRemediationDetail(detailPayload && detailPayload.item ? detailPayload.item : selectedItem);
+        return detailPayload;
+      } catch (error) {
+        renderRemediationDetailError(selectedItem, error.message);
+        if (force) {
+          console.warn(`Не удалось обновить remediation detail: ${error.message}`);
+        }
+        return null;
+      }
+    }
+
+    async function syncRemediationPanel(force = false, payload = null) {
+      if (!force && !isDocumentVisibleForRefresh()) {
+        return null;
+      }
+      try {
+        const remediationPayload = payload || await fetchRemediationBundlesPayload(force);
+        if (remediationPayload) {
+          const selectedItem = renderRemediationPanel(remediationPayload);
+          await syncRemediationDetail(force, selectedItem);
+        }
+        return remediationPayload;
+      } catch (error) {
+        renderRemediationPanel({ status: "down", error: error.message });
+        if (force) {
+          console.warn(`Не удалось обновить remediation panel: ${error.message}`);
         }
         return null;
       }
@@ -2954,13 +3463,13 @@
       }, isError ? 4200 : 3000);
     }
 
-    function emitClientBudgetChatNotice(notice) {
+    function emitClientBudgetChatNotice(notice, source = "dashboard_notice") {
       if (!notice || typeof notice.message_text !== "string" || !notice.message_text.trim()) {
         return;
       }
       const detail = {
         ...notice,
-        source: "dashboard_client_budget_target",
+        source,
       };
       window.dispatchEvent(new CustomEvent("amai:chat-notice", { detail }));
       try {
@@ -2973,6 +3482,39 @@
           window.opener.postMessage({ type: "amai:chat-notice", detail }, "*");
         }
       } catch (_) {}
+    }
+
+    function messageWithWorkingStateWarning(baseMessage, writeStatus) {
+      const base =
+        typeof baseMessage === "string" && baseMessage.trim() ? baseMessage.trim() : "";
+      const warning =
+        writeStatus &&
+        typeof writeStatus.warning === "string" &&
+        writeStatus.warning.trim()
+          ? writeStatus.warning.trim()
+          : "";
+      if (base && warning) {
+        return `${base}\n${warning}`;
+      }
+      return base || warning;
+    }
+
+    function sourceNoticeMessageOrWarningFallback(baseMessage, writeStatus) {
+      const base =
+        typeof baseMessage === "string" && baseMessage.trim() ? baseMessage.trim() : "";
+      if (base) {
+        return base;
+      }
+      return messageWithWorkingStateWarning("", writeStatus);
+    }
+
+    function payloadMessageOrWarningFallback(payloadMessage, fallbackBaseMessage, writeStatus) {
+      const payloadText =
+        typeof payloadMessage === "string" && payloadMessage.trim() ? payloadMessage.trim() : "";
+      if (payloadText) {
+        return payloadText;
+      }
+      return messageWithWorkingStateWarning(fallbackBaseMessage, writeStatus);
     }
 
     function launchExternalUri(uri) {
@@ -3026,10 +3568,22 @@
       if (payload?.client_budget_live) {
         applyClientBudgetLiveRows(payload.client_budget_live);
       }
-      const notice = payload?.chat_notice || payload?.client_budget_target_update?.operator_notice;
+      const notice =
+        payload?.delivery_surface_notice ||
+        payload?.chat_notice ||
+        payload?.client_budget_target_update?.operator_notice;
+      const targetWriteStatus =
+        payload?.client_budget_target_update?.working_state_write_status || null;
+      const noticeMessage = sourceNoticeMessageOrWarningFallback(
+        notice && notice.message_text,
+        (notice && notice.working_state_write_status) || targetWriteStatus
+      );
       if (notice) {
-        emitClientBudgetChatNotice(notice);
-        showDashboardToast(notice.message_text || `Целевая экономия переключена на ${parsedPercent}%.`);
+        emitClientBudgetChatNotice(
+          { ...notice, message_text: noticeMessage || notice.message_text },
+          "dashboard_client_budget_target"
+        );
+        showDashboardToast(noticeMessage || `Целевая экономия переключена на ${parsedPercent}%.`);
       } else {
         showDashboardToast(`Целевая экономия переключена на ${parsedPercent}%.`);
       }
@@ -3038,9 +3592,16 @@
       return payload;
     }
 
-    function buildCompactChatAssistText(surface, note, requiredHostAction, promptFile) {
+    function buildCompactChatAssistText(
+      surface,
+      note,
+      requiredHostAction,
+      promptFile,
+      launchCommand,
+      launchFallbackCommand
+    ) {
       if (!surface || typeof surface !== "object") {
-        if (note || requiredHostAction) {
+        if (note || requiredHostAction || promptFile || launchCommand || launchFallbackCommand) {
           const fallbackParts = [];
           if (note) {
             fallbackParts.push(note);
@@ -3051,12 +3612,20 @@
           if (promptFile) {
             fallbackParts.push(`Prompt file: ${promptFile}`);
           }
+          if (launchCommand) {
+            fallbackParts.push(`Launch command: ${launchCommand}`);
+          }
+          if (launchFallbackCommand) {
+            fallbackParts.push(`Launch fallback: ${launchFallbackCommand}`);
+          }
           return fallbackParts.join(" · ");
         }
         return "";
       }
       const parts = [];
-      if (surface.fresh_chat_assist_summary) {
+      if (surface.delivery_surface_assist_summary) {
+        parts.push(surface.delivery_surface_assist_summary);
+      } else if (surface.fresh_chat_assist_summary) {
         parts.push(surface.fresh_chat_assist_summary);
       }
       if (surface.startup_instruction_path) {
@@ -3081,6 +3650,12 @@
       }
       if (promptFile) {
         parts.push(`Prompt file: ${promptFile}`);
+      }
+      if (launchCommand) {
+        parts.push(`Launch command: ${launchCommand}`);
+      }
+      if (launchFallbackCommand) {
+        parts.push(`Launch fallback: ${launchFallbackCommand}`);
       }
       return parts.join(" · ");
     }
@@ -3108,23 +3683,36 @@
       if (payload?.client_budget_live) {
         applyClientBudgetLiveRows(payload.client_budget_live);
       }
-      const notice = payload?.chat_notice || payload?.continuity_compact_chat?.operator_notice;
+      const notice =
+        payload?.delivery_surface_notice ||
+        payload?.chat_notice ||
+        payload?.continuity_compact_chat?.operator_notice;
       const assistText = buildCompactChatAssistText(
         notice?.client_surface || payload?.continuity_compact_chat?.client_surface,
         notice?.note || payload?.continuity_compact_chat?.operator_notice?.note,
         notice?.required_host_action || payload?.continuity_compact_chat?.operator_notice?.required_host_action,
-        notice?.prompt_file || payload?.continuity_compact_chat?.operator_notice?.prompt_file
+        notice?.prompt_file || payload?.continuity_compact_chat?.operator_notice?.prompt_file,
+        notice?.launch_clean_chat_command || payload?.continuity_compact_chat?.operator_notice?.launch_clean_chat_command,
+        notice?.launch_clean_chat_fallback_command || payload?.continuity_compact_chat?.operator_notice?.launch_clean_chat_fallback_command
       );
       if (notice) {
+        const sourceNoticeMessage = sourceNoticeMessageOrWarningFallback(
+          notice.message_text,
+          notice.working_state_write_status
+        );
         const baseMessage =
-          notice.message_text || "Подготовлен fresh CHAT_START_RESTORE для compact chat.";
+          sourceNoticeMessage ||
+          "Подготовлен startup restore для переноса рабочей линии на новую чистую рабочую поверхность.";
         const enrichedMessage = assistText ? `${baseMessage}\n${assistText}` : baseMessage;
-        emitClientBudgetChatNotice({ ...notice, message_text: enrichedMessage });
+        emitClientBudgetChatNotice(
+          { ...notice, message_text: enrichedMessage },
+          "dashboard_compact_chat"
+        );
         showDashboardToast(enrichedMessage);
       } else {
         const fallbackMessage = assistText
-          ? `Подготовлен fresh CHAT_START_RESTORE для compact chat.\n${assistText}`
-          : "Подготовлен fresh CHAT_START_RESTORE для compact chat.";
+          ? `Подготовлен startup restore для переноса рабочей линии на новую чистую рабочую поверхность.\n${assistText}`
+          : "Подготовлен startup restore для переноса рабочей линии на новую чистую рабочую поверхность.";
         showDashboardToast(fallbackMessage);
       }
       hideTooltip(target);
@@ -3169,9 +3757,20 @@
         applyClientBudgetLiveRows(payload.client_budget_live);
       }
       const notice =
-        payload?.chat_notice || payload?.client_budget_host_control_feedback?.operator_notice;
+        payload?.delivery_surface_notice ||
+        payload?.chat_notice ||
+        payload?.client_budget_host_control_feedback?.operator_notice;
+      const feedbackWriteStatus =
+        payload?.client_budget_host_control_feedback?.working_state_write_status || null;
+      const noticeMessage = sourceNoticeMessageOrWarningFallback(
+        notice && notice.message_text,
+        (notice && notice.working_state_write_status) || feedbackWriteStatus
+      );
       if (notice && options.emitNotice !== false) {
-        emitClientBudgetChatNotice(notice);
+        emitClientBudgetChatNotice({
+          ...notice,
+          message_text: noticeMessage || notice.message_text,
+        }, "dashboard_host_current_thread_control_feedback");
       }
       const subject =
         options.subjectLabel ||
@@ -3183,8 +3782,13 @@
           : feedbackKind === "opened"
             ? `Подтверждено: ${subject} открылся.`
             : `Зафиксировано: ${subject} не открылся.`;
+      const fallbackMessage = payloadMessageOrWarningFallback(
+        payload?.client_budget_host_control_feedback?.message_text,
+        defaultMessage,
+        feedbackWriteStatus
+      );
       if (options.showToast !== false) {
-        showDashboardToast((notice && notice.message_text) || defaultMessage);
+        showDashboardToast(noticeMessage || fallbackMessage);
       }
       if (options.hideTooltip !== false) {
         hideTooltip(target);
@@ -3280,11 +3884,22 @@
           try {
             const payload = await requestCurrentThreadHostControlLaunch(selectorState, surface);
             const notice =
-              payload?.chat_notice || payload?.client_budget_host_control_launch?.operator_notice;
+              payload?.delivery_surface_notice ||
+              payload?.chat_notice ||
+              payload?.client_budget_host_control_launch?.operator_notice;
+            const launchWriteStatus =
+              payload?.client_budget_host_control_launch?.working_state_write_status || null;
+            const noticeMessage = sourceNoticeMessageOrWarningFallback(
+              notice && notice.message_text,
+              (notice && notice.working_state_write_status) || launchWriteStatus
+            );
             if (notice) {
-              emitClientBudgetChatNotice(notice);
+              emitClientBudgetChatNotice({
+                ...notice,
+                message_text: noticeMessage || notice.message_text,
+              }, "dashboard_host_current_thread_control_launch");
             }
-            launchSummary = (notice && notice.message_text) || messageText;
+            launchSummary = noticeMessage || messageText;
             selectorState.host_current_thread_control_feedback_pending = true;
             selectorState.host_current_thread_control_last_command_id = surface.command_id;
             selectorState.host_current_thread_control_last_button_label =
@@ -3298,12 +3913,15 @@
             tooltipLayer.classList.add("visible");
             positionTooltip(target);
             showDashboardToast(
-              `${(notice && notice.message_text) || messageText} Подтверди исход в tooltip.`
+              `${noticeMessage || messageText} Подтверди исход в tooltip.`
             );
             return surface;
           } catch (_) {}
         }
-        emitClientBudgetChatNotice(requestedNotice);
+        emitClientBudgetChatNotice(
+          requestedNotice,
+          "dashboard_host_current_thread_control_request"
+        );
         try {
           await applyCurrentThreadHostControlFeedback("requested", selectorState, target, {
             commandId: surface.command_id,
@@ -3330,7 +3948,10 @@
         showDashboardToast(`${messageText} Подтверди исход в tooltip.`);
         return surface;
       }
-      emitClientBudgetChatNotice(requestedNotice);
+      emitClientBudgetChatNotice(
+        requestedNotice,
+        "dashboard_host_current_thread_control_request"
+      );
       showDashboardToast(messageText);
       hideTooltip(target);
       return surface;
@@ -3435,16 +4056,83 @@
             textNode(
               "div",
               "tooltip-target-picker-note",
-              `Клиент fresh chat: ${selectorState.compact_chat_client_display_name}`
+              `Клиент clean surface: ${selectorState.compact_chat_client_display_name}`
             )
           );
         }
-        if (selectorState.compact_chat_assist_summary) {
+        if (
+          selectorState.compact_chat_delivery_surface_assist_summary ||
+          selectorState.compact_chat_assist_summary
+        ) {
           shell.appendChild(
             textNode(
               "div",
               "tooltip-target-picker-note",
-              selectorState.compact_chat_assist_summary
+              selectorState.compact_chat_delivery_surface_assist_summary ||
+                selectorState.compact_chat_assist_summary
+            )
+          );
+        }
+        if (Array.isArray(selectorState.compact_chat_manual_fallback_steps)) {
+          selectorState.compact_chat_manual_fallback_steps.forEach((step) => {
+            if (typeof step === "string" && step.trim()) {
+              shell.appendChild(
+                textNode("div", "tooltip-target-picker-note", step.trim())
+              );
+            }
+          });
+        }
+        if (selectorState.compact_chat_launch_status) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              `Auto-launch status: ${selectorState.compact_chat_launch_status}`
+            )
+          );
+        }
+        if (selectorState.compact_chat_launch_command_kind) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              `Launch bridge: ${selectorState.compact_chat_launch_command_kind}`
+            )
+          );
+        }
+        if (selectorState.compact_chat_launch_command) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-command",
+              selectorState.compact_chat_launch_command
+            )
+          );
+        }
+        if (selectorState.compact_chat_launch_fallback_command) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-command",
+              selectorState.compact_chat_launch_fallback_command
+            )
+          );
+        }
+        if (selectorState.compact_chat_launch_unavailable_reason) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              `Unavailable reason: ${selectorState.compact_chat_launch_unavailable_reason}`
+            )
+          );
+        }
+        if (selectorState.compact_chat_launch_ux_verdict) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              `UX verdict: ${selectorState.compact_chat_launch_ux_verdict}`
             )
           );
         }
@@ -4751,6 +5439,9 @@
       if (Array.isArray(payload.top_cards)) {
         renderCards("top-cards", payload.top_cards, "metric-card");
       }
+      if (Array.isArray(payload.service_cards)) {
+        renderCards("service-cards", payload.service_cards, "service-card");
+      }
     }
 
     function renderLinks(links) {
@@ -4975,6 +5666,7 @@
       refreshInFlight = true;
       lastDashboardRefreshStartedAt = Date.now();
       const clientBudgetLivePayloadPromise = fetchClientBudgetLivePayload(force).catch(() => null);
+      const remediationPayloadPromise = fetchRemediationBundlesPayload(force).catch(() => null);
       try {
         const response = await fetchWithTimeout(
           apiPathWithThreadHint("/api/dashboard"),
@@ -4991,6 +5683,10 @@
         const livePayload = await clientBudgetLivePayloadPromise;
         if (livePayload) {
           applyClientBudgetLiveRows(livePayload);
+        }
+        const remediationPayload = await remediationPayloadPromise;
+        if (remediationPayload) {
+          await syncRemediationPanel(force, remediationPayload);
         }
       } catch (error) {
         showError(`Не удалось обновить панель Amai: ${error.message}`);
@@ -5166,6 +5862,7 @@
     renderDashboardPayload(chooseInitialDashboardPayload(DASHBOARD_BOOTSTRAP_PAYLOAD));
     scheduleForcedDashboardRefresh("initial_boot");
     setInterval(() => syncClientBudgetLiveRows(false), CLIENT_BUDGET_LIVE_REFRESH_MS);
+    setInterval(() => syncRemediationPanel(false), CLIENT_BUDGET_LIVE_REFRESH_MS);
   </script>
 </body>
 </html>

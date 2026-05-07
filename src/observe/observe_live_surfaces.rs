@@ -116,10 +116,10 @@ pub(super) async fn dashboard_live_summary_payload_for_request(
         }
     }
 
-    let payload = refresh_dashboard_live_summary_cache(state, resolved_thread_id.clone()).await?;
+    spawn_dashboard_live_summary_refresh(state, resolved_thread_id).await;
     let cache = state.cache.read().await;
     Ok(attach_observe_cache_to_dashboard_payload(
-        payload,
+        dashboard_live_summary_warmup_payload(cache_snapshot_age_ms(&cache)),
         &cache,
         state.dashboard_refresh_ms,
     ))

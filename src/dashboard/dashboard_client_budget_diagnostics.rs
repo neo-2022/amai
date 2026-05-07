@@ -442,6 +442,7 @@ pub(super) fn current_session_client_live_meter_available(client_live_meter: &Va
         && client_live_meter_current_thread_bound(client_live_meter)
 }
 
+#[cfg(test)]
 pub(crate) fn client_budget_root_cause_payload(snapshot: &Value) -> Value {
     let guard = current_session_budget_guard(snapshot);
     client_budget_root_cause_payload_with_guard(snapshot, &guard)

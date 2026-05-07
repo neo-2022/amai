@@ -511,6 +511,59 @@ done <<< "${non_active_ids}"
 [[ "${audit_missing}" -eq 0 ]] || fail "${audit_missing} non-active items lack audit trail"
 step "all non-active items have explainable audit trail (pass)"
 
+step "verify lifecycle transition stats CLI surfaces Queue 2 derived contract"
+transition_stats_output="$(cargo run --quiet -- memory transition-stats \
+  --project "${project_code}" \
+  --namespace "${namespace_code}")"
+transition_contract="$(printf '%s' "${transition_stats_output}" | jq -r '.contract_version')"
+[[ "${transition_contract}" == "lifecycle-transition-stats-v1" ]] || fail "unexpected transition stats contract: ${transition_contract}"
+transition_rows="$(printf '%s' "${transition_stats_output}" | jq '.rows | length')"
+[[ "${transition_rows}" -ge 3 ]] || fail "expected lifecycle transition rows, got ${transition_rows}"
+for next_state in pruned archived pending_review; do
+  transition_state_count="$(printf '%s' "${transition_stats_output}" | jq --arg state "${next_state}" '[.rows[] | select(.next_state == $state)] | length')"
+  [[ "${transition_state_count}" -ge 1 ]] || fail "expected transition stats row for next_state=${next_state}, got ${transition_state_count}"
+done
+compaction_transition_count="$(printf '%s' "${transition_stats_output}" | jq '[.rows[] | select(.next_state == "compacted")] | length')"
+compaction_job_actions="$(printf '%s' "${compaction_job_output}" | jq '.action_count')"
+if [[ "${compaction_job_actions}" -gt 0 ]]; then
+  [[ "${compaction_transition_count}" -ge 1 ]] || fail "expected compacted transition row when compaction_job produced actions"
+fi
+step "lifecycle transition stats CLI surfaces pruned/archived/pending_review and conditionally compacted rows (pass)"
+
+step "verify lifecycle cohort-risk CLI surfaces Queue 3 advisory contract"
+cohort_risk_output="$(cargo run --quiet -- memory cohort-risk \
+  --project "${project_code}" \
+  --namespace "${namespace_code}")"
+cohort_risk_contract="$(printf '%s' "${cohort_risk_output}" | jq -r '.contract_version')"
+[[ "${cohort_risk_contract}" == "lifecycle-cohort-risk-v1" ]] || fail "unexpected cohort risk contract: ${cohort_risk_contract}"
+cohort_risk_rows="$(printf '%s' "${cohort_risk_output}" | jq '.rows | length')"
+[[ "${cohort_risk_rows}" -ge 1 ]] || fail "expected lifecycle cohort risk rows, got ${cohort_risk_rows}"
+cohort_risk_invalid_states="$(printf '%s' "${cohort_risk_output}" | jq '[.rows[] | select((.expected_next_state | IN("active_hot","active_stale","pending_review","compacted","archived","pruned","protected","quarantined")) | not)] | length')"
+[[ "${cohort_risk_invalid_states}" -eq 0 ]] || fail "cohort risk surfaced invalid expected_next_state"
+cohort_risk_missing_summary="$(printf '%s' "${cohort_risk_output}" | jq '[.rows[] | select((.cohort_reason_summary | type != "string") or (.cohort_reason_summary == ""))] | length')"
+[[ "${cohort_risk_missing_summary}" -eq 0 ]] || fail "cohort risk rows missing cohort_reason_summary"
+cohort_risk_nonzero="$(printf '%s' "${cohort_risk_output}" | jq '[.rows[] | select(.pending_review_risk_7d > 0 or .archive_risk_30d > 0 or .prune_risk_30d > 0)] | length')"
+[[ "${cohort_risk_nonzero}" -ge 1 ]] || fail "expected at least one non-zero lifecycle cohort risk row"
+step "lifecycle cohort-risk CLI surfaces Queue 3 advisory contract (pass)"
+
+step "verify lifecycle policy-simulate CLI surfaces Queue 3 approval contour without authority"
+policy_simulate_output="$(cargo run --quiet -- memory policy-simulate \
+  --project "${project_code}" \
+  --namespace "${namespace_code}")"
+policy_simulate_contract="$(printf '%s' "${policy_simulate_output}" | jq -r '.contract_version')"
+[[ "${policy_simulate_contract}" == "lifecycle-policy-simulate-v1" ]] || fail "unexpected policy simulate contract: ${policy_simulate_contract}"
+policy_simulate_authority="$(printf '%s' "${policy_simulate_output}" | jq -r '.authority_mode')"
+[[ "${policy_simulate_authority}" == "advisory_only_no_runtime_authority" ]] || fail "policy simulate surfaced unexpected authority mode: ${policy_simulate_authority}"
+policy_simulate_rows="$(printf '%s' "${policy_simulate_output}" | jq '.rows | length')"
+[[ "${policy_simulate_rows}" -ge 1 ]] || fail "expected lifecycle policy simulation rows, got ${policy_simulate_rows}"
+policy_simulate_invalid_actions="$(printf '%s' "${policy_simulate_output}" | jq '[.rows[] | select((.recommended_review_action | IN("hold_current_policy","review_revalidation_queue","review_archive_candidate","review_prune_candidate","observe_only")) | not)] | length')"
+[[ "${policy_simulate_invalid_actions}" -eq 0 ]] || fail "policy simulate surfaced invalid recommended_review_action"
+policy_simulate_invalid_urgency="$(printf '%s' "${policy_simulate_output}" | jq '[.rows[] | select((.urgency | IN("manual_only","high","medium","low")) | not)] | length')"
+[[ "${policy_simulate_invalid_urgency}" -eq 0 ]] || fail "policy simulate surfaced invalid urgency"
+policy_simulate_missing_blocker="$(printf '%s' "${policy_simulate_output}" | jq '[.rows[] | select((.blocking_reasons | index("advisory_only_no_runtime_authority")) == null)] | length')"
+[[ "${policy_simulate_missing_blocker}" -eq 0 ]] || fail "policy simulate rows lost advisory-only blocker"
+step "lifecycle policy-simulate CLI stays advisory-only and surfaces approval contour (pass)"
+
 # ────────────────────────────────────────────────────────────────────────
 # 13. Final integrity: immutable items untouched throughout entire proof
 # ────────────────────────────────────────────────────────────────────────

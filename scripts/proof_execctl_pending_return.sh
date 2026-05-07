@@ -51,6 +51,9 @@ jq -e '.working_state_restore.execctl_resume_state == "pending_return_queue_pres
 jq -e '.working_state_restore.execctl_resume_contract.resume_state == "return_required"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.pending_return_queue[0].headline == "Same-meter spend control"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.pending_return_summary | contains("Same-meter spend control")' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.required_task_set == []' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.execctl_resume_contract.required_task_set_count == 0' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.execctl_resume_contract.required_task_set == []' "${restore_output}" >/dev/null
 startup_action_kind="$(jq -r '.working_state_restore.startup_next_action.action_kind' "${restore_output}")"
 case "${startup_action_kind}" in
   rotate_chat_for_client_budget)

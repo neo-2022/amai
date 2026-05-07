@@ -1,4 +1,5 @@
 use super::*;
+use tokio::sync::Mutex as AsyncMutex;
 
 #[derive(Debug, Clone)]
 pub(super) struct DashboardExactClientLimitsCache {
@@ -33,6 +34,11 @@ struct PersistedDashboardExactClientLimitsCache {
     observation: Option<CodexAppServerRateLimitsObservation>,
 }
 
+fn dashboard_exact_client_limits_refresh_lock() -> &'static AsyncMutex<()> {
+    static REFRESH_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    REFRESH_LOCK.get_or_init(|| AsyncMutex::new(()))
+}
+
 pub(super) fn cached_dashboard_exact_client_limits_observation()
 -> Option<CodexAppServerRateLimitsObservation> {
     let cache = DASHBOARD_EXACT_CLIENT_LIMITS_CACHE.get_or_init(|| Mutex::new(None));
@@ -42,20 +48,21 @@ pub(super) fn cached_dashboard_exact_client_limits_observation()
         .and_then(|guard| guard.as_ref().and_then(|entry| entry.observation.clone()))
 }
 
-pub(super) fn fresh_dashboard_exact_client_limits_cache_entry(
+pub(crate) fn fresh_dashboard_exact_client_limits_cache_entry(
     now_epoch_ms: u64,
 ) -> Option<DashboardExactClientLimitsCache> {
     let cache = DASHBOARD_EXACT_CLIENT_LIMITS_CACHE.get_or_init(|| Mutex::new(None));
     cache.lock().ok().and_then(|guard| {
         guard.as_ref().and_then(|entry| {
-            (now_epoch_ms.saturating_sub(entry.fetched_at_epoch_ms)
-                <= DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS)
+            (entry.observation.is_some()
+                && now_epoch_ms.saturating_sub(entry.fetched_at_epoch_ms)
+                    <= DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS)
                 .then(|| entry.clone())
         })
     })
 }
 
-pub(super) fn set_dashboard_exact_client_limits_cache(entry: DashboardExactClientLimitsCache) {
+pub(crate) fn set_dashboard_exact_client_limits_cache(entry: DashboardExactClientLimitsCache) {
     let cache = DASHBOARD_EXACT_CLIENT_LIMITS_CACHE.get_or_init(|| Mutex::new(None));
     if let Ok(mut guard) = cache.lock() {
         *guard = Some(entry);
@@ -85,6 +92,9 @@ pub(super) fn load_shared_dashboard_exact_client_limits_cache(
     if now_epoch_ms.saturating_sub(persisted.fetched_at_epoch_ms)
         > DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS
     {
+        return None;
+    }
+    if persisted.observation.is_none() {
         return None;
     }
     Some(DashboardExactClientLimitsCache {
@@ -149,6 +159,31 @@ pub(super) async fn dashboard_exact_client_rate_limits_resolution()
             });
         }
     }
+    let _refresh_guard = dashboard_exact_client_limits_refresh_lock().lock().await;
+    let now_epoch_ms = current_epoch_ms().unwrap_or_default() as u64;
+    if let Some(entry) = fresh_dashboard_exact_client_limits_cache_entry(now_epoch_ms) {
+        return Ok(DashboardExactClientLimitsResolution {
+            source: if entry.observation.is_some() {
+                DashboardExactClientLimitsResolutionSource::InProcessCache
+            } else {
+                DashboardExactClientLimitsResolutionSource::Missing
+            },
+            observation: entry.observation,
+        });
+    }
+    if let Some(path) = discovered_dashboard_exact_client_limits_shared_cache_path() {
+        if let Some(entry) = load_shared_dashboard_exact_client_limits_cache(&path, now_epoch_ms) {
+            set_dashboard_exact_client_limits_cache(entry.clone());
+            return Ok(DashboardExactClientLimitsResolution {
+                source: if entry.observation.is_some() {
+                    DashboardExactClientLimitsResolutionSource::SharedFileCache
+                } else {
+                    DashboardExactClientLimitsResolutionSource::Missing
+                },
+                observation: entry.observation,
+            });
+        }
+    }
     let stale_cached_observation = cached_dashboard_exact_client_limits_observation();
     let live_query_result = if let Some(executable) = discover_local_codex_app_server_executable() {
         query_codex_app_server_rate_limits(&executable).await
@@ -157,13 +192,15 @@ pub(super) async fn dashboard_exact_client_rate_limits_resolution()
     };
     let (observation, source) = match live_query_result {
         Ok(observation) => {
-            let cache_entry = DashboardExactClientLimitsCache {
-                fetched_at_epoch_ms: now_epoch_ms,
-                observation: observation.clone(),
-            };
-            set_dashboard_exact_client_limits_cache(cache_entry.clone());
-            if let Some(path) = discovered_dashboard_exact_client_limits_shared_cache_path() {
-                let _ = write_shared_dashboard_exact_client_limits_cache(&path, &cache_entry);
+            if observation.is_some() {
+                let cache_entry = DashboardExactClientLimitsCache {
+                    fetched_at_epoch_ms: now_epoch_ms,
+                    observation: observation.clone(),
+                };
+                set_dashboard_exact_client_limits_cache(cache_entry.clone());
+                if let Some(path) = discovered_dashboard_exact_client_limits_shared_cache_path() {
+                    let _ = write_shared_dashboard_exact_client_limits_cache(&path, &cache_entry);
+                }
             }
             let source = if observation.is_some() {
                 DashboardExactClientLimitsResolutionSource::LiveAppServer

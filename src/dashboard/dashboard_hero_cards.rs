@@ -1,3 +1,4 @@
+use super::dashboard_current_session_budget_guard::CLIENT_BUDGET_ADVISORY_STATUS_PREFIX;
 use super::*;
 
 fn active_agent_budget_card_status(surface: &Value) -> (&'static str, &'static str, String) {
@@ -908,7 +909,9 @@ fn build_current_session_hero_card(snapshot: &Value) -> Value {
         session_card = with_status_label(session_card, "реальная экономия не доказана");
         session_card = with_status_tooltip(
             session_card,
-            "Статус требует внимания по следующим причинам:\n- Для текущего живого turn ещё нет доказанной same-turn пары `без Amai / с Amai`.\n- Значит реальную экономию на полной шкале клиента пока нельзя честно показать числом.\n- Пока эта пара не materialized, нижняя строка про учтённую часть остаётся внутренним Amai-срезом, а не полным client spend.\n- Чтобы получить реальную экономию, нужно быстрее фиксировать exact pair на коротком live turn и для этого сначала сжать текущий giant thread через same-thread compact window, а не расширять его новыми ходами.",
+            &format!(
+                "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- Для текущего живого turn ещё нет доказанной same-turn пары `без Amai / с Amai`.\n- Значит реальную экономию на полной шкале клиента пока нельзя честно показать числом.\n- Пока эта пара не materialized, нижняя строка про учтённую часть остаётся внутренним Amai-срезом, а не полным client spend.\n- Чтобы получить реальную экономию, нужно быстрее фиксировать exact pair на коротком live turn и для этого сначала сжать текущий giant thread через same-thread compact window, а не расширять его новыми ходами."
+            ),
         );
     } else if let Some(full_turn_savings_pct) = session_full_turn_savings_pct
         .filter(|value| client_budget_target_active && *value < client_budget_target_percent_f64)
@@ -920,7 +923,7 @@ fn build_current_session_hero_card(snapshot: &Value) -> Value {
         session_card = with_status_tooltip(
             session_card,
             &format!(
-                "Статус требует внимания по следующим причинам:\n- Реальная экономия на полной шкале клиента сейчас всего {}.\n- {}\n- Значит текущий thread пока жжёт почти весь полный client turn/context, а Amai экономит только малую долю.\n- Чтобы реально улучшить картину без потери точности, нужно дальше уменьшать полный размер turn и жёстко удерживать same-thread compact surface, чтобы следующий exact pair materialized на коротком live turn.",
+                "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- Реальная экономия на полной шкале клиента сейчас всего {}.\n- {}\n- Значит текущий thread пока жжёт почти весь полный client turn/context, а Amai экономит только малую долю.\n- Чтобы реально улучшить картину без потери точности, нужно дальше уменьшать полный размер turn и жёстко удерживать same-thread compact surface, чтобы следующий exact pair materialized на коротком live turn.",
                 format_percent(Some(full_turn_savings_pct)),
                 client_budget_target_sentence(client_budget_target_percent)
             ),
@@ -934,7 +937,7 @@ fn build_current_session_hero_card(snapshot: &Value) -> Value {
         session_card = with_status_tooltip(
             session_card,
             &format!(
-                "Статус требует внимания по следующим причинам:\n- В этой сессии savings-KPI пока не показывает положительную подтверждённую экономию.\n- При этом observed continuity startup уже сжёг {} токенов.\n- Strict same-meter slice по клиентскому запросу пока даёт только {} токенов.\n- Значит лимит сейчас уходит главным образом в continuity restore, а не в retrieval/workflow effect.",
+                "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- В этой сессии savings-KPI пока не показывает положительную подтверждённую экономию.\n- При этом observed continuity startup уже сжёг {} токенов.\n- Strict same-meter slice по клиентскому запросу пока даёт только {} токенов.\n- Значит лимит сейчас уходит главным образом в continuity restore, а не в retrieval/workflow effect.",
                 format_u64(Some(boundary_tokens)),
                 format_u64(Some(strict_tokens))
             ),
@@ -948,7 +951,7 @@ fn build_current_session_hero_card(snapshot: &Value) -> Value {
         session_card = with_status_tooltip(
             session_card,
             &format!(
-                "Статус требует внимания по следующим причинам:\n- В подтверждённой части текущей сессии экономия сейчас отрицательная: {}.\n- Это значит, что в уже проверенных случаях контекст от Amai вышел тяжелее обычного пути без Amai.\n- Нижние строки со всем живым потоком показаны отдельно и не отменяют этот итог.",
+                "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- В подтверждённой части текущей сессии экономия сейчас отрицательная: {}.\n- Это значит, что в уже проверенных случаях контекст от Amai вышел тяжелее обычного пути без Amai.\n- Нижние строки со всем живым потоком показаны отдельно и не отменяют этот итог.",
                 format_signed_count(session_saved)
             ),
         );
@@ -1138,7 +1141,7 @@ pub(super) fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         rolling_card = with_status_tooltip(
             rolling_card,
             &format!(
-                "Статус требует внимания по следующим причинам:\n- В verified рабочем окне экономия сейчас не положительная: {}.\n- При этом observed continuity startup уже сжёг {} токенов.\n- Strict same-meter slice по клиентскому запросу пока даёт только {} токенов.\n- Значит окно сейчас горит главным образом в continuity restore, а не даёт устойчивый retrieval/workflow effect.",
+                "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- В verified рабочем окне экономия сейчас не положительная: {}.\n- При этом observed continuity startup уже сжёг {} токенов.\n- Strict same-meter slice по клиентскому запросу пока даёт только {} токенов.\n- Значит окно сейчас горит главным образом в continuity restore, а не даёт устойчивый retrieval/workflow effect.",
                 format_signed_count(rolling_saved),
                 format_u64(Some(boundary_tokens)),
                 format_u64(Some(strict_tokens))
@@ -1152,7 +1155,7 @@ pub(super) fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         rolling_card = with_status_tooltip(
             rolling_card,
             &format!(
-                "Статус требует внимания по следующим причинам:\n- В verified рабочем окне экономия сейчас отрицательная: {}.\n- При этом текущая сессия уже в плюсе, значит отрицательный итог окна в основном идёт от старого startup-хвоста внутри 5-часового окна.\n- Этот хвост вынесен в отдельную строку ниже, чтобы не смешивать его с текущим live-turn effect.",
+                "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- В verified рабочем окне экономия сейчас отрицательная: {}.\n- При этом текущая сессия уже в плюсе, значит отрицательный итог окна в основном идёт от старого startup-хвоста внутри 5-часового окна.\n- Этот хвост вынесен в отдельную строку ниже, чтобы не смешивать его с текущим live-turn effect.",
                 format_signed_count(rolling_saved)
             ),
         );
@@ -1160,7 +1163,7 @@ pub(super) fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         rolling_card = with_status_tooltip(
             rolling_card,
             &format!(
-                "Статус требует внимания по следующим причинам:\n- В verified рабочем окне экономия сейчас отрицательная: {}.\n- Это значит, что в уже подтверждённых случаях Amai пока выходил тяжелее обычного пути без Amai.",
+                "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- В verified рабочем окне экономия сейчас отрицательная: {}.\n- Это значит, что в уже подтверждённых случаях Amai пока выходил тяжелее обычного пути без Amai.",
                 format_signed_count(rolling_saved)
             ),
         );
@@ -1277,7 +1280,7 @@ pub(super) fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         lifetime_card = with_status_tooltip(
             lifetime_card,
             &format!(
-                "Статус требует внимания по следующим причинам:\n- В подтверждённой части всей истории экономия сейчас отрицательная: {}.\n- Это значит, что в уже проверенных случаях контекст от Amai пока выходит тяжелее обычного пути без Amai.",
+                "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- В подтверждённой части всей истории экономия сейчас отрицательная: {}.\n- Это значит, что в уже проверенных случаях контекст от Amai пока выходит тяжелее обычного пути без Amai.",
                 format_signed_count(lifetime_saved)
             ),
         );

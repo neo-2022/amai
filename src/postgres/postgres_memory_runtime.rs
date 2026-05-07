@@ -172,6 +172,7 @@ pub(super) fn derive_memory_item_source_kind(record: &MemoryItemInsert<'_>) -> O
     None
 }
 
+#[cfg(test)]
 pub(super) fn memory_item_has_recorded_basis(record: &MemoryItemInsert<'_>) -> bool {
     !record.source_event_ids.is_empty()
         || !record.artifact_refs.is_empty()

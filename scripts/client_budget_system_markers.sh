@@ -21,6 +21,15 @@ root_cause_freshness() {
   '
 }
 
+root_cause_payload_is_materialized() {
+  local payload="${1:-}"
+  [[ -n "${payload}" ]] || return 1
+  printf '%s\n' "${payload}" | jq -e '
+    (.client_budget_reply_gate | type) == "object"
+    and (.client_budget_reply_gate.reply_execution_gate | type) == "object"
+  ' >/dev/null 2>&1
+}
+
 startup_state_source="cli_fallback"
 if [[ -r "${STARTUP_STATE_ARTIFACT}" ]] \
   && jq -e \
@@ -40,14 +49,22 @@ fi
 
 fresh_root_cause_json() {
   local payload=""
-  payload="$("${SCRIPT_DIR}/client_budget_root_cause.sh" --enforce-reply-gate)"
-  if [[ "$(root_cause_freshness "${payload}")" == "fresh" ]]; then
+  if [[ -x "${SCRIPT_DIR}/client_budget_root_cause.sh" ]]; then
+    payload="$("${SCRIPT_DIR}/client_budget_root_cause.sh" --enforce-reply-gate 2>/dev/null || true)"
+  fi
+  if root_cause_payload_is_materialized "${payload}" \
+    && [[ "$(root_cause_freshness "${payload}")" == "fresh" ]]; then
     printf '%s\n' "${payload}"
     return 0
   fi
 
-  payload="$("${SCRIPT_DIR}/client_budget_root_cause.sh" --enforce-reply-gate)"
-  if [[ "$(root_cause_freshness "${payload}")" == "fresh" ]]; then
+  if [[ -x "${SCRIPT_DIR}/client_budget_root_cause.sh" ]]; then
+    payload="$("${SCRIPT_DIR}/client_budget_root_cause.sh" --enforce-reply-gate 2>/dev/null || true)"
+  else
+    payload=""
+  fi
+  if root_cause_payload_is_materialized "${payload}" \
+    && [[ "$(root_cause_freshness "${payload}")" == "fresh" ]]; then
     printf '%s\n' "${payload}"
     return 0
   fi
@@ -64,10 +81,21 @@ fresh_root_cause_json() {
     )"
   fi
 
+  if ! root_cause_payload_is_materialized "${payload}"; then
+    echo "client budget system markers: no root cause payload available" >&2
+    return 12
+  fi
+
   printf '%s\n' "${payload}"
 }
 
-root_cause_json="$(fresh_root_cause_json)"
+if ! root_cause_json="$(fresh_root_cause_json)"; then
+  status=$?
+  if [[ ${status} -eq 0 ]]; then
+    status=12
+  fi
+  exit "${status}"
+fi
 
 jq -n \
   --arg toolbar_kpi "${toolbar_kpi}" \

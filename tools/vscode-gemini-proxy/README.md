@@ -7,8 +7,8 @@
 
 1. Откройте VS Code.
 2. `Extensions` → `...` → `Install from VSIX` не нужно.
-3. В `Extensions` выберите `Install from Location...` и укажите папку:
-   `/home/art/agent-memory-index/tools/vscode-gemini-proxy`
+3. В `Extensions` выберите `Install from Location...` и укажите папку
+   `tools/vscode-gemini-proxy` из текущего checkout этого репозитория.
 4. Перезапустите VS Code, если попросит.
 
 ## Настройки

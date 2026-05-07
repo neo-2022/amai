@@ -5,6 +5,10 @@
 Сейчас в проекте уже есть несколько сильных документов:
 - `README.md`
   - продуктовая картина и базовое объяснение, что такое `Amai`;
+- `docs/AMAI_SYSTEM_OVERVIEW.md`
+  - единая human-readable картина того, что `Amai` такое целиком:
+    память, continuity, задачи, интеграции, платформы, ОС/host слой и scientific advisory
+    contour;
 - `docs/ARCHITECTURE.md`
   - слои, source of truth, retrieval laws, `ExecCtl` baseline;
 - `docs/OPERATIONS.md`
@@ -19,6 +23,9 @@
 Проблема не в том, что этих планов мало.
 
 Проблема в том, что без общего roadmap они легко начинают восприниматься как отдельные миры.
+
+И даже при наличии roadmap новый агент всё ещё может сузить картину проекта до одного контура,
+если не поднимет сначала `docs/AMAI_SYSTEM_OVERVIEW.md`.
 
 Этот документ нужен затем, чтобы:
 - ничего не потерять;
@@ -238,7 +245,7 @@
 Перед началом реализации нужно не “вспоминать с нуля”, а пройти короткий preflight:
 
 1. Прочитать этот roadmap.
-2. Прочитать [AMAI_TASK_TREE_PLAN.md](docs/AMAI_TASK_TREE_PLAN.md) как частный план по graph/task memory.
+2. Прочитать [AMAI_TASK_TREE_PLAN.md](AMAI_TASK_TREE_PLAN.md) как частный план по graph/task memory.
 3. Не открывать заново спор по locked-решениям выше.
 4. Брать следующий этап по порядку, а не перепрыгивать через scope/provenance/temporal base.
 5. После каждого большого подшага сразу делать proof и тесты.
@@ -682,7 +689,7 @@
 - повторная проверка после исправлений;
 - список известных ограничений;
 - явное решение: `готово к следующему этапу` или `нет`.
-- обновлённый [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md), чтобы любой агент видел актуальный статус без перелопачивания всего корпуса.
+- обновлённый [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md), чтобы любой агент видел актуальный статус без перелопачивания всего корпуса.
 
 И ещё один жёсткий закон stage gate:
 - если benchmark или proof показывает деградацию хотя бы по одной из четырёх осей, этап не закрывается;
@@ -1378,7 +1385,7 @@ Retrieval не должен сразу прыгать в сырые логи и 
 - потом уже можно собирать богатый restore.
 
 Проверка после этапа:
-- новый чат поднимает не только headline;
+- новая чистая рабочая поверхность поднимает не только headline;
 - а реальную рабочую картину.
 - в restore есть не только задачи, но и blocked/waiting items.
 - в restore есть важные свежие эпизоды.
@@ -1783,11 +1790,15 @@ Out-of-scope без отдельной ревизии execution-spec:
 Как раскладывать по текущим этапам:
 - `Bayesian / confidence / calibration`
   - future extension к `Этапу 10`;
-  - пока не source of truth и не materialized law;
-  - статус: `concept-only`.
+  - не source of truth и не materialized truth law;
+  - measured approval overlay уже частично materialized поверх compare/promotion plane;
+  - final promotion остаётся human-gated;
+  - статус: `partially_materialized / no truth-authority`.
 - `statistical benchmark discipline + drift checks`
   - extension к `Этапу 7` и `Этапу 10`;
-  - статус: `planned`.
+  - Queue 1 уже materialize-ит statistics/promotion/approval slices для `memory_task_matrix` и `mcp_task_matrix`;
+  - fresh proof-refresh 2026-04-24: `memory_task_matrix`, `mcp_task_matrix`, benchmark contamination preflight and dependent observability/dashboard parity are green after the MCP matrix red-state/no-data defect was fixed;
+  - статус: `in_progress / fresh-proof-green / measured-approval-human-gated`.
 - `Markov / hazard lifecycle`
   - extension к `Этапу 9`;
   - нужен как explainable lifecycle planner, а не как truth-engine;
@@ -1801,14 +1812,28 @@ Out-of-scope без отдельной ревизии execution-spec:
     - лучшее `pending_review`/revalidation targeting;
     - более честный archive/prune forecast;
     - policy simulation по cohort-level переходам;
-  - статус: `concept-only`.
+  - minimal advisory slice уже materialized как `memory cohort-risk`, governance/dashboard summary и MCP/observe snapshot summary;
+  - broader approval/policy-simulation contour ещё не закрыт;
+  - статус: `materialized_minimal_slice / advisory-only`.
 - `Poisson capacity`
-  - future performance/capacity contour;
-  - статус: `blocked by proof/data`.
+  - performance/capacity planning contour;
+  - Queue 5 minimal forecast-only slice уже materialized для `nats_events`;
+  - runtime/routing/truth authority запрещены;
+  - статус: `materialized_minimal_slice / forecast-only`.
+- `KAN-style context-pack utility explain`
+  - research candidate under the scientific reinforcement contour, not a new
+    core stage and not a product promise;
+  - source-of-truth for this idea lives in `Candidate Queue 4A` inside
+    `AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md`;
+  - until `shadow_approved`, it stays `spec_only / not_materialized`;
+  - even after future implementation it may only start as read-only shadow
+    explanation over already allowed context-pack candidates.
 - `regression / explainability`
-  - optional explain surface;
+  - read-only explain surface;
   - не authoritative truth-layer;
-  - статус: `planned`.
+  - Queue 4 minimal slice уже materialized как CLI/snapshot/dashboard contour;
+  - live measured quality пока честно остаётся `insufficient_sample`;
+  - статус: `materialized_minimal_slice / insufficient_sample_for_measured_quality`.
 
 Жёсткие ограничения:
 - probabilistic score не имеет права переписывать verified truth без policy/evidence path;

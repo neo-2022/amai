@@ -3,33 +3,35 @@ use super::{
     MemoryCardVerificationConflictCheck, MemoryConflictInsert, MemoryEdgeInsert, MemoryItemInsert,
     MemoryItemRecord, MemoryLinkDecisionInsert, MemoryProvenanceInsert, NamespaceRecord,
     ObservabilityInsertMeta, PendingLinkProposalInsert, PolicyRuleInsert, ProjectRecord,
-    QuarantineItemInsert, RelationUpdate, RestorePackInsert, RetrievalTraceInsert, SkillCardRecord,
-    SkillCardVerificationConflictCheck, SymbolRecord, TaskEventInsert, TaskNodeCandidateExtraction,
+    QuarantineItemInsert, RelationUpdate, RestorePackInsert, RestorePackSourceSnapshotHint,
+    RetrievalTraceInsert, SkillCardRecord, SkillCardVerificationConflictCheck, SymbolRecord,
+    TaskEventInsert, TaskNodeCandidateExtraction,
     TaskNodeInsert, TaskNodeVerificationConflictCheck, add_relation, apply_memory_card_update,
     augment_memory_item_metadata_with_stage2_runtime, bind_shared_asset_to_project,
     build_memory_write_pipeline, build_skill_execution_cards, canonical_repo_root_string,
-    connect_admin, count_documents_for_project_namespace_codes, create_artifact_ref,
+    bootstrap_schema, connect_admin, count_documents_for_project_namespace_codes, create_artifact_ref,
     create_import_packet, create_memory_card, create_memory_conflict, create_memory_edge,
     create_memory_item, create_memory_link_decision, create_memory_provenance,
     create_memory_relation_edge, create_pending_link_proposal, create_policy_rule,
-    create_quarantine_item, create_restore_pack, create_retrieval_trace,
+    create_quarantine_item, create_restore_pack, create_restore_pack_detailed, create_retrieval_trace,
     create_skill_card_candidate, create_skill_evidence_bundle, create_task_event, create_task_node,
     derive_memory_item_source_kind, ensure_access_policy, ensure_namespace, ensure_shared_asset,
     ensure_transfer_policy, ensure_workspace, evidence_span_marks_skill_card_poisoned,
     exact_match_basename, exact_match_basename_stem, extract_memory_card_candidate,
     extract_memory_item_candidate, extract_skill_card_candidate, extract_task_node_candidate,
-    get_import_packet, get_namespace_by_code, get_project_by_code, get_stack_meta, get_task_node,
-    insert_artifact_ref, insert_context_pack, insert_observability_snapshot, list_skill_cards,
-    memory_item_has_recorded_basis, memory_write_async_index_subjects,
-    memory_write_fan_out_subjects, metadata_marks_memory_item_poisoned,
-    observability_conflict_error, observability_source_class, prepare_observability_payload,
-    provenance_marks_memory_card_poisoned, reconcile_import_packet_quarantines, record_skill_eval,
-    record_skill_reuse_log, record_skill_trial_run, record_skill_trigger_match,
-    replace_document_index, run_memory_card_policy_scope_filter,
+    get_document_id_for_namespace_relative_path, get_import_packet, get_namespace_by_code,
+    get_project_by_code, get_restore_pack, get_stack_meta, get_task_node, insert_artifact_ref, insert_context_pack,
+    insert_observability_snapshot, list_skill_cards, memory_item_has_recorded_basis,
+    memory_write_async_index_subjects, memory_write_fan_out_subjects,
+    lookup_restore_pack_by_source_snapshot_id, metadata_marks_memory_item_poisoned, observability_conflict_error, observability_source_class,
+    prepare_observability_payload, provenance_marks_memory_card_poisoned,
+    reconcile_import_packet_quarantines, record_skill_eval, record_skill_reuse_log,
+    record_skill_trial_run, record_skill_trigger_match, replace_document_index,
+    replace_document_index_with_document_id, run_memory_card_policy_scope_filter,
     run_memory_item_policy_scope_filter, run_skill_card_policy_scope_filter,
     run_task_node_policy_scope_filter, safe_postgres_descriptor, search_memory_cards_for_namespace,
     task_node_marks_poisoned, update_import_packet, update_memory_card_truth_state,
-    update_relation, upsert_project, upsert_stack_meta, validate_artifact_ref_basis,
+    update_observability_snapshot_payload, update_relation, upsert_project, upsert_stack_meta, validate_artifact_ref_basis,
     validate_memory_card_candidate, validate_memory_card_policy_scope_filter,
     validate_memory_card_runtime_states, validate_memory_card_verification_conflict_check,
     validate_memory_item_candidate, validate_memory_item_policy_scope_filter,
@@ -40,13 +42,110 @@ use super::{
     validate_skill_card_verification_conflict_check, validate_skill_evidence_bundle_basis,
     validate_stage2_basis, validate_task_event_basis, validate_task_node_candidate,
     validate_task_node_policy_scope_filter, validate_task_node_verification_conflict_check,
+    insert_observability_snapshot_detailed, with_postgres_advisory_lock,
+    ObservabilityInsertErrorPhase,
+    RestorePackCreateErrorPhase,
 };
 use crate::config::AppConfig;
 use crate::nats;
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio_postgres::Client;
+use tokio_postgres::{Client, error::SqlState};
 use uuid::Uuid;
+
+const RESTORE_PACK_SAME_SOURCE_DEDUPE_AND_INDEX_SQL: &str = r#"
+WITH ranked_restore_packs AS (
+    SELECT
+        restore_pack_id,
+        ROW_NUMBER() OVER (
+            PARTITION BY project_id, namespace_id, pack_kind, source_snapshot_id
+            ORDER BY captured_at_epoch_ms DESC NULLS LAST, created_at DESC, restore_pack_id DESC
+        ) AS row_rank
+    FROM ami.restore_packs
+    WHERE source_snapshot_id IS NOT NULL
+)
+DELETE FROM ami.restore_packs rp
+USING ranked_restore_packs ranked
+WHERE rp.restore_pack_id = ranked.restore_pack_id
+  AND ranked.row_rank > 1;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ami_restore_packs_same_source_snapshot
+    ON ami.restore_packs(project_id, namespace_id, pack_kind, source_snapshot_id)
+    WHERE source_snapshot_id IS NOT NULL;
+"#;
+
+const RESTORE_PACK_SOURCE_SNAPSHOT_FK_RESTRICT_SQL: &str = r#"
+ALTER TABLE ami.restore_packs
+    DROP CONSTRAINT IF EXISTS restore_packs_source_snapshot_id_fkey;
+ALTER TABLE ami.restore_packs
+    ADD CONSTRAINT restore_packs_source_snapshot_id_fkey
+    FOREIGN KEY (source_snapshot_id)
+    REFERENCES ami.observability_snapshots(snapshot_id)
+    ON DELETE RESTRICT;
+"#;
+
+const RESTORE_PACK_WORKSPACE_SOURCE_SNAPSHOT_REQUIRED_SQL: &str = r#"
+DELETE FROM ami.restore_packs
+WHERE pack_kind = 'workspace_restore_pack'
+  AND source_snapshot_id IS NULL;
+ALTER TABLE ami.restore_packs
+    DROP CONSTRAINT IF EXISTS restore_packs_workspace_restore_pack_requires_source_snapshot_check;
+ALTER TABLE ami.restore_packs
+    ADD CONSTRAINT restore_packs_workspace_restore_pack_requires_source_snapshot_check CHECK (
+        pack_kind <> 'workspace_restore_pack' OR source_snapshot_id IS NOT NULL
+    );
+"#;
+
+const RESTORE_PACK_WORKSPACE_SOURCE_SNAPSHOT_REQUIRED_SQL_WITH_FORCED_FAILURE: &str = r#"
+DELETE FROM ami.restore_packs
+WHERE pack_kind = 'workspace_restore_pack'
+  AND source_snapshot_id IS NULL;
+SELECT definitely_missing_column
+FROM ami.restore_packs
+LIMIT 1;
+ALTER TABLE ami.restore_packs
+    DROP CONSTRAINT IF EXISTS restore_packs_workspace_restore_pack_requires_source_snapshot_check;
+ALTER TABLE ami.restore_packs
+    ADD CONSTRAINT restore_packs_workspace_restore_pack_requires_source_snapshot_check CHECK (
+        pack_kind <> 'workspace_restore_pack' OR source_snapshot_id IS NOT NULL
+    );
+"#;
+
+const RESTORE_PACK_SOURCE_IDENTITY_SCHEMA_TEST_LOCK_KEY: i64 = 0x52505f534348454d;
+
+async fn batch_execute_restore_pack_source_identity_schema_mutation(
+    client: &Client,
+    sql: &str,
+) -> anyhow::Result<()> {
+    with_postgres_advisory_lock(
+        client,
+        RESTORE_PACK_SOURCE_IDENTITY_SCHEMA_TEST_LOCK_KEY,
+        "failed to acquire restore_pack source identity schema test advisory lock",
+        "failed to release restore_pack source identity schema test advisory lock",
+        || async move {
+            client.batch_execute(sql).await?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+async fn with_restore_pack_source_identity_schema_test_lock<T, F, Fut>(
+    client: &Client,
+    f: F,
+) -> anyhow::Result<T>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    with_postgres_advisory_lock(
+        client,
+        RESTORE_PACK_SOURCE_IDENTITY_SCHEMA_TEST_LOCK_KEY,
+        "failed to acquire restore_pack source identity schema test advisory lock",
+        "failed to release restore_pack source identity schema test advisory lock",
+        f,
+    )
+    .await
+}
 
 async fn ensure_project_alpha_test_namespace(
     client: &Client,
@@ -64,6 +163,176 @@ async fn ensure_project_alpha_test_namespace(
     )
     .await
     .expect("test namespace")
+}
+
+#[test]
+fn bootstrap_sql_has_no_forward_table_references_or_precreate_ops() {
+    let bootstrap_sql = include_str!("../../sql/000_bootstrap.sql");
+    let mut create_positions = std::collections::BTreeMap::new();
+    for create_prefix in [
+        "CREATE TABLE IF NOT EXISTS ami.",
+        "CREATE VIEW ami.",
+        "CREATE MATERIALIZED VIEW ami.",
+    ] {
+        let mut search_from = 0usize;
+        while let Some(relative_pos) = bootstrap_sql[search_from..].find(create_prefix) {
+            let table_start = search_from + relative_pos + create_prefix.len();
+            let table_end = bootstrap_sql[table_start..]
+                .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .map(|offset| table_start + offset)
+                .expect("table name terminator");
+            let table_name = &bootstrap_sql[table_start..table_end];
+            create_positions
+                .entry(table_name.to_string())
+                .or_insert(search_from + relative_pos);
+            search_from = table_end;
+        }
+    }
+
+    let mut table_create_positions = std::collections::BTreeMap::new();
+    let mut search_from = 0usize;
+    let table_create_prefix = "CREATE TABLE IF NOT EXISTS ami.";
+    while let Some(relative_pos) = bootstrap_sql[search_from..].find(table_create_prefix) {
+        let table_start = search_from + relative_pos + table_create_prefix.len();
+        let table_end = bootstrap_sql[table_start..]
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .map(|offset| table_start + offset)
+            .expect("table name terminator");
+        let table_name = &bootstrap_sql[table_start..table_end];
+        table_create_positions
+            .entry(table_name.to_string())
+            .or_insert(search_from + relative_pos);
+        search_from = table_end;
+    }
+
+    let mut violations = Vec::new();
+    let mut table_blocks = bootstrap_sql.match_indices(table_create_prefix).peekable();
+    while let Some((table_pos, _)) = table_blocks.next() {
+        let table_start = table_pos + table_create_prefix.len();
+        let table_end = bootstrap_sql[table_start..]
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .map(|offset| table_start + offset)
+            .expect("table name terminator");
+        let table_name = &bootstrap_sql[table_start..table_end];
+        let body_end = table_blocks
+            .peek()
+            .map(|(next_pos, _)| *next_pos)
+            .unwrap_or(bootstrap_sql.len());
+        let body = &bootstrap_sql[table_pos..body_end];
+        let mut body_search = 0usize;
+        let ref_prefix = "REFERENCES ami.";
+        while let Some(relative_ref_pos) = body[body_search..].find(ref_prefix) {
+            let ref_start = body_search + relative_ref_pos + ref_prefix.len();
+            let ref_end = body[ref_start..]
+                .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .map(|offset| ref_start + offset)
+                .expect("reference name terminator");
+            let ref_name = &body[ref_start..ref_end];
+            match table_create_positions.get(ref_name) {
+                Some(ref_pos) if ref_pos > &table_pos => {
+                    violations.push(format!(
+                        "{table_name} references {ref_name} before it is created"
+                    ));
+                }
+                None => {
+                    violations.push(format!(
+                        "{table_name} references {ref_name} but no CREATE TABLE exists"
+                    ));
+                }
+                _ => {}
+            }
+            body_search = ref_end;
+        }
+    }
+
+    for marker in [
+        "ALTER TABLE ami.",
+        "DROP TRIGGER IF EXISTS ",
+        "CREATE TRIGGER ",
+        "CREATE INDEX IF NOT EXISTS ",
+    ] {
+        let mut op_search = 0usize;
+        while let Some(relative_op_pos) = bootstrap_sql[op_search..].find(marker) {
+            let op_pos = op_search + relative_op_pos;
+            let table_prefix = match marker {
+                "ALTER TABLE ami." => "ALTER TABLE ami.",
+                "DROP TRIGGER IF EXISTS " => " ON ami.",
+                "CREATE TRIGGER " => " ON ami.",
+                "CREATE INDEX IF NOT EXISTS " => " ON ami.",
+                _ => unreachable!(),
+            };
+            let table_anchor = match marker {
+                "ALTER TABLE ami." => op_pos,
+                _ => bootstrap_sql[op_pos..]
+                    .find(table_prefix)
+                    .map(|offset| op_pos + offset)
+                    .expect("table anchor"),
+            };
+            let table_start = table_anchor + table_prefix.len();
+            let table_end = bootstrap_sql[table_start..]
+                .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .map(|offset| table_start + offset)
+                .expect("table name terminator");
+            let table_name = &bootstrap_sql[table_start..table_end];
+            match create_positions.get(table_name) {
+                Some(create_pos) if create_pos > &op_pos => violations.push(format!(
+                    "operation `{marker}` touches {table_name} before it is created"
+                )),
+                None => violations.push(format!(
+                    "operation `{marker}` touches {table_name} but no create statement exists"
+                )),
+                _ => {}
+            }
+            op_search = table_end;
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "bootstrap SQL has pre-create ordering violations: {}",
+        violations.join("; ")
+    );
+}
+
+#[test]
+fn bootstrap_sql_restore_packs_create_blocks_keep_source_identity_law_aligned() {
+    let bootstrap_sql = include_str!("../../sql/000_bootstrap.sql");
+    let table_create_prefix = "CREATE TABLE IF NOT EXISTS ami.restore_packs";
+    let create_positions: Vec<usize> = bootstrap_sql
+        .match_indices(table_create_prefix)
+        .map(|(pos, _)| pos)
+        .collect();
+    assert!(
+        create_positions.len() >= 2,
+        "expected duplicate restore_packs CREATE TABLE blocks in bootstrap SQL for alignment guard"
+    );
+
+    for (index, table_pos) in create_positions.iter().enumerate() {
+        let body_start = *table_pos;
+        let body_end = create_positions
+            .get(index + 1)
+            .copied()
+            .unwrap_or(bootstrap_sql.len());
+        let body = &bootstrap_sql[body_start..body_end];
+        assert!(
+            body.contains(
+                "source_snapshot_id UUID REFERENCES ami.observability_snapshots(snapshot_id) ON DELETE RESTRICT"
+            ),
+            "restore_packs CREATE block #{index} drifted from ON DELETE RESTRICT"
+        );
+        assert!(
+            body.contains(
+                "CONSTRAINT restore_packs_workspace_restore_pack_requires_source_snapshot_check CHECK"
+            ),
+            "restore_packs CREATE block #{index} drifted from workspace_restore_pack source identity check"
+        );
+        assert!(
+            body.contains(
+                "pack_kind <> 'workspace_restore_pack' OR source_snapshot_id IS NOT NULL"
+            ),
+            "restore_packs CREATE block #{index} drifted from workspace_restore_pack source_snapshot invariant"
+        );
+    }
 }
 
 #[test]
@@ -10400,6 +10669,3904 @@ async fn create_restore_pack_policy_scope_filter_requires_source_snapshot_for_wo
 }
 
 #[tokio::test]
+async fn create_restore_pack_concurrent_same_source_snapshot_reuses_single_row() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client_a = connect_admin(&cfg).await.expect("postgres client a");
+    let client_b = connect_admin(&cfg).await.expect("postgres client b");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client_a, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 1_234_567,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-race:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client_a, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!("event:restore-pack-race:{suffix}")]);
+    let artifact_refs = json!([format!("artifact://proof/restore-pack-race/{suffix}")]);
+    let message_refs = json!([format!("thread:restore-pack-race:{suffix}")]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-race:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack race goal {suffix}"),
+        "next_step": "continue restore race proof",
+        "recent_actions": [{"event_id": format!("event:restore-pack-race:{suffix}")}]
+    });
+    let record_a = RestorePackInsert {
+        agent_scope: Some("proof::restore-race"),
+        session_id: Some("session-restore-pack-race-a"),
+        thread_id: Some("thread-restore-pack-race-a"),
+        source_snapshot_id: Some(source_snapshot_id),
+        source_snapshot_hint: None,
+        pack_kind: "workspace_restore_pack",
+        source_kind: Some("working_state_restore_runtime"),
+        source_event_ids: Some(&source_event_ids),
+        artifact_refs: Some(&artifact_refs),
+        message_refs: Some(&message_refs),
+        evidence_span: Some(&evidence_span),
+        derivation_kind: Some("summary"),
+        schema_version: Some("restore-pack-envelope-v1"),
+        headline: Some("restore pack race headline"),
+        summary: Some("restore pack race summary"),
+        payload: &payload,
+        captured_at_epoch_ms: Some(1_234_567),
+    };
+    let record_b = RestorePackInsert {
+        agent_scope: Some("proof::restore-race"),
+        session_id: Some("session-restore-pack-race-b"),
+        thread_id: Some("thread-restore-pack-race-b"),
+        source_snapshot_id: Some(source_snapshot_id),
+        source_snapshot_hint: None,
+        pack_kind: "workspace_restore_pack",
+        source_kind: Some("working_state_restore_runtime"),
+        source_event_ids: Some(&source_event_ids),
+        artifact_refs: Some(&artifact_refs),
+        message_refs: Some(&message_refs),
+        evidence_span: Some(&evidence_span),
+        derivation_kind: Some("summary"),
+        schema_version: Some("restore-pack-envelope-v1"),
+        headline: Some("restore pack race headline"),
+        summary: Some("restore pack race summary"),
+        payload: &payload,
+        captured_at_epoch_ms: Some(1_234_567),
+    };
+    unsafe {
+        std::env::set_var("AMAI_TEST_DELAY_RESTORE_PACK_CREATE_AFTER_LOOKUP_MS", "150");
+    }
+    let (result_a, result_b) = tokio::join!(
+        create_restore_pack(&client_a, &target_project_code, namespace_code, &record_a),
+        create_restore_pack(&client_b, &target_project_code, namespace_code, &record_b)
+    );
+    unsafe {
+        std::env::remove_var("AMAI_TEST_DELAY_RESTORE_PACK_CREATE_AFTER_LOOKUP_MS");
+    }
+
+    let pack_a = result_a.expect("create restore pack a");
+    let pack_b = result_b.expect("create restore pack b");
+    assert_eq!(pack_a.restore_pack_id, pack_b.restore_pack_id);
+
+    let count: i64 = client_a
+        .query_one(
+            r#"
+            SELECT COUNT(*)
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND source_snapshot_id = $3
+            "#,
+            &[&target_project_code, &namespace_code, &source_snapshot_id],
+        )
+        .await
+        .expect("restore pack count")
+        .get(0);
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn create_restore_pack_exact_replay_reuses_same_row_without_mutation() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 1_234_567,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-replay:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!("event:restore-pack-replay:{suffix}")]);
+    let artifact_refs = json!([format!("artifact://proof/restore-pack-replay/{suffix}")]);
+    let message_refs = json!([format!("thread:restore-pack-replay:{suffix}")]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-replay:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack replay goal {suffix}"),
+        "next_step": "exact replay must stay idempotent",
+        "recent_actions": [{"event_id": format!("event:restore-pack-replay:{suffix}")}]
+    });
+    let record = RestorePackInsert {
+        agent_scope: Some("proof::restore-replay"),
+        session_id: Some("session-restore-pack-replay"),
+        thread_id: Some("thread-restore-pack-replay"),
+        source_snapshot_id: Some(source_snapshot_id),
+        source_snapshot_hint: None,
+        pack_kind: "workspace_restore_pack",
+        source_kind: Some("working_state_restore_runtime"),
+        source_event_ids: Some(&source_event_ids),
+        artifact_refs: Some(&artifact_refs),
+        message_refs: Some(&message_refs),
+        evidence_span: Some(&evidence_span),
+        derivation_kind: Some("summary"),
+        schema_version: Some("restore-pack-envelope-v1"),
+        headline: Some("restore pack replay headline"),
+        summary: Some("restore pack replay summary"),
+        payload: &payload,
+        captured_at_epoch_ms: Some(1_234_567),
+    };
+
+    let first = create_restore_pack(&client, &target_project_code, namespace_code, &record)
+        .await
+        .expect("first restore pack");
+    let second = create_restore_pack(&client, &target_project_code, namespace_code, &record)
+        .await
+        .expect("second exact replay");
+
+    assert_eq!(first.restore_pack_id, second.restore_pack_id);
+    assert_eq!(first.payload, payload);
+    assert_eq!(second.payload, payload);
+
+    let row = client
+        .query_one(
+            r#"
+            SELECT payload, COUNT(*) OVER()
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND source_snapshot_id = $3
+            LIMIT 1
+            "#,
+            &[&target_project_code, &namespace_code, &source_snapshot_id],
+        )
+        .await
+        .expect("stored restore pack row");
+    let stored_payload: Value = row.get(0);
+    let count: i64 = row.get(1);
+    assert_eq!(count, 1);
+    assert_eq!(stored_payload, payload);
+}
+
+#[tokio::test]
+async fn create_restore_pack_same_source_snapshot_conflicting_payload_is_rejected() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 1_234_567,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-conflict:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!("event:restore-pack-conflict:{suffix}")]);
+    let artifact_refs = json!([format!("artifact://proof/restore-pack-conflict/{suffix}")]);
+    let message_refs = json!([format!("thread:restore-pack-conflict:{suffix}")]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-conflict:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let original_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack conflict goal {suffix}"),
+        "next_step": "keep canonical row stable",
+        "recent_actions": [{"event_id": format!("event:restore-pack-conflict:{suffix}")}]
+    });
+    let conflicting_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack conflicting goal {suffix}"),
+        "next_step": "this should be rejected",
+        "recent_actions": [{"event_id": format!("event:restore-pack-conflict:{suffix}")}]
+    });
+
+    let created = create_restore_pack(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-conflict"),
+            session_id: Some("session-restore-pack-conflict-a"),
+            thread_id: Some("thread-restore-pack-conflict-a"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack conflict headline"),
+            summary: Some("restore pack conflict summary"),
+            payload: &original_payload,
+            captured_at_epoch_ms: Some(1_234_567),
+        },
+    )
+    .await
+    .expect("initial restore pack");
+
+    let error = create_restore_pack(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-conflict"),
+            session_id: Some("session-restore-pack-conflict-b"),
+            thread_id: Some("thread-restore-pack-conflict-b"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack conflict headline"),
+            summary: Some("restore pack conflict summary"),
+            payload: &conflicting_payload,
+            captured_at_epoch_ms: Some(1_234_567),
+        },
+    )
+    .await
+    .expect_err("conflicting payload rejected");
+    assert!(error
+        .to_string()
+        .contains("restore pack canonical content conflict"));
+
+    let row = client
+        .query_one(
+            r#"
+            SELECT payload
+            FROM ami.restore_packs
+            WHERE restore_pack_id = $1
+            "#,
+            &[&created.restore_pack_id],
+        )
+        .await
+        .expect("stored restore pack");
+    let stored_payload: Value = row.get(0);
+    assert_eq!(stored_payload, original_payload);
+}
+
+#[tokio::test]
+async fn create_restore_pack_concurrent_same_source_snapshot_conflicting_payload_preserves_first_row()
+{
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client_a = connect_admin(&cfg).await.expect("postgres client a");
+    let client_b = connect_admin(&cfg).await.expect("postgres client b");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client_a, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 1_234_567,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-race-conflict:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client_a, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids =
+        json!([format!("event:restore-pack-race-conflict:{suffix}")]);
+    let artifact_refs =
+        json!([format!("artifact://proof/restore-pack-race-conflict/{suffix}")]);
+    let message_refs =
+        json!([format!("thread:restore-pack-race-conflict:{suffix}")]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-race-conflict:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let payload_a = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack race canonical goal {suffix}"),
+        "next_step": "keep first canonical row",
+        "recent_actions": [{"event_id": format!("event:restore-pack-race-conflict:{suffix}")}]
+    });
+    let payload_b = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack race conflicting goal {suffix}"),
+        "next_step": "reject second semantic shape",
+        "recent_actions": [{"event_id": format!("event:restore-pack-race-conflict:{suffix}")}]
+    });
+    let record_a = RestorePackInsert {
+        agent_scope: Some("proof::restore-race-conflict"),
+        session_id: Some("session-restore-pack-race-conflict-a"),
+        thread_id: Some("thread-restore-pack-race-conflict-a"),
+        source_snapshot_id: Some(source_snapshot_id),
+        source_snapshot_hint: None,
+        pack_kind: "workspace_restore_pack",
+        source_kind: Some("working_state_restore_runtime"),
+        source_event_ids: Some(&source_event_ids),
+        artifact_refs: Some(&artifact_refs),
+        message_refs: Some(&message_refs),
+        evidence_span: Some(&evidence_span),
+        derivation_kind: Some("summary"),
+        schema_version: Some("restore-pack-envelope-v1"),
+        headline: Some("restore pack race conflict headline"),
+        summary: Some("restore pack race conflict summary"),
+        payload: &payload_a,
+        captured_at_epoch_ms: Some(1_234_567),
+    };
+    let record_b = RestorePackInsert {
+        agent_scope: Some("proof::restore-race-conflict"),
+        session_id: Some("session-restore-pack-race-conflict-b"),
+        thread_id: Some("thread-restore-pack-race-conflict-b"),
+        source_snapshot_id: Some(source_snapshot_id),
+        source_snapshot_hint: None,
+        pack_kind: "workspace_restore_pack",
+        source_kind: Some("working_state_restore_runtime"),
+        source_event_ids: Some(&source_event_ids),
+        artifact_refs: Some(&artifact_refs),
+        message_refs: Some(&message_refs),
+        evidence_span: Some(&evidence_span),
+        derivation_kind: Some("summary"),
+        schema_version: Some("restore-pack-envelope-v1"),
+        headline: Some("restore pack race conflict headline"),
+        summary: Some("restore pack race conflict summary"),
+        payload: &payload_b,
+        captured_at_epoch_ms: Some(1_234_567),
+    };
+
+    unsafe {
+        std::env::set_var("AMAI_TEST_DELAY_RESTORE_PACK_CREATE_AFTER_LOOKUP_MS", "150");
+    }
+    let first = async {
+        create_restore_pack(&client_a, &target_project_code, namespace_code, &record_a).await
+    };
+    let second = async {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        create_restore_pack(&client_b, &target_project_code, namespace_code, &record_b).await
+    };
+    let (result_a, result_b) = tokio::join!(first, second);
+    unsafe {
+        std::env::remove_var("AMAI_TEST_DELAY_RESTORE_PACK_CREATE_AFTER_LOOKUP_MS");
+    }
+
+    let created = result_a.expect("first canonical restore pack");
+    let error = result_b.expect_err("second conflicting restore pack rejected");
+    assert!(error
+        .to_string()
+        .contains("restore pack canonical content conflict"));
+
+    let row = client_a
+        .query_one(
+            r#"
+            SELECT payload, COUNT(*) OVER()
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND source_snapshot_id = $3
+            LIMIT 1
+            "#,
+            &[&target_project_code, &namespace_code, &source_snapshot_id],
+        )
+        .await
+        .expect("stored canonical restore pack row");
+    let stored_payload: Value = row.get(0);
+    let count: i64 = row.get(1);
+    assert_eq!(count, 1);
+    assert_eq!(stored_payload, payload_a);
+    assert_eq!(created.payload, payload_a);
+}
+
+#[tokio::test]
+async fn create_restore_pack_missing_snapshot_behind_verified_hint_fails_before_write() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let fake_snapshot_id = Uuid::new_v4();
+    let source_event_ids = json!([format!("event:restore-pack-fk-miss:{suffix}")]);
+    let artifact_refs = json!([format!("artifact://proof/restore-pack-fk-miss/{suffix}")]);
+    let message_refs = json!([format!("thread:restore-pack-fk-miss:{suffix}")]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-fk-miss:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": "fk miss behind verified hint"
+    });
+
+    let error = create_restore_pack_detailed(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-fk-miss"),
+            session_id: Some("session-restore-pack-fk-miss"),
+            thread_id: Some("thread-restore-pack-fk-miss"),
+            source_snapshot_id: Some(fake_snapshot_id),
+            source_snapshot_hint: Some(RestorePackSourceSnapshotHint {
+                snapshot_kind: "working_state_restore",
+                scope_project_code: Some(&target_project_code),
+                scope_namespace_code: Some(namespace_code),
+                verified_exists: true,
+            }),
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack fk miss"),
+            summary: Some("restore pack fk miss"),
+            payload: &payload,
+            captured_at_epoch_ms: Some(1_234_567),
+        },
+    )
+    .await
+    .expect_err("missing snapshot behind verified hint must fail");
+
+    assert_eq!(error.phase, RestorePackCreateErrorPhase::BeforeWrite);
+    assert_eq!(error.project_code, target_project_code);
+    assert_eq!(error.namespace_code, namespace_code);
+    assert_eq!(error.pack_kind, "workspace_restore_pack");
+    assert_eq!(error.source_snapshot_id, Some(fake_snapshot_id));
+    let error_text = format!("{:#}", error.error);
+    assert!(
+        error_text.contains("failed to create restore pack")
+            || error_text.contains("restore pack")
+    );
+
+    let count: i64 = client
+        .query_one(
+            r#"
+            SELECT COUNT(*)
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND source_snapshot_id = $3
+            "#,
+            &[&target_project_code, &namespace_code, &fake_snapshot_id],
+        )
+        .await
+        .expect("restore pack count")
+        .get(0);
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn create_restore_pack_invalid_pack_kind_fails_before_write() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 1_234_567,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-invalid-kind:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!("event:restore-pack-invalid-kind:{suffix}")]);
+    let artifact_refs = json!([format!("artifact://proof/restore-pack-invalid-kind/{suffix}")]);
+    let message_refs = json!([format!("thread:restore-pack-invalid-kind:{suffix}")]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-invalid-kind:{suffix}"),
+        "restore_confidence": "durable"
+    });
+
+    let error = create_restore_pack_detailed(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-invalid-kind"),
+            session_id: Some("session-restore-pack-invalid-kind"),
+            thread_id: Some("thread-restore-pack-invalid-kind"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "invalid_pack_kind",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack invalid kind"),
+            summary: Some("restore pack invalid kind"),
+            payload: &json!({
+                "project": {"code": target_project_code},
+                "namespace": {"code": namespace_code},
+                "current_goal": "invalid pack kind"
+            }),
+            captured_at_epoch_ms: Some(1_234_567),
+        },
+    )
+    .await
+    .expect_err("invalid pack_kind must fail");
+
+    assert_eq!(error.phase, RestorePackCreateErrorPhase::BeforeWrite);
+    assert_eq!(error.project_code, target_project_code);
+    assert_eq!(error.namespace_code, namespace_code);
+    assert_eq!(error.pack_kind, "invalid_pack_kind");
+    assert_eq!(error.source_snapshot_id, Some(source_snapshot_id));
+
+    let count: i64 = client
+        .query_one(
+            r#"
+            SELECT COUNT(*)
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND source_snapshot_id = $3
+              AND headline = 'restore pack invalid kind'
+            "#,
+            &[&target_project_code, &namespace_code, &source_snapshot_id],
+        )
+        .await
+        .expect("restore pack count")
+        .get(0);
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn create_restore_pack_invalid_derivation_kind_fails_before_write() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 1_234_567,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-invalid-derivation:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids =
+        json!([format!("event:restore-pack-invalid-derivation:{suffix}")]);
+    let artifact_refs =
+        json!([format!("artifact://proof/restore-pack-invalid-derivation/{suffix}")]);
+    let message_refs =
+        json!([format!("thread:restore-pack-invalid-derivation:{suffix}")]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-invalid-derivation:{suffix}"),
+        "restore_confidence": "durable"
+    });
+
+    let error = create_restore_pack_detailed(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-invalid-derivation"),
+            session_id: Some("session-restore-pack-invalid-derivation"),
+            thread_id: Some("thread-restore-pack-invalid-derivation"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("invalid_derivation_kind"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack invalid derivation"),
+            summary: Some("restore pack invalid derivation"),
+            payload: &json!({
+                "project": {"code": target_project_code},
+                "namespace": {"code": namespace_code},
+                "current_goal": "invalid derivation kind"
+            }),
+            captured_at_epoch_ms: Some(1_234_567),
+        },
+    )
+    .await
+    .expect_err("invalid derivation_kind must fail");
+
+    assert_eq!(error.phase, RestorePackCreateErrorPhase::BeforeWrite);
+    assert_eq!(error.project_code, target_project_code);
+    assert_eq!(error.namespace_code, namespace_code);
+    assert_eq!(error.pack_kind, "workspace_restore_pack");
+    assert_eq!(error.source_snapshot_id, Some(source_snapshot_id));
+
+    let count: i64 = client
+        .query_one(
+            r#"
+            SELECT COUNT(*)
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND source_snapshot_id = $3
+              AND headline = 'restore pack invalid derivation'
+            "#,
+            &[&target_project_code, &namespace_code, &source_snapshot_id],
+        )
+        .await
+        .expect("restore pack count")
+        .get(0);
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn create_restore_pack_forced_outcome_unknown_after_write_keeps_row_materialized() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 1_234_567,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-unknown:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!("event:restore-pack-unknown:{suffix}")]);
+    let artifact_refs = json!([format!("artifact://proof/restore-pack-unknown/{suffix}")]);
+    let message_refs = json!([format!("thread:restore-pack-unknown:{suffix}")]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-unknown:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack unknown goal {suffix}"),
+        "next_step": "continue restore proof",
+        "recent_actions": [{"event_id": format!("event:restore-pack-unknown:{suffix}")}]
+    });
+
+    unsafe {
+        std::env::set_var(
+            "AMAI_TEST_FORCE_RESTORE_PACK_CREATE_FAILURE",
+            "outcome_unknown_after_write",
+        );
+    }
+    let error = create_restore_pack_detailed(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-unknown"),
+            session_id: Some("session-restore-pack-unknown"),
+            thread_id: Some("thread-restore-pack-unknown"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack unknown headline"),
+            summary: Some("restore pack unknown summary"),
+            payload: &payload,
+            captured_at_epoch_ms: Some(1_234_567),
+        },
+    )
+    .await
+    .expect_err("forced ambiguous restore pack create");
+    unsafe {
+        std::env::remove_var("AMAI_TEST_FORCE_RESTORE_PACK_CREATE_FAILURE");
+    }
+
+    assert_eq!(
+        error.phase,
+        RestorePackCreateErrorPhase::OutcomeUnknownAfterWrite
+    );
+    assert_eq!(error.project_code, target_project_code);
+    assert_eq!(error.namespace_code, namespace_code);
+    assert_eq!(error.pack_kind, "workspace_restore_pack");
+    assert_eq!(error.source_snapshot_id, Some(source_snapshot_id));
+
+    let count: i64 = client
+        .query_one(
+            r#"
+            SELECT COUNT(*)
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND source_snapshot_id = $3
+            "#,
+            &[&target_project_code, &namespace_code, &source_snapshot_id],
+        )
+        .await
+        .expect("restore pack count")
+        .get(0);
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn restore_pack_schema_rejects_source_snapshot_delete_while_restore_pack_depends_on_it() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    with_restore_pack_source_identity_schema_test_lock(&client, || async {
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 1_234_567,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-fk-protect:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!("event:restore-pack-fk-protect:{suffix}")]);
+    let artifact_refs = json!([format!("artifact://proof/restore-pack-fk-protect/{suffix}")]);
+    let message_refs = json!([format!("thread:restore-pack-fk-protect:{suffix}")]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-fk-protect:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let restore_pack = create_restore_pack(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-pack-fk-protect"),
+            session_id: Some("session-restore-pack-fk-protect"),
+            thread_id: Some("thread-restore-pack-fk-protect"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack fk protect headline"),
+            summary: Some("restore pack fk protect summary"),
+            payload: &json!({
+                "project": {"code": target_project_code},
+                "namespace": {"code": namespace_code},
+                "current_goal": "protect source snapshot from delete"
+            }),
+            captured_at_epoch_ms: Some(1_234_567),
+        },
+    )
+    .await
+    .expect("restore pack");
+
+    batch_execute_restore_pack_source_identity_schema_mutation(
+        &client,
+        RESTORE_PACK_SOURCE_SNAPSHOT_FK_RESTRICT_SQL,
+    )
+        .await
+        .expect("apply restore_pack source_snapshot FK restrict migration");
+
+    let error = client
+        .execute(
+            "DELETE FROM ami.observability_snapshots WHERE snapshot_id = $1",
+            &[&source_snapshot_id],
+        )
+        .await
+        .expect_err("source snapshot delete must be blocked by restore_pack FK");
+    let db_error = error.as_db_error().expect("db error");
+    assert_eq!(
+        db_error.code(),
+        &tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION
+    );
+
+    let row = client
+        .query_one(
+            r#"
+            SELECT source_snapshot_id
+            FROM ami.restore_packs
+            WHERE restore_pack_id = $1
+            "#,
+            &[&restore_pack.restore_pack_id],
+        )
+        .await
+        .expect("restore pack still present");
+    let kept_source_snapshot_id: Option<Uuid> = row.get(0);
+    assert_eq!(kept_source_snapshot_id, Some(source_snapshot_id));
+
+    let snapshot_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM ami.observability_snapshots WHERE snapshot_id = $1",
+            &[&source_snapshot_id],
+        )
+        .await
+        .expect("snapshot count")
+        .get(0);
+    assert_eq!(snapshot_count, 1);
+    Ok(())
+    })
+    .await
+    .expect("run restore_pack source snapshot delete protection test");
+}
+
+#[tokio::test]
+async fn restore_pack_schema_rejects_raw_workspace_restore_pack_without_source_snapshot() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    with_restore_pack_source_identity_schema_test_lock(&client, || async {
+
+    batch_execute_restore_pack_source_identity_schema_mutation(
+        &client,
+        RESTORE_PACK_WORKSPACE_SOURCE_SNAPSHOT_REQUIRED_SQL,
+    )
+        .await
+        .expect("apply workspace_restore_pack source_snapshot check migration");
+
+    let error = client
+        .execute(
+            r#"
+            INSERT INTO ami.restore_packs(
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms
+            )
+            VALUES (
+                (SELECT workspace_id FROM ami.workspaces LIMIT 1),
+                (SELECT project_id FROM ami.projects WHERE code = $1),
+                (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+                ),
+                'proof::restore-pack-null-source',
+                'session-restore-pack-null-source',
+                'thread-restore-pack-null-source',
+                NULL,
+                'workspace_restore_pack',
+                'working_state_restore_runtime',
+                '[]'::jsonb,
+                '[]'::jsonb,
+                '[]'::jsonb,
+                '{}'::jsonb,
+                'summary',
+                'restore-pack-envelope-v1',
+                'restore pack null source snapshot headline',
+                'restore pack null source snapshot summary',
+                $3::jsonb,
+                1234567
+            )
+            "#,
+            &[
+                &target_project_code,
+                &namespace_code,
+                &json!({
+                    "project": {"code": target_project_code},
+                    "namespace": {"code": namespace_code},
+                    "current_goal": "raw null source snapshot must fail"
+                }),
+            ],
+        )
+        .await
+        .expect_err("raw workspace_restore_pack without source_snapshot must be rejected");
+    let db_error = error.as_db_error().expect("db error");
+    assert_eq!(db_error.code(), &tokio_postgres::error::SqlState::CHECK_VIOLATION);
+
+    let count: i64 = client
+        .query_one(
+            r#"
+            SELECT COUNT(*)
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND headline = 'restore pack null source snapshot headline'
+            "#,
+            &[&target_project_code, &namespace_code],
+        )
+        .await
+        .expect("restore pack count")
+        .get(0);
+    assert_eq!(count, 0);
+    Ok(())
+    })
+    .await
+    .expect("run raw workspace_restore_pack source identity rejection test");
+}
+
+#[tokio::test]
+async fn get_restore_pack_rejects_dirty_workspace_restore_pack_without_source_snapshot() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    with_restore_pack_source_identity_schema_test_lock(&client, || async {
+
+    batch_execute_restore_pack_source_identity_schema_mutation(
+        &client,
+        "ALTER TABLE ami.restore_packs DROP CONSTRAINT IF EXISTS restore_packs_workspace_restore_pack_requires_source_snapshot_check;",
+    )
+    .await
+    .expect("drop workspace_restore_pack source_snapshot check");
+
+    let restore_pack_id: Uuid = client
+        .query_one(
+            r#"
+            INSERT INTO ami.restore_packs(
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms
+            )
+            VALUES (
+                (SELECT workspace_id FROM ami.workspaces LIMIT 1),
+                (SELECT project_id FROM ami.projects WHERE code = $1),
+                (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+                ),
+                'proof::restore-pack-read-dirty-orphan',
+                'session-restore-pack-read-dirty-orphan',
+                'thread-restore-pack-read-dirty-orphan',
+                NULL,
+                'workspace_restore_pack',
+                'working_state_restore_runtime',
+                '[]'::jsonb,
+                '[]'::jsonb,
+                '[]'::jsonb,
+                '{}'::jsonb,
+                'summary',
+                'restore-pack-envelope-v1',
+                'restore pack read dirty orphan headline',
+                'restore pack read dirty orphan summary',
+                $3::jsonb,
+                NULL
+            )
+            RETURNING restore_pack_id
+            "#,
+            &[
+                &target_project_code,
+                &namespace_code,
+                &json!({
+                    "project": {"code": target_project_code},
+                    "namespace": {"code": namespace_code},
+                    "current_goal": "direct read must reject dirty orphan restore pack"
+                }),
+            ],
+        )
+        .await
+        .expect("insert dirty orphan workspace_restore_pack")
+        .get(0);
+
+    let error = get_restore_pack(&client, restore_pack_id)
+        .await
+        .expect_err("dirty workspace_restore_pack read must fail closed");
+    assert!(error.to_string().contains("workspace_restore_pack requires source_snapshot_id"));
+    Ok(())
+    })
+    .await
+    .expect("run dirty workspace_restore_pack read rejection test");
+}
+
+#[tokio::test]
+async fn restore_pack_workspace_source_snapshot_check_migration_deletes_dirty_orphans_and_is_idempotent()
+{
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    with_restore_pack_source_identity_schema_test_lock(&client, || async {
+
+    batch_execute_restore_pack_source_identity_schema_mutation(
+        &client,
+        "ALTER TABLE ami.restore_packs DROP CONSTRAINT IF EXISTS restore_packs_workspace_restore_pack_requires_source_snapshot_check;",
+    )
+        .await
+        .expect("drop workspace_restore_pack source_snapshot check");
+
+    client
+        .execute(
+            r#"
+            INSERT INTO ami.restore_packs(
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms
+            )
+            VALUES (
+                (SELECT workspace_id FROM ami.workspaces LIMIT 1),
+                (SELECT project_id FROM ami.projects WHERE code = $1),
+                (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+                ),
+                'proof::restore-pack-dirty-orphan',
+                'session-restore-pack-dirty-orphan',
+                'thread-restore-pack-dirty-orphan',
+                NULL,
+                'workspace_restore_pack',
+                'working_state_restore_runtime',
+                '[]'::jsonb,
+                '[]'::jsonb,
+                '[]'::jsonb,
+                '{}'::jsonb,
+                'summary',
+                'restore-pack-envelope-v1',
+                'restore pack dirty orphan headline',
+                'restore pack dirty orphan summary',
+                $3::jsonb,
+                NULL
+            )
+            "#,
+            &[
+                &target_project_code,
+                &namespace_code,
+                &json!({
+                    "project": {"code": target_project_code},
+                    "namespace": {"code": namespace_code},
+                    "current_goal": "dirty orphan row should be deleted by migration"
+                }),
+            ],
+        )
+        .await
+        .expect("insert dirty orphan workspace_restore_pack");
+
+    batch_execute_restore_pack_source_identity_schema_mutation(
+        &client,
+        RESTORE_PACK_WORKSPACE_SOURCE_SNAPSHOT_REQUIRED_SQL,
+    )
+        .await
+        .expect("apply workspace_restore_pack source_snapshot check migration first pass");
+    batch_execute_restore_pack_source_identity_schema_mutation(
+        &client,
+        RESTORE_PACK_WORKSPACE_SOURCE_SNAPSHOT_REQUIRED_SQL,
+    )
+        .await
+        .expect("apply workspace_restore_pack source_snapshot check migration second pass");
+
+    let count: i64 = client
+        .query_one(
+            r#"
+            SELECT COUNT(*)
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND headline = 'restore pack dirty orphan headline'
+            "#,
+            &[&target_project_code, &namespace_code],
+        )
+        .await
+        .expect("restore pack orphan count")
+        .get(0);
+    assert_eq!(count, 0);
+    Ok(())
+    })
+    .await
+    .expect("run dirty orphan cleanup idempotency test");
+}
+
+#[tokio::test]
+async fn restore_pack_workspace_source_snapshot_check_migration_failure_rolls_back_cleanup() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    with_restore_pack_source_identity_schema_test_lock(&client, || async {
+
+    batch_execute_restore_pack_source_identity_schema_mutation(
+        &client,
+        "ALTER TABLE ami.restore_packs DROP CONSTRAINT IF EXISTS restore_packs_workspace_restore_pack_requires_source_snapshot_check;",
+    )
+        .await
+        .expect("drop workspace_restore_pack source_snapshot check");
+
+    client
+        .execute(
+            r#"
+            INSERT INTO ami.restore_packs(
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms
+            )
+            VALUES (
+                (SELECT workspace_id FROM ami.workspaces LIMIT 1),
+                (SELECT project_id FROM ami.projects WHERE code = $1),
+                (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+                ),
+                'proof::restore-pack-dirty-orphan-rollback',
+                'session-restore-pack-dirty-orphan-rollback',
+                'thread-restore-pack-dirty-orphan-rollback',
+                NULL,
+                'workspace_restore_pack',
+                'working_state_restore_runtime',
+                '[]'::jsonb,
+                '[]'::jsonb,
+                '[]'::jsonb,
+                '{}'::jsonb,
+                'summary',
+                'restore-pack-envelope-v1',
+                'restore pack dirty orphan rollback headline',
+                'restore pack dirty orphan rollback summary',
+                $3::jsonb,
+                NULL
+            )
+            "#,
+            &[
+                &target_project_code,
+                &namespace_code,
+                &json!({
+                    "project": {"code": target_project_code},
+                    "namespace": {"code": namespace_code},
+                    "current_goal": "dirty orphan row should survive failed migration transaction"
+                }),
+            ],
+        )
+        .await
+        .expect("insert dirty orphan workspace_restore_pack");
+
+    let error = batch_execute_restore_pack_source_identity_schema_mutation(
+        &client,
+        RESTORE_PACK_WORKSPACE_SOURCE_SNAPSHOT_REQUIRED_SQL_WITH_FORCED_FAILURE,
+    )
+        .await
+        .expect_err("forced failure migration must abort");
+    let db_error = error
+        .downcast_ref::<tokio_postgres::Error>()
+        .and_then(|inner| inner.as_db_error())
+        .expect("db error");
+    assert_eq!(db_error.code(), &tokio_postgres::error::SqlState::UNDEFINED_COLUMN);
+
+    let count: i64 = client
+        .query_one(
+            r#"
+            SELECT COUNT(*)
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND headline = 'restore pack dirty orphan rollback headline'
+              AND source_snapshot_id IS NULL
+            "#,
+            &[&target_project_code, &namespace_code],
+        )
+        .await
+        .expect("restore pack orphan count")
+        .get(0);
+    assert_eq!(count, 1);
+    Ok(())
+    })
+    .await
+    .expect("run dirty orphan cleanup rollback test");
+}
+
+#[tokio::test]
+async fn bootstrap_schema_restores_restore_pack_source_identity_law_and_cleans_dirty_orphans() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    with_restore_pack_source_identity_schema_test_lock(&client, || async {
+
+    batch_execute_restore_pack_source_identity_schema_mutation(
+        &client,
+        r#"
+            ALTER TABLE ami.restore_packs
+                DROP CONSTRAINT IF EXISTS restore_packs_workspace_restore_pack_requires_source_snapshot_check;
+            ALTER TABLE ami.restore_packs
+                DROP CONSTRAINT IF EXISTS restore_packs_source_snapshot_id_fkey;
+            ALTER TABLE ami.restore_packs
+                ADD CONSTRAINT restore_packs_source_snapshot_id_fkey
+                FOREIGN KEY (source_snapshot_id)
+                REFERENCES ami.observability_snapshots(snapshot_id)
+                ON DELETE SET NULL;
+            "#,
+    )
+        .await
+        .expect("degrade restore_pack source identity laws");
+
+    client
+        .execute(
+            r#"
+            INSERT INTO ami.restore_packs(
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms
+            )
+            VALUES (
+                (SELECT workspace_id FROM ami.workspaces LIMIT 1),
+                (SELECT project_id FROM ami.projects WHERE code = $1),
+                (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+                ),
+                'proof::bootstrap-restore-pack-orphan',
+                'session-bootstrap-restore-pack-orphan',
+                'thread-bootstrap-restore-pack-orphan',
+                NULL,
+                'workspace_restore_pack',
+                'working_state_restore_runtime',
+                '[]'::jsonb,
+                '[]'::jsonb,
+                '[]'::jsonb,
+                '{}'::jsonb,
+                'summary',
+                'restore-pack-envelope-v1',
+                'bootstrap restore pack orphan headline',
+                'bootstrap restore pack orphan summary',
+                $3::jsonb,
+                NULL
+            )
+            "#,
+            &[
+                &target_project_code,
+                &namespace_code,
+                &json!({
+                    "project": {"code": target_project_code},
+                    "namespace": {"code": namespace_code},
+                    "current_goal": "bootstrap should clean dirty restore_pack orphan"
+                }),
+            ],
+        )
+        .await
+        .expect("insert dirty orphan workspace_restore_pack");
+
+    bootstrap_schema(&client, &cfg)
+        .await
+        .expect("bootstrap schema should restore restore_pack source identity law");
+
+    let orphan_count: i64 = client
+        .query_one(
+            r#"
+            SELECT COUNT(*)
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND headline = 'bootstrap restore pack orphan headline'
+            "#,
+            &[&target_project_code, &namespace_code],
+        )
+        .await
+        .expect("orphan count")
+        .get(0);
+    assert_eq!(orphan_count, 0);
+
+    let fk_row = client
+        .query_one(
+            r#"
+            SELECT pg_get_constraintdef(c.oid)
+            FROM pg_constraint c
+            INNER JOIN pg_class t ON t.oid = c.conrelid
+            INNER JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE n.nspname = 'ami'
+              AND t.relname = 'restore_packs'
+              AND c.conname = 'restore_packs_source_snapshot_id_fkey'
+            "#,
+            &[],
+        )
+        .await
+        .expect("restore_packs source_snapshot FK");
+    let fk_def: String = fk_row.get(0);
+    assert!(fk_def.contains("ON DELETE RESTRICT"));
+
+    let check_row = client
+        .query_one(
+            r#"
+            SELECT pg_get_constraintdef(c.oid)
+            FROM pg_constraint c
+            INNER JOIN pg_class t ON t.oid = c.conrelid
+            INNER JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE n.nspname = 'ami'
+              AND t.relname = 'restore_packs'
+              AND c.conname = 'restore_packs_workspace_restore_pack_requires_source_snapshot_check'
+            "#,
+            &[],
+        )
+        .await
+        .expect("restore_packs workspace source identity CHECK");
+    let check_def: String = check_row.get(0);
+    assert!(check_def.contains("pack_kind <> 'workspace_restore_pack'"));
+    assert!(check_def.contains("source_snapshot_id IS NOT NULL"));
+    Ok(())
+    })
+    .await
+    .expect("run bootstrap restore_pack source identity repair test");
+}
+
+#[tokio::test]
+async fn restore_packs_schema_rejects_raw_duplicate_same_source_snapshot() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 1_234_567,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-schema-dup:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!("event:restore-pack-schema-dup:{suffix}")]);
+    let artifact_refs = json!([format!("artifact://proof/restore-pack-schema-dup/{suffix}")]);
+    let message_refs = json!([format!("thread:restore-pack-schema-dup:{suffix}")]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-schema-dup:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack schema dup goal {suffix}"),
+        "next_step": "prove db unique boundary",
+        "recent_actions": [{"event_id": format!("event:restore-pack-schema-dup:{suffix}")}]
+    });
+
+    client
+        .batch_execute(RESTORE_PACK_SAME_SOURCE_DEDUPE_AND_INDEX_SQL)
+        .await
+        .expect("ensure restore pack unique index");
+
+    let created = create_restore_pack(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-schema-dup"),
+            session_id: Some("session-restore-pack-schema-dup"),
+            thread_id: Some("thread-restore-pack-schema-dup"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack schema dup headline"),
+            summary: Some("restore pack schema dup summary"),
+            payload: &payload,
+            captured_at_epoch_ms: Some(1_234_567),
+        },
+    )
+    .await
+    .expect("canonical restore pack");
+
+    let duplicate_error = client
+        .execute(
+            r#"
+            INSERT INTO ami.restore_packs(
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms
+            )
+            SELECT
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms
+            FROM ami.restore_packs
+            WHERE restore_pack_id = $1
+            "#,
+            &[&created.restore_pack_id],
+        )
+        .await
+        .expect_err("raw duplicate same-source row must be rejected");
+
+    let db_error = duplicate_error
+        .as_db_error()
+        .expect("raw duplicate insert must surface db error");
+    assert_eq!(db_error.code(), &SqlState::UNIQUE_VIOLATION);
+
+    let count: i64 = client
+        .query_one(
+            r#"
+            SELECT COUNT(*)
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND source_snapshot_id = $3
+            "#,
+            &[&target_project_code, &namespace_code, &source_snapshot_id],
+        )
+        .await
+        .expect("restore pack count")
+        .get(0);
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn restore_packs_bootstrap_dedupe_prefers_newer_source_time_over_later_insert_and_is_idempotent() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 1_234_567,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-bootstrap-dedupe:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!(
+        "event:restore-pack-bootstrap-dedupe:{suffix}"
+    )]);
+    let artifact_refs = json!([format!(
+        "artifact://proof/restore-pack-bootstrap-dedupe/{suffix}"
+    )]);
+    let message_refs = json!([format!(
+        "thread:restore-pack-bootstrap-dedupe:{suffix}"
+    )]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-bootstrap-dedupe:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let original_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack bootstrap original goal {suffix}"),
+        "next_step": "original row",
+        "recent_actions": [{"event_id": format!("event:restore-pack-bootstrap-dedupe:{suffix}")}]
+    });
+    let original = create_restore_pack(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-bootstrap-dedupe"),
+            session_id: Some("session-restore-pack-bootstrap-dedupe"),
+            thread_id: Some("thread-restore-pack-bootstrap-dedupe"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack bootstrap original headline"),
+            summary: Some("restore pack bootstrap original summary"),
+            payload: &original_payload,
+            captured_at_epoch_ms: Some(1_234_567),
+        },
+    )
+    .await
+    .expect("original restore pack");
+
+    client
+        .batch_execute("DROP INDEX IF EXISTS ami.idx_ami_restore_packs_same_source_snapshot;")
+        .await
+        .expect("drop restore pack unique index");
+
+    let duplicate_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack bootstrap duplicate goal {suffix}"),
+        "next_step": "duplicate row should win by higher source time",
+        "recent_actions": [{"event_id": format!("event:restore-pack-bootstrap-dedupe:{suffix}")}]
+    });
+    client
+        .execute(
+            r#"
+            INSERT INTO ami.restore_packs(
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms
+            )
+            SELECT
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                'restore pack bootstrap duplicate headline',
+                'restore pack bootstrap duplicate summary',
+                $2::jsonb,
+                captured_at_epoch_ms + 1
+            FROM ami.restore_packs
+            WHERE restore_pack_id = $1
+            "#,
+            &[&original.restore_pack_id, &duplicate_payload],
+        )
+        .await
+        .expect("insert dirty duplicate restore pack row");
+
+    client
+        .batch_execute(RESTORE_PACK_SAME_SOURCE_DEDUPE_AND_INDEX_SQL)
+        .await
+        .expect("apply dedupe and unique index first pass");
+    client
+        .batch_execute(RESTORE_PACK_SAME_SOURCE_DEDUPE_AND_INDEX_SQL)
+        .await
+        .expect("apply dedupe and unique index second pass");
+
+    let row = client
+        .query_one(
+            r#"
+            SELECT restore_pack_id, headline, summary, payload, COUNT(*) OVER()
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND source_snapshot_id = $3
+            LIMIT 1
+            "#,
+            &[&target_project_code, &namespace_code, &source_snapshot_id],
+        )
+        .await
+        .expect("deduped restore pack row");
+
+    let kept_restore_pack_id: Uuid = row.get(0);
+    let kept_headline: Option<String> = row.get(1);
+    let kept_summary: Option<String> = row.get(2);
+    let kept_payload: Value = row.get(3);
+    let count: i64 = row.get(4);
+
+    assert_eq!(count, 1);
+    assert_ne!(kept_restore_pack_id, original.restore_pack_id);
+    assert_eq!(
+        kept_headline.as_deref(),
+        Some("restore pack bootstrap duplicate headline")
+    );
+    assert_eq!(
+        kept_summary.as_deref(),
+        Some("restore pack bootstrap duplicate summary")
+    );
+    assert_eq!(kept_payload, duplicate_payload);
+}
+
+#[tokio::test]
+async fn lookup_restore_pack_by_source_snapshot_id_prefers_canonical_newer_source_time_for_dirty_duplicates()
+{
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let project = get_project_by_code(&client, &target_project_code)
+        .await
+        .expect("project");
+    let namespace = get_namespace_by_code(&client, project.project_id, namespace_code)
+        .await
+        .expect("namespace");
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 100,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-lookup-duplicate:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!("event:restore-pack-lookup-duplicate:{suffix}")]);
+    let artifact_refs = json!([format!(
+        "artifact://proof/restore-pack-lookup-duplicate/{suffix}"
+    )]);
+    let message_refs = json!([format!("thread:restore-pack-lookup-duplicate:{suffix}")]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-lookup-duplicate:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let original = create_restore_pack(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-pack-lookup-duplicate"),
+            session_id: Some("session-restore-pack-lookup-duplicate"),
+            thread_id: Some("thread-restore-pack-lookup-duplicate"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack lookup original headline"),
+            summary: Some("restore pack lookup original summary"),
+            payload: &json!({
+                "project": {"code": target_project_code},
+                "namespace": {"code": namespace_code},
+                "current_goal": format!("restore pack lookup original goal {suffix}")
+            }),
+            captured_at_epoch_ms: Some(100),
+        },
+    )
+    .await
+    .expect("original restore pack");
+
+    batch_execute_restore_pack_source_identity_schema_mutation(
+        &client,
+        "DROP INDEX IF EXISTS ami.idx_ami_restore_packs_same_source_snapshot;",
+    )
+    .await
+    .expect("drop restore pack unique index");
+
+    let duplicate_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack lookup duplicate goal {suffix}")
+    });
+    let duplicate_id: Uuid = client
+        .query_one(
+            r#"
+            INSERT INTO ami.restore_packs(
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms
+            )
+            SELECT
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                'restore pack lookup duplicate headline',
+                'restore pack lookup duplicate summary',
+                $2::jsonb,
+                captured_at_epoch_ms + 1
+            FROM ami.restore_packs
+            WHERE restore_pack_id = $1
+            RETURNING restore_pack_id
+            "#,
+            &[&original.restore_pack_id, &duplicate_payload],
+        )
+        .await
+        .expect("insert dirty duplicate restore pack row")
+        .get(0);
+
+    let looked_up = lookup_restore_pack_by_source_snapshot_id(
+        &client,
+        project.project_id,
+        namespace.namespace_id,
+        "workspace_restore_pack",
+        source_snapshot_id,
+    )
+    .await
+    .expect("lookup restore pack")
+    .expect("restore pack present");
+
+    assert_eq!(looked_up.restore_pack_id, duplicate_id);
+    assert_eq!(
+        looked_up.headline.as_deref(),
+        Some("restore pack lookup duplicate headline")
+    );
+    assert_eq!(looked_up.payload, duplicate_payload);
+}
+
+#[tokio::test]
+async fn lookup_restore_pack_by_source_snapshot_id_prefers_non_null_source_time_for_dirty_duplicates()
+{
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let project = get_project_by_code(&client, &target_project_code)
+        .await
+        .expect("project");
+    let namespace = get_namespace_by_code(&client, project.project_id, namespace_code)
+        .await
+        .expect("namespace");
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 100,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-lookup-null-source-time:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!(
+        "event:restore-pack-lookup-null-source-time:{suffix}"
+    )]);
+    let artifact_refs = json!([format!(
+        "artifact://proof/restore-pack-lookup-null-source-time/{suffix}"
+    )]);
+    let message_refs = json!([format!(
+        "thread:restore-pack-lookup-null-source-time:{suffix}"
+    )]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-lookup-null-source-time:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let original = create_restore_pack(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-pack-lookup-null-source-time"),
+            session_id: Some("session-restore-pack-lookup-null-source-time"),
+            thread_id: Some("thread-restore-pack-lookup-null-source-time"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack lookup null source time original headline"),
+            summary: Some("restore pack lookup null source time original summary"),
+            payload: &json!({
+                "project": {"code": target_project_code},
+                "namespace": {"code": namespace_code},
+                "current_goal": format!("restore pack lookup null source time original goal {suffix}")
+            }),
+            captured_at_epoch_ms: Some(100),
+        },
+    )
+    .await
+    .expect("original restore pack");
+
+    batch_execute_restore_pack_source_identity_schema_mutation(
+        &client,
+        "DROP INDEX IF EXISTS ami.idx_ami_restore_packs_same_source_snapshot;",
+    )
+    .await
+    .expect("drop restore pack unique index");
+
+    let duplicate_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack lookup null source time duplicate goal {suffix}")
+    });
+    let duplicate_id: Uuid = client
+        .query_one(
+            r#"
+            INSERT INTO ami.restore_packs(
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms
+            )
+            SELECT
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                'restore pack lookup null source time duplicate headline',
+                'restore pack lookup null source time duplicate summary',
+                $2::jsonb,
+                NULL
+            FROM ami.restore_packs
+            WHERE restore_pack_id = $1
+            RETURNING restore_pack_id
+            "#,
+            &[&original.restore_pack_id, &duplicate_payload],
+        )
+        .await
+        .expect("insert dirty duplicate restore pack row")
+        .get(0);
+
+    let looked_up = lookup_restore_pack_by_source_snapshot_id(
+        &client,
+        project.project_id,
+        namespace.namespace_id,
+        "workspace_restore_pack",
+        source_snapshot_id,
+    )
+    .await
+    .expect("lookup restore pack")
+    .expect("restore pack present");
+
+    assert_ne!(looked_up.restore_pack_id, duplicate_id);
+    assert_eq!(looked_up.restore_pack_id, original.restore_pack_id);
+    assert_eq!(
+        looked_up.headline.as_deref(),
+        Some("restore pack lookup null source time original headline")
+    );
+}
+
+#[tokio::test]
+async fn restore_packs_bootstrap_dedupe_prefers_higher_source_time_even_if_inserted_earlier() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 100,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-bootstrap-delayed:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!(
+        "event:restore-pack-bootstrap-delayed:{suffix}"
+    )]);
+    let artifact_refs = json!([format!(
+        "artifact://proof/restore-pack-bootstrap-delayed/{suffix}"
+    )]);
+    let message_refs = json!([format!(
+        "thread:restore-pack-bootstrap-delayed:{suffix}"
+    )]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-bootstrap-delayed:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let newer_source_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack delayed newer-source goal {suffix}"),
+        "next_step": "higher source time should win even if inserted first",
+        "recent_actions": [{"event_id": format!("event:restore-pack-bootstrap-delayed:{suffix}")}]
+    });
+    let original = create_restore_pack(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-bootstrap-delayed"),
+            session_id: Some("session-restore-pack-bootstrap-delayed"),
+            thread_id: Some("thread-restore-pack-bootstrap-delayed"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack delayed newer-source headline"),
+            summary: Some("restore pack delayed newer-source summary"),
+            payload: &newer_source_payload,
+            captured_at_epoch_ms: Some(200),
+        },
+    )
+    .await
+    .expect("newer source-time restore pack");
+
+    client
+        .batch_execute("DROP INDEX IF EXISTS ami.idx_ami_restore_packs_same_source_snapshot;")
+        .await
+        .expect("drop restore pack unique index");
+
+    client
+        .execute(
+            r#"
+            INSERT INTO ami.restore_packs(
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms,
+                created_at
+            )
+            SELECT
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                'restore pack delayed later-insert headline',
+                'restore pack delayed later-insert summary',
+                $2::jsonb,
+                100,
+                created_at + interval '1 second'
+            FROM ami.restore_packs
+            WHERE restore_pack_id = $1
+            "#,
+            &[
+                &original.restore_pack_id,
+                &json!({
+                    "project": {"code": target_project_code},
+                    "namespace": {"code": namespace_code},
+                    "current_goal": format!("restore pack delayed later-insert goal {suffix}"),
+                    "next_step": "later insert should lose to higher source time",
+                    "recent_actions": [{"event_id": format!("event:restore-pack-bootstrap-delayed:{suffix}")}]
+                }),
+            ],
+        )
+        .await
+        .expect("insert later-created lower-source-time duplicate");
+
+    client
+        .batch_execute(RESTORE_PACK_SAME_SOURCE_DEDUPE_AND_INDEX_SQL)
+        .await
+        .expect("apply dedupe and unique index");
+
+    let row = client
+        .query_one(
+            r#"
+            SELECT headline, summary, payload, captured_at_epoch_ms, COUNT(*) OVER()
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND source_snapshot_id = $3
+            LIMIT 1
+            "#,
+            &[&target_project_code, &namespace_code, &source_snapshot_id],
+        )
+        .await
+        .expect("deduped restore pack row");
+
+    let kept_headline: Option<String> = row.get(0);
+    let kept_summary: Option<String> = row.get(1);
+    let kept_payload: Value = row.get(2);
+    let kept_captured_at_epoch_ms: Option<i64> = row.get(3);
+    let count: i64 = row.get(4);
+
+    assert_eq!(count, 1);
+    assert_eq!(
+        kept_headline.as_deref(),
+        Some("restore pack delayed newer-source headline")
+    );
+    assert_eq!(
+        kept_summary.as_deref(),
+        Some("restore pack delayed newer-source summary")
+    );
+    assert_eq!(kept_payload, newer_source_payload);
+    assert_eq!(kept_captured_at_epoch_ms, Some(200));
+}
+
+#[tokio::test]
+async fn restore_packs_bootstrap_dedupe_uses_created_at_when_source_time_ties() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 200,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-bootstrap-created-at:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!(
+        "event:restore-pack-bootstrap-created-at:{suffix}"
+    )]);
+    let artifact_refs = json!([format!(
+        "artifact://proof/restore-pack-bootstrap-created-at/{suffix}"
+    )]);
+    let message_refs = json!([format!(
+        "thread:restore-pack-bootstrap-created-at:{suffix}"
+    )]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-bootstrap-created-at:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let earlier_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack created_at earlier goal {suffix}"),
+        "next_step": "older created_at should lose on source-time tie",
+        "recent_actions": [{"event_id": format!("event:restore-pack-bootstrap-created-at:{suffix}")}]
+    });
+    let original = create_restore_pack(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-bootstrap-created-at"),
+            session_id: Some("session-restore-pack-bootstrap-created-at"),
+            thread_id: Some("thread-restore-pack-bootstrap-created-at"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack created_at earlier headline"),
+            summary: Some("restore pack created_at earlier summary"),
+            payload: &earlier_payload,
+            captured_at_epoch_ms: Some(200),
+        },
+    )
+    .await
+    .expect("earlier created_at restore pack");
+
+    client
+        .batch_execute("DROP INDEX IF EXISTS ami.idx_ami_restore_packs_same_source_snapshot;")
+        .await
+        .expect("drop restore pack unique index");
+
+    let later_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack created_at later goal {suffix}"),
+        "next_step": "newer created_at should win on source-time tie",
+        "recent_actions": [{"event_id": format!("event:restore-pack-bootstrap-created-at:{suffix}")}]
+    });
+    client
+        .execute(
+            r#"
+            INSERT INTO ami.restore_packs(
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms,
+                created_at
+            )
+            SELECT
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                'restore pack created_at later headline',
+                'restore pack created_at later summary',
+                $2::jsonb,
+                captured_at_epoch_ms,
+                created_at + interval '1 second'
+            FROM ami.restore_packs
+            WHERE restore_pack_id = $1
+            "#,
+            &[&original.restore_pack_id, &later_payload],
+        )
+        .await
+        .expect("insert same-source-time later-created duplicate restore pack row");
+
+    client
+        .batch_execute(RESTORE_PACK_SAME_SOURCE_DEDUPE_AND_INDEX_SQL)
+        .await
+        .expect("apply dedupe and unique index");
+
+    let row = client
+        .query_one(
+            r#"
+            SELECT headline, summary, payload, captured_at_epoch_ms, COUNT(*) OVER()
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND source_snapshot_id = $3
+            LIMIT 1
+            "#,
+            &[&target_project_code, &namespace_code, &source_snapshot_id],
+        )
+        .await
+        .expect("deduped restore pack row");
+
+    let kept_headline: Option<String> = row.get(0);
+    let kept_summary: Option<String> = row.get(1);
+    let kept_payload: Value = row.get(2);
+    let kept_captured_at_epoch_ms: Option<i64> = row.get(3);
+    let count: i64 = row.get(4);
+
+    assert_eq!(count, 1);
+    assert_eq!(
+        kept_headline.as_deref(),
+        Some("restore pack created_at later headline")
+    );
+    assert_eq!(
+        kept_summary.as_deref(),
+        Some("restore pack created_at later summary")
+    );
+    assert_eq!(kept_payload, later_payload);
+    assert_eq!(kept_captured_at_epoch_ms, Some(200));
+}
+
+#[tokio::test]
+async fn restore_packs_bootstrap_dedupe_prefers_higher_captured_at_when_created_at_ties() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 100,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-bootstrap-tie:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!(
+        "event:restore-pack-bootstrap-tie:{suffix}"
+    )]);
+    let artifact_refs = json!([format!(
+        "artifact://proof/restore-pack-bootstrap-tie/{suffix}"
+    )]);
+    let message_refs = json!([format!(
+        "thread:restore-pack-bootstrap-tie:{suffix}"
+    )]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-bootstrap-tie:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let lower_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack tie lower goal {suffix}"),
+        "next_step": "lower captured_at should lose",
+        "recent_actions": [{"event_id": format!("event:restore-pack-bootstrap-tie:{suffix}")}]
+    });
+    let original = create_restore_pack(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-bootstrap-tie"),
+            session_id: Some("session-restore-pack-bootstrap-tie"),
+            thread_id: Some("thread-restore-pack-bootstrap-tie"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack bootstrap tie lower headline"),
+            summary: Some("restore pack bootstrap tie lower summary"),
+            payload: &lower_payload,
+            captured_at_epoch_ms: Some(100),
+        },
+    )
+    .await
+    .expect("lower captured_at restore pack");
+
+    client
+        .batch_execute("DROP INDEX IF EXISTS ami.idx_ami_restore_packs_same_source_snapshot;")
+        .await
+        .expect("drop restore pack unique index");
+
+    let higher_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack tie higher goal {suffix}"),
+        "next_step": "higher captured_at should win",
+        "recent_actions": [{"event_id": format!("event:restore-pack-bootstrap-tie:{suffix}")}]
+    });
+    client
+        .execute(
+            r#"
+            INSERT INTO ami.restore_packs(
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms,
+                created_at
+            )
+            SELECT
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                'restore pack bootstrap tie higher headline',
+                'restore pack bootstrap tie higher summary',
+                $2::jsonb,
+                200,
+                created_at
+            FROM ami.restore_packs
+            WHERE restore_pack_id = $1
+            "#,
+            &[&original.restore_pack_id, &higher_payload],
+        )
+        .await
+        .expect("insert equal-created-at duplicate restore pack row");
+
+    client
+        .batch_execute(RESTORE_PACK_SAME_SOURCE_DEDUPE_AND_INDEX_SQL)
+        .await
+        .expect("apply dedupe and unique index");
+
+    let row = client
+        .query_one(
+            r#"
+            SELECT headline, summary, payload, captured_at_epoch_ms, COUNT(*) OVER()
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND source_snapshot_id = $3
+            LIMIT 1
+            "#,
+            &[&target_project_code, &namespace_code, &source_snapshot_id],
+        )
+        .await
+        .expect("deduped restore pack row");
+
+    let kept_headline: Option<String> = row.get(0);
+    let kept_summary: Option<String> = row.get(1);
+    let kept_payload: Value = row.get(2);
+    let kept_captured_at_epoch_ms: Option<i64> = row.get(3);
+    let count: i64 = row.get(4);
+
+    assert_eq!(count, 1);
+    assert_eq!(
+        kept_headline.as_deref(),
+        Some("restore pack bootstrap tie higher headline")
+    );
+    assert_eq!(
+        kept_summary.as_deref(),
+        Some("restore pack bootstrap tie higher summary")
+    );
+    assert_eq!(kept_payload, higher_payload);
+    assert_eq!(kept_captured_at_epoch_ms, Some(200));
+}
+
+#[tokio::test]
+async fn restore_packs_bootstrap_dedupe_prefers_non_null_captured_at_when_created_at_ties() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 100,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-bootstrap-null-captured:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!(
+        "event:restore-pack-bootstrap-null-captured:{suffix}"
+    )]);
+    let artifact_refs = json!([format!(
+        "artifact://proof/restore-pack-bootstrap-null-captured/{suffix}"
+    )]);
+    let message_refs = json!([format!(
+        "thread:restore-pack-bootstrap-null-captured:{suffix}"
+    )]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-bootstrap-null-captured:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let original_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack non-null captured goal {suffix}"),
+        "next_step": "non-null captured_at should win",
+        "recent_actions": [{"event_id": format!("event:restore-pack-bootstrap-null-captured:{suffix}")}]
+    });
+    let original = create_restore_pack(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-bootstrap-null-captured"),
+            session_id: Some("session-restore-pack-bootstrap-null-captured"),
+            thread_id: Some("thread-restore-pack-bootstrap-null-captured"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack non-null captured headline"),
+            summary: Some("restore pack non-null captured summary"),
+            payload: &original_payload,
+            captured_at_epoch_ms: Some(100),
+        },
+    )
+    .await
+    .expect("non-null captured_at restore pack");
+
+    client
+        .batch_execute("DROP INDEX IF EXISTS ami.idx_ami_restore_packs_same_source_snapshot;")
+        .await
+        .expect("drop restore pack unique index");
+
+    client
+        .execute(
+            r#"
+            INSERT INTO ami.restore_packs(
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms,
+                created_at
+            )
+            SELECT
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                'restore pack null captured headline',
+                'restore pack null captured summary',
+                $2::jsonb,
+                NULL,
+                created_at
+            FROM ami.restore_packs
+            WHERE restore_pack_id = $1
+            "#,
+            &[
+                &original.restore_pack_id,
+                &json!({
+                    "project": {"code": target_project_code},
+                    "namespace": {"code": namespace_code},
+                    "current_goal": format!("restore pack null captured goal {suffix}"),
+                    "next_step": "null captured_at should lose",
+                    "recent_actions": [{"event_id": format!("event:restore-pack-bootstrap-null-captured:{suffix}")}]
+                }),
+            ],
+        )
+        .await
+        .expect("insert equal-created-at null-captured duplicate restore pack row");
+
+    client
+        .batch_execute(RESTORE_PACK_SAME_SOURCE_DEDUPE_AND_INDEX_SQL)
+        .await
+        .expect("apply dedupe and unique index");
+
+    let row = client
+        .query_one(
+            r#"
+            SELECT headline, summary, payload, captured_at_epoch_ms, COUNT(*) OVER()
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND source_snapshot_id = $3
+            LIMIT 1
+            "#,
+            &[&target_project_code, &namespace_code, &source_snapshot_id],
+        )
+        .await
+        .expect("deduped restore pack row");
+
+    let kept_headline: Option<String> = row.get(0);
+    let kept_summary: Option<String> = row.get(1);
+    let kept_payload: Value = row.get(2);
+    let kept_captured_at_epoch_ms: Option<i64> = row.get(3);
+    let count: i64 = row.get(4);
+
+    assert_eq!(count, 1);
+    assert_eq!(
+        kept_headline.as_deref(),
+        Some("restore pack non-null captured headline")
+    );
+    assert_eq!(
+        kept_summary.as_deref(),
+        Some("restore pack non-null captured summary")
+    );
+    assert_eq!(kept_payload, original_payload);
+    assert_eq!(kept_captured_at_epoch_ms, Some(100));
+}
+
+#[tokio::test]
+async fn restore_packs_bootstrap_dedupe_prefers_non_null_source_time_over_later_created_at_with_null_source_time()
+{
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 100,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-bootstrap-null-later-created:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!(
+        "event:restore-pack-bootstrap-null-later-created:{suffix}"
+    )]);
+    let artifact_refs = json!([format!(
+        "artifact://proof/restore-pack-bootstrap-null-later-created/{suffix}"
+    )]);
+    let message_refs = json!([format!(
+        "thread:restore-pack-bootstrap-null-later-created:{suffix}"
+    )]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-bootstrap-null-later-created:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let original_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack non-null source-time goal {suffix}"),
+        "next_step": "non-null source-time should win over later created_at null source-time",
+        "recent_actions": [{"event_id": format!("event:restore-pack-bootstrap-null-later-created:{suffix}")}]
+    });
+    let original = create_restore_pack(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-bootstrap-null-later-created"),
+            session_id: Some("session-restore-pack-bootstrap-null-later-created"),
+            thread_id: Some("thread-restore-pack-bootstrap-null-later-created"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack non-null source-time headline"),
+            summary: Some("restore pack non-null source-time summary"),
+            payload: &original_payload,
+            captured_at_epoch_ms: Some(100),
+        },
+    )
+    .await
+    .expect("non-null source-time restore pack");
+
+    client
+        .batch_execute("DROP INDEX IF EXISTS ami.idx_ami_restore_packs_same_source_snapshot;")
+        .await
+        .expect("drop restore pack unique index");
+
+    let later_created_null_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack later created null source-time goal {suffix}"),
+        "next_step": "later created_at null source-time should lose",
+        "recent_actions": [{"event_id": format!("event:restore-pack-bootstrap-null-later-created:{suffix}")}]
+    });
+    client
+        .execute(
+            r#"
+            INSERT INTO ami.restore_packs(
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms,
+                created_at
+            )
+            SELECT
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                'restore pack later created null source-time headline',
+                'restore pack later created null source-time summary',
+                $2::jsonb,
+                NULL,
+                created_at + interval '1 second'
+            FROM ami.restore_packs
+            WHERE restore_pack_id = $1
+            "#,
+            &[&original.restore_pack_id, &later_created_null_payload],
+        )
+        .await
+        .expect("insert later-created null-source-time duplicate restore pack row");
+
+    client
+        .batch_execute(RESTORE_PACK_SAME_SOURCE_DEDUPE_AND_INDEX_SQL)
+        .await
+        .expect("apply dedupe and unique index");
+
+    let row = client
+        .query_one(
+            r#"
+            SELECT headline, summary, payload, captured_at_epoch_ms, COUNT(*) OVER()
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND source_snapshot_id = $3
+            LIMIT 1
+            "#,
+            &[&target_project_code, &namespace_code, &source_snapshot_id],
+        )
+        .await
+        .expect("deduped restore pack row");
+
+    let kept_headline: Option<String> = row.get(0);
+    let kept_summary: Option<String> = row.get(1);
+    let kept_payload: Value = row.get(2);
+    let kept_captured_at_epoch_ms: Option<i64> = row.get(3);
+    let count: i64 = row.get(4);
+
+    assert_eq!(count, 1);
+    assert_eq!(
+        kept_headline.as_deref(),
+        Some("restore pack non-null source-time headline")
+    );
+    assert_eq!(
+        kept_summary.as_deref(),
+        Some("restore pack non-null source-time summary")
+    );
+    assert_eq!(kept_payload, original_payload);
+    assert_eq!(kept_captured_at_epoch_ms, Some(100));
+}
+
+#[tokio::test]
+async fn restore_packs_bootstrap_dedupe_uses_restore_pack_id_as_last_tiebreak_when_source_time_missing()
+{
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-bootstrap-null-tie:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!(
+        "event:restore-pack-bootstrap-null-tie:{suffix}"
+    )]);
+    let artifact_refs = json!([format!(
+        "artifact://proof/restore-pack-bootstrap-null-tie/{suffix}"
+    )]);
+    let message_refs = json!([format!(
+        "thread:restore-pack-bootstrap-null-tie:{suffix}"
+    )]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-bootstrap-null-tie:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let earlier_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack null tie earlier goal {suffix}"),
+        "next_step": "older restore_pack_id should lose",
+        "recent_actions": [{"event_id": format!("event:restore-pack-bootstrap-null-tie:{suffix}")}]
+    });
+    let original = create_restore_pack(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-bootstrap-null-tie"),
+            session_id: Some("session-restore-pack-bootstrap-null-tie"),
+            thread_id: Some("thread-restore-pack-bootstrap-null-tie"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&source_event_ids),
+            artifact_refs: Some(&artifact_refs),
+            message_refs: Some(&message_refs),
+            evidence_span: Some(&evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack null tie earlier headline"),
+            summary: Some("restore pack null tie earlier summary"),
+            payload: &earlier_payload,
+            captured_at_epoch_ms: None,
+        },
+    )
+    .await
+    .expect("earlier null-captured restore pack");
+
+    client
+        .batch_execute("DROP INDEX IF EXISTS ami.idx_ami_restore_packs_same_source_snapshot;")
+        .await
+        .expect("drop restore pack unique index");
+
+    let later_restore_pack_id = loop {
+        let candidate = Uuid::new_v4();
+        if candidate > original.restore_pack_id {
+            break candidate;
+        }
+    };
+    let later_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack null tie later goal {suffix}"),
+        "next_step": "higher restore_pack_id should win",
+        "recent_actions": [{"event_id": format!("event:restore-pack-bootstrap-null-tie:{suffix}")}]
+    });
+    client
+        .execute(
+            r#"
+            INSERT INTO ami.restore_packs(
+                restore_pack_id,
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms,
+                created_at
+            )
+            SELECT
+                $2::uuid,
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                'restore pack null tie later headline',
+                'restore pack null tie later summary',
+                $3::jsonb,
+                NULL,
+                created_at
+            FROM ami.restore_packs
+            WHERE restore_pack_id = $1
+            "#,
+            &[&original.restore_pack_id, &later_restore_pack_id, &later_payload],
+        )
+        .await
+        .expect("insert equal-created-at equal-captured duplicate restore pack row");
+
+    client
+        .batch_execute(RESTORE_PACK_SAME_SOURCE_DEDUPE_AND_INDEX_SQL)
+        .await
+        .expect("apply dedupe and unique index");
+
+    let row = client
+        .query_one(
+            r#"
+            SELECT headline, summary, payload, captured_at_epoch_ms, COUNT(*) OVER()
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND source_snapshot_id = $3
+            LIMIT 1
+            "#,
+            &[&target_project_code, &namespace_code, &source_snapshot_id],
+        )
+        .await
+        .expect("deduped restore pack row");
+
+    let kept_headline: Option<String> = row.get(0);
+    let kept_summary: Option<String> = row.get(1);
+    let kept_payload: Value = row.get(2);
+    let kept_captured_at_epoch_ms: Option<i64> = row.get(3);
+    let count: i64 = row.get(4);
+
+    assert_eq!(count, 1);
+    assert_eq!(
+        kept_headline.as_deref(),
+        Some("restore pack null tie later headline")
+    );
+    assert_eq!(
+        kept_summary.as_deref(),
+        Some("restore pack null tie later summary")
+    );
+    assert_eq!(kept_payload, later_payload);
+    assert_eq!(kept_captured_at_epoch_ms, None);
+}
+
+#[tokio::test]
+async fn create_restore_pack_forced_before_write_failure_leaves_no_row() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 1_234_567,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-before-write:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+
+    unsafe {
+        std::env::set_var(
+            "AMAI_TEST_FORCE_RESTORE_PACK_CREATE_FAILURE",
+            "before_write",
+        );
+    }
+    let error = create_restore_pack_detailed(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::restore-before-write"),
+            session_id: Some("session-restore-pack-before-write"),
+            thread_id: Some("thread-restore-pack-before-write"),
+            source_snapshot_id: Some(source_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&json!([format!(
+                "event:restore-pack-before-write:{suffix}"
+            )])),
+            artifact_refs: Some(&json!([format!(
+                "artifact://proof/restore-pack-before-write/{suffix}"
+            )])),
+            message_refs: Some(&json!([format!(
+                "thread:restore-pack-before-write:{suffix}"
+            )])),
+            evidence_span: Some(&json!({
+                "kind": "working_state_restore",
+                "authoritative_event_id": format!("event:restore-pack-before-write:{suffix}")
+            })),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("restore pack before write headline"),
+            summary: Some("restore pack before write summary"),
+            payload: &json!({
+                "project": {"code": target_project_code},
+                "namespace": {"code": namespace_code},
+                "current_goal": "before write failure"
+            }),
+            captured_at_epoch_ms: Some(1_234_567),
+        },
+    )
+    .await
+    .expect_err("forced before-write restore pack create");
+    unsafe {
+        std::env::remove_var("AMAI_TEST_FORCE_RESTORE_PACK_CREATE_FAILURE");
+    }
+
+    assert_eq!(error.phase, RestorePackCreateErrorPhase::BeforeWrite);
+    assert_eq!(error.project_code, target_project_code);
+    assert_eq!(error.namespace_code, namespace_code);
+    assert_eq!(error.pack_kind, "workspace_restore_pack");
+    assert_eq!(error.source_snapshot_id, Some(source_snapshot_id));
+
+    let count: i64 = client
+        .query_one(
+            r#"
+            SELECT COUNT(*)
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND source_snapshot_id = $3
+            "#,
+            &[&target_project_code, &namespace_code, &source_snapshot_id],
+        )
+        .await
+        .expect("restore pack count")
+        .get(0);
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
 async fn create_restore_pack_policy_scope_filter_rejects_snapshot_scope_mismatch() {
     if let Ok(env_text) =
         std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
@@ -13771,6 +17938,1521 @@ fn observability_payload_extracts_scope_from_working_state_restore_root() {
     assert_eq!(meta.captured_at_epoch_ms, Some(999));
 }
 
+#[tokio::test]
+async fn working_state_restore_snapshot_reuses_same_row_for_newer_same_authoritative_event() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let project_code = format!("working_state_restore_snapshot_reuse_{suffix}");
+    let repo_root = format!("/tmp/{project_code}");
+    std::fs::create_dir_all(&repo_root).expect("repo root");
+    let project = upsert_project(
+        &client,
+        &project_code,
+        "Working State Restore Snapshot Reuse",
+        &repo_root,
+        Some("main"),
+        "default",
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("project");
+    ensure_namespace(
+        &client,
+        project.project_id,
+        "default",
+        Some("Default"),
+        "local_strict",
+    )
+    .await
+    .expect("namespace");
+
+    let event_id = format!("event:working-state-restore-reuse:{suffix}");
+    let first_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 100,
+            "current_goal": "Same line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let first_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &first_payload)
+            .await
+            .expect("first snapshot");
+
+    let second_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 200,
+            "current_goal": "Same line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let second_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &second_payload)
+            .await
+            .expect("second snapshot");
+
+    assert_eq!(second_snapshot_id, first_snapshot_id);
+    let row = client
+        .query_one(
+            r#"
+            SELECT count(*), replay_count, payload
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = 'working_state_restore'
+              AND event_key = $1
+            GROUP BY replay_count, payload
+            "#,
+            &[&event_id],
+        )
+        .await
+        .expect("working_state_restore row");
+    let count: i64 = row.get(0);
+    let replay_count: i64 = row.get(1);
+    let payload: Value = row.get(2);
+    assert_eq!(count, 1);
+    assert_eq!(replay_count, 1);
+    assert_eq!(
+        payload["working_state_restore"]["captured_at_epoch_ms"],
+        json!(200)
+    );
+}
+
+#[tokio::test]
+async fn working_state_restore_snapshot_reuses_same_row_when_newer_payload_has_null_timestamp() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let project_code = format!("working_state_restore_snapshot_null_ts_reuse_{suffix}");
+    let repo_root = format!("/tmp/{project_code}");
+    std::fs::create_dir_all(&repo_root).expect("repo root");
+    let project = upsert_project(
+        &client,
+        &project_code,
+        "Working State Restore Snapshot Null Timestamp Reuse",
+        &repo_root,
+        Some("main"),
+        "default",
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("project");
+    ensure_namespace(
+        &client,
+        project.project_id,
+        "default",
+        Some("Default"),
+        "local_strict",
+    )
+    .await
+    .expect("namespace");
+
+    let event_id = format!("event:working-state-restore-null-ts:{suffix}");
+    let first_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 100,
+            "current_goal": "Same line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let first_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &first_payload)
+            .await
+            .expect("first snapshot");
+
+    let second_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "current_goal": "Same line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let second_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &second_payload)
+            .await
+            .expect("second snapshot");
+
+    assert_eq!(second_snapshot_id, first_snapshot_id);
+    let row = client
+        .query_one(
+            r#"
+            SELECT count(*), replay_count, payload
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = 'working_state_restore'
+              AND event_key = $1
+            GROUP BY replay_count, payload
+            "#,
+            &[&event_id],
+        )
+        .await
+        .expect("working_state_restore row");
+    let count: i64 = row.get(0);
+    let replay_count: i64 = row.get(1);
+    let payload: Value = row.get(2);
+    assert_eq!(count, 1);
+    assert_eq!(replay_count, 1);
+    assert!(payload["working_state_restore"]["captured_at_epoch_ms"].is_null());
+}
+
+#[tokio::test]
+async fn working_state_restore_snapshot_keeps_distinct_rows_for_distinct_authoritative_events() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let project_code = format!("working_state_restore_snapshot_distinct_event_{suffix}");
+    let repo_root = format!("/tmp/{project_code}");
+    std::fs::create_dir_all(&repo_root).expect("repo root");
+    let project = upsert_project(
+        &client,
+        &project_code,
+        "Working State Restore Snapshot Distinct Event",
+        &repo_root,
+        Some("main"),
+        "default",
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("project");
+    ensure_namespace(
+        &client,
+        project.project_id,
+        "default",
+        Some("Default"),
+        "local_strict",
+    )
+    .await
+    .expect("namespace");
+
+    let first_event_id = format!("event:working-state-restore-distinct-a:{suffix}");
+    let second_event_id = format!("event:working-state-restore-distinct-b:{suffix}");
+    let first_payload = json!({
+        "_observability": {
+            "source_event_id": first_event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 100,
+            "current_goal": "Same line",
+            "state_lineage": {
+                "authoritative_event_id": first_event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let second_payload = json!({
+        "_observability": {
+            "source_event_id": second_event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 100,
+            "current_goal": "Same line",
+            "state_lineage": {
+                "authoritative_event_id": second_event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+
+    let first_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &first_payload)
+            .await
+            .expect("first snapshot");
+    let second_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &second_payload)
+            .await
+            .expect("second snapshot");
+
+    assert_ne!(second_snapshot_id, first_snapshot_id);
+    let row = client
+        .query_one(
+            r#"
+            SELECT count(*)
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = 'working_state_restore'
+              AND scope_project_code = $1
+            "#,
+            &[&project_code],
+        )
+        .await
+        .expect("working_state_restore count");
+    let count: i64 = row.get(0);
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
+async fn working_state_restore_snapshot_ignores_older_replay_for_same_authoritative_event() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let project_code = format!("working_state_restore_snapshot_older_replay_{suffix}");
+    let repo_root = format!("/tmp/{project_code}");
+    std::fs::create_dir_all(&repo_root).expect("repo root");
+    let project = upsert_project(
+        &client,
+        &project_code,
+        "Working State Restore Snapshot Older Replay",
+        &repo_root,
+        Some("main"),
+        "default",
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("project");
+    ensure_namespace(
+        &client,
+        project.project_id,
+        "default",
+        Some("Default"),
+        "local_strict",
+    )
+    .await
+    .expect("namespace");
+
+    let event_id = format!("event:working-state-restore-older-replay:{suffix}");
+    let newer_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 200,
+            "current_goal": "Same line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let older_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 100,
+            "current_goal": "Stale line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+
+    let first_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &newer_payload)
+            .await
+            .expect("newer snapshot");
+    let second_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &older_payload)
+            .await
+            .expect("older replay snapshot");
+
+    assert_eq!(second_snapshot_id, first_snapshot_id);
+    let row = client
+        .query_one(
+            r#"
+            SELECT count(*), replay_count, payload
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = 'working_state_restore'
+              AND event_key = $1
+            GROUP BY replay_count, payload
+            "#,
+            &[&event_id],
+        )
+        .await
+        .expect("working_state_restore row");
+    let count: i64 = row.get(0);
+    let replay_count: i64 = row.get(1);
+    let payload: Value = row.get(2);
+    assert_eq!(count, 1);
+    assert_eq!(replay_count, 1);
+    assert_eq!(
+        payload["working_state_restore"]["captured_at_epoch_ms"],
+        json!(200)
+    );
+    assert_eq!(payload["working_state_restore"]["current_goal"], json!("Same line"));
+}
+
+#[tokio::test]
+async fn working_state_restore_snapshot_preserves_first_payload_on_same_timestamp_conflict() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let project_code = format!("working_state_restore_snapshot_same_ts_{suffix}");
+    let repo_root = format!("/tmp/{project_code}");
+    std::fs::create_dir_all(&repo_root).expect("repo root");
+    let project = upsert_project(
+        &client,
+        &project_code,
+        "Working State Restore Snapshot Same Timestamp Conflict",
+        &repo_root,
+        Some("main"),
+        "default",
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("project");
+    ensure_namespace(
+        &client,
+        project.project_id,
+        "default",
+        Some("Default"),
+        "local_strict",
+    )
+    .await
+    .expect("namespace");
+
+    let event_id = format!("event:working-state-restore-same-ts:{suffix}");
+    let first_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 100,
+            "current_goal": "First line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let second_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 100,
+            "current_goal": "Conflicting same-ts line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+
+    let first_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &first_payload)
+            .await
+            .expect("first snapshot");
+    let second_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &second_payload)
+            .await
+            .expect("second snapshot");
+
+    assert_eq!(second_snapshot_id, first_snapshot_id);
+    let row = client
+        .query_one(
+            r#"
+            SELECT count(*), replay_count, payload
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = 'working_state_restore'
+              AND event_key = $1
+            GROUP BY replay_count, payload
+            "#,
+            &[&event_id],
+        )
+        .await
+        .expect("working_state_restore row");
+    let count: i64 = row.get(0);
+    let replay_count: i64 = row.get(1);
+    let payload: Value = row.get(2);
+    assert_eq!(count, 1);
+    assert_eq!(replay_count, 1);
+    assert_eq!(
+        payload["working_state_restore"]["captured_at_epoch_ms"],
+        json!(100)
+    );
+    assert_eq!(
+        payload["working_state_restore"]["current_goal"],
+        json!("First line")
+    );
+}
+
+#[tokio::test]
+async fn working_state_restore_snapshot_rejects_malformed_update_payload() {
+    let payload = json!({
+        "_observability": {
+            "source_event_id": "event-malformed",
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": "project_alpha"},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": "not-an-integer",
+            "state_lineage": {
+                "authoritative_event_id": "event-malformed"
+            }
+        }
+    });
+    let error = prepare_observability_payload("working_state_restore", &payload)
+        .expect_err("malformed payload must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("captured_at_epoch_ms must be integer")
+    );
+}
+
+#[tokio::test]
+async fn working_state_restore_snapshot_rejects_source_event_id_mismatch() {
+    let payload = json!({
+        "_observability": {
+            "source_event_id": "event-a",
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": "project_alpha"},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 100,
+            "state_lineage": {
+                "authoritative_event_id": "event-b"
+            }
+        }
+    });
+    let error = prepare_observability_payload("working_state_restore", &payload)
+        .expect_err("mismatched source event id must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("source_event_id must match authoritative_event_id")
+    );
+}
+
+#[tokio::test]
+async fn working_state_restore_snapshot_rejects_missing_namespace_code() {
+    let payload = json!({
+        "_observability": {
+            "source_event_id": "event-missing-namespace",
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": "project_alpha"},
+            "namespace": {},
+            "captured_at_epoch_ms": 100,
+            "state_lineage": {
+                "authoritative_event_id": "event-missing-namespace"
+            }
+        }
+    });
+    let error = prepare_observability_payload("working_state_restore", &payload)
+        .expect_err("missing namespace.code must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("must include namespace.code")
+    );
+}
+
+#[tokio::test]
+async fn working_state_restore_snapshot_rejects_combined_namespace_and_source_id_drift() {
+    let payload = json!({
+        "_observability": {
+            "source_event_id": "event-a",
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": "project_alpha"},
+            "namespace": {},
+            "captured_at_epoch_ms": 100,
+            "state_lineage": {
+                "authoritative_event_id": "event-b"
+            }
+        }
+    });
+    let error = prepare_observability_payload("working_state_restore", &payload)
+        .expect_err("combined malformed payload must fail closed");
+    let message = error.to_string();
+    assert!(
+        message.contains("must include namespace.code")
+            || message.contains("source_event_id must match authoritative_event_id")
+    );
+}
+
+#[tokio::test]
+async fn working_state_restore_snapshot_concurrent_newer_and_older_replays_keep_single_newest_row() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client_a = connect_admin(&cfg).await.expect("postgres a");
+    let client_b = connect_admin(&cfg).await.expect("postgres b");
+    let client_read = connect_admin(&cfg).await.expect("postgres read");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let project_code = format!("working_state_restore_snapshot_concurrent_{suffix}");
+    let repo_root = format!("/tmp/{project_code}");
+    std::fs::create_dir_all(&repo_root).expect("repo root");
+    let project = upsert_project(
+        &client_read,
+        &project_code,
+        "Working State Restore Snapshot Concurrent Replay",
+        &repo_root,
+        Some("main"),
+        "default",
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("project");
+    ensure_namespace(
+        &client_read,
+        project.project_id,
+        "default",
+        Some("Default"),
+        "local_strict",
+    )
+    .await
+    .expect("namespace");
+
+    let event_id = format!("event:working-state-restore-concurrent:{suffix}");
+    let newer_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 200,
+            "current_goal": "Newest line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let older_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 100,
+            "current_goal": "Older line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+
+    let (left, right) = tokio::join!(
+        insert_observability_snapshot(&client_a, "working_state_restore", &newer_payload),
+        insert_observability_snapshot(&client_b, "working_state_restore", &older_payload),
+    );
+    let left_snapshot_id = left.expect("left insert");
+    let right_snapshot_id = right.expect("right insert");
+    assert_eq!(left_snapshot_id, right_snapshot_id);
+
+    let row = client_read
+        .query_one(
+            r#"
+            SELECT count(*), replay_count, payload
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = 'working_state_restore'
+              AND event_key = $1
+            GROUP BY replay_count, payload
+            "#,
+            &[&event_id],
+        )
+        .await
+        .expect("working_state_restore row");
+    let count: i64 = row.get(0);
+    let replay_count: i64 = row.get(1);
+    let payload: Value = row.get(2);
+    assert_eq!(count, 1);
+    assert_eq!(replay_count, 1);
+    assert_eq!(
+        payload["working_state_restore"]["captured_at_epoch_ms"],
+        json!(200)
+    );
+    assert_eq!(
+        payload["working_state_restore"]["current_goal"],
+        json!("Newest line")
+    );
+}
+
+#[tokio::test]
+async fn working_state_restore_snapshot_concurrent_valid_and_malformed_replays_preserve_valid_row() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client_a = connect_admin(&cfg).await.expect("postgres a");
+    let client_b = connect_admin(&cfg).await.expect("postgres b");
+    let client_read = connect_admin(&cfg).await.expect("postgres read");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let project_code = format!("working_state_restore_snapshot_valid_vs_bad_{suffix}");
+    let repo_root = format!("/tmp/{project_code}");
+    std::fs::create_dir_all(&repo_root).expect("repo root");
+    let project = upsert_project(
+        &client_read,
+        &project_code,
+        "Working State Restore Snapshot Valid Versus Malformed",
+        &repo_root,
+        Some("main"),
+        "default",
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("project");
+    ensure_namespace(
+        &client_read,
+        project.project_id,
+        "default",
+        Some("Default"),
+        "local_strict",
+    )
+    .await
+    .expect("namespace");
+
+    let event_id = format!("event:working-state-restore-valid-vs-bad:{suffix}");
+    let valid_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 200,
+            "current_goal": "Valid line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let malformed_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {},
+            "captured_at_epoch_ms": 100,
+            "current_goal": "Broken line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+
+    let (left, right) = tokio::join!(
+        insert_observability_snapshot(&client_a, "working_state_restore", &valid_payload),
+        insert_observability_snapshot(&client_b, "working_state_restore", &malformed_payload),
+    );
+    let left_snapshot_id = left.expect("valid insert");
+    let right_error = right.expect_err("malformed insert must fail");
+    assert!(
+        right_error
+            .to_string()
+            .contains("must include namespace.code")
+    );
+
+    let row = client_read
+        .query_one(
+            r#"
+            SELECT count(*), replay_count, payload, snapshot_id
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = 'working_state_restore'
+              AND event_key = $1
+            GROUP BY replay_count, payload, snapshot_id
+            "#,
+            &[&event_id],
+        )
+        .await
+        .expect("working_state_restore row");
+    let count: i64 = row.get(0);
+    let replay_count: i64 = row.get(1);
+    let payload: Value = row.get(2);
+    let stored_snapshot_id: Uuid = row.get(3);
+    assert_eq!(count, 1);
+    assert_eq!(replay_count, 0);
+    assert_eq!(stored_snapshot_id, left_snapshot_id);
+    assert_eq!(
+        payload["working_state_restore"]["current_goal"],
+        json!("Valid line")
+    );
+}
+
+#[tokio::test]
+async fn working_state_restore_snapshot_same_timestamp_valid_and_malformed_replays_preserve_valid_row() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client_a = connect_admin(&cfg).await.expect("postgres a");
+    let client_b = connect_admin(&cfg).await.expect("postgres b");
+    let client_read = connect_admin(&cfg).await.expect("postgres read");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let project_code = format!("working_state_restore_snapshot_same_ts_valid_bad_{suffix}");
+    let repo_root = format!("/tmp/{project_code}");
+    std::fs::create_dir_all(&repo_root).expect("repo root");
+    let project = upsert_project(
+        &client_read,
+        &project_code,
+        "Working State Restore Snapshot Same TS Valid Versus Malformed",
+        &repo_root,
+        Some("main"),
+        "default",
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("project");
+    ensure_namespace(
+        &client_read,
+        project.project_id,
+        "default",
+        Some("Default"),
+        "local_strict",
+    )
+    .await
+    .expect("namespace");
+
+    let event_id = format!("event:working-state-restore-same-ts-valid-bad:{suffix}");
+    let valid_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 200,
+            "current_goal": "Valid same-ts line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let malformed_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {},
+            "captured_at_epoch_ms": 200,
+            "current_goal": "Broken same-ts line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+
+    let (left, right) = tokio::join!(
+        insert_observability_snapshot(&client_a, "working_state_restore", &valid_payload),
+        insert_observability_snapshot(&client_b, "working_state_restore", &malformed_payload),
+    );
+    let left_snapshot_id = left.expect("valid insert");
+    let right_error = right.expect_err("malformed insert must fail");
+    assert!(
+        right_error
+            .to_string()
+            .contains("must include namespace.code")
+    );
+
+    let row = client_read
+        .query_one(
+            r#"
+            SELECT count(*), replay_count, payload, snapshot_id
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = 'working_state_restore'
+              AND event_key = $1
+            GROUP BY replay_count, payload, snapshot_id
+            "#,
+            &[&event_id],
+        )
+        .await
+        .expect("working_state_restore row");
+    let count: i64 = row.get(0);
+    let replay_count: i64 = row.get(1);
+    let payload: Value = row.get(2);
+    let stored_snapshot_id: Uuid = row.get(3);
+    assert_eq!(count, 1);
+    assert_eq!(replay_count, 0);
+    assert_eq!(stored_snapshot_id, left_snapshot_id);
+    assert_eq!(
+        payload["working_state_restore"]["current_goal"],
+        json!("Valid same-ts line")
+    );
+    assert_eq!(
+        payload["working_state_restore"]["captured_at_epoch_ms"],
+        json!(200)
+    );
+}
+
+#[tokio::test]
+async fn working_state_restore_update_rejects_malformed_payload_without_mutating_row() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let project_code = format!("working_state_restore_update_atomicity_{suffix}");
+    let repo_root = format!("/tmp/{project_code}");
+    std::fs::create_dir_all(&repo_root).expect("repo root");
+    let project = upsert_project(
+        &client,
+        &project_code,
+        "Working State Restore Update Atomicity",
+        &repo_root,
+        Some("main"),
+        "default",
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("project");
+    ensure_namespace(
+        &client,
+        project.project_id,
+        "default",
+        Some("Default"),
+        "local_strict",
+    )
+    .await
+    .expect("namespace");
+
+    let event_id = format!("event:working-state-restore-update-atomicity:{suffix}");
+    let valid_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 200,
+            "current_goal": "Stable line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &valid_payload)
+            .await
+            .expect("valid snapshot");
+
+    let malformed_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {},
+            "captured_at_epoch_ms": 200,
+            "current_goal": "Broken line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let error = update_observability_snapshot_payload(&client, &snapshot_id, &malformed_payload)
+        .await
+        .expect_err("malformed update must fail closed");
+    assert!(error.to_string().contains("must include namespace.code"));
+
+    let row = client
+        .query_one(
+            r#"
+            SELECT payload, replay_count
+            FROM ami.observability_snapshots
+            WHERE snapshot_id = $1
+            "#,
+            &[&snapshot_id],
+        )
+        .await
+        .expect("stored row");
+    let payload: Value = row.get(0);
+    let replay_count: i64 = row.get(1);
+    assert_eq!(replay_count, 0);
+    assert_eq!(
+        payload["working_state_restore"]["current_goal"],
+        json!("Stable line")
+    );
+    assert_eq!(
+        payload["working_state_restore"]["namespace"]["code"],
+        json!("default")
+    );
+}
+
+#[tokio::test]
+async fn working_state_restore_snapshot_insert_connection_loss_leaves_no_row() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let victim = connect_admin(&cfg).await.expect("postgres victim");
+    let killer = connect_admin(&cfg).await.expect("postgres killer");
+    let reader = connect_admin(&cfg).await.expect("postgres reader");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let event_id = format!("event:working-state-restore-insert-connection-loss:{suffix}");
+    let pid: i32 = victim
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("backend pid")
+        .get(0);
+    let terminated: bool = killer
+        .query_one("SELECT pg_terminate_backend($1)", &[&pid])
+        .await
+        .expect("terminate backend")
+        .get(0);
+    assert!(terminated);
+
+    let payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": "project_alpha"},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 100,
+            "current_goal": "Connection loss line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let error = insert_observability_snapshot(&victim, "working_state_restore", &payload)
+        .await
+        .expect_err("insert after connection loss must fail");
+    assert!(
+        error.to_string().contains("failed to insert observability snapshot")
+            || error.to_string().contains("closed")
+    );
+
+    let count: i64 = reader
+        .query_one(
+            r#"
+            SELECT count(*)
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = 'working_state_restore'
+              AND event_key = $1
+            "#,
+            &[&event_id],
+        )
+        .await
+        .expect("count row")
+        .get(0);
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn working_state_restore_snapshot_forced_outcome_unknown_after_write_keeps_row_materialized() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let reader = connect_admin(&cfg).await.expect("postgres reader");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let event_id = format!("event:working-state-restore-outcome-unknown:{suffix}");
+    let payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": "project_alpha"},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 100,
+            "current_goal": "Outcome unknown line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+
+    unsafe {
+        std::env::set_var(
+            "AMAI_TEST_FORCE_OBSERVABILITY_INSERT_FAILURE",
+            "outcome_unknown_after_write:08006",
+        );
+    }
+    let error = insert_observability_snapshot_detailed(&client, "working_state_restore", &payload)
+        .await
+        .expect_err("forced outcome unknown must error");
+    unsafe {
+        std::env::remove_var("AMAI_TEST_FORCE_OBSERVABILITY_INSERT_FAILURE");
+    }
+    assert_eq!(error.phase, ObservabilityInsertErrorPhase::OutcomeUnknownAfterWrite);
+    assert_eq!(error.snapshot_kind, "working_state_restore");
+    assert_eq!(error.event_key, event_id);
+    assert_eq!(error.sqlstate_code.as_deref(), Some("08006"));
+
+    let row = reader
+        .query_one(
+            r#"
+            SELECT count(*), replay_count, payload
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = 'working_state_restore'
+              AND event_key = $1
+            GROUP BY replay_count, payload
+            "#,
+            &[&event_id],
+        )
+        .await
+        .expect("working_state_restore row");
+    let count: i64 = row.get(0);
+    let replay_count: i64 = row.get(1);
+    let stored_payload: Value = row.get(2);
+    assert_eq!(count, 1);
+    assert_eq!(replay_count, 0);
+    assert_eq!(
+        stored_payload["working_state_restore"]["current_goal"],
+        json!("Outcome unknown line")
+    );
+}
+
+#[tokio::test]
+async fn working_state_restore_snapshot_forced_before_write_failure_leaves_no_row() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let reader = connect_admin(&cfg).await.expect("postgres reader");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let event_id = format!("event:working-state-restore-before-write:{suffix}");
+    let payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": "project_alpha"},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 100,
+            "current_goal": "Before write failure line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+
+    unsafe {
+        std::env::set_var(
+            "AMAI_TEST_FORCE_OBSERVABILITY_INSERT_FAILURE",
+            "before_write:23514",
+        );
+    }
+    let error = insert_observability_snapshot_detailed(&client, "working_state_restore", &payload)
+        .await
+        .expect_err("forced before_write must error");
+    unsafe {
+        std::env::remove_var("AMAI_TEST_FORCE_OBSERVABILITY_INSERT_FAILURE");
+    }
+    assert_eq!(error.phase, ObservabilityInsertErrorPhase::BeforeWrite);
+    assert_eq!(error.snapshot_kind, "working_state_restore");
+    assert_eq!(error.event_key, event_id);
+    assert_eq!(error.sqlstate_code.as_deref(), Some("23514"));
+
+    let count: i64 = reader
+        .query_one(
+            r#"
+            SELECT count(*)
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = 'working_state_restore'
+              AND event_key = $1
+            "#,
+            &[&event_id],
+        )
+        .await
+        .expect("count row")
+        .get(0);
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn working_state_restore_update_connection_loss_preserves_existing_row() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let victim = connect_admin(&cfg).await.expect("postgres victim");
+    let killer = connect_admin(&cfg).await.expect("postgres killer");
+    let reader = connect_admin(&cfg).await.expect("postgres reader");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let event_id = format!("event:working-state-restore-update-connection-loss:{suffix}");
+    let valid_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": "project_alpha"},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 200,
+            "current_goal": "Stable line",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let snapshot_id =
+        insert_observability_snapshot(&victim, "working_state_restore", &valid_payload)
+            .await
+            .expect("valid snapshot");
+
+    let pid: i32 = victim
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("backend pid")
+        .get(0);
+    let terminated: bool = killer
+        .query_one("SELECT pg_terminate_backend($1)", &[&pid])
+        .await
+        .expect("terminate backend")
+        .get(0);
+    assert!(terminated);
+
+    let updated_payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": "project_alpha"},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 300,
+            "current_goal": "Should not persist",
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let error = update_observability_snapshot_payload(&victim, &snapshot_id, &updated_payload)
+        .await
+        .expect_err("update after connection loss must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("failed to load observability snapshot metadata before update")
+            || error.to_string().contains("closed")
+    );
+
+    let row = reader
+        .query_one(
+            r#"
+            SELECT payload, replay_count
+            FROM ami.observability_snapshots
+            WHERE snapshot_id = $1
+            "#,
+            &[&snapshot_id],
+        )
+        .await
+        .expect("stored row");
+    let payload: Value = row.get(0);
+    let replay_count: i64 = row.get(1);
+    assert_eq!(replay_count, 0);
+    assert_eq!(
+        payload["working_state_restore"]["current_goal"],
+        json!("Stable line")
+    );
+    assert_eq!(
+        payload["working_state_restore"]["captured_at_epoch_ms"],
+        json!(200)
+    );
+}
+
 #[test]
 fn observability_payload_marks_live_context_benchmark_as_contaminated() {
     let payload = json!({
@@ -14143,6 +19825,119 @@ async fn replace_document_index_upserts_single_document_and_preserves_namespace_
             .await
             .expect("second count");
     assert_eq!(second_count, 1);
+}
+
+#[tokio::test]
+async fn replace_document_index_with_document_id_preserves_existing_document_identity() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let mut client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let namespace_code = format!("doc_index_identity_{suffix}");
+    let namespace = ensure_project_alpha_test_namespace(&client, &namespace_code).await;
+    let project = get_project_by_code(&client, "project_alpha")
+        .await
+        .expect("project_alpha");
+    let repo_root = format!("/tmp/postgres_doc_index_identity_{suffix}");
+    std::fs::create_dir_all(format!("{repo_root}/src")).expect("repo root");
+    let absolute_path = format!("{repo_root}/src/lib.rs");
+    let relative_path = "src/lib.rs".to_string();
+
+    let first_doc = DocumentRecord {
+        project_id: project.project_id,
+        namespace_id: namespace.namespace_id,
+        repo_root: repo_root.clone(),
+        absolute_path: absolute_path.clone(),
+        relative_path: relative_path.clone(),
+        language: Some("rust".to_string()),
+        source_kind: "git".to_string(),
+        git_commit_sha: Some(format!("commit-{suffix}-1")),
+        file_sha256: format!("{:064x}", suffix),
+        line_count: 1,
+        byte_count: 18,
+        content: "pub fn first() {}\n".to_string(),
+        metrics: json!({"bytes":18}),
+        structure: json!({"items":1}),
+        imports: json!([]),
+        exports: json!(["first"]),
+        diagnostics: json!([]),
+        metadata: json!({"revision":1}),
+    };
+    let preferred_document_id = Uuid::new_v4();
+    let inserted_id = replace_document_index_with_document_id(
+        &mut client,
+        &first_doc,
+        &Vec::<SymbolRecord>::new(),
+        &Vec::<ChunkRecord>::new(),
+        preferred_document_id,
+    )
+    .await
+    .expect("insert");
+    assert_eq!(inserted_id, preferred_document_id);
+
+    let loaded_id = get_document_id_for_namespace_relative_path(
+        &client,
+        namespace.namespace_id,
+        &relative_path,
+    )
+    .await
+    .expect("load existing")
+    .expect("existing id");
+    assert_eq!(loaded_id, preferred_document_id);
+
+    let second_doc = DocumentRecord {
+        git_commit_sha: Some(format!("commit-{suffix}-2")),
+        file_sha256: format!("{:064x}", suffix + 1),
+        line_count: 1,
+        byte_count: 19,
+        content: "pub fn second() {}\n".to_string(),
+        metrics: json!({"bytes":19}),
+        structure: json!({"items":1}),
+        imports: json!([]),
+        exports: json!(["second"]),
+        diagnostics: json!([]),
+        metadata: json!({"revision":2}),
+        ..first_doc
+    };
+    let second_preferred = Uuid::new_v4();
+    let upserted_id = replace_document_index_with_document_id(
+        &mut client,
+        &second_doc,
+        &Vec::<SymbolRecord>::new(),
+        &Vec::<ChunkRecord>::new(),
+        second_preferred,
+    )
+    .await
+    .expect("upsert");
+    assert_eq!(upserted_id, preferred_document_id);
+
+    let loaded_after = get_document_id_for_namespace_relative_path(
+        &client,
+        namespace.namespace_id,
+        &relative_path,
+    )
+    .await
+    .expect("load after upsert")
+    .expect("existing id after upsert");
+    assert_eq!(loaded_after, preferred_document_id);
 }
 
 #[test]

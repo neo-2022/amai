@@ -26,9 +26,14 @@ process_cwd_matches_repo() {
 
 process_is_orphan() {
   local pid="$1"
+  local proc_stat
+  local stat_tail
   local ppid
   local parent_cmd
-  ppid="$(awk '{print $4}' "/proc/${pid}/stat" 2>/dev/null || true)"
+  proc_stat="$(cat "/proc/${pid}/stat" 2>/dev/null || true)"
+  [[ -n "${proc_stat}" && "${proc_stat}" == *") "* ]] || return 1
+  stat_tail="${proc_stat##*) }"
+  ppid="$(awk '{print $2}' <<<"${stat_tail}" 2>/dev/null || true)"
   [[ -n "${ppid}" ]] || return 1
   if [[ "${ppid}" == "1" ]]; then
     return 0

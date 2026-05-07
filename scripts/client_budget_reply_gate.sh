@@ -76,6 +76,11 @@ if [[ -z "$gate_json" ]]; then
   gate_json="$("$SCRIPT_DIR/client_budget_gate.sh" 2>/dev/null || true)"
 fi
 
+if [[ -z "$gate_json" ]]; then
+  echo "client budget reply gate: no gate payload available" >&2
+  exit 12
+fi
+
 guard_fields="$(
   printf '%s' "$gate_json" | jq -r '
     [
@@ -95,8 +100,12 @@ guard_fields="$(
         // empty
       )
     ] | @tsv
-  '
+  ' 2>/dev/null || true
 )"
+if [[ -z "$guard_fields" ]]; then
+  echo "client budget reply gate: invalid gate payload" >&2
+  exit 12
+fi
 IFS=$'\t' read -r reply_blocked blocked_reply reply_prefix <<<"$guard_fields"
 
 if [[ "$reply_blocked" != "true" ]]; then

@@ -1,7 +1,12 @@
+use crate::capacity_forecast;
 use crate::config::{AppConfig, discover_repo_root};
+use crate::regression_explain;
 use crate::{
     artifact_cleanup,
-    cli::{ContinuityCompactChatArgs, ObserveClientBudgetHostControlLaunchArgs},
+    cli::{
+        ContinuityCompactChatArgs, ObserveCapacityForecastArgs,
+        ObserveClientBudgetHostControlLaunchArgs, ObserveRegressionExplainArgs,
+    },
     codex_threads, compatibility, continuity, dashboard, external_benchmark, nats, postgres, s3,
     token_budget, working_state,
 };
@@ -28,6 +33,7 @@ use tokio_postgres::Client;
 use uuid::Uuid;
 
 mod observe_cache_meta;
+mod observe_capacity_forecast_cli;
 mod observe_cli;
 mod observe_client_budget_cache;
 mod observe_client_budget_runtime;
@@ -50,9 +56,11 @@ mod observe_snapshot_runtime;
 mod observe_thread_bound;
 
 use self::observe_cache_meta::*;
+pub use self::observe_capacity_forecast_cli::print_capacity_forecast;
 pub use self::observe_cli::{
     print_artifact_cleanup, print_budget_snapshot_preview, print_guardrails,
-    print_retention_cleanup, print_snapshot, print_snapshot_preview, run_sla_check,
+    print_regression_explain, print_retention_cleanup, print_snapshot, print_snapshot_preview,
+    run_sla_check,
 };
 use self::observe_client_budget_cache::*;
 #[cfg(test)]
@@ -77,9 +85,14 @@ pub(crate) use self::observe_client_budget_runtime::{
 };
 use self::observe_control_api::{
     client_budget_compact_chat_api_handler, client_budget_host_control_feedback_api_handler,
-    client_budget_host_control_launch_api_handler, client_budget_host_control_launch_api_summary,
-    compact_chat_api_summary, continuity_handoff_api_handler,
-    evaluate_host_current_thread_control_window_targeting, observe_user_visible_client_thread,
+    client_budget_host_control_launch_api_handler, continuity_handoff_api_handler,
+    observe_user_visible_client_thread, remediation_bundle_detail_api_handler,
+    remediation_bundles_api_handler,
+};
+#[cfg(test)]
+use self::observe_control_api::{
+    client_budget_host_control_launch_api_summary, compact_chat_api_summary,
+    evaluate_host_current_thread_control_window_targeting,
 };
 pub use self::observe_control_api::{
     client_budget_host_control_launch_payload, print_client_budget_host_control_launch,
@@ -92,18 +105,24 @@ use self::observe_governance_surface::collect_governance_surface;
 use self::observe_guardrails::{
     cleanup_guardrail_rows, collect_guardrail_report, procedural_benchmark_history_surface,
 };
+#[cfg(test)]
+use self::observe_live_infra::collect_qdrant_live_from;
 use self::observe_live_infra::{
     collect_nats_live, collect_optional_benchmark_qdrant_live, collect_postgres_live,
-    collect_qdrant_live, collect_qdrant_live_from, collect_s3_live,
-    enrich_live_cold_benchmark_progress, read_live_cold_benchmark_progress, with_postgres_rates,
+    collect_qdrant_live, collect_s3_live, enrich_live_cold_benchmark_progress,
+    read_live_cold_benchmark_progress, with_postgres_rates,
 };
+#[cfg(test)]
 use self::observe_live_surfaces::{
     active_agent_budget_card_payload_from_snapshot,
     active_agent_card_refresh_needed_against_rollout, cached_client_live_meter_state,
-    cached_dashboard_payload, cached_exact_client_limit_refresh_needed, cached_snapshot_with_meta,
-    client_live_meter_refresh_needed, dashboard_live_summary_payload_for_request,
-    live_active_agent_budget_card_payload, live_active_agent_snapshot_for_request,
-    overlay_live_active_agent_surfaces, refresh_client_live_meter_on_request,
+    cached_exact_client_limit_refresh_needed, client_live_meter_refresh_needed,
+    overlay_live_active_agent_surfaces,
+};
+use self::observe_live_surfaces::{
+    cached_dashboard_payload, cached_snapshot_with_meta,
+    dashboard_live_summary_payload_for_request, live_active_agent_budget_card_payload,
+    live_active_agent_snapshot_for_request, refresh_client_live_meter_on_request,
     spawn_client_live_meter_refresh,
 };
 use self::observe_local_http::*;
@@ -123,20 +142,26 @@ use self::observe_refresh_runtime::{
 };
 #[cfg(test)]
 use self::observe_retention::select_latest_clean_benchmark_snapshot;
+#[cfg(test)]
 use self::observe_retention::{
-    artifact_cleanup_summary_is_fresh, collect_artifact_cleanup_summary,
-    expired_retention_candidates, latest_clean_benchmark_snapshot,
+    artifact_cleanup_summary_is_fresh, expired_retention_candidates,
+    select_latest_dashboard_cold_benchmark_snapshot,
+};
+use self::observe_retention::{
+    collect_artifact_cleanup_summary, latest_clean_benchmark_snapshot,
     latest_dashboard_cold_benchmark_snapshot, maybe_cleanup_local_artifacts,
     maybe_cleanup_observability_snapshots, maybe_cleanup_observability_snapshots_with_db,
-    run_retention_cleanup, select_latest_dashboard_cold_benchmark_snapshot,
+    run_retention_cleanup,
 };
 use self::observe_runtime_support::{timed_future, with_postgres_advisory_lock};
 pub(crate) use self::observe_server_runtime::serve_metrics;
+#[cfg(test)]
+use self::observe_sla_metrics::benchmark_contamination_value;
 use self::observe_sla_metrics::{
-    benchmark_contamination_value, benchmark_payload_contaminated, counter_delta, delta_rate,
-    evaluate_sla, extract_nats_consumer_lag, http_client, load_profile, metric_value,
-    metric_value_optional, parse_prometheus_sums, percentile_f64, profile_thresholds_json, ratio,
-    ratio_f64, render_prometheus_metrics,
+    benchmark_payload_contaminated, counter_delta, delta_rate, evaluate_sla,
+    extract_nats_consumer_lag, http_client, load_profile, metric_value, metric_value_optional,
+    parse_prometheus_sums, percentile_f64, profile_thresholds_json, ratio, ratio_f64,
+    render_prometheus_metrics,
 };
 use self::observe_snapshot_runtime::{
     build_snapshot, collect_budget_snapshot_preview, latest_repo_working_state_restore_payload,
@@ -147,14 +172,17 @@ pub(crate) use self::observe_snapshot_runtime::{
 };
 use self::observe_thread_bound::{
     auto_thread_binding_hint_from_cache, cached_latest_repo_working_state_restore_snapshot,
-    cached_token_budget_report_snapshot, compact_client_budget_snapshot_cache_too_old,
-    compact_client_budget_snapshot_for_request,
+    cached_token_budget_report_snapshot, compact_client_budget_snapshot_for_request,
     materialize_shared_thread_bound_client_budget_surfaces_from_snapshot,
-    merge_thread_bound_client_budget_snapshot_into_base_snapshot,
     merged_thread_bound_snapshot_with_meta, normalized_thread_id_hint,
     populate_thread_bound_client_budget_surfaces_from_snapshot, resolved_request_thread_hint,
     strict_auto_thread_binding_hint_from_snapshot, thread_bound_dashboard_payload,
     thread_bound_snapshot_with_meta,
+};
+#[cfg(test)]
+use self::observe_thread_bound::{
+    compact_client_budget_snapshot_cache_too_old,
+    merge_thread_bound_client_budget_snapshot_into_base_snapshot,
 };
 
 #[cfg(test)]

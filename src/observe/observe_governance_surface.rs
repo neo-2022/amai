@@ -1,6 +1,145 @@
 use super::*;
+use crate::{forgetting, postgres};
+use std::path::Path;
 
-pub(super) async fn collect_governance_surface(db: &Client) -> Result<Value> {
+#[derive(Debug, Clone)]
+struct LifecycleRiskSurfaceSummary {
+    project_code: String,
+    namespace_code: String,
+    model_kind: String,
+    cohort_count: usize,
+    top_observed_state: String,
+    top_expected_next_state: String,
+    top_sample_size: i64,
+    max_pending_review_risk_7d: f64,
+    max_archive_risk_30d: f64,
+    max_prune_risk_30d: f64,
+    expected_residency_ms: i64,
+    top_cohort_reason_summary: String,
+}
+
+impl LifecycleRiskSurfaceSummary {
+    fn peak_risk(&self) -> f64 {
+        self.max_pending_review_risk_7d
+            .max(self.max_archive_risk_30d)
+            .max(self.max_prune_risk_30d)
+    }
+}
+
+fn summarize_lifecycle_risk_report(
+    report: &forgetting::LifecycleCohortRiskReport,
+) -> Option<LifecycleRiskSurfaceSummary> {
+    let top_row = report.rows.iter().max_by(|left, right| {
+        let left_peak = left
+            .pending_review_risk_7d
+            .max(left.archive_risk_30d)
+            .max(left.prune_risk_30d);
+        let right_peak = right
+            .pending_review_risk_7d
+            .max(right.archive_risk_30d)
+            .max(right.prune_risk_30d);
+        left_peak
+            .partial_cmp(&right_peak)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left.sample_size.cmp(&right.sample_size))
+    })?;
+    Some(LifecycleRiskSurfaceSummary {
+        project_code: report.project_code.clone(),
+        namespace_code: report.namespace_code.clone(),
+        model_kind: report.model_kind.clone(),
+        cohort_count: report.rows.len(),
+        top_observed_state: top_row.observed_state.clone(),
+        top_expected_next_state: top_row.expected_next_state.clone(),
+        top_sample_size: top_row.sample_size,
+        max_pending_review_risk_7d: top_row.pending_review_risk_7d,
+        max_archive_risk_30d: top_row.archive_risk_30d,
+        max_prune_risk_30d: top_row.prune_risk_30d,
+        expected_residency_ms: top_row.expected_residency_ms,
+        top_cohort_reason_summary: top_row.cohort_reason_summary.clone(),
+    })
+}
+
+async fn collect_lifecycle_risk_summary(db: &Client, repo_root: &Path) -> Result<Value> {
+    let project = match postgres::get_project_by_repo_root(db, &repo_root.display().to_string())
+        .await
+    {
+        Ok(project) => project,
+        Err(_) => {
+            return Ok(json!({
+                "summary_version": "lifecycle-risk-summary-v1",
+                "status": "not_available",
+                "reason": "project_unregistered_for_repo_root",
+                "note": "Queue 3 lifecycle risk surface stays fail-closed until repo_root resolves to a registered project."
+            }));
+        }
+    };
+    let namespaces = postgres::list_namespaces_for_project(db, project.project_id).await?;
+    let mut best_summary: Option<LifecycleRiskSurfaceSummary> = None;
+    for namespace in namespaces {
+        let has_rows: bool = db
+            .query_one(
+                r#"
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM ami.lifecycle_transition_events_v1
+                    WHERE project_code = $1
+                      AND namespace_code = $2
+                )
+                "#,
+                &[&project.code, &namespace.code],
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "governance: probe lifecycle transition events for {}/{}",
+                    project.code, namespace.code
+                )
+            })?
+            .get(0);
+        if !has_rows {
+            continue;
+        }
+        let report = forgetting::cohort_risk(db, &project.code, &namespace.code).await?;
+        let Some(candidate) = summarize_lifecycle_risk_report(&report) else {
+            continue;
+        };
+        match &best_summary {
+            Some(current)
+                if current.peak_risk() > candidate.peak_risk()
+                    || (current.peak_risk() == candidate.peak_risk()
+                        && current.top_sample_size >= candidate.top_sample_size) => {}
+            _ => best_summary = Some(candidate),
+        }
+    }
+    let Some(summary) = best_summary else {
+        return Ok(json!({
+            "summary_version": "lifecycle-risk-summary-v1",
+            "status": "not_available",
+            "project_code": project.code,
+            "reason": "no_transition_events_for_project",
+            "note": "Queue 3 advisory lifecycle risk surface appears only after Queue 2 transition events exist for at least one namespace."
+        }));
+    };
+    Ok(json!({
+        "summary_version": "lifecycle-risk-summary-v1",
+        "status": "advisory",
+        "project_code": summary.project_code,
+        "namespace_code": summary.namespace_code,
+        "model_kind": summary.model_kind,
+        "cohort_count": summary.cohort_count,
+        "top_observed_state": summary.top_observed_state,
+        "top_expected_next_state": summary.top_expected_next_state,
+        "top_sample_size": summary.top_sample_size,
+        "max_pending_review_risk_7d": summary.max_pending_review_risk_7d,
+        "max_archive_risk_30d": summary.max_archive_risk_30d,
+        "max_prune_risk_30d": summary.max_prune_risk_30d,
+        "expected_residency_ms": summary.expected_residency_ms,
+        "top_cohort_reason_summary": summary.top_cohort_reason_summary,
+        "note": "Queue 3 advisory-only lifecycle risk summary over the highest-risk scoped cohort. It informs review and planning but does not authorize prune/archive/policy actions."
+    }))
+}
+
+pub(super) async fn collect_governance_surface(db: &Client, repo_root: &Path) -> Result<Value> {
     let open_conflicts: i64 = db
         .query_one(
             r#"
@@ -271,9 +410,10 @@ pub(super) async fn collect_governance_surface(db: &Client) -> Result<Value> {
     } else {
         0.0
     };
+    let lifecycle_risk_summary = collect_lifecycle_risk_summary(db, repo_root).await?;
 
     Ok(json!({
-        "governance_surface_version": "governance-surface-v2",
+        "governance_surface_version": "governance-surface-v3",
         "wrong_link_rate": {
             "open_conflict_count": open_conflicts,
             "note": "wrong-link rate is proxied by open memory_conflicts with kind='scope' or 'truth'"
@@ -315,6 +455,7 @@ pub(super) async fn collect_governance_surface(db: &Client) -> Result<Value> {
             "scope_override_events_total": scope_override_events_count,
             "forgetting_audit_log_entries_total": forgetting_actions_count
         },
+        "lifecycle_risk_summary": lifecycle_risk_summary,
         "forgetting_job_breakdown": forgetting_job_breakdown,
         "forgetting_action_breakdown": forgetting_action_breakdown
     }))

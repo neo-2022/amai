@@ -3,6 +3,7 @@
 .amai/
 .fastembed_cache/
 .mcp.json
+.openclaw/
 
 target/
 *.log
@@ -41,3 +42,10 @@ output/
 # Local agent/dev artifacts (must not be committed).
 .codex
 .playwright-cli/
+
+# Vendor must stay self-contained in git even if nested files match generic ignore
+# patterns such as target/, output/ or .vscode/.
+!vendor/**
+vendor/**/.vscode/
+vendor/**/src/target/
+vendor/**/src/output/

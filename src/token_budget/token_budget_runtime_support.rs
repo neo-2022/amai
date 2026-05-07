@@ -1,13 +1,12 @@
 use super::*;
 
 pub(crate) fn load_config(repo_root: &Path) -> Result<TokenBudgetConfigFile> {
-    let path = repo_root.join(CONFIG_RELATIVE_PATH);
-    let canonical_repo_root =
-        fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    let path = resolve_token_budget_config_path(repo_root);
+    let canonical_config_path = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
     if let Some((size_bytes, modified_epoch_ms)) = token_budget_config_file_signature(&path) {
         let cache = TOKEN_BUDGET_CONFIG_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
         if let Ok(guard) = cache.lock() {
-            if let Some(entry) = guard.get(&canonical_repo_root) {
+            if let Some(entry) = guard.get(&canonical_config_path) {
                 if entry.size_bytes == size_bytes && entry.modified_epoch_ms == modified_epoch_ms {
                     return Ok(entry.config.clone());
                 }
@@ -22,7 +21,7 @@ pub(crate) fn load_config(repo_root: &Path) -> Result<TokenBudgetConfigFile> {
         let cache = TOKEN_BUDGET_CONFIG_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
         if let Ok(mut guard) = cache.lock() {
             guard.insert(
-                canonical_repo_root,
+                canonical_config_path,
                 CachedTokenBudgetConfig {
                     size_bytes,
                     modified_epoch_ms,
@@ -32,6 +31,22 @@ pub(crate) fn load_config(repo_root: &Path) -> Result<TokenBudgetConfigFile> {
         }
     }
     Ok(config)
+}
+
+fn resolve_token_budget_config_path(repo_root: &Path) -> PathBuf {
+    let project_local_path = repo_root.join(CONFIG_RELATIVE_PATH);
+    if project_local_path.exists() {
+        return project_local_path;
+    }
+
+    if let Ok(amai_repo_root) = config::discover_repo_root(None) {
+        let shared_path = amai_repo_root.join(CONFIG_RELATIVE_PATH);
+        if shared_path.exists() {
+            return shared_path;
+        }
+    }
+
+    project_local_path
 }
 
 fn token_budget_config_file_signature(path: &Path) -> Option<(u64, u64)> {
@@ -80,6 +95,40 @@ pub(crate) fn resolve_profile(
         session_gap_minutes: profile.session_gap_minutes,
         rolling_window_hours: profile.rolling_window_hours,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_config_falls_back_to_amai_repo_config_for_plain_project_roots() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "amai-token-budget-config-fallback-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+
+        let resolved = resolve_token_budget_config_path(&temp_root);
+        let expected = Path::new(env!("CARGO_MANIFEST_DIR")).join(CONFIG_RELATIVE_PATH);
+        assert_eq!(
+            fs::canonicalize(resolved).expect("resolved canonical path"),
+            fs::canonicalize(expected).expect("expected canonical path")
+        );
+
+        let config = load_config(&temp_root).expect("fallback config");
+        assert!(!config.default_profile.is_empty());
+        assert!(
+            config.profiles.contains_key(&config.default_profile),
+            "default profile must resolve after fallback"
+        );
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
 }
 
 pub(crate) async fn load_events(

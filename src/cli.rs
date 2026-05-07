@@ -126,6 +126,9 @@ pub enum BenchmarkCommand {
     ExternalMemoryPrepare(BenchmarkExternalMemoryPrepareArgs),
     ExternalMemoryRun(BenchmarkExternalMemoryRunArgs),
     ExternalMemoryScore(BenchmarkExternalMemoryScoreArgs),
+    ExternalMemoryOfficialJudge(BenchmarkExternalMemoryOfficialJudgeArgs),
+    ExternalMemoryOfficialScore(BenchmarkExternalMemoryOfficialScoreArgs),
+    ExternalMemorySecretScan(BenchmarkExternalMemorySecretScanArgs),
     ExternalMemorySchema(BenchmarkExternalMemorySchemaArgs),
 }
 
@@ -304,6 +307,9 @@ pub enum MemoryCommand {
     Revalidate(RevalidateArgs),
     TouchAccess(TouchAccessArgs),
     ExplainForgetting(ExplainForgettingArgs),
+    TransitionStats(TransitionStatsArgs),
+    CohortRisk(CohortRiskArgs),
+    PolicySimulate(PolicySimulateArgs),
 }
 
 #[derive(Debug, Args)]
@@ -759,6 +765,8 @@ pub enum VerifyCommand {
 #[derive(Debug, Subcommand)]
 pub enum ObserveCommand {
     Snapshot,
+    RegressionExplain(ObserveRegressionExplainArgs),
+    CapacityForecast(ObserveCapacityForecastArgs),
     GetSnapshot(ObserveGetSnapshotArgs),
     ListSnapshots(ObserveListSnapshotsArgs),
     SnapshotPreview,
@@ -790,6 +798,20 @@ pub enum ObserveCommand {
     ReverifyTokenLedger(ObserveReverifyTokenLedgerArgs),
     RelayMemoryWriteOutbox(ObserveRelayMemoryWriteOutboxArgs),
     Serve(ObserveServeArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveRegressionExplainArgs {
+    #[arg(long, default_value = "snapshot")]
+    pub surface: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveCapacityForecastArgs {
+    #[arg(long, default_value = "window")]
+    pub surface: String,
+    #[arg(long, default_value = "5m")]
+    pub window: String,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -914,6 +936,8 @@ pub struct BenchmarkExternalMemoryPrepareArgs {
     pub benchmark: String,
     #[arg(long)]
     pub dataset: String,
+    #[arg(long)]
+    pub source_path: Option<PathBuf>,
     #[arg(long, default_value_t = false)]
     pub download_missing: bool,
     #[arg(long)]
@@ -930,6 +954,46 @@ pub struct BenchmarkExternalMemoryScoreArgs {
     pub predictions: PathBuf,
     #[arg(long)]
     pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchmarkExternalMemoryOfficialJudgeArgs {
+    #[arg(long)]
+    pub cases: PathBuf,
+    #[arg(long)]
+    pub predictions: PathBuf,
+    #[arg(long)]
+    pub eval_results: PathBuf,
+    #[arg(long)]
+    pub summary: Option<PathBuf>,
+    #[arg(long, default_value_t = false)]
+    pub allow_live: bool,
+    #[arg(long, default_value = "https://api.openai.com/v1")]
+    pub api_base_url: String,
+    #[arg(long, default_value = "OPENAI_API_KEY")]
+    pub api_key_env: String,
+    #[arg(long, default_value = "gpt-4o-2024-08-06")]
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchmarkExternalMemoryOfficialScoreArgs {
+    #[arg(long)]
+    pub cases: PathBuf,
+    #[arg(long)]
+    pub eval_results: PathBuf,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchmarkExternalMemorySecretScanArgs {
+    #[arg(long)]
+    pub output_dir: PathBuf,
+    #[arg(long)]
+    pub secret_env: String,
+    #[arg(long, default_value_t = 8)]
+    pub min_secret_len: usize,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1020,6 +1084,8 @@ pub struct ContinuityStartupArgs {
         help = "Token ledger source kind for continuity-startup observed whole-cycle events. Plain CLI startup is operator-safe by default; pass live_continuity_startup only for real chat-start flows."
     )]
     pub token_source_kind: String,
+    #[arg(long, default_value_t = false, hide = true)]
+    pub skip_live_client_budget_guard: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -2406,6 +2472,30 @@ pub struct TouchAccessArgs {
 pub struct ExplainForgettingArgs {
     #[arg(long = "memory-item-id")]
     pub memory_item_id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct TransitionStatsArgs {
+    #[arg(long)]
+    pub project: String,
+    #[arg(long)]
+    pub namespace: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CohortRiskArgs {
+    #[arg(long)]
+    pub project: String,
+    #[arg(long)]
+    pub namespace: String,
+}
+
+#[derive(Debug, Args)]
+pub struct PolicySimulateArgs {
+    #[arg(long)]
+    pub project: String,
+    #[arg(long)]
+    pub namespace: String,
 }
 
 #[derive(Debug, Clone, Args)]

@@ -5,28 +5,71 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 tmp_dir="$(mktemp -d)"
-output_json="$tmp_dir/vscode-mcp.json"
-output_toml="$tmp_dir/codex-mcp.toml"
 trap 'rm -rf "$tmp_dir"' EXIT
 
-cargo run --quiet -- mcp config \
+amai_bin="$repo_root/target/debug/amai"
+if [[ ! -x "$amai_bin" ]]; then
+  cargo build --quiet >/dev/null
+fi
+
+vscode_output="$tmp_dir/vscode-mcp.json"
+"$amai_bin" mcp config \
   --client vscode \
   --ssh-destination ops@example-host \
   --remote-repo-root /srv/amai \
-  --output "$output_json" >/dev/null
+  --output "$vscode_output" >/dev/null
+grep -q '"command": "ssh"' "$vscode_output"
+grep -q 'ops@example-host' "$vscode_output"
+grep -q "cd '/srv/amai' && ./scripts/run_mcp_stdio.sh" "$vscode_output"
 
-grep -q '"command": "ssh"' "$output_json"
-grep -q 'ops@example-host' "$output_json"
-grep -q "cd '/srv/amai' && ./scripts/run_mcp_stdio.sh" "$output_json"
+cursor_output="$tmp_dir/cursor-mcp.json"
+"$amai_bin" mcp config \
+  --client cursor \
+  --ssh-destination ops@example-host \
+  --remote-repo-root /srv/amai \
+  --output "$cursor_output" >/dev/null
+grep -q '"command": "ssh"' "$cursor_output"
+grep -q 'ops@example-host' "$cursor_output"
+grep -q "cd '/srv/amai' && ./scripts/run_mcp_stdio.sh" "$cursor_output"
 
-cargo run --quiet -- mcp config \
+claude_code_output="$tmp_dir/claude-code-mcp.json"
+"$amai_bin" mcp config \
+  --client claude-code \
+  --ssh-destination ops@example-host \
+  --remote-repo-root /srv/amai \
+  --output "$claude_code_output" >/dev/null
+grep -q '"command": "ssh"' "$claude_code_output"
+grep -q 'ops@example-host' "$claude_code_output"
+grep -q "cd '/srv/amai' && ./scripts/run_mcp_stdio.sh" "$claude_code_output"
+
+codex_output="$tmp_dir/codex-mcp.toml"
+"$amai_bin" mcp config \
   --client codex \
   --ssh-destination ops@example-host \
   --remote-repo-root /srv/amai \
-  --output "$output_toml" >/dev/null
+  --output "$codex_output" >/dev/null
+grep -q 'command = "ssh"' "$codex_output"
+grep -q 'ops@example-host' "$codex_output"
+grep -q "cd '/srv/amai' && ./scripts/run_mcp_stdio.sh" "$codex_output"
 
-grep -q 'command = "ssh"' "$output_toml"
-grep -q 'ops@example-host' "$output_toml"
-grep -q "cd '/srv/amai' && ./scripts/run_mcp_stdio.sh" "$output_toml"
+hermes_output="$tmp_dir/hermes-mcp.yaml"
+"$amai_bin" mcp config \
+  --client hermes \
+  --ssh-destination ops@example-host \
+  --remote-repo-root /srv/amai \
+  --output "$hermes_output" >/dev/null
+grep -q "command: 'ssh'" "$hermes_output"
+grep -q "ops@example-host" "$hermes_output"
+grep -q "cd ''/srv/amai'' && ./scripts/run_mcp_stdio.sh" "$hermes_output"
+
+openclaw_output="$tmp_dir/openclaw-mcp.json"
+"$amai_bin" mcp config \
+  --client openclaw \
+  --ssh-destination ops@example-host \
+  --remote-repo-root /srv/amai \
+  --output "$openclaw_output" >/dev/null
+grep -q '"command": "ssh"' "$openclaw_output"
+grep -q 'ops@example-host' "$openclaw_output"
+grep -q "cd '/srv/amai' && ./scripts/run_mcp_stdio.sh" "$openclaw_output"
 
 echo "proof_remote_ssh_config: ok"

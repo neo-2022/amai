@@ -1,4 +1,279 @@
 use super::*;
+use anyhow::Error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestorePackCreateErrorPhase {
+    BeforeWrite,
+    OutcomeUnknownAfterWrite,
+}
+
+#[derive(Debug)]
+pub(crate) struct RestorePackCreateError {
+    pub(crate) phase: RestorePackCreateErrorPhase,
+    pub(crate) project_code: String,
+    pub(crate) namespace_code: String,
+    pub(crate) pack_kind: String,
+    pub(crate) source_snapshot_id: Option<Uuid>,
+    pub(crate) error: Error,
+}
+
+impl RestorePackCreateError {
+    fn before_write(
+        project_code: &str,
+        namespace_code: &str,
+        pack_kind: &str,
+        source_snapshot_id: Option<Uuid>,
+        error: Error,
+    ) -> Self {
+        Self {
+            phase: RestorePackCreateErrorPhase::BeforeWrite,
+            project_code: project_code.to_string(),
+            namespace_code: namespace_code.to_string(),
+            pack_kind: pack_kind.to_string(),
+            source_snapshot_id,
+            error,
+        }
+    }
+
+    fn outcome_unknown_after_write(
+        project_code: &str,
+        namespace_code: &str,
+        pack_kind: &str,
+        source_snapshot_id: Option<Uuid>,
+        error: Error,
+    ) -> Self {
+        Self {
+            phase: RestorePackCreateErrorPhase::OutcomeUnknownAfterWrite,
+            project_code: project_code.to_string(),
+            namespace_code: namespace_code.to_string(),
+            pack_kind: pack_kind.to_string(),
+            source_snapshot_id,
+            error,
+        }
+    }
+}
+
+fn restore_pack_source_snapshot_advisory_lock_key(
+    namespace_id: Uuid,
+    pack_kind: &str,
+    source_snapshot_id: Uuid,
+) -> i64 {
+    let mut hasher = Sha256::new();
+    hasher.update(namespace_id.as_bytes());
+    hasher.update(pack_kind.as_bytes());
+    hasher.update(source_snapshot_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    i64::from_be_bytes(bytes)
+}
+
+fn ensure_existing_restore_pack_matches_incoming(
+    existing: &RestorePackRecord,
+    record: &RestorePackInsert<'_>,
+    source_event_ids: &Value,
+    artifact_refs: &Value,
+    message_refs: &Value,
+    stored_evidence_span: &Value,
+    derivation_kind: &str,
+    schema_version: &str,
+) -> Result<()> {
+    let incoming_source_kind = record.source_kind.map(ToOwned::to_owned);
+    let incoming_headline = record.headline.map(ToOwned::to_owned);
+    let incoming_summary = record.summary.map(ToOwned::to_owned);
+
+    let same_canonical_content = existing.source_kind == incoming_source_kind
+        && existing.source_event_ids == *source_event_ids
+        && existing.artifact_refs == *artifact_refs
+        && existing.message_refs == *message_refs
+        && existing.evidence_span == *stored_evidence_span
+        && existing.derivation_kind == derivation_kind
+        && existing.schema_version == schema_version
+        && existing.headline == incoming_headline
+        && existing.summary == incoming_summary
+        && existing.payload == *record.payload
+        && existing.captured_at_epoch_ms == record.captured_at_epoch_ms;
+
+    if same_canonical_content {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "restore pack canonical content conflict for existing restore_pack_id={} project={} namespace={} pack_kind={} source_snapshot_id={:?}",
+        existing.restore_pack_id,
+        existing.project_code,
+        existing.namespace_code.as_deref().unwrap_or_default(),
+        existing.pack_kind,
+        existing.source_snapshot_id
+    ))
+}
+
+fn validate_restore_pack_record_source_identity(record: &RestorePackRecord) -> Result<()> {
+    if record.pack_kind == "workspace_restore_pack" && record.source_snapshot_id.is_none() {
+        return Err(anyhow!(
+            "restore pack {} violates source identity law: workspace_restore_pack requires source_snapshot_id",
+            record.restore_pack_id
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+async fn maybe_delay_restore_pack_create_after_lookup_for_tests() {
+    let delay_ms = std::env::var("AMAI_TEST_DELAY_RESTORE_PACK_CREATE_AFTER_LOOKUP_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    if delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    }
+}
+
+#[cfg(test)]
+fn forced_restore_pack_create_error_for_tests(
+    project_code: &str,
+    namespace_code: &str,
+    pack_kind: &str,
+    source_snapshot_id: Option<Uuid>,
+    after_write: bool,
+) -> Option<RestorePackCreateError> {
+    let spec = std::env::var("AMAI_TEST_FORCE_RESTORE_PACK_CREATE_FAILURE").ok()?;
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match (trimmed, after_write) {
+        ("before_write", false) => Some(RestorePackCreateError::before_write(
+            project_code,
+            namespace_code,
+            pack_kind,
+            source_snapshot_id,
+            anyhow!(
+                "forced restore pack create failure for tests phase=before_write project={} namespace={} pack_kind={}",
+                project_code,
+                namespace_code,
+                pack_kind
+            ),
+        )),
+        ("outcome_unknown_after_write", true) => Some(
+            RestorePackCreateError::outcome_unknown_after_write(
+                project_code,
+                namespace_code,
+                pack_kind,
+                source_snapshot_id,
+                anyhow!(
+                    "forced restore pack create failure for tests phase=outcome_unknown_after_write project={} namespace={} pack_kind={}",
+                    project_code,
+                    namespace_code,
+                    pack_kind
+                ),
+            ),
+        ),
+        _ => None,
+    }
+}
+
+async fn create_restore_pack_row(
+    client: &Client,
+    workspace_id: Uuid,
+    workspace_code: &str,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    record: &RestorePackInsert<'_>,
+    source_event_ids: &Value,
+    artifact_refs: &Value,
+    message_refs: &Value,
+    stored_evidence_span: &Value,
+    derivation_kind: &str,
+    schema_version: &str,
+) -> Result<RestorePackRecord> {
+    let row = client
+        .query_one(
+            r#"
+            INSERT INTO ami.restore_packs(
+                workspace_id,
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8,
+                $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb,
+                $14, $15, $16, $17, $18::jsonb, $19
+            )
+            RETURNING
+                restore_pack_id,
+                $20::text,
+                $21::text,
+                $22::text,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                pack_kind,
+                source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version,
+                headline,
+                summary,
+                payload,
+                captured_at_epoch_ms
+            "#,
+            &[
+                &workspace_id,
+                &project.project_id,
+                &namespace.namespace_id,
+                &record.agent_scope,
+                &record.session_id,
+                &record.thread_id,
+                &record.source_snapshot_id,
+                &record.pack_kind,
+                &record.source_kind,
+                source_event_ids,
+                artifact_refs,
+                message_refs,
+                stored_evidence_span,
+                &derivation_kind,
+                &schema_version,
+                &record.headline,
+                &record.summary,
+                record.payload,
+                &record.captured_at_epoch_ms,
+                &workspace_code,
+                &project.code,
+                &namespace.code,
+            ],
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to create restore pack for {}:{}",
+                project.code, namespace.code
+            )
+        })?;
+    let record = restore_pack_record_from_row(&row);
+    validate_restore_pack_record_source_identity(&record)?;
+    Ok(record)
+}
 
 pub(super) fn validate_artifact_ref_basis(
     record: &ArtifactRefInsert<'_>,
@@ -452,6 +727,7 @@ pub async fn get_context_pack(client: &Client, context_pack_id: Uuid) -> Result<
     Ok(context_pack_record_from_row(&row))
 }
 
+#[cfg(test)]
 pub async fn insert_context_pack(client: &Client, record: &ContextPackInsert<'_>) -> Result<()> {
     client
         .execute(
@@ -833,9 +1109,40 @@ pub async fn create_restore_pack(
     namespace_code: &str,
     record: &RestorePackInsert<'_>,
 ) -> Result<RestorePackRecord> {
+    create_restore_pack_detailed(client, project_code, namespace_code, record)
+        .await
+        .map_err(|error| error.error)
+}
+
+pub(crate) async fn create_restore_pack_detailed(
+    client: &Client,
+    project_code: &str,
+    namespace_code: &str,
+    record: &RestorePackInsert<'_>,
+) -> std::result::Result<RestorePackRecord, RestorePackCreateError> {
     let (workspace_id, project, namespace) =
-        resolve_scope_ids(client, project_code, namespace_code).await?;
-    let workspace = get_workspace_by_id(client, workspace_id).await?;
+        resolve_scope_ids(client, project_code, namespace_code)
+            .await
+            .map_err(|error| {
+                RestorePackCreateError::before_write(
+                    project_code,
+                    namespace_code,
+                    record.pack_kind,
+                    record.source_snapshot_id,
+                    error,
+                )
+            })?;
+    let workspace = get_workspace_by_id(client, workspace_id)
+        .await
+        .map_err(|error| {
+            RestorePackCreateError::before_write(
+                &project.code,
+                &namespace.code,
+                record.pack_kind,
+                record.source_snapshot_id,
+                error,
+            )
+        })?;
     let source_event_ids = record
         .source_event_ids
         .cloned()
@@ -852,11 +1159,37 @@ pub async fn create_restore_pack(
         &artifact_refs,
         &message_refs,
         &evidence_span,
-    )?;
+    )
+    .map_err(|error| {
+        RestorePackCreateError::before_write(
+            &project.code,
+            &namespace.code,
+            record.pack_kind,
+            record.source_snapshot_id,
+            error,
+        )
+    })?;
     let policy_filter =
         run_restore_pack_policy_scope_filter(client, &workspace.code, &project, &namespace, record)
-            .await?;
-    validate_restore_pack_policy_scope_filter(&policy_filter)?;
+            .await
+            .map_err(|error| {
+                RestorePackCreateError::before_write(
+                    &project.code,
+                    &namespace.code,
+                    record.pack_kind,
+                    record.source_snapshot_id,
+                    error,
+                )
+            })?;
+    validate_restore_pack_policy_scope_filter(&policy_filter).map_err(|error| {
+        RestorePackCreateError::before_write(
+            &project.code,
+            &namespace.code,
+            record.pack_kind,
+            record.source_snapshot_id,
+            error,
+        )
+    })?;
     let verification_check = run_restore_pack_verification_conflict_check(
         derivation_kind,
         &source_event_ids,
@@ -865,146 +1198,266 @@ pub async fn create_restore_pack(
         &evidence_span,
         &policy_filter,
     );
-    validate_restore_pack_verification_conflict_check(&verification_check)?;
+    validate_restore_pack_verification_conflict_check(&verification_check).map_err(|error| {
+        RestorePackCreateError::before_write(
+            &project.code,
+            &namespace.code,
+            record.pack_kind,
+            record.source_snapshot_id,
+            error,
+        )
+    })?;
     let stored_evidence_span = augment_restore_pack_evidence_span_with_stage2_preflight(
         &evidence_span,
         &policy_filter,
         &verification_check,
     );
     if let Some(source_snapshot_id) = record.source_snapshot_id {
-        if let Some(existing_row) = client
-            .query_opt(
-                r#"
-                SELECT
-                    rp.restore_pack_id,
-                    w.code,
-                    p.code,
-                    n.code,
-                    rp.agent_scope,
-                    rp.session_id,
-                    rp.thread_id,
-                    rp.source_snapshot_id,
-                    rp.pack_kind,
-                    rp.source_kind,
-                    rp.source_event_ids,
-                    rp.artifact_refs,
-                    rp.message_refs,
-                    rp.evidence_span,
-                    rp.derivation_kind,
-                    rp.schema_version,
-                    rp.headline,
-                    rp.summary,
-                    rp.payload,
-                    rp.captured_at_epoch_ms
-                FROM ami.restore_packs rp
-                INNER JOIN ami.workspaces w ON w.workspace_id = rp.workspace_id
-                INNER JOIN ami.projects p ON p.project_id = rp.project_id
-                LEFT JOIN ami.namespaces n ON n.namespace_id = rp.namespace_id
-                WHERE rp.project_id = $1
-                  AND rp.namespace_id = $2
-                  AND rp.pack_kind = $3
-                  AND rp.source_snapshot_id = $4
-                ORDER BY rp.created_at DESC, rp.restore_pack_id DESC
-                LIMIT 1
-                "#,
-                &[
-                    &project.project_id,
-                    &namespace.namespace_id,
-                    &record.pack_kind,
-                    &source_snapshot_id,
-                ],
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to inspect existing restore pack for {project_code}:{namespace_code}"
+        let advisory_lock_key = restore_pack_source_snapshot_advisory_lock_key(
+            namespace.namespace_id,
+            record.pack_kind,
+            source_snapshot_id,
+        );
+        return with_postgres_advisory_lock(
+            client,
+            advisory_lock_key,
+            format!(
+                "failed to acquire restore pack advisory lock for {project_code}:{namespace_code}"
+            ),
+            format!(
+                "failed to release restore pack advisory lock for {project_code}:{namespace_code}"
+            ),
+            || async {
+                if let Some(existing_row) = client
+                    .query_opt(
+                        r#"
+                        SELECT
+                            rp.restore_pack_id,
+                            w.code,
+                            p.code,
+                            n.code,
+                            rp.agent_scope,
+                            rp.session_id,
+                            rp.thread_id,
+                            rp.source_snapshot_id,
+                            rp.pack_kind,
+                            rp.source_kind,
+                            rp.source_event_ids,
+                            rp.artifact_refs,
+                            rp.message_refs,
+                            rp.evidence_span,
+                            rp.derivation_kind,
+                            rp.schema_version,
+                            rp.headline,
+                            rp.summary,
+                            rp.payload,
+                            rp.captured_at_epoch_ms
+                        FROM ami.restore_packs rp
+                        INNER JOIN ami.workspaces w ON w.workspace_id = rp.workspace_id
+                        INNER JOIN ami.projects p ON p.project_id = rp.project_id
+                        LEFT JOIN ami.namespaces n ON n.namespace_id = rp.namespace_id
+                        WHERE rp.project_id = $1
+                          AND rp.namespace_id = $2
+                          AND rp.pack_kind = $3
+                          AND rp.source_snapshot_id = $4
+                        ORDER BY rp.captured_at_epoch_ms DESC NULLS LAST, rp.created_at DESC, rp.restore_pack_id DESC
+                        LIMIT 1
+                        "#,
+                        &[
+                            &project.project_id,
+                            &namespace.namespace_id,
+                            &record.pack_kind,
+                            &source_snapshot_id,
+                        ],
+                    )
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to inspect existing restore pack for {project_code}:{namespace_code}"
+                        )
+                    })?
+                {
+                    let existing_record = restore_pack_record_from_row(&existing_row);
+                    validate_restore_pack_record_source_identity(&existing_record)?;
+                    ensure_existing_restore_pack_matches_incoming(
+                        &existing_record,
+                        record,
+                        &source_event_ids,
+                        &artifact_refs,
+                        &message_refs,
+                        &stored_evidence_span,
+                        derivation_kind,
+                        schema_version,
+                    )?;
+                    return Ok(existing_record);
+                }
+                #[cfg(test)]
+                if let Some(forced_error) = forced_restore_pack_create_error_for_tests(
+                    &project.code,
+                    &namespace.code,
+                    record.pack_kind,
+                    Some(source_snapshot_id),
+                    false,
+                ) {
+                    return Err(forced_error.error);
+                }
+                #[cfg(test)]
+                maybe_delay_restore_pack_create_after_lookup_for_tests().await;
+                let row = create_restore_pack_row(
+                    client,
+                    workspace_id,
+                    &workspace.code,
+                    &project,
+                    &namespace,
+                    record,
+                    &source_event_ids,
+                    &artifact_refs,
+                    &message_refs,
+                    &stored_evidence_span,
+                    derivation_kind,
+                    schema_version,
                 )
-            })?
-        {
-            return Ok(restore_pack_record_from_row(&existing_row));
-        }
-    }
-    let row = client
-        .query_one(
-            r#"
-            INSERT INTO ami.restore_packs(
-                workspace_id,
-                project_id,
-                namespace_id,
-                agent_scope,
-                session_id,
-                thread_id,
-                source_snapshot_id,
-                pack_kind,
-                source_kind,
-                source_event_ids,
-                artifact_refs,
-                message_refs,
-                evidence_span,
-                derivation_kind,
-                schema_version,
-                headline,
-                summary,
-                payload,
-                captured_at_epoch_ms
-            )
-            VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8,
-                $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb,
-                $14, $15, $16, $17, $18::jsonb, $19
-            )
-            RETURNING
-                restore_pack_id,
-                $20::text,
-                $21::text,
-                $22::text,
-                agent_scope,
-                session_id,
-                thread_id,
-                source_snapshot_id,
-                pack_kind,
-                source_kind,
-                source_event_ids,
-                artifact_refs,
-                message_refs,
-                evidence_span,
-                derivation_kind,
-                schema_version,
-                headline,
-                summary,
-                payload,
-                captured_at_epoch_ms
-            "#,
-            &[
-                &workspace_id,
-                &project.project_id,
-                &namespace.namespace_id,
-                &record.agent_scope,
-                &record.session_id,
-                &record.thread_id,
-                &record.source_snapshot_id,
-                &record.pack_kind,
-                &record.source_kind,
-                &source_event_ids,
-                &artifact_refs,
-                &message_refs,
-                &stored_evidence_span,
-                &derivation_kind,
-                &schema_version,
-                &record.headline,
-                &record.summary,
-                record.payload,
-                &record.captured_at_epoch_ms,
-                &workspace.code,
-                &project.code,
-                &namespace.code,
-            ],
+                .await?;
+                #[cfg(test)]
+                if let Some(forced_error) = forced_restore_pack_create_error_for_tests(
+                    &project.code,
+                    &namespace.code,
+                    record.pack_kind,
+                    Some(source_snapshot_id),
+                    true,
+                ) {
+                    return Err(forced_error.error);
+                }
+                Ok(row)
+            },
         )
         .await
-        .with_context(|| {
-            format!("failed to create restore pack for {project_code}:{namespace_code}")
-        })?;
-    Ok(restore_pack_record_from_row(&row))
+        .map_err(|error| {
+            let forced_after_write =
+                std::env::var("AMAI_TEST_FORCE_RESTORE_PACK_CREATE_FAILURE")
+                    .ok()
+                    .as_deref()
+                    == Some("outcome_unknown_after_write");
+            if forced_after_write {
+                RestorePackCreateError::outcome_unknown_after_write(
+                    &project.code,
+                    &namespace.code,
+                    record.pack_kind,
+                    Some(source_snapshot_id),
+                    error,
+                )
+            } else {
+                RestorePackCreateError::before_write(
+                    &project.code,
+                    &namespace.code,
+                    record.pack_kind,
+                    Some(source_snapshot_id),
+                    error,
+                )
+            }
+        });
+    }
+    #[cfg(test)]
+    if let Some(forced_error) = forced_restore_pack_create_error_for_tests(
+        &project.code,
+        &namespace.code,
+        record.pack_kind,
+        record.source_snapshot_id,
+        false,
+    ) {
+        return Err(forced_error);
+    }
+    let row = create_restore_pack_row(
+        client,
+        workspace_id,
+        &workspace.code,
+        &project,
+        &namespace,
+        record,
+        &source_event_ids,
+        &artifact_refs,
+        &message_refs,
+        &stored_evidence_span,
+        derivation_kind,
+        schema_version,
+    )
+    .await
+    .map_err(|error| {
+        RestorePackCreateError::before_write(
+            &project.code,
+            &namespace.code,
+            record.pack_kind,
+            record.source_snapshot_id,
+            error,
+        )
+    })?;
+    #[cfg(test)]
+    if let Some(forced_error) = forced_restore_pack_create_error_for_tests(
+        &project.code,
+        &namespace.code,
+        record.pack_kind,
+        record.source_snapshot_id,
+        true,
+    ) {
+        return Err(forced_error);
+    }
+    Ok(row)
+}
+
+pub(crate) async fn lookup_restore_pack_by_source_snapshot_id(
+    client: &Client,
+    project_id: Uuid,
+    namespace_id: Uuid,
+    pack_kind: &str,
+    source_snapshot_id: Uuid,
+) -> Result<Option<RestorePackRecord>> {
+    client
+        .query_opt(
+            r#"
+            SELECT
+                rp.restore_pack_id,
+                w.code,
+                p.code,
+                n.code,
+                rp.agent_scope,
+                rp.session_id,
+                rp.thread_id,
+                rp.source_snapshot_id,
+                rp.pack_kind,
+                rp.source_kind,
+                rp.source_event_ids,
+                rp.artifact_refs,
+                rp.message_refs,
+                rp.evidence_span,
+                rp.derivation_kind,
+                rp.schema_version,
+                rp.headline,
+                rp.summary,
+                rp.payload,
+                rp.captured_at_epoch_ms
+            FROM ami.restore_packs rp
+            INNER JOIN ami.workspaces w ON w.workspace_id = rp.workspace_id
+            INNER JOIN ami.projects p ON p.project_id = rp.project_id
+            LEFT JOIN ami.namespaces n ON n.namespace_id = rp.namespace_id
+            WHERE rp.project_id = $1
+              AND rp.namespace_id = $2
+              AND rp.pack_kind = $3
+              AND rp.source_snapshot_id = $4
+            ORDER BY rp.captured_at_epoch_ms DESC NULLS LAST, rp.created_at DESC, rp.restore_pack_id DESC
+            LIMIT 1
+            "#,
+            &[&project_id, &namespace_id, &pack_kind, &source_snapshot_id],
+        )
+        .await
+        .context("failed to lookup restore pack by source_snapshot_id")
+        .and_then(|row| {
+            row.map(|row| {
+                let record = restore_pack_record_from_row(&row);
+                validate_restore_pack_record_source_identity(&record)?;
+                Ok(record)
+            })
+            .transpose()
+        })
 }
 
 pub async fn get_restore_pack(client: &Client, restore_pack_id: Uuid) -> Result<RestorePackRecord> {
@@ -1042,7 +1495,9 @@ pub async fn get_restore_pack(client: &Client, restore_pack_id: Uuid) -> Result<
         )
         .await
         .with_context(|| format!("failed to load restore pack {}", restore_pack_id))?;
-    Ok(restore_pack_record_from_row(&row))
+    let record = restore_pack_record_from_row(&row);
+    validate_restore_pack_record_source_identity(&record)?;
+    Ok(record)
 }
 
 pub async fn insert_context_pack_pending_artifact(

@@ -233,7 +233,11 @@ pub(crate) async fn collect_report(
         .to_str()
         .ok_or_else(|| anyhow!("repo_root must be valid UTF-8"))?;
     let rollout_observations = rollout_assistant_generation_observations_for_repo(repo_root)?;
-    let mut events = load_events(db, include_verify_events, limit).await?;
+    let mut events = if limit.is_some() {
+        load_events(db, include_verify_events, limit).await?
+    } else {
+        load_dashboard_token_events(db, repo_root, include_verify_events).await?
+    };
     events.sort_by_key(|event| event.created_at_epoch_ms);
     let mut events =
         reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
@@ -261,7 +265,11 @@ pub(crate) async fn collect_report(
     let continuity_baseline_changed =
         sync_continuity_pre_amai_baseline_for_events(db, repo_root, &events).await?;
     if tool_overhead_changed || assistant_generation_changed || continuity_baseline_changed {
-        let mut refreshed = load_events(db, include_verify_events, limit).await?;
+        let mut refreshed = if limit.is_some() {
+            load_events(db, include_verify_events, limit).await?
+        } else {
+            load_dashboard_token_events(db, repo_root, include_verify_events).await?
+        };
         refreshed.sort_by_key(|event| event.created_at_epoch_ms);
         events =
             reconcile_followup_recovery(&refreshed, profile.session_gap_minutes as i64 * 60_000);

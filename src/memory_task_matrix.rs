@@ -1,3 +1,6 @@
+use crate::benchmark_measured_approval;
+use crate::benchmark_promotion;
+use crate::benchmark_statistics;
 use crate::bootstrap;
 use crate::cli::{
     ContextPackArgs, ContinuityImportArgs, ContinuityStartupArgs,
@@ -198,6 +201,11 @@ async fn run_matrix_inner(
     temp_root: &Path,
 ) -> Result<Value> {
     let mut db = postgres::connect_admin(cfg).await?;
+    let matrix_run_id = Uuid::new_v4();
+    let captured_at_epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_millis() as u64;
     let mut task_results = Vec::with_capacity(ordered_tasks.len());
     for (task_code, task) in ordered_tasks {
         task_results.push(run_task(cfg, &mut db, args, task_code, task, temp_root).await?);
@@ -283,7 +291,26 @@ async fn run_matrix_inner(
         gate_failures.push(format!("p95_ms={p95_ms:.3} exceeds allowed {limit:.3}"));
     }
 
-    let payload = json!({
+    let baseline_snapshot = postgres::list_observability_snapshots_by_kind_for_scope(
+        &db,
+        "memory_task_matrix",
+        "memory_task_matrix",
+        "amai",
+        &args.matrix,
+        Some(1),
+    )
+    .await?
+    .into_iter()
+    .next();
+
+    let mut payload = json!({
+        "_observability": {
+            "source_event_id": matrix_run_id,
+            "source_kind": "memory_task_matrix_run",
+            "scope_project_code": "amai",
+            "scope_namespace_code": args.matrix,
+            "captured_at_epoch_ms": captured_at_epoch_ms,
+        },
         "memory_task_matrix": {
             "matrix": args.matrix,
             "display_name": matrix.display_name,
@@ -311,6 +338,24 @@ async fn run_matrix_inner(
             "tasks": task_results.iter().map(TaskResult::as_json).collect::<Vec<_>>(),
         }
     });
+    let statistics_gate_failures = payload["memory_task_matrix"]["gate_failures"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+        .collect::<Vec<_>>();
+    let statistics = benchmark_statistics::statistics_block_from_pair(
+        "memory_task_matrix",
+        &payload,
+        baseline_snapshot.as_ref().map(|record| &record.payload),
+        matrix_run_id,
+        &statistics_gate_failures,
+    );
+    payload["memory_task_matrix"]["statistics"] = statistics;
+    payload["memory_task_matrix"]["promotion_law"] =
+        benchmark_promotion::promotion_law_block("memory_task_matrix", &payload);
+    payload["memory_task_matrix"]["measured_approval"] =
+        benchmark_measured_approval::measured_approval_block("memory_task_matrix", &payload);
     let _ = postgres::insert_observability_snapshot(&db, "memory_task_matrix", &payload).await?;
     Ok(payload)
 }
@@ -970,14 +1015,7 @@ async fn run_restore_json(
     namespace: &str,
     agent_scope: Option<&str>,
 ) -> Result<Value> {
-    let args = ContinuityStartupArgs {
-        project: Some(project.to_string()),
-        repo_root: None,
-        namespace: namespace.to_string(),
-        json: false,
-        runtime_state_json: false,
-        token_source_kind: DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND.to_string(),
-    };
+    let args = synthetic_memory_matrix_restore_args(project, namespace);
     with_agent_scope_env(agent_scope, continuity::restore_payload_with_db(db, &args)).await
 }
 
@@ -987,19 +1025,24 @@ async fn run_restore_error(
     namespace: &str,
     agent_scope: Option<&str>,
 ) -> Result<String> {
-    let args = ContinuityStartupArgs {
+    let args = synthetic_memory_matrix_restore_args(project, namespace);
+    let result =
+        with_agent_scope_env(agent_scope, continuity::restore_payload_with_db(db, &args)).await;
+    match result {
+        Ok(_) => Err(anyhow!("continuity restore unexpectedly succeeded")),
+        Err(error) => Ok(format!("{error:#}")),
+    }
+}
+
+fn synthetic_memory_matrix_restore_args(project: &str, namespace: &str) -> ContinuityStartupArgs {
+    ContinuityStartupArgs {
         project: Some(project.to_string()),
         repo_root: None,
         namespace: namespace.to_string(),
         json: false,
         runtime_state_json: false,
         token_source_kind: DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND.to_string(),
-    };
-    let result =
-        with_agent_scope_env(agent_scope, continuity::restore_payload_with_db(db, &args)).await;
-    match result {
-        Ok(_) => Err(anyhow!("continuity restore unexpectedly succeeded")),
-        Err(error) => Ok(format!("{error:#}")),
+        skip_live_client_budget_guard: true,
     }
 }
 
@@ -1329,6 +1372,18 @@ mod tests {
                 "success_rate=0.5 below required 1.0".to_string(),
                 "mean_score=0.8 below required 1.0".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn synthetic_memory_matrix_restore_args_skip_live_client_budget_guard() {
+        let args = super::synthetic_memory_matrix_restore_args("proj", "ns");
+        assert_eq!(args.project.as_deref(), Some("proj"));
+        assert_eq!(args.namespace, "ns");
+        assert!(args.skip_live_client_budget_guard);
+        assert_eq!(
+            args.token_source_kind,
+            super::DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND
         );
     }
 }

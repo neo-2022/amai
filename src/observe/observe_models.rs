@@ -34,6 +34,22 @@ pub(super) struct ClientBudgetCompactChatRequest {
     pub(super) refresh_handoff: bool,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(super) struct RemediationBundlesQuery {
+    #[serde(default)]
+    pub(super) project: Option<String>,
+    #[serde(default)]
+    pub(super) limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(super) struct RemediationBundleDetailQuery {
+    #[serde(default)]
+    pub(super) project: Option<String>,
+    #[serde(default)]
+    pub(super) file_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct ContinuityHandoffRequest {
     #[serde(default)]

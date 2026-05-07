@@ -37,6 +37,23 @@ pub(super) fn load_startup_runtime_state_artifact(repo_root: &Path) -> Result<Op
     Ok(Some(payload))
 }
 
+fn normalized_optional_text_json(value: Option<&str>) -> Value {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| json!(value))
+        .unwrap_or(Value::Null)
+}
+
+fn format_text_for_human(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "ещё нет данных"
+    } else {
+        trimmed
+    }
+}
+
 fn evaluate_startup_execution_gate_consistency(
     summary: &Value,
     startup_execution_gate: &Value,
@@ -63,9 +80,17 @@ fn evaluate_startup_execution_gate_consistency(
         startup_execution_gate["required_return_task_headline"].as_str();
     let gate_required_return_task_next_step =
         startup_execution_gate["required_return_task_next_step"].as_str();
+    let gate_required_task_set_count = startup_execution_gate["required_task_set_count"].as_u64();
+    let gate_required_task_set_present =
+        startup_execution_gate["required_task_set_present"].as_bool();
+    let gate_must_preserve_required_task_set =
+        startup_execution_gate["must_preserve_required_task_set"].as_bool();
     let blocking = startup_execution_gate["blocking"].as_bool();
     let required_return_task_headline = summary["required_return_task"]["headline"].as_str();
     let required_return_task_next_step = summary["required_return_task"]["next_step"].as_str();
+    let required_task_set_count = summary["required_task_set"]
+        .as_array()
+        .map(|items| items.len() as u64);
     let gate_contract = mcp::project_chat_startup_contract();
     let gate_enforcement = &gate_contract["startup_execution_gate_enforcement"];
     let resume_enforcement = &gate_contract["resume_enforcement"];
@@ -130,6 +155,22 @@ fn evaluate_startup_execution_gate_consistency(
             {
                 ok = false;
             }
+            if required_task_set_count.is_none()
+                || gate_required_task_set_count != required_task_set_count
+            {
+                ok = false;
+            }
+            if required_task_set_count.is_none()
+                || gate_required_task_set_present != required_task_set_count.map(|count| count > 0)
+            {
+                ok = false;
+            }
+            if required_task_set_count.is_none()
+                || gate_must_preserve_required_task_set
+                    != required_task_set_count.map(|count| count > 0)
+            {
+                ok = false;
+            }
             if startup_action_kind == required_action_kind {
                 if required_return_task_field_present != Some(true)
                     || !gate_required_return_present
@@ -169,6 +210,8 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
             startup_next_action_present: None,
             startup_execution_gate_present: None,
             required_return_task_field_present: None,
+            required_task_set_field_present: None,
+            required_task_set_summary_field_present: None,
             execctl_active_lease_field_present: None,
             project_task_tree_field_present: None,
             project_task_tree_summary_field_present: None,
@@ -180,6 +223,9 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
             must_follow_startup_next_action: None,
             unrelated_work_allowed: None,
             must_read_prompt_text_before_reply: None,
+            required_task_set_count_consistent: None,
+            required_task_set_presence_consistent: None,
+            must_preserve_required_task_set_consistent: None,
             required_action_kind_when_resume_required: None,
             no_silent_drop: None,
             artifact_gate_semantics_consistent_present: None,
@@ -205,6 +251,16 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         summary
             .as_object()
             .is_some_and(|object| object.contains_key("required_return_task")),
+    );
+    let required_task_set_field_present = Some(
+        summary
+            .as_object()
+            .is_some_and(|object| object.contains_key("required_task_set")),
+    );
+    let required_task_set_summary_field_present = Some(
+        summary
+            .as_object()
+            .is_some_and(|object| object.contains_key("required_task_set_summary")),
     );
     let execctl_active_lease_field_present = Some(
         summary
@@ -246,6 +302,24 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         payload["startup_execution_gate"]["unrelated_work_allowed"].as_bool();
     let must_read_prompt_text_before_reply =
         payload["startup_execution_gate"]["must_read_prompt_text_before_reply"].as_bool();
+    let required_task_set_count = summary["required_task_set"]
+        .as_array()
+        .map(|items| items.len() as u64);
+    let required_task_set_count_consistent = Some(
+        required_task_set_count.is_some()
+            && payload["startup_execution_gate"]["required_task_set_count"].as_u64()
+                == required_task_set_count,
+    );
+    let required_task_set_presence_consistent = Some(
+        required_task_set_count.is_some()
+            && payload["startup_execution_gate"]["required_task_set_present"].as_bool()
+                == required_task_set_count.map(|count| count > 0),
+    );
+    let must_preserve_required_task_set_consistent = Some(
+        required_task_set_count.is_some()
+            && payload["startup_execution_gate"]["must_preserve_required_task_set"].as_bool()
+                == required_task_set_count.map(|count| count > 0),
+    );
     let required_action_kind_when_resume_required =
         payload["startup_execution_gate"]["required_action_kind_when_resume_required"]
             .as_str()
@@ -276,6 +350,8 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         || startup_next_action_present != Some(true)
         || startup_execution_gate_present != Some(true)
         || required_return_task_field_present != Some(true)
+        || required_task_set_field_present != Some(true)
+        || required_task_set_summary_field_present != Some(true)
         || execctl_active_lease_field_present != Some(true)
         || project_task_tree_field_present != Some(true)
         || project_task_tree_summary_field_present != Some(true)
@@ -284,6 +360,9 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         || must_follow_startup_next_action.is_none()
         || unrelated_work_allowed.is_none()
         || must_read_prompt_text_before_reply.is_none()
+        || required_task_set_count_consistent != Some(true)
+        || required_task_set_presence_consistent != Some(true)
+        || must_preserve_required_task_set_consistent != Some(true)
         || required_action_kind_when_resume_required.is_none()
         || no_silent_drop.is_none()
         || artifact_gate_semantics_consistent_present != Some(true)
@@ -305,6 +384,8 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         startup_next_action_present,
         startup_execution_gate_present,
         required_return_task_field_present,
+        required_task_set_field_present,
+        required_task_set_summary_field_present,
         execctl_active_lease_field_present,
         project_task_tree_field_present,
         project_task_tree_summary_field_present,
@@ -316,6 +397,9 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         must_follow_startup_next_action,
         unrelated_work_allowed,
         must_read_prompt_text_before_reply,
+        required_task_set_count_consistent,
+        required_task_set_presence_consistent,
+        must_preserve_required_task_set_consistent,
         required_action_kind_when_resume_required,
         no_silent_drop,
         artifact_gate_semantics_consistent_present,
@@ -345,112 +429,137 @@ pub(crate) fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> 
     println!("Artifact present: {}", audit.artifact_exists);
     println!(
         "Contract hash matches current startup contract: {}",
-        audit
-            .startup_contract_sha_matches_current_contract
-            .unwrap_or(false)
+        format_optional_bool(audit.startup_contract_sha_matches_current_contract)
     );
     println!(
         "Source summary field matches continuity_startup_summary: {}",
-        audit.source_summary_field_matches.unwrap_or(false)
+        format_optional_bool(audit.source_summary_field_matches)
     );
     println!(
         "Prompt text present: {}",
-        audit.prompt_text_present.unwrap_or(false)
+        format_optional_bool(audit.prompt_text_present)
     );
     println!(
         "startup_next_action present: {}",
-        audit.startup_next_action_present.unwrap_or(false)
+        format_optional_bool(audit.startup_next_action_present)
     );
     println!(
         "startup_execution_gate present: {}",
-        audit.startup_execution_gate_present.unwrap_or(false)
+        format_optional_bool(audit.startup_execution_gate_present)
     );
     println!(
         "required_return_task field present: {}",
-        audit.required_return_task_field_present.unwrap_or(false)
+        format_optional_bool(audit.required_return_task_field_present)
+    );
+    println!(
+        "required_task_set field present: {}",
+        format_optional_bool(audit.required_task_set_field_present)
+    );
+    println!(
+        "required_task_set summary field present: {}",
+        format_optional_bool(audit.required_task_set_summary_field_present)
     );
     println!(
         "execctl_active_lease field present: {}",
-        audit.execctl_active_lease_field_present.unwrap_or(false)
+        format_optional_bool(audit.execctl_active_lease_field_present)
     );
     println!(
         "project_task_tree field present: {}",
-        audit.project_task_tree_field_present.unwrap_or(false)
+        format_optional_bool(audit.project_task_tree_field_present)
     );
     println!(
         "project_task_tree summary field present: {}",
-        audit
-            .project_task_tree_summary_field_present
-            .unwrap_or(false)
+        format_optional_bool(audit.project_task_tree_summary_field_present)
     );
     println!(
         "project_task_ledger field present: {}",
-        audit.project_task_ledger_field_present.unwrap_or(false)
+        format_optional_bool(audit.project_task_ledger_field_present)
     );
     println!(
         "project_task_ledger summary field present: {}",
-        audit
-            .project_task_ledger_summary_field_present
-            .unwrap_or(false)
+        format_optional_bool(audit.project_task_ledger_summary_field_present)
     );
     println!(
         "resume_state: {}",
         audit
             .resume_state
-            .clone()
-            .unwrap_or_else(|| "n/a".to_string())
+            .as_deref()
+            .map(format_text_for_human)
+            .unwrap_or("ещё нет данных")
     );
     println!(
         "action_kind: {}",
         audit
             .action_kind
-            .clone()
-            .unwrap_or_else(|| "n/a".to_string())
+            .as_deref()
+            .map(format_text_for_human)
+            .unwrap_or("ещё нет данных")
     );
     println!(
         "lease_owner_state: {}",
         audit
             .lease_owner_state
-            .clone()
-            .unwrap_or_else(|| "n/a".to_string())
+            .as_deref()
+            .map(format_text_for_human)
+            .unwrap_or("ещё нет данных")
     );
     println!(
         "must_follow_startup_next_action: {}",
-        audit.must_follow_startup_next_action.unwrap_or(false)
+        format_optional_bool(audit.must_follow_startup_next_action)
     );
     println!(
         "unrelated_work_allowed: {}",
-        audit.unrelated_work_allowed.unwrap_or(false)
+        format_optional_bool(audit.unrelated_work_allowed)
     );
     println!(
         "must_read_prompt_text_before_reply: {}",
-        audit.must_read_prompt_text_before_reply.unwrap_or(false)
+        format_optional_bool(audit.must_read_prompt_text_before_reply)
+    );
+    println!(
+        "required_task_set_count_consistent: {}",
+        format_optional_bool(audit.required_task_set_count_consistent)
+    );
+    println!(
+        "required_task_set_presence_consistent: {}",
+        format_optional_bool(audit.required_task_set_presence_consistent)
+    );
+    println!(
+        "must_preserve_required_task_set_consistent: {}",
+        format_optional_bool(audit.must_preserve_required_task_set_consistent)
     );
     println!(
         "required_action_kind_when_resume_required: {}",
         audit
             .required_action_kind_when_resume_required
-            .clone()
-            .unwrap_or_else(|| "n/a".to_string())
+            .as_deref()
+            .map(format_text_for_human)
+            .unwrap_or("ещё нет данных")
     );
-    println!("no_silent_drop: {}", audit.no_silent_drop.unwrap_or(false));
+    println!(
+        "no_silent_drop: {}",
+        format_optional_bool(audit.no_silent_drop)
+    );
     println!(
         "artifact_gate_semantics_consistent_present: {}",
-        audit
-            .artifact_gate_semantics_consistent_present
-            .unwrap_or(false)
+        format_optional_bool(audit.artifact_gate_semantics_consistent_present)
     );
     println!(
         "artifact_gate_semantics_consistent_matches_recomputed: {}",
-        audit
-            .artifact_gate_semantics_consistent_matches_recomputed
-            .unwrap_or(false)
+        format_optional_bool(audit.artifact_gate_semantics_consistent_matches_recomputed)
     );
     println!(
         "gate_semantics_consistent: {}",
-        audit.gate_semantics_consistent.unwrap_or(false)
+        format_optional_bool(audit.gate_semantics_consistent)
     );
     Ok(())
+}
+
+fn format_optional_bool(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "n/a",
+    }
 }
 
 pub(super) fn startup_runtime_state_audit_json(
@@ -467,6 +576,8 @@ pub(super) fn startup_runtime_state_audit_json(
         "startup_next_action_present": audit.startup_next_action_present,
         "startup_execution_gate_present": audit.startup_execution_gate_present,
         "required_return_task_field_present": audit.required_return_task_field_present,
+        "required_task_set_field_present": audit.required_task_set_field_present,
+        "required_task_set_summary_field_present": audit.required_task_set_summary_field_present,
         "execctl_active_lease_field_present": audit.execctl_active_lease_field_present,
         "project_task_tree_field_present": audit.project_task_tree_field_present,
         "project_task_tree_summary_field_present": audit.project_task_tree_summary_field_present,
@@ -478,6 +589,9 @@ pub(super) fn startup_runtime_state_audit_json(
         "must_follow_startup_next_action": audit.must_follow_startup_next_action,
         "unrelated_work_allowed": audit.unrelated_work_allowed,
         "must_read_prompt_text_before_reply": audit.must_read_prompt_text_before_reply,
+        "required_task_set_count_consistent": audit.required_task_set_count_consistent,
+        "required_task_set_presence_consistent": audit.required_task_set_presence_consistent,
+        "must_preserve_required_task_set_consistent": audit.must_preserve_required_task_set_consistent,
         "required_action_kind_when_resume_required": audit.required_action_kind_when_resume_required,
         "no_silent_drop": audit.no_silent_drop,
         "artifact_gate_semantics_consistent_present": audit.artifact_gate_semantics_consistent_present,
@@ -525,6 +639,12 @@ pub(super) fn startup_runtime_state_audit_json(
                 )
             })
             .unwrap_or(Value::Null),
+        "required_task_set": artifact_payload
+            .map(|payload| payload["continuity_startup_summary"]["required_task_set"].clone())
+            .unwrap_or(Value::Null),
+        "required_task_set_summary": artifact_payload
+            .map(|payload| payload["continuity_startup_summary"]["required_task_set_summary"].clone())
+            .unwrap_or(Value::Null),
         "execctl_active_lease": artifact_payload
             .map(|payload| {
                 compact_startup_runtime_execctl_active_lease(
@@ -547,6 +667,11 @@ pub(super) fn build_startup_runtime_state_cli_json(
         "action_kind": runtime_state["action_kind"].clone(),
         "lease_owner_state": runtime_state["lease_owner_state"].clone(),
         "gate_semantics_consistent": runtime_state["gate_semantics_consistent"].clone(),
+        "required_task_set_field_present": runtime_state["required_task_set_field_present"].clone(),
+        "required_task_set_summary_field_present": runtime_state["required_task_set_summary_field_present"].clone(),
+        "required_task_set_count_consistent": runtime_state["required_task_set_count_consistent"].clone(),
+        "required_task_set_presence_consistent": runtime_state["required_task_set_presence_consistent"].clone(),
+        "must_preserve_required_task_set_consistent": runtime_state["must_preserve_required_task_set_consistent"].clone(),
     });
     json!({
         "startup_runtime_state": runtime_state,
@@ -643,6 +768,8 @@ pub(super) fn build_startup_runtime_state_artifact(
     let startup_next_action = continuity_startup_summary["startup_next_action"].clone();
     let execctl_active_lease = continuity_startup_summary["execctl_active_lease"].clone();
     let required_return_task = continuity_startup_summary["required_return_task"].clone();
+    let required_task_set = continuity_startup_summary["required_task_set"].clone();
+    let required_task_set_summary = continuity_startup_summary["required_task_set_summary"].clone();
     Ok(json!({
         "artifact_version": STARTUP_RUNTIME_STATE_ARTIFACT_VERSION,
         "repo_root": repo_root.display().to_string(),
@@ -658,13 +785,19 @@ pub(super) fn build_startup_runtime_state_artifact(
         "startup_next_action": startup_next_action,
         "execctl_active_lease": execctl_active_lease,
         "required_return_task": required_return_task,
+        "required_task_set": required_task_set,
+        "required_task_set_summary": required_task_set_summary,
         "gate_semantics_consistent": gate_semantics_consistent,
         "client_budget_guard": client_budget_guard,
         "reply_execution_gate": reply_execution_gate,
         "blocking_reply_contract": blocking_reply_contract,
         "chat_start_restore": {
-            "headline": payload["chat_start_restore"]["headline"].clone(),
-            "next_step": payload["chat_start_restore"]["next_step"].clone(),
+            "headline": normalized_optional_text_json(
+                payload["chat_start_restore"]["headline"].as_str(),
+            ),
+            "next_step": normalized_optional_text_json(
+                payload["chat_start_restore"]["next_step"].as_str(),
+            ),
             "restore_confidence": payload["chat_start_restore"]["restore_confidence"].clone(),
             "prompt_text": payload["chat_start_restore"]["prompt_text"].clone(),
         },
@@ -747,8 +880,7 @@ fn build_startup_execution_gate(payload: &Value) -> Value {
     let contract = mcp::project_chat_startup_contract();
     let resume_enforcement = &contract["resume_enforcement"];
     let action_kind = payload["chat_start_restore"]["startup_next_action"]["action_kind"]
-        .as_str()
-        .unwrap_or("continue_active_workline");
+        .as_str();
     let lease_owner_state =
         payload["chat_start_restore"]["execctl_active_lease"]["lease_owner_state"].as_str();
     let previous_session_owner_value = resume_enforcement["previous_session_owner_value"]
@@ -762,34 +894,42 @@ fn build_startup_execution_gate(payload: &Value) -> Value {
         .as_str()
         .unwrap_or("resume_required_return_task");
     let blocking = payload["chat_start_restore"]["startup_next_action"]["blocking"]
-        .as_bool()
-        .unwrap_or(false);
+        .as_bool();
     let required_task_set_count = payload["chat_start_restore"]["required_task_set"]
         .as_array()
-        .map(|items| items.len())
-        .unwrap_or_default();
-    let must_follow = blocking
-        || (must_resume_before_unrelated && action_kind == required_action_kind)
-        || lease_owner_state == Some(previous_session_owner_value);
+        .map(|items| items.len());
+    let must_follow = if lease_owner_state == Some(previous_session_owner_value) {
+        Some(true)
+    } else if let Some(blocking_value) = blocking {
+        Some(
+            blocking_value
+                || (must_resume_before_unrelated && action_kind == Some(required_action_kind)),
+        )
+    } else {
+        None
+    };
+    let unrelated_work_allowed = must_follow.map(|value| !value);
 
     json!({
         "gate_version": "startup-execution-gate-v1",
         "action_kind": action_kind,
         "blocking": blocking,
         "required_task_set_count": required_task_set_count,
-        "resume_state": payload["chat_start_restore"]["execctl_resume_state"]
-            .as_str()
-            .unwrap_or("clear"),
+        "resume_state": normalized_optional_text_json(
+            payload["chat_start_restore"]["execctl_resume_state"].as_str(),
+        ),
         "required_return_task_present": payload["chat_start_restore"]["required_return_task"].is_object(),
-        "required_return_task_headline": payload["chat_start_restore"]["required_return_task"]["headline"]
-            .as_str(),
-        "required_return_task_next_step": payload["chat_start_restore"]["required_return_task"]["next_step"]
-            .as_str(),
-        "required_task_set_present": required_task_set_count > 0,
-        "must_preserve_required_task_set": required_task_set_count > 0,
+        "required_return_task_headline": normalized_optional_text_json(
+            payload["chat_start_restore"]["required_return_task"]["headline"].as_str(),
+        ),
+        "required_return_task_next_step": normalized_optional_text_json(
+            payload["chat_start_restore"]["required_return_task"]["next_step"].as_str(),
+        ),
+        "required_task_set_present": required_task_set_count.map(|count| count > 0),
+        "must_preserve_required_task_set": required_task_set_count.map(|count| count > 0),
         "lease_owner_state": lease_owner_state,
         "must_follow_startup_next_action": must_follow,
-        "unrelated_work_allowed": !must_follow,
+        "unrelated_work_allowed": unrelated_work_allowed,
         "must_read_prompt_text_before_reply": payload["chat_start_restore"]["prompt_text"]
             .as_str()
             .is_some_and(|value| !value.trim().is_empty()),
@@ -798,4 +938,22 @@ fn build_startup_execution_gate(payload: &Value) -> Value {
             .as_bool()
             .unwrap_or(false),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_optional_bool, format_text_for_human};
+
+    #[test]
+    fn format_optional_bool_preserves_missing_state_for_human_output() {
+        assert_eq!(format_optional_bool(Some(true)), "true");
+        assert_eq!(format_optional_bool(Some(false)), "false");
+        assert_eq!(format_optional_bool(None), "n/a");
+    }
+
+    #[test]
+    fn format_text_for_human_preserves_missing_state_for_runtime_audit() {
+        assert_eq!(format_text_for_human("resume_required_return_task"), "resume_required_return_task");
+        assert_eq!(format_text_for_human("   "), "ещё нет данных");
+    }
 }

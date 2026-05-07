@@ -56,7 +56,8 @@ fn build_same_thread_cache_reuse_payload(payload: &Value, _thread_id: &str) -> V
                     .map_or(0, Vec::len),
                 "raw_evidence": payload["retrieval"]["raw_evidence"].as_array().map_or(0, Vec::len),
             }
-        }
+        },
+        "working_state_write_status": payload["working_state_write_status"].clone(),
     })
 }
 
@@ -414,6 +415,7 @@ pub(crate) fn model_visible_context_pack_payload(payload: &Value) -> Value {
         },
         "effective_retrieval_mode": payload["effective_retrieval_mode"].clone(),
         "visible_projects": compact_visible_projects_for_token_budget(&payload["visible_projects"]),
+        "working_state_write_status": payload["working_state_write_status"].clone(),
         "retrieval": {
             "exact_documents": compact_exact_documents(
                 &payload["retrieval"]["exact_documents"],
@@ -452,6 +454,7 @@ fn model_visible_same_thread_cache_reuse_payload(payload: &Value) -> Value {
         "namespace": {
             "code": payload["namespace"]["code"].clone(),
         },
+        "working_state_write_status": payload["working_state_write_status"].clone(),
         "cache_reuse_reference": compact_cache_reuse_reference(&payload["cache_reuse_reference"]),
     })
 }
@@ -678,4 +681,3 @@ fn compact_text_signature(project_code: &str, relative_path: &str, text: &str) -
     }
     Some(format!("{project_code}\u{1f}{relative_path}\u{1f}{text}"))
 }
-

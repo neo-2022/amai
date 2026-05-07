@@ -102,7 +102,7 @@ try:
         {
             "name": "amai_continuity_startup",
             "arguments": {
-                "project": "bug_bounty",
+                "project": "amai",
                 "namespace": "continuity",
                 "token_source_kind": "proof_mcp_continuity_startup",
             },
@@ -113,43 +113,43 @@ try:
         raise RuntimeError(f"startup unexpectedly failed: {result!r}")
     structured = result["structuredContent"]
     summary = structured["continuity_startup_summary"]
-    if summary["project_code"] != "bug_bounty":
+    if summary["project_code"] != "amai":
         raise RuntimeError(f"wrong project restored: {summary!r}")
     if summary["namespace_code"] != "continuity":
         raise RuntimeError(f"wrong namespace restored: {summary!r}")
     if summary["prompt_text_present"] is not True:
         raise RuntimeError(f"prompt_text missing: {summary!r}")
 
-    default_startup = request(
+    repeat_startup = request(
         3,
         "tools/call",
         {
             "name": "amai_continuity_startup",
             "arguments": {
-                "project": "bug_bounty",
-                "namespace": "default",
+                "project": "amai",
+                "namespace": "continuity",
                 "token_source_kind": "proof_mcp_continuity_startup",
             },
         },
     )
-    default_result = default_startup["result"]
-    if default_result.get("isError"):
-        raise RuntimeError(f"default namespace startup failed: {default_result!r}")
-    default_structured = default_result["structuredContent"]
-    default_summary = default_structured["continuity_startup_summary"]
-    if default_summary["project_code"] != "bug_bounty":
-        raise RuntimeError(f"default startup lost project binding: {default_summary!r}")
-    if default_summary["prompt_text_present"] is not True:
-        raise RuntimeError(f"default startup lost prompt_text: {default_summary!r}")
+    repeat_result = repeat_startup["result"]
+    if repeat_result.get("isError"):
+        raise RuntimeError(f"repeat continuity startup failed: {repeat_result!r}")
+    repeat_structured = repeat_result["structuredContent"]
+    repeat_summary = repeat_structured["continuity_startup_summary"]
+    if repeat_summary["project_code"] != "amai":
+        raise RuntimeError(f"repeat startup lost project binding: {repeat_summary!r}")
+    if repeat_summary["prompt_text_present"] is not True:
+        raise RuntimeError(f"repeat startup lost prompt_text: {repeat_summary!r}")
 
-    continuity_source = default_structured["continuity_startup"].get("continuity_source", {})
+    continuity_source = repeat_structured["continuity_startup"].get("continuity_source", {})
     source_mode = continuity_source.get("mode")
     if source_mode not in {
         "scoped_import",
         "continuity_namespace_fallback_import",
         "working_state_fallback",
     }:
-        raise RuntimeError(f"unexpected default continuity source: {continuity_source!r}")
+        raise RuntimeError(f"unexpected repeat continuity source: {continuity_source!r}")
 
     with open(marker_file, "r", encoding="utf-8") as fh:
         cargo_invocation = fh.read().strip()

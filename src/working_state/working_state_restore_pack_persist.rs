@@ -1,5 +1,5 @@
 use crate::postgres;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use tokio_postgres::Client;
@@ -50,6 +50,11 @@ pub(super) fn persisted_restore_snapshot_payload(bundle: &Value) -> Value {
     let mut payload = json!({
         "working_state_restore": bundle["working_state_restore"].clone()
     });
+    let authoritative_event_id = payload["working_state_restore"]["state_lineage"]
+        ["authoritative_event_id"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned);
     if let Some(restore) = payload
         .get_mut("working_state_restore")
         .and_then(Value::as_object_mut)
@@ -65,6 +70,23 @@ pub(super) fn persisted_restore_snapshot_payload(bundle: &Value) -> Value {
         restore.remove("skill_execution_card");
         restore.remove("skill_execution_card_summary");
         restore.remove("skill_execution_card_binding");
+    }
+    if let Some(authoritative_event_id) = authoritative_event_id {
+        if let Some(root) = payload.as_object_mut() {
+            let observability = root
+                .entry("_observability".to_string())
+                .or_insert_with(|| json!({}));
+            if let Some(object) = observability.as_object_mut() {
+                object.insert(
+                    "source_event_id".to_string(),
+                    Value::String(authoritative_event_id),
+                );
+                object.insert(
+                    "source_kind".to_string(),
+                    Value::String("working_state_restore_runtime".to_string()),
+                );
+            }
+        }
     }
     payload
 }
@@ -174,7 +196,7 @@ pub(super) async fn materialize_restore_pack(
         .filter(|value| !value.trim().is_empty());
     let captured_at_epoch_ms = restore["captured_at_epoch_ms"].as_i64();
     let payload = workspace_restore_pack.clone();
-    let _ = postgres::create_restore_pack(
+    match postgres::create_restore_pack_detailed(
         db,
         &project.code,
         &namespace.code,
@@ -203,6 +225,43 @@ pub(super) async fn materialize_restore_pack(
             captured_at_epoch_ms,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(_) => {}
+        Err(error)
+            if error.phase == postgres::RestorePackCreateErrorPhase::OutcomeUnknownAfterWrite =>
+        {
+            let recovered_pack = postgres::lookup_restore_pack_by_source_snapshot_id(
+                db,
+                project.project_id,
+                namespace.namespace_id,
+                "workspace_restore_pack",
+                source_snapshot_id,
+            )
+            .await?
+            .with_context(|| {
+                format!(
+                    "workspace_restore_pack create outcome unknown but no persisted restore_pack found for source_snapshot_id={}",
+                    source_snapshot_id
+                )
+            })?;
+            let recovered_snapshot_id = recovered_pack
+                .source_snapshot_id
+                .with_context(|| {
+                    format!(
+                        "workspace_restore_pack recovered after ambiguous create is missing source_snapshot_id for restore_pack_id={}",
+                        recovered_pack.restore_pack_id
+                    )
+                })?;
+            if recovered_snapshot_id != source_snapshot_id {
+                return Err(anyhow::anyhow!(
+                    "workspace_restore_pack recovered after ambiguous create points to unexpected source_snapshot_id={} expected={}",
+                    recovered_snapshot_id,
+                    source_snapshot_id
+                ));
+            }
+        }
+        Err(error) => return Err(error.error),
+    }
     Ok(())
 }

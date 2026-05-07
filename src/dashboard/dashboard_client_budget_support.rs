@@ -1010,7 +1010,7 @@ pub(super) fn global_client_limit_guard_note(
         client_limits_value.unwrap_or("последнее observed значение лимита клиента");
     if exact_live_source && guard.severity == "critical" {
         format!(
-            "Current thread binding ещё не materialized, но Amai уже читает live global rate-limit source клиента напрямую из codex app-server: 5ч {}, 7д {}. Этого уже достаточно для fail-closed wait path: новый чат не поможет, нужно дождаться восстановления внешнего клиентского лимита. Текущее live значение: {rendered_limits}.",
+            "Current thread binding ещё не materialized, но Amai уже читает live global rate-limit source клиента напрямую из codex app-server: 5ч {}, 7д {}. Этого уже достаточно для fail-closed wait path: новая чистая рабочая поверхность не поможет, нужно дождаться восстановления внешнего клиентского лимита. Текущее live значение: {rendered_limits}.",
             format_percent(Some(guard.primary_remaining_percent)),
             format_percent(Some(guard.secondary_remaining_percent)),
         )
@@ -1022,7 +1022,7 @@ pub(super) fn global_client_limit_guard_note(
         )
     } else if guard.severity == "critical" {
         format!(
-            "Current thread binding ещё не materialized, поэтому Amai видит только последнее observed значение client limits: 5ч {}, 7д {}. Этого уже достаточно для fail-closed wait path: новый чат не поможет, нужно дождаться восстановления внешнего клиентского лимита. Текущее observed значение: {rendered_limits}.",
+            "Current thread binding ещё не materialized, поэтому Amai видит только последнее observed значение client limits: 5ч {}, 7д {}. Этого уже достаточно для fail-closed wait path: новая чистая рабочая поверхность не поможет, нужно дождаться восстановления внешнего клиентского лимита. Текущее observed значение: {rendered_limits}.",
             format_percent(Some(guard.primary_remaining_percent)),
             format_percent(Some(guard.secondary_remaining_percent)),
         )
@@ -1034,6 +1034,7 @@ pub(super) fn global_client_limit_guard_note(
         )
     }
 }
+#[cfg(test)]
 pub(super) fn client_turn_pressure_guard(
     client_live_meter: &Value,
     exact_pair: Option<(u64, u64, i64, f64)>,
@@ -1227,7 +1228,7 @@ fn observed_client_limit_hourly_burn_classification(
     }
 }
 
-pub(super) fn client_turn_pressure_display_status_label<'a>(
+pub(crate) fn client_turn_pressure_display_status_label<'a>(
     status_label: &'a str,
     same_thread_compaction_preferred: bool,
 ) -> &'a str {
@@ -1239,6 +1240,21 @@ pub(super) fn client_turn_pressure_display_status_label<'a>(
         }
     } else {
         status_label
+    }
+}
+
+pub(crate) const CLIENT_TURN_PRESSURE_ROTATE_STATUS_LABELS: [&str; 2] =
+    ["сожми текущий чат", "сожми текущий чат сейчас"];
+
+pub(super) fn delivery_surface_status_label(status_label: &str) -> &str {
+    match status_label {
+        "новый чат нужен сейчас" => {
+            "новая чистая рабочая поверхность нужна сейчас"
+        }
+        "новый чат рекомендован" => {
+            "новая чистая рабочая поверхность рекомендована"
+        }
+        _ => status_label,
     }
 }
 
@@ -1293,7 +1309,7 @@ pub(super) fn client_turn_pressure_note_sentence_for_preference(
         if same_thread_compaction_preferred {
             "Сейчас выгоднее сначала сжать текущий giant thread через same-thread compact window:"
         } else {
-            "Сейчас giant thread уже требует fallback-внимания: не раздувай его дальше; новый чат допустим только после подтверждённого провала same-thread control:"
+            "Сейчас giant thread уже требует fallback-внимания: не раздувай его дальше; новая рабочая поверхность допустима только после подтверждённого провала same-thread control:"
         },
         format_u64(Some(guard.turn_total_tokens)),
         format_u64(Some(guard.model_context_window)),
@@ -1320,7 +1336,7 @@ pub(super) fn client_turn_pressure_metric_row(
         } else if guard.severity == "critical" {
             "не раздувай giant thread; fallback через handoff/startup только если same-thread control реально не помог".to_string()
         } else {
-            "не раздувай giant thread; handoff/new chat допустимы только как fallback после same-thread failure".to_string()
+            "не раздувай giant thread; handoff/новая рабочая поверхность допустимы только как fallback после same-thread failure".to_string()
         },
         Some(
             client_turn_pressure_tooltip(guard, action_bundle, same_thread_compaction_preferred)
@@ -1386,11 +1402,11 @@ pub(super) fn client_turn_pressure_tooltip(
     }
     if same_thread_compaction_preferred {
         tooltip.push_str(
-            "\n- При таком соотношении продолжение в том же thread жжёт внешний клиентский лимит в основном размером самого thread/context, а не Amai-delta\n- Для этого giant thread Amai уже поднял same-thread compact window как primary action. Новый чат остаётся fallback, если compact surface не уменьшит regrowth/burn.",
+            "\n- При таком соотношении продолжение в том же thread жжёт внешний клиентский лимит в основном размером самого thread/context, а не Amai-delta\n- Для этого giant thread Amai уже поднял same-thread compact window как primary action. Новая чистая рабочая поверхность остаётся fallback, если compact surface не уменьшит regrowth/burn.",
         );
     } else {
         tooltip.push_str(
-            "\n- При таком соотношении продолжение в том же thread жжёт внешний клиентский лимит в основном размером самого thread/context, а не Amai-delta\n- Если same-thread control недоступен или уже подтверждённо не помог, handoff и новый чат остаются только fallback.",
+            "\n- При таком соотношении продолжение в том же thread жжёт внешний клиентский лимит в основном размером самого thread/context, а не Amai-delta\n- Если same-thread control недоступен или уже подтверждённо не помог, handoff и новая чистая рабочая поверхность остаются только fallback.",
         );
     }
     if let Some(bundle) = action_bundle {
@@ -1435,7 +1451,7 @@ pub(super) fn client_turn_pressure_tooltip(
         }
         if let Some(command) = bundle["operator_flow"]["startup_command"].as_str() {
             tooltip.push_str(&format!(
-                "\n- Если fallback всё-таки понадобится, после нового чата запусти startup: {command}"
+                "\n- Если fallback всё-таки понадобится, после новой чистой рабочей поверхности запусти startup: {command}"
             ));
         }
     }
@@ -1656,12 +1672,16 @@ pub(super) fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<
     ))
 }
 
-pub(super) fn compact_chat_selector_client_surface(restore_context: &Value) -> Value {
-    let repo_root = restore_context["project"]["repo_root"]
+fn compact_chat_selector_repo_root(restore_context: &Value) -> Option<PathBuf> {
+    restore_context["project"]["repo_root"]
         .as_str()
         .filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)
-        .or_else(|| config::discover_repo_root(None).ok());
+        .or_else(|| config::discover_repo_root(None).ok())
+}
+
+pub(super) fn compact_chat_selector_client_surface(restore_context: &Value) -> Value {
+    let repo_root = compact_chat_selector_repo_root(restore_context);
     if let Some(repo_root) = repo_root {
         onboarding::describe_client_surface(repo_root.as_path(), None).unwrap_or_else(|_| {
             json!({
@@ -1672,6 +1692,7 @@ pub(super) fn compact_chat_selector_client_surface(restore_context: &Value) -> V
                 "reconnect_shell_command": Value::Null,
                 "reconnect_bootstrap_command": Value::Null,
                 "fresh_chat_assist_summary": Value::Null,
+                "delivery_surface_assist_summary": Value::Null,
             })
         })
     } else {
@@ -1683,38 +1704,74 @@ pub(super) fn compact_chat_selector_client_surface(restore_context: &Value) -> V
             "reconnect_shell_command": Value::Null,
             "reconnect_bootstrap_command": Value::Null,
             "fresh_chat_assist_summary": Value::Null,
+            "delivery_surface_assist_summary": Value::Null,
         })
     }
 }
 
-fn compact_chat_selector_prompt_file(restore_context: &Value) -> Option<String> {
-    let repo_root = restore_context["project"]["repo_root"]
-        .as_str()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| config::discover_repo_root(None).ok())?;
+fn compact_chat_selector_prompt_path(restore_context: &Value) -> Option<PathBuf> {
+    let repo_root = compact_chat_selector_repo_root(restore_context)?;
     let prompt_path = repo_root.join(".amai/continuity/compact-chat-prompt.txt");
     if prompt_path.is_file() {
-        Some(prompt_path.display().to_string())
+        Some(prompt_path)
     } else {
         None
     }
 }
 
+fn compact_chat_selector_prompt_file(restore_context: &Value) -> Option<String> {
+    compact_chat_selector_prompt_path(restore_context).map(|path| path.display().to_string())
+}
+
+fn compact_chat_selector_clean_launch_surface(
+    restore_context: &Value,
+    client_surface: &Value,
+) -> Value {
+    let Some(repo_root) = compact_chat_selector_repo_root(restore_context) else {
+        return json!({
+            "status": "bridge_unavailable",
+            "supported_auto_launch": false,
+            "command_kind": Value::Null,
+            "unavailable_reason": "repo_root_unavailable",
+            "ux_verdict": "not_seamless_until_live_client_proof",
+        });
+    };
+    crate::continuity::compact_chat_clean_launch_surface(
+        client_surface,
+        repo_root.as_path(),
+        compact_chat_selector_prompt_path(restore_context).as_deref(),
+    )
+}
+
 fn compact_chat_selector_manual_note(client_surface: &Value) -> Option<String> {
-    let mut note = "Если automatic clean chat launch недоступен, открой чистый context surface и вставь prompt_text вручную.".to_string();
+    let mut note = "Если automatic clean-surface launch недоступен, открой новую чистую рабочую поверхность и вставь prompt_text вручную.".to_string();
     if let Some(display_name) = client_surface["display_name"]
         .as_str()
         .filter(|value| !value.is_empty())
     {
         note.push_str(&format!(" Клиент: {display_name}."));
     }
-    if let Some(summary) = client_surface["fresh_chat_assist_summary"]
+    if let Some(summary) = client_surface["delivery_surface_assist_summary"]
         .as_str()
         .filter(|value| !value.is_empty())
+        .or_else(|| {
+            client_surface["fresh_chat_assist_summary"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+        })
     {
         note.push(' ');
         note.push_str(summary);
+    }
+    if let Some(path) = client_surface["startup_instruction_path"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        let mode = client_surface["startup_instruction_mode"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .unwrap_or("unknown");
+        note.push_str(&format!(" Startup surface: {path} ({mode})."));
     }
     Some(note)
 }
@@ -1875,6 +1932,10 @@ pub(super) fn client_limit_hourly_burn_metric_row(
             );
             if let Some(root) = row.as_object_mut() {
                 if let Some((value_prefix, value_suffix)) = selector_value_parts {
+                    let compact_chat_clean_launch = compact_chat_selector_clean_launch_surface(
+                        restore_context,
+                        &compact_chat_client_surface,
+                    );
                     root.insert(
                         "target_selector".to_string(),
                         json!({
@@ -1892,7 +1953,7 @@ pub(super) fn client_limit_hourly_burn_metric_row(
                             ),
                             "compact_chat_command": client_budget_compact_chat_command(),
                             "compact_chat_button_label": "Compact chat",
-                            "compact_chat_intro": "Подготовить fresh CHAT_START_RESTORE для huge-chat rebase через clean context surface.",
+                            "compact_chat_intro": "Подготовить startup restore пакет для переноса рабочей линии на новую clean work surface.",
                             "compact_chat_required_host_action":
                                 "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable",
                             "compact_chat_prompt_file": compact_chat_prompt_file_value,
@@ -1903,6 +1964,26 @@ pub(super) fn client_limit_hourly_burn_metric_row(
                                 compact_chat_client_surface["display_name"].clone(),
                             "compact_chat_assist_summary":
                                 compact_chat_client_surface["fresh_chat_assist_summary"].clone(),
+                            "compact_chat_delivery_surface_assist_summary":
+                                compact_chat_client_surface["delivery_surface_assist_summary"].clone(),
+                            "compact_chat_manual_fallback_steps":
+                                crate::continuity::compact_chat_manual_fallback_steps(
+                                    &compact_chat_client_surface,
+                                ),
+                            "compact_chat_launch_status":
+                                compact_chat_clean_launch["status"].clone(),
+                            "compact_chat_launch_supported_auto":
+                                compact_chat_clean_launch["supported_auto_launch"].clone(),
+                            "compact_chat_launch_command_kind":
+                                compact_chat_clean_launch["command_kind"].clone(),
+                            "compact_chat_launch_command":
+                                compact_chat_clean_launch["launch_clean_chat_command"].clone(),
+                            "compact_chat_launch_fallback_command":
+                                compact_chat_clean_launch["launch_clean_chat_fallback_command"].clone(),
+                            "compact_chat_launch_unavailable_reason":
+                                compact_chat_clean_launch["unavailable_reason"].clone(),
+                            "compact_chat_launch_ux_verdict":
+                                compact_chat_clean_launch["ux_verdict"].clone(),
                             "compact_chat_startup_instruction_path":
                                 compact_chat_client_surface["startup_instruction_path"].clone(),
                             "compact_chat_startup_instruction_mode":
@@ -2635,6 +2716,10 @@ mod tests {
                 .expect("pressure guard");
         assert_eq!(guard.severity, "critical");
         assert_eq!(guard.status_label, "новый чат нужен сейчас");
+        assert_eq!(
+            super::delivery_surface_status_label(guard.status_label),
+            "новая чистая рабочая поверхность нужна сейчас"
+        );
         assert!(
             super::client_turn_pressure_tooltip(guard, None, false,).contains("слишком раздут")
         );
@@ -2661,6 +2746,7 @@ mod tests {
         let tooltip = super::client_turn_pressure_tooltip(guard, Some(&bundle), false);
         assert!(tooltip.contains("same-thread host surface"));
         assert!(tooltip.contains("thread-overlay-open-current"));
+        assert!(tooltip.contains("новая чистая рабочая поверхность"));
     }
 
     #[test]
@@ -3662,6 +3748,34 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("./scripts/reconnect_local.sh --client")
+        );
+        assert_eq!(
+            row["target_selector"]["compact_chat_delivery_surface_assist_summary"],
+            row["target_selector"]["compact_chat_assist_summary"]
+        );
+        assert!(
+            row["target_selector"]["compact_chat_manual_fallback_steps"]
+                .as_array()
+                .and_then(|steps| steps.first())
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .contains("новую чистую рабочую поверхность")
+        );
+        assert!(
+            row["target_selector"]["compact_chat_launch_status"]
+                .as_str()
+                .is_some_and(|value| {
+                    [
+                        "manual_only",
+                        "bridge_unavailable",
+                        "launch_command_available",
+                    ]
+                    .contains(&value)
+                })
+        );
+        assert_eq!(
+            row["target_selector"]["compact_chat_launch_ux_verdict"],
+            json!("not_seamless_until_live_client_proof")
         );
         assert!(
             row["target_selector"]["compact_chat_reconnect_bootstrap_command"]

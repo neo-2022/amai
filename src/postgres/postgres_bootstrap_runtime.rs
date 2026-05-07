@@ -90,42 +90,26 @@ pub async fn bootstrap_schema(client: &Client, cfg: &AppConfig) -> Result<()> {
     if bootstrap_schema_cache_contains(&cache_key) && bootstrap_schema_is_current(client).await? {
         return Ok(());
     }
-    client
-        .query_one(
-            "SELECT pg_advisory_lock($1)",
-            &[&BOOTSTRAP_SCHEMA_ADVISORY_LOCK_KEY],
-        )
-        .await
-        .context("failed to acquire postgres schema bootstrap advisory lock")?;
-    let schema_result: Result<()> = async {
-        if !bootstrap_schema_is_current(client).await? {
-            client
-                .batch_execute(include_str!("../../sql/000_bootstrap.sql"))
-                .await
-                .context("failed to apply postgres schema")?;
-        }
-        ensure_app_role(client, cfg).await?;
-        if bootstrap_schema_is_current(client).await? {
-            bootstrap_schema_cache_insert(cache_key.clone());
-        }
-        Ok(())
-    }
-    .await;
-    let unlock_result = client
-        .query_one(
-            "SELECT pg_advisory_unlock($1)",
-            &[&BOOTSTRAP_SCHEMA_ADVISORY_LOCK_KEY],
-        )
-        .await
-        .context("failed to release postgres schema bootstrap advisory lock");
-    match (schema_result, unlock_result) {
-        (Ok(()), Ok(_)) => Ok(()),
-        (Err(error), Ok(_)) => Err(error),
-        (Ok(()), Err(unlock_error)) => Err(unlock_error),
-        (Err(error), Err(unlock_error)) => Err(anyhow!(
-            "{error:#}\nsecondary unlock failure: {unlock_error:#}"
-        )),
-    }
+    super::with_postgres_advisory_lock(
+        client,
+        BOOTSTRAP_SCHEMA_ADVISORY_LOCK_KEY,
+        "failed to acquire postgres schema bootstrap advisory lock",
+        "failed to release postgres schema bootstrap advisory lock",
+        || async {
+            if !bootstrap_schema_is_current(client).await? {
+                client
+                    .batch_execute(include_str!("../../sql/000_bootstrap.sql"))
+                    .await
+                    .context("failed to apply postgres schema")?;
+            }
+            ensure_app_role(client, cfg).await?;
+            if bootstrap_schema_is_current(client).await? {
+                bootstrap_schema_cache_insert(cache_key.clone());
+            }
+            Ok(())
+        },
+    )
+    .await
 }
 
 fn bootstrap_schema_cache_key(cfg: &AppConfig) -> String {
@@ -176,6 +160,9 @@ async fn bootstrap_schema_is_current(client: &Client) -> Result<bool> {
                 AND to_regclass('ami.restore_packs') IS NOT NULL
                 AND to_regclass('ami.policy_rules') IS NOT NULL
                 AND to_regclass('ami.quarantine_items') IS NOT NULL
+                AND to_regclass('ami.forgetting_audit_log') IS NOT NULL
+                AND to_regclass('ami.lifecycle_transition_events_v1') IS NOT NULL
+                AND to_regclass('ami.lifecycle_transition_stats_v1') IS NOT NULL
                 AND to_regclass('ami.observability_snapshots') IS NOT NULL
                 AND to_regclass('ami.task_nodes') IS NOT NULL
                 AND to_regclass('ami.task_events') IS NOT NULL
@@ -188,12 +175,93 @@ async fn bootstrap_schema_is_current(client: &Client) -> Result<bool> {
                     INNER JOIN pg_class t ON t.oid = c.conrelid
                     INNER JOIN pg_namespace n ON n.oid = t.relnamespace
                     WHERE n.nspname = 'ami'
+                      AND t.relname = 'restore_packs'
+                      AND c.conname = 'restore_packs_source_snapshot_id_fkey'
+                      AND pg_get_constraintdef(c.oid) LIKE '%ON DELETE RESTRICT%'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM pg_constraint c
+                    INNER JOIN pg_class t ON t.oid = c.conrelid
+                    INNER JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE n.nspname = 'ami'
+                      AND t.relname = 'restore_packs'
+                      AND c.conname = 'restore_packs_workspace_restore_pack_requires_source_snapshot_check'
+                      AND pg_get_constraintdef(c.oid) LIKE '%pack_kind <> ''workspace_restore_pack'' OR source_snapshot_id IS NOT NULL%'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM pg_constraint c
+                    INNER JOIN pg_class t ON t.oid = c.conrelid
+                    INNER JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE n.nspname = 'ami'
                       AND t.relname = 'skill_cards'
                       AND c.conname = 'skill_cards_candidate_class_check'
                       AND pg_get_constraintdef(c.oid) LIKE '%failure_pattern%'
                       AND pg_get_constraintdef(c.oid) LIKE '%failure_playbook%'
                       AND pg_get_constraintdef(c.oid) LIKE '%repair_sequence%'
                       AND pg_get_constraintdef(c.oid) LIKE '%anti_pattern%'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'ami'
+                      AND table_name = 'lifecycle_transition_events_v1'
+                      AND column_name = 'dwell_ms'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'ami'
+                      AND table_name = 'lifecycle_transition_events_v1'
+                      AND column_name = 'freshness_band'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM pg_attribute a
+                    INNER JOIN pg_class c ON c.oid = a.attrelid
+                    INNER JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'ami'
+                      AND c.relname = 'lifecycle_transition_stats_v1'
+                      AND a.attname = 'transition_count'
+                      AND a.attnum > 0
+                      AND NOT a.attisdropped
+                      AND format_type(a.atttypid, a.atttypmod) = 'bigint'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM pg_attribute a
+                    INNER JOIN pg_class c ON c.oid = a.attrelid
+                    INNER JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'ami'
+                      AND c.relname = 'lifecycle_transition_stats_v1'
+                      AND a.attname = 'total_dwell_ms'
+                      AND a.attnum > 0
+                      AND NOT a.attisdropped
+                      AND format_type(a.atttypid, a.atttypmod) = 'bigint'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM pg_attribute a
+                    INNER JOIN pg_class c ON c.oid = a.attrelid
+                    INNER JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'ami'
+                      AND c.relname = 'lifecycle_transition_stats_v1'
+                      AND a.attname = 'avg_dwell_ms'
+                      AND a.attnum > 0
+                      AND NOT a.attisdropped
+                      AND format_type(a.atttypid, a.atttypmod) = 'bigint'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM pg_attribute a
+                    INNER JOIN pg_class c ON c.oid = a.attrelid
+                    INNER JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'ami'
+                      AND c.relname = 'lifecycle_transition_stats_v1'
+                      AND a.attname = 'p90_dwell_ms'
+                      AND a.attnum > 0
+                      AND NOT a.attisdropped
                 )
                 AND EXISTS (
                     SELECT 1

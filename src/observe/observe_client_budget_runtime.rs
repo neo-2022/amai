@@ -83,7 +83,9 @@ pub(crate) async fn print_client_budget_guard(
             "wait_for_global_client_budget_recovery" => {
                 "wait for global client budget recovery before replying"
             }
-            "rotate_chat_for_client_budget" => "rotate into a fresh chat before replying",
+            "rotate_chat_for_client_budget" => {
+                "rotate into a new clean work surface before replying"
+            }
             _ => "refresh the live client budget gate before replying",
         };
         return Err(anyhow!(
@@ -146,7 +148,9 @@ pub(crate) async fn print_client_budget_gate(
             "wait_for_global_client_budget_recovery" => {
                 "wait for global client budget recovery before replying"
             }
-            "rotate_chat_for_client_budget" => "rotate into a fresh chat before replying",
+            "rotate_chat_for_client_budget" => {
+                "rotate into a new clean work surface before replying"
+            }
             _ => "refresh the live client budget gate before replying",
         };
         return Err(anyhow!(
@@ -202,7 +206,9 @@ pub(crate) async fn print_client_budget_root_cause(
             "wait_for_global_client_budget_recovery" => {
                 "wait for global client budget recovery before replying"
             }
-            "rotate_chat_for_client_budget" => "rotate into a fresh chat before replying",
+            "rotate_chat_for_client_budget" => {
+                "rotate into a new clean work surface before replying"
+            }
             _ => "refresh the live client budget gate before replying",
         };
         return Err(anyhow!(
@@ -452,10 +458,9 @@ pub(super) async fn collect_client_budget_snapshot_from_db(
     )
     .await?;
     let latest_repo_working_state_restore =
-        super::latest_repo_working_state_restore_payload(&db, repo_root)
-            .await?
-            .map(|value| compact_latest_repo_working_state_restore_for_budget(&value))
-            .unwrap_or_else(|| json!({ "working_state_restore": {} }));
+        compact_latest_repo_working_state_restore_from_optional_payload(
+            latest_repo_restore_raw.as_ref(),
+        );
     Ok(json!({
         "token_budget_report": {
             "token_budget_report": report["token_budget_report"].clone(),
@@ -471,6 +476,12 @@ fn compact_latest_repo_working_state_restore_for_budget(payload: &Value) -> Valu
             &payload["working_state_restore"]
         )
     })
+}
+
+fn compact_latest_repo_working_state_restore_from_optional_payload(payload: Option<&Value>) -> Value {
+    payload
+        .map(compact_latest_repo_working_state_restore_for_budget)
+        .unwrap_or_else(|| json!({ "working_state_restore": {} }))
 }
 
 pub(super) fn compact_working_state_restore_for_budget(restore: &Value) -> Value {
@@ -495,6 +506,8 @@ pub(super) fn compact_working_state_restore_for_budget(restore: &Value) -> Value
                 "host_current_thread_control_feedback": {
                     "feedback_kind": action["host_current_thread_control_feedback"]["feedback_kind"].clone(),
                     "command_id": action["host_current_thread_control_feedback"]["command_id"].clone(),
+                    "working_state_write_status":
+                        action["host_current_thread_control_feedback"]["working_state_write_status"].clone(),
                     "feedback_snapshot": {
                         "thread_id": action["host_current_thread_control_feedback"]["feedback_snapshot"]["thread_id"].clone(),
                         "client_live_meter": {
@@ -781,41 +794,103 @@ pub(super) fn try_load_fast_thread_bound_materialized_compact_client_budget_surf
 }
 
 pub(super) fn compact_current_session_budget_guard_payload(guard: &Value) -> Value {
-    json!({
-        "status_label": guard["status_label"].clone(),
-        "full_turn_savings_proven": guard["full_turn_savings_proven"].clone(),
-        "full_turn_savings_percent": guard["full_turn_savings_percent"].clone(),
-        "should_rotate_chat_now": guard["should_rotate_chat_now"].clone(),
-        "should_rotate_chat_soon": guard["should_rotate_chat_soon"].clone(),
-        "requires_global_budget_recovery_before_reply":
+    let mut payload = serde_json::Map::from_iter([
+        ("status_label".to_string(), guard["status_label"].clone()),
+        (
+            "full_turn_savings_proven".to_string(),
+            guard["full_turn_savings_proven"].clone(),
+        ),
+        (
+            "full_turn_savings_percent".to_string(),
+            guard["full_turn_savings_percent"].clone(),
+        ),
+        (
+            "should_rotate_chat_now".to_string(),
+            guard["should_rotate_chat_now"].clone(),
+        ),
+        (
+            "should_rotate_chat_soon".to_string(),
+            guard["should_rotate_chat_soon"].clone(),
+        ),
+        (
+            "requires_global_budget_recovery_before_reply".to_string(),
             guard["requires_global_budget_recovery_before_reply"].clone(),
-        "next_action": guard["next_action"].clone(),
-        "last_request": guard["last_request"].clone(),
-        "client_limits": guard["client_limits"].clone(),
-        "tracked_slice": guard["tracked_slice"].clone(),
-        "tracked_slice_truth": guard["tracked_slice_truth"].clone(),
-        "client_live_meter_current_thread_bound":
+        ),
+        ("next_action".to_string(), guard["next_action"].clone()),
+        ("last_request".to_string(), guard["last_request"].clone()),
+        ("client_limits".to_string(), guard["client_limits"].clone()),
+        ("tracked_slice".to_string(), guard["tracked_slice"].clone()),
+        (
+            "tracked_slice_truth".to_string(),
+            guard["tracked_slice_truth"].clone(),
+        ),
+        (
+            "client_live_meter_current_thread_bound".to_string(),
             guard["client_live_meter_current_thread_bound"].clone(),
-        "client_live_meter_thread_binding_state":
+        ),
+        (
+            "client_live_meter_thread_binding_state".to_string(),
             guard["client_live_meter_thread_binding_state"].clone(),
-        "observed_at_epoch_ms": guard["observed_at_epoch_ms"].clone(),
-        "max_guard_age_seconds": guard["max_guard_age_seconds"].clone(),
-        "reply_execution_gate": compact_reply_execution_gate(&guard["reply_execution_gate"]),
-    })
+        ),
+        (
+            "observed_at_epoch_ms".to_string(),
+            guard["observed_at_epoch_ms"].clone(),
+        ),
+        (
+            "max_guard_age_seconds".to_string(),
+            guard["max_guard_age_seconds"].clone(),
+        ),
+        (
+            "reply_execution_gate".to_string(),
+            compact_reply_execution_gate(&guard["reply_execution_gate"]),
+        ),
+    ]);
+    if !guard["delivery_surface_status_label"].is_null() {
+        payload.insert(
+            "delivery_surface_status_label".to_string(),
+            guard["delivery_surface_status_label"].clone(),
+        );
+    }
+    Value::Object(payload)
 }
 
 pub(super) fn compact_client_budget_gate_payload(guard: &Value) -> Value {
     let reply_execution_gate = &guard["reply_execution_gate"];
-    json!({
-        "status_label": guard["status_label"].clone(),
-        "reply_prefix": guard["reply_prefix"].clone(),
-        "global_reply_prefix": guard["global_reply_prefix"].clone(),
-        "reply_prefix_source": guard["reply_prefix_source"].clone(),
-        "host_context_compaction": guard["host_context_compaction"].clone(),
-        "observed_at_epoch_ms": guard["observed_at_epoch_ms"].clone(),
-        "max_guard_age_seconds": guard["max_guard_age_seconds"].clone(),
-        "reply_execution_gate": compact_reply_execution_gate(reply_execution_gate),
-    })
+    let carries_heavy_host_context = guard["host_context_compaction"].is_object();
+    let mut payload = serde_json::Map::from_iter([
+        ("status_label".to_string(), guard["status_label"].clone()),
+        (
+            "observed_at_epoch_ms".to_string(),
+            guard["observed_at_epoch_ms"].clone(),
+        ),
+        (
+            "max_guard_age_seconds".to_string(),
+            guard["max_guard_age_seconds"].clone(),
+        ),
+        (
+            "reply_execution_gate".to_string(),
+            compact_reply_execution_gate(reply_execution_gate),
+        ),
+    ]);
+    if !carries_heavy_host_context && !guard["host_context_compaction"].is_null() {
+        payload.insert(
+            "host_context_compaction".to_string(),
+            guard["host_context_compaction"].clone(),
+        );
+    }
+    for field in ["delivery_surface_status_label"] {
+        if !guard[field].is_null() {
+            payload.insert(field.to_string(), guard[field].clone());
+        }
+    }
+    if !carries_heavy_host_context {
+        for field in ["reply_prefix", "global_reply_prefix", "reply_prefix_source"] {
+            if !guard[field].is_null() {
+                payload.insert(field.to_string(), guard[field].clone());
+            }
+        }
+    }
+    Value::Object(payload)
 }
 
 fn compact_host_context_compaction_for_cli(host_context_compaction: &Value) -> Value {
@@ -1269,15 +1344,35 @@ pub(super) fn compact_cli_client_budget_gate_payload(guard: &Value) -> Value {
             );
         }
     }
-    json!({
-        "status_label": compact_gate["status_label"].clone(),
-        "reply_prefix": compact_gate["reply_prefix"].clone(),
-        "global_reply_prefix": compact_gate["global_reply_prefix"].clone(),
-        "reply_prefix_source": compact_gate["reply_prefix_source"].clone(),
-        "observed_at_epoch_ms": compact_gate["observed_at_epoch_ms"].clone(),
-        "max_guard_age_seconds": compact_gate["max_guard_age_seconds"].clone(),
-        "reply_execution_gate": Value::Object(compact_reply_execution_gate),
-    })
+    let mut compact = serde_json::Map::from_iter([
+        (
+            "status_label".to_string(),
+            compact_gate["status_label"].clone(),
+        ),
+        (
+            "observed_at_epoch_ms".to_string(),
+            compact_gate["observed_at_epoch_ms"].clone(),
+        ),
+        (
+            "max_guard_age_seconds".to_string(),
+            compact_gate["max_guard_age_seconds"].clone(),
+        ),
+        (
+            "reply_execution_gate".to_string(),
+            Value::Object(compact_reply_execution_gate),
+        ),
+    ]);
+    for field in [
+        "delivery_surface_status_label",
+        "reply_prefix",
+        "global_reply_prefix",
+        "reply_prefix_source",
+    ] {
+        if !compact_gate[field].is_null() {
+            compact.insert(field.to_string(), compact_gate[field].clone());
+        }
+    }
+    Value::Object(compact)
 }
 
 pub(super) fn front_door_client_budget_gate_payload(gate: Value) -> Value {
@@ -1481,6 +1576,10 @@ fn compact_reply_execution_gate(reply_execution_gate: &Value) -> Value {
             reply_execution_gate["reply_prefix_source"].clone(),
         ),
         (
+            "delivery_surface_status_label".to_string(),
+            reply_execution_gate["delivery_surface_status_label"].clone(),
+        ),
+        (
             "host_context_compaction_stage".to_string(),
             reply_execution_gate["host_context_compaction_stage"].clone(),
         ),
@@ -1495,6 +1594,10 @@ fn compact_reply_execution_gate(reply_execution_gate: &Value) -> Value {
         (
             "preserves_return_obligation".to_string(),
             preserves_return_obligation,
+        ),
+        (
+            "delivery_surface_requires_continuity_startup".to_string(),
+            reply_execution_gate["delivery_surface_requires_continuity_startup"].clone(),
         ),
         ("action_bundle".to_string(), action_bundle),
     ]);
@@ -1522,6 +1625,7 @@ fn compact_reply_execution_action_bundle(action_bundle: &Value) -> Value {
         "measurement_before_retry_required",
         "feedback_confirmation_before_retry_required",
         "order",
+        "delivery_surface_order",
     ] {
         if !bundle.get(field).unwrap_or(&Value::Null).is_null() {
             compact.insert(field.to_string(), action_bundle[field].clone());
@@ -1589,5 +1693,139 @@ fn compact_reply_execution_action_bundle(action_bundle: &Value) -> Value {
         Value::Object(compact)
     } else {
         Value::Null
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        compact_latest_repo_working_state_restore_from_optional_payload,
+        compact_working_state_restore_for_budget,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn compact_working_state_restore_for_budget_preserves_host_feedback_write_status() {
+        let restore = json!({
+            "recent_actions": [
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "summary": "feedback summary",
+                    "recorded_at_epoch_ms": 123,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "opened",
+                        "command_id": "compact_window",
+                        "working_state_write_status": {
+                            "status": "degraded_after_primary_write",
+                            "warning": "Refresh degraded after primary write."
+                        },
+                        "feedback_snapshot": {
+                            "thread_id": "thread-1",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 100,
+                                "context_used_percent": 25.0,
+                                "primary_limit_used_percent": 10
+                            },
+                            "host_context_compaction": {
+                                "compaction_count": 1,
+                                "growth_since_compaction_tokens": 20,
+                                "compacted_at_epoch_ms": 111,
+                                "stage": "verified"
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+
+        let compact = compact_working_state_restore_for_budget(&restore);
+        assert_eq!(
+            compact["recent_actions"][0]["host_current_thread_control_feedback"]
+                ["working_state_write_status"]["status"],
+            "degraded_after_primary_write"
+        );
+        assert_eq!(
+            compact["recent_actions"][0]["host_current_thread_control_feedback"]
+                ["working_state_write_status"]["warning"],
+            "Refresh degraded after primary write."
+        );
+    }
+
+    #[test]
+    fn compact_working_state_restore_for_budget_preserves_missing_host_feedback_write_status_as_null(
+    ) {
+        let restore = json!({
+            "recent_actions": [
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "summary": "feedback summary",
+                    "recorded_at_epoch_ms": 123,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "opened",
+                        "command_id": "compact_window",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-1",
+                            "client_live_meter": {},
+                            "host_context_compaction": {}
+                        }
+                    }
+                }
+            ]
+        });
+
+        let compact = compact_working_state_restore_for_budget(&restore);
+        assert!(
+            compact["recent_actions"][0]["host_current_thread_control_feedback"]
+                ["working_state_write_status"]
+                .is_null()
+        );
+    }
+
+    #[test]
+    fn compact_latest_repo_working_state_restore_from_optional_payload_preserves_override_payload() {
+        let payload = json!({
+            "working_state_restore": {
+                "current_goal": "override goal",
+                "recent_actions": [
+                    {
+                        "source_kind": "host_current_thread_control_feedback",
+                        "summary": "feedback summary",
+                        "recorded_at_epoch_ms": 123,
+                        "host_current_thread_control_feedback": {
+                            "feedback_kind": "opened",
+                            "command_id": "compact_window",
+                            "working_state_write_status": {
+                                "status": "degraded_after_primary_write",
+                                "warning": "Refresh degraded after primary write."
+                            },
+                            "feedback_snapshot": {
+                                "thread_id": "thread-1",
+                                "client_live_meter": {},
+                                "host_context_compaction": {}
+                            }
+                        }
+                    }
+                ]
+            }
+        });
+
+        let compact =
+            compact_latest_repo_working_state_restore_from_optional_payload(Some(&payload));
+        assert_eq!(
+            compact["working_state_restore"]["current_goal"],
+            "override goal"
+        );
+        assert_eq!(
+            compact["working_state_restore"]["recent_actions"][0]
+                ["host_current_thread_control_feedback"]["working_state_write_status"]["status"],
+            "degraded_after_primary_write"
+        );
+    }
+
+    #[test]
+    fn compact_latest_repo_working_state_restore_from_optional_payload_preserves_missing_payload_as_empty_restore(
+    ) {
+        let compact = compact_latest_repo_working_state_restore_from_optional_payload(None);
+        assert_eq!(compact, json!({ "working_state_restore": {} }));
     }
 }

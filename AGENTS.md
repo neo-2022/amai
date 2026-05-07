@@ -271,20 +271,78 @@ Rust-native verification commands:
 4. Живые LLM-subagents и другие model-level workers не подпадают под это правило автоматически: их поднимать только когда нужен именно model-level execution или validation, а не когда ту же проверку можно закрыть локальными non-LLM средствами.
 5. Если пользователь явно требует живых LLM-агентов как часть проверки, это требование имеет приоритет, и агент обязан выполнить именно этот уровень верификации, а не подменять его shell-only эквивалентом.
 
+## 11A. Обязательный first-pass side-agent contour для Gemma
+1. Локальный `Gemma` через `ollama` считается не optional toy, а стандартным bounded side-agent для дешёвого first-pass analysis.
+2. Если задача относится к одному из следующих классов, агент обязан сначала поднять `Gemma`-контур, а потом уже делать собственный основной проход:
+   - большой файл или монолитный модуль, где нужен domain map, symbol grouping или split-plan;
+   - first-pass code review, smell scan, risk scan или поиск missing tests;
+   - генерация test ideas, edge cases, negative paths или regression checklist;
+   - draft structuring, когда нужно быстро сжать большой кодовой surface в рабочую карту модулей, responsibilities и migration order;
+   - поиск альтернативных гипотез после уже начатого локального root-cause анализа, если нужен второй дешёвый взгляд, а не final verdict.
+3. Канонические launcher-ы этого контура:
+   - `scripts/gemma_code_assist.sh`
+   - `scripts/gemma_monolith_split.sh`
+   - `scripts/ollama_chat.sh`
+4. Для split/domain задач default launcher = `scripts/gemma_monolith_split.sh`; для review/bug/plan/test-idea задач default launcher = `scripts/gemma_code_assist.sh` с подходящим `--mode`.
+5. Этот contour обязан работать по project-local binding law и использовать:
+   - `AGENTS.md`
+   - `docs/AGENT_START_HERE.md`
+   - `docs/MAINTAINABILITY_ENFORCEMENT.md`
+   - `docs/standards/MAINTAINABILITY_SUPPORTABILITY_EVOLVABILITY_ANTI_HARDCODING_STANDARD.md`
+   - `docs/IMPLEMENTATION_STATUS.md`
+   - `docs/IMPLEMENTATION_GATES.md`
+6. `Gemma` запрещено считать final authority для:
+   - exact root cause;
+   - schema / protocol / security решений;
+   - stage-close verdict;
+   - final архитектурного решения;
+   - merge-ready patch без локальной верификации;
+   - любого truth-sensitive вывода, где ошибка дороже, чем экономия лимитов.
+7. Если `Gemma`-contour вызван по этому правилу, агент обязан относиться к его output как к first-pass material:
+   - брать полезные domain clusters, risks, draft plans и test ideas;
+   - не принимать слепо claims о полноте, coverage или correctness;
+   - локально проверять symbol coverage, invariants, contracts и proof impact перед содержательным изменением.
+8. Пропустить этот contour можно только если:
+   - задача не относится к перечисленным классам;
+   - side-agent явно недоступен технически;
+   - локальный non-LLM путь уже даёт тот же результат дешевле и надёжнее.
+9. Если contour был пропущен при задаче из этого списка без явной причины, это считается workflow defect, а не допустимой оптимизацией.
+10. Для любой содержательной работы после собственного основного прохода агент обязан сделать ещё и final cross-check через `Gemma` до финального ответа пользователю:
+   - change review;
+   - risk scan;
+   - obvious gap scan;
+   - negative-path/test-idea pass, если это уместно для текущего slice.
+11. Этот final cross-check обязателен для:
+   - любой правки кода;
+   - любой архитектурной, policy, truth, schema или protocol decision;
+   - любого stage/proof/status verdict;
+   - любого claim вида `закрыто`, `зелёно`, `доказано`, `materialized`.
+12. Допустимые исключения только такие:
+   - `Gemma` технически недоступен, завис, таймаутит или не возвращает usable output;
+   - ответ не является содержательной работой и ограничивается тривиальным ack/status without technical claim.
+13. Если final cross-check не был выполнен, агент обязан:
+   - считать это workflow defect;
+   - не делать вид, что требование было соблюдено;
+   - явно сказать пользователю, что Gemma-pass был пропущен или сорвался.
+14. Если final cross-check выполнен, в финальном ответе нужно честно отражать:
+   - что Gemma была использована;
+   - что именно она перепроверяла;
+   - где source of truth остался за локальными proof/harness/result lanes, а не за side-agent verdict.
+
 <!-- AMAI MANAGED STARTUP INSTRUCTIONS v1 -->
 # Amai continuity startup for Codex
 
 Этот managed block должен жить в project `AGENTS.md`, а не в global config.
 
 Перед первым содержательным ответом в новом или resumed чате и дальше перед каждым следующим содержательным ответом:
-1. Workspace = `/home/art/agent-memory-index`. Прочитай compact agent contract `/home/art/agent-memory-index/.amai/onboarding/project-chat-startup-agent-contract.json` и machine-readable startup contract `/home/art/agent-memory-index/.amai/onboarding/project-chat-startup-contract.json`; startup contract остаётся pinned source-of-truth. До MCP tool call проверь `startup_contract_sha256 = "c24022b7c4aa8059033da20a8e23f79025a16ee974d97427fcec30415c2bcc65"`, `workspace_contract_required_before_tool_call = true`, `missing_or_unreadable_fail_closed = true`, `sha256_mismatch_fail_closed = true`.
+1. Workspace = `/home/art/agent-memory-index`. Прочитай compact agent contract `/home/art/agent-memory-index/.amai/onboarding/project-chat-startup-agent-contract.json` и machine-readable startup contract `/home/art/agent-memory-index/.amai/onboarding/project-chat-startup-contract.json`; startup contract остаётся pinned source-of-truth. До MCP tool call проверь `startup_contract_sha256 = "218c603815692422ef3fd648b7672acae69eea587e3ba23cf5c75d6fb481f1da"`, `workspace_contract_required_before_tool_call = true`, `missing_or_unreadable_fail_closed = true`, `sha256_mismatch_fail_closed = true`.
 2. Затем вызови MCP tool `amai_continuity_startup` с `repo_root = "/home/art/agent-memory-index"` и `namespace = "continuity"`; `project` передавай только при exact binding по repo_root. До `continuity_startup_summary` не переходи к `amai_context_pack` и новым действиям. Если tool вернул `tool_execution_failed` и detail содержит `no continuity import found for`, немедленно сделай reconcile через `./scripts/continuity_startup.sh --repo-root "/home/art/agent-memory-index" --namespace "continuity" --json` (`requires_repo_root_argument = true`, `requires_namespace_argument = true`, `json_required = true`). Если embedded MCP tool call упал на transport error с detail `Transport closed` (`transport_error_detail_case_insensitive = true`), делай тот же local CLI reconcile. Если local CLI startup succeeds, классифицируй это как `stale_embedded_mcp_session` (`local_cli_success_replaces_mcp_failure = true`, `local_cli_success_replaces_transport_failure = true`, `must_request_mcp_reconnect_after_local_success = true`, `must_continue_from_local_startup_payload = true`), продолжай от локального startup payload и требуй reconnect exact front-door-ом: `./scripts/reconnect_local.sh --client codex` или `./scripts/amai_exec.sh bootstrap reconnect --client codex --yes`. Только если и MCP, и local CLI fallback провалились, объявляй continuity реально unavailable.
 3. После startup прочитай runtime artifact `.amai/continuity/project-chat-startup-state.json`: `workspace_runtime_state_artifact_version` должен быть `workspace-startup-runtime-state-v4`, его пишет `amai_continuity_startup`, он обязан нести `continuity_startup_summary`. Fallback: `./scripts/continuity_startup_state.sh --repo-root "/home/art/agent-memory-index" --json`.
 4. В runtime artifact смотри только `startup_execution_gate`, `execctl_resume_state`, `execctl_resume_contract_summary`, `execctl_resume_obligation`, `startup_next_action`, `execctl_active_lease`. Restore бери из `required_summary_fields`, obligations из `restored_obligations`. Fail-closed, если `gate_semantics_consistent != true` (`gate_semantics_consistent_true_required = true`), `startup_execution_gate.must_follow_startup_next_action != true`, `startup_execution_gate.unrelated_work_allowed != false`, `startup_execution_gate.must_read_prompt_text_before_reply != true` или `startup_execution_gate.no_silent_drop != true`.
-5. Resume law: если `startup_execution_gate.required_action_kind_when_resume_required == "resume_required_return_task"`, `startup_next_action.action_kind == "resume_required_return_task"` (`must_resume_required_return_task_before_unrelated_work = true`) или `execctl_active_lease.lease_owner_state == "previous_session_owner"` (`previous_session_owner_must_follow_startup_next_action = true`), follow startup_next_action first. `no_silent_drop = true`. Для resume смотри `execctl_active_lease_summary`, `required_return_task`, `project_task_tree`, `project_task_tree_summary`, `project_task_ledger`, `project_task_ledger_summary`.
+5. Resume law: если `startup_execution_gate.required_action_kind_when_resume_required == "resume_required_return_task"`, `startup_next_action.action_kind == "resume_required_return_task"` (`must_resume_required_return_task_before_unrelated_work = true`) или `execctl_active_lease.lease_owner_state == "previous_session_owner"` (`previous_session_owner_must_follow_startup_next_action = true`), follow startup_next_action first. `no_silent_drop = true`. Для resume смотри `execctl_active_lease_summary`, `required_return_task`, `required_task_set`, `required_task_set_summary`, `project_task_tree`, `project_task_tree_summary`, `project_task_ledger`, `project_task_ledger_summary`.
 6. Перед каждым содержательным ответом обновляй guard `./scripts/client_budget_gate.sh` и работай только по `client_budget_reply_gate.reply_execution_gate`. `must_check_before_each_substantive_reply = true`; stale старше `10` секунд запрещён (`stale_guard_requires_refresh = true`). Hard gate automation: `--enforce-reply-gate` (`guard_enforcement_exit_on_blocking = true`). Prefix preflight: `--enforce-online-reply-prefix` (`required_reply_prefix_source = personal_agent_online_limit_contour`, `required_reply_prefix_non_empty = true`, `reply_prefix_preflight_blocks_substantive_reply = true`, `output_prefix_enforcement_mode = instruction_preflight_fail_closed`, `output_prefix_host_enforced = false`). Continuity write-side maintenance в Amai (continuity import, continuity handoff, observe /api/continuity-handoff) не блокируется reply guard (`continuity_write_exempt_from_reply_guard = true`) и при rotate/advisory pressure остаётся обязательным перед уходом (`continuity_write_required_before_rotate = true`). Для KPI/guard/exact-pair root-cause сначала используй `./scripts/client_budget_root_cause.sh`; `must_prefer_compact_diagnostics_over_full_snapshot = true`.
 7. Gate version pinned: `client-reply-budget-gate-v1`. Начинать user-visible reply можно только если `reply_execution_gate.reply_prefix` не пустой и источник равен `personal_agent_online_limit_contour`; иначе substantive reply запрещён и сначала нужен новый guard-check через `--enforce-online-reply-prefix`. Если prefix готов, начинай reply с этой exact строки. Если `reply_budget_mode == "compact_high_signal"`, substantive reply разрешён только по `reply_budget_contract` с `contract_version = "client-reply-budget-v1"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing. Exact operator-switch для target режима: matching `^экономия_(0|10|20|30|40|50|60|70|80|90)%$` -> `./scripts/continuity_client_budget_target.sh --repo-root "/home/art/agent-memory-index" --namespace "continuity" --percent N` (`repo_root_argument_required = true`, `switch_immediately_on_exact_chat_command = true`, `reply_with_confirmation_after_switch = true`). Пример exact chat-команды: `экономия_50%`. Exact operator-switch для huge-chat rebase: точную команду `компакт_чат` обработай через `./scripts/continuity_compact_chat.sh --repo-root "/home/art/agent-memory-index" --namespace "continuity" --json` (`repo_root_argument_required = true`, `switch_immediately_on_exact_chat_command = true`, `reply_with_confirmation_after_prepare = true`, `prompt_text_required_for_rebase = true`), верни `prompt_text` и `operator_notice`, и требуй host action `open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable`.
-8. Client-budget blocked reply mechanism removed: `reply_blocking_removed = true`. Tool-turn blocked mechanism removed too: `tool_turn_blocking_removed = true`. Если `reply_execution_gate.must_rotate_before_reply = true`, `reply_execution_gate.must_wait_for_budget_recovery_before_reply = true`, `should_rotate_chat_now = true`, `status_label` равен одному из [сожми текущий чат, сожми текущий чат сейчас], `same_meter_pure_burn_turn_active = true`, `must_avoid_new_tool_turn_without_specific_delta_goal = true` или `max_tool_roundtrips_soft = 0`, считай это только advisory/compact pressure signal. User-visible blocked wait template использовать запрещено; `amai_context_pack`, continuity write и другие Amai tools не блокируй только из-за этих полей. `save_handoff_before_rotate = true` и `fresh_chat_requires_continuity_startup = true` остаются operator guidance.
+8. Client-budget blocked reply mechanism removed: `reply_blocking_removed = true`. Tool-turn blocked mechanism removed too: `tool_turn_blocking_removed = true`. Если `reply_execution_gate.must_rotate_before_reply = true`, `reply_execution_gate.must_wait_for_budget_recovery_before_reply = true`, `should_rotate_chat_now = true`, `status_label` равен одному из current normalized same-thread advisory labels [сожми текущий чат, сожми текущий чат сейчас], `same_meter_pure_burn_turn_active = true`, `must_avoid_new_tool_turn_without_specific_delta_goal = true` или `max_tool_roundtrips_soft = 0`, считай это только advisory/compact pressure signal. Этот список в startup instructions является non-binding human-readable snapshot канонического shared advisory source, а не отдельным policy-list. User-visible blocked wait template использовать запрещено; `amai_context_pack`, continuity write и другие Amai tools не блокируй только из-за этих полей. `save_handoff_before_rotate = true` и `fresh_chat_requires_continuity_startup = true` остаются operator guidance.
 9. Не подменяй полную клиентскую шкалу внутренним Amai-slice: `full_scale_client_truth_required = true`. Любой fail-closed scenario (project_unregistered, repo_root_binding_ambiguous, continuity_restore_unavailable) сообщай как блокер и не угадывай continuity.
 <!-- /AMAI MANAGED STARTUP INSTRUCTIONS v1 -->
 
@@ -357,3 +415,4 @@ Rust-native verification commands:
 
 Если хотя бы один из этих четырёх пунктов не доказан,
 слой не готов к promotion даже если локально “всё работает”.
+

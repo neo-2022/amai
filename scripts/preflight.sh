@@ -4,6 +4,9 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
+cargo_bin="$(./scripts/resolve_cargo.sh)"
+rustc_bin="$(./scripts/resolve_rustc.sh)"
+
 explicit_profile=0
 stack_profile=""
 install_args=()
@@ -27,7 +30,7 @@ for ((i=0; i<${#args[@]}; i++)); do
 done
 
 run_preflight() {
-  cargo run --quiet -- bootstrap preflight --stack-profile "$1"
+  RUSTC="${rustc_bin}" "${cargo_bin}" run --quiet -- bootstrap preflight --stack-profile "$1"
 }
 
 extract_line() {

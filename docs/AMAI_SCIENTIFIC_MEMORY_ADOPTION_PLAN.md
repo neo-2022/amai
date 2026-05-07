@@ -3,8 +3,8 @@
 Дата ручной сверки: 2026-04-13
 
 Источники:
-- `/home/art/Загрузки/AMAI_audit_and_improvement_plan.pdf`
-- `/home/art/Загрузки/tv&ms_ff.pdf`
+- `AMAI_audit_and_improvement_plan.pdf`
+- `tv&ms_ff.pdf`
 
 ## Source trust model
 
@@ -73,6 +73,8 @@
 - destructive auto-decision из probabilistic score;
 - замену `verified truth` математической проекцией;
 - numeric posterior promotion без отдельного measured approval revision этого же документа.
+- KAN-style reranking, routing или context-pack mutation без отдельного
+  measured approval revision и no-authority proof bundle.
 
 Коротко:
 - production scope этого документа = advisory/proof-grade probabilistic/statistical contours;
@@ -123,12 +125,25 @@
 - `./scripts/proof_forgetting_consolidation.sh`
 - `./scripts/proof_observability.sh`
 
+Fresh baseline law:
+- if `proof_mcp_task_matrix.sh` or `proof_observability.sh` is red, this plan must not describe benchmark significance/drift or dashboard parity as fresh-green;
+- current 2026-04-24 proof-refresh state is green after strict-heavy MCP matrix contamination preflight, explicit failed-run artifact handling and clean observability rerun.
+
 Что надо зафиксировать как baseline artifact set:
 - benchmark coverage summary;
 - memory task matrix summary;
 - MCP task matrix summary;
 - observability snapshot summary;
 - forgetting/governance dashboard snapshot или raw equivalent.
+
+Canonical launcher `v1` для этого artifact set:
+- `./scripts/scientific_queue0_baseline_freeze.sh`
+
+Что он обязан materialize-ить:
+- machine-readable manifest с `git_head`, initial/final worktree fingerprint, environment snapshot, dependency hashes, exact command invocations и per-command checksums;
+- fail-closed классификацию `passed / pre_existing_known_failure / current_failure`;
+- optional `--baseline-allowlist` contour для уже известных pre-existing red zones;
+- optional `--require-clean-worktree` strict mode для freeze-run без TOCTOU-двусмысленности.
 
 Выход из Queue 0 разрешён только если:
 - baseline либо зелёный, либо все уже существующие красные зоны локализованы как pre-existing и явно не созданы текущей очередью;
@@ -390,6 +405,178 @@ Dashboard/observe surfaces:
 - explain surface production-visible;
 - no hidden coupling with routing/truth/forgetting authority.
 
+Текущий честный статус:
+- `materialized_minimal_slice`
+- bounded Queue 4 contour уже materialized в code/runtime:
+  - `src/regression_explain.rs`
+  - `cargo run -- observe regression-explain --surface ...`
+  - `observe snapshot` block `regression_explain`
+  - dashboard card `Regression explain`
+- текущий proof bundle после fresh proof-refresh 2026-04-24:
+  - `./scripts/proof_memory_task_matrix.sh` = green
+  - `./scripts/proof_benchmark_contamination_preflight.sh` = green
+  - `./scripts/proof_mcp_task_matrix.sh` = green after strict-heavy contamination preflight and explicit failed-run artifact handling
+  - `./scripts/proof_observability.sh` = green after the MCP matrix dashboard compare lane was revalidated
+    - it now also asserts the `Regression explain` dashboard card and `observe snapshot.regression_explain` guardrails
+- fresh proof-refresh 2026-04-25:
+  - `./scripts/proof_observability.sh` = green for the same read-only/fail-closed guardrail boundary, not for measured regression quality.
+- current live sample остаётся honest fail-closed:
+  - `sample_pool_size = 31`
+  - `measured_outcomes = 0`
+  - `insufficient_sample_outcomes = 3`
+  - `status = unknown`
+- текущее one-sided label distribution:
+  - `benchmark_pass`: `n=17`, только positive class
+  - `stale_error`: `n=31`, только negative class
+  - `retrieval_helpful`: `n=31`, только positive class
+- значит Queue 4 уже production-visible, но ещё не даёт measured regression quality на текущем live contour; это не code gap, а sample-shape/data gap.
+
+#### Candidate Queue 4A. KAN-style context-pack utility explain surface
+
+Статус:
+- `research_candidate / spec_only / not_materialized`
+- это не новая core queue и не shortcut вокруг Queue 0-5;
+- все payload, rollout и proof поля ниже являются target contract, а не
+  описанием уже существующего runtime behavior;
+- future code must treat these fields as speculative/contract-based until a
+  separate `shadow_approved` revision exists;
+- any future consumer must be blocked by an explicit compile-time or runtime
+  guard until `shadow_approved`; serializers, logs and helper projections must
+  not leak these fields into live decision paths;
+- этот раздел разрешает только contract/proof planning до отдельного
+  measured approval revision;
+- runtime/schema/dashboard/MCP implementation запрещена, пока этот раздел не
+  будет явно promoted из `spec_only` в `shadow_approved`.
+
+Цель:
+- объяснить полезность уже разрешённых context-pack candidates;
+- показать, почему конкретный chunk/source/symbol вошёл или не вошёл;
+- найти redundant context, wasted tokens, weak-scope semantic hits,
+  stale/conflicting evidence и нестабильные explanations;
+- не менять сам context-pack, ordering, top-k, project/namespace scope,
+  retrieval mode, truth state или lifecycle/forgetting decision.
+
+Почему KAN/Kolmogorov-Arnold идея здесь уместна:
+- полезная часть не в "магической" теореме, а в explainable additive/spline
+  decomposition of feature interactions;
+- planned surface would report operator-readable вклад факторов:
+  `lexical_score`, `symbol_match`, `semantic_score`, `scope_guard`,
+  `provenance_trust`, `freshness`, `token_cost`, `redundancy`,
+  `evidence_conflict`, `continuity_relevance`;
+- если KAN-style curves нестабильны или не выигрывают у simple baselines,
+  contour остаётся research artifact и не получает product authority.
+
+Allowed candidate scope:
+- только candidates, которые уже прошли действующие project/namespace/scope
+  фильтры;
+- только traces после materialized context-pack decision;
+- semantic/Qdrant evidence не может расширять scope или становиться единственным
+  source of truth;
+- lexical/symbol-first law сохраняется.
+
+Exact authority contract:
+- `truth_authority = false`
+- `routing_authority = false`
+- `ranking_authority = false`
+- `runtime_authority = false`
+- `forgetting_authority = false`
+- `promotion_authority = false`
+
+Минимальный trace contract:
+- `context_pack_id`
+- `correlation_id`
+- `decision_trace_id`
+- `project_code`
+- `namespace_code`
+- `retrieval_mode`
+- `allowed_candidate_scope`
+- `candidate_summary`
+- `rerank_summary`
+- `evidence_sufficiency`
+- `final_decision`
+- `model_visible_context_pack_payload_sha256`
+- `candidate_order_sha256`
+- `feature_schema_version`
+
+Минимальный output payload:
+- `context_pack_utility_explain.model_version`
+- `surface_role = read_only_context_pack_utility_explain`
+- `summary.status = measured | insufficient_sample | ood | not_materialized | unknown`
+- `sample_pool_size`
+- `outcomes`
+- `top_contributors`
+- `redundancy_summary`
+- `token_utility_summary`
+- `stability_summary`
+- `ood_summary`
+- `guardrails.truth_authority = false`
+- `guardrails.routing_authority = false`
+- `guardrails.ranking_authority = false`
+- `guardrails.runtime_authority = false`
+- `raw_parity.raw_payload_sha256`
+- `raw_parity.dashboard_payload_sha256`
+- `raw_parity.parity_status`
+
+Rollout order:
+1. `spec_only`: this section plus gate contract only; no code.
+2. `trace_only`: capture/read existing retrieval/context-pack decision traces
+   after pack construction; enabled-vs-disabled context-pack output must be
+   byte/JSON equivalent.
+3. `offline_replay`: train/evaluate candidate models only on stored traces,
+   with simple transparent baselines.
+4. `shadow_observe`: expose raw/observe summary as read-only, fail-closed
+   projection.
+5. `dashboard_internal`: add hidden/internal operator card only after raw parity,
+   sample floor, OOD and SLA guards pass.
+6. `user_visible_opt_in`: optional surface only after proof bundle and explicit
+   approval; still advisory.
+
+Failure semantics:
+- missing raw trace -> `not_materialized`;
+- one-sided labels -> `insufficient_sample`;
+- stale schema/version mismatch -> `unknown`;
+- OOD input -> `ood`;
+- Qdrant unavailable -> no semantic-derived explanation, not best guess;
+- raw/dashboard SHA mismatch -> dashboard card hidden and proof red;
+- any scope mismatch -> fail-closed and no explanation.
+
+Baseline comparisons:
+- current heuristic/explain summary;
+- simple linear/logistic or GAM-style baseline where applicable;
+- KAN-style candidate;
+- ablation by feature family;
+- perturbation/stability check for top contributors.
+
+Обязательный proof bundle before any promotion beyond `spec_only`:
+- targeted Rust contract tests for trace schema, feature extraction and
+  authority flags;
+- enabled-vs-disabled context-pack equality check;
+- adversarial empty/ambiguous trace tests;
+- cross-project and namespace leak guard;
+- Qdrant unavailable degradation test;
+- redaction/secret hygiene check;
+- baseline-vs-candidate raw-result lane with sample size and CI/drift metadata;
+- `./scripts/proof_memory_task_matrix.sh`;
+- `./scripts/proof_mcp_task_matrix.sh`;
+- `./scripts/proof_observability.sh`;
+- `cargo run -- observe snapshot`;
+- `cargo run -- observe sla-check`.
+
+Если implementation touches retrieval/vector/context-pack runtime, дополнительно:
+- `./scripts/proof_accuracy.sh`
+- `./scripts/proof_performance.sh`
+- `./scripts/proof_load.sh`
+- cold benchmark bundle from `docs/IMPLEMENTATION_GATES.md`
+- external/Qdrant bundle from `docs/IMPLEMENTATION_GATES.md`
+
+First approved implementation shape, only after `shadow_approved`:
+- Rust-first module, exact candidate filename:
+  - `src/context_pack_utility_explain.rs`
+- observe/dashboard integration must read the raw advisory payload and must not
+  compute hidden dashboard-only truth;
+- any model artifact must be versioned and reversible;
+- no new Python harness is allowed for internal proof.
+
 #### Queue 5. Poisson / arrival capacity forecast
 
 Цель:
@@ -438,6 +625,36 @@ Dashboard/observe surfaces:
 - capacity forecast surfaced в production как advisory/planning contour;
 - runtime policy по-прежнему не зависит от него напрямую.
 
+Текущий честный статус:
+- `materialized_minimal_slice`
+- Queue 5 уже materialized как bounded forecast-only contour, а не как runtime control law.
+- Canonical `v1` implementation now includes:
+  - новый module/runtime path:
+    - `src/capacity_forecast.rs`
+  - новый CLI surface:
+    - `cargo run -- observe capacity-forecast --window 5m`
+  - new dashboard/read-only operator surface:
+    - card `Capacity forecast`
+  - new snapshot surface:
+    - `observe snapshot.capacity_forecast`
+  - new scoped history basis:
+    - `system_snapshot` now persists project-local `_observability.scope_project_code / scope_namespace_code`
+    - Queue 5 history source resolves as `project_scoped_observe_history`
+- Current supported family set is intentionally narrow:
+  - `nats_events`
+- Live window state is intentionally data-dependent, not a stable completion claim:
+  - `history_scope.mode = project_scoped_observe_history` is the durable status-truth claim;
+  - measured/insufficient status can change as `system_snapshot` history ages;
+  - latest raw spot-check on 2026-04-25 showed `history_points = 44`, `nats_events.1m = measured`, `nats_events.5m = insufficient_sample`, `sample_count = 3`;
+  - these exact values are raw evidence for that run only, therefore docs must not claim `measured_families = 1`, `1m = measured`, `5m = measured` or any fixed capacity-quality number as a permanent live state.
+- Current proof state:
+  - targeted Rust tests for Poisson interval and bucket aggregation contract = green
+  - targeted Rust tests for Queue 5 dashboard-card fallback and measured-window rendering = green
+  - `./scripts/proof_observability.sh` = green in the fresh 2026-04-25 companion run.
+    - it now also asserts the `Capacity forecast` dashboard card and `observe snapshot.capacity_forecast` guardrails
+- Remaining honest gap:
+  - Queue 5 is still a minimal advisory slice, not a broad multi-family capacity model and not a runtime enforcement contour.
+
 ### Cross-queue hard rules
 
 Для всех очередей без исключения:
@@ -456,7 +673,7 @@ Dashboard/observe surfaces:
 | Тезис | Ручной verdict | Почему |
 | --- | --- | --- |
 | `restore_confidence` остаётся в основном категориальным contour | `live-confirmed` | В текущем коде и surfaces всё ещё доминируют значения вроде `preliminary / medium / high / durable`, а не формальный calibrated belief-layer. |
-| benchmark story не публикует статистическую честность уровня CI/significance/drift | `live-confirmed` | `benchmark coverage` уже показывает `1 materialized` procedural compare-plane contour, но gates/roadmap всё ещё не materialize-ят отдельный statistical benchmark layer с доверительными интервалами, significance и drift tests. |
+| benchmark story не публикует статистическую честность уровня CI/significance/drift | `stale-snapshot` | Это утверждение было верным для более раннего snapshot, но уже не соответствует текущему repo: compare/drift layer теперь partially materialized, а `IMPLEMENTATION_STATUS.md` честно фиксирует measured CI/significance/drift slices для `memory_task_matrix` и `mcp_task_matrix`, хотя contour ещё не объявлен полностью завершённым. |
 | формального numeric posterior по memory/belief нет | `partially-confirmed` | В schema и отдельных surfaces есть `confidence`, но нет принятой canonical модели `truth/freshness/scope/usefulness posterior` с calibration policy. |
 | крупные файлы и maintainability debt остаются фактором риска | `live-confirmed` | Giant-file debt остаётся частью текущего реального состояния проекта, хотя несколько bounded-context split уже materialized. |
 
@@ -477,14 +694,20 @@ Dashboard/observe surfaces:
 | evaluator/trust loop обязателен | `duplicate-of-existing-roadmap` | Это уже канонический Stage 10 baseline. |
 | benchmark honesty и non-regression нельзя подменять красивыми цифрами | `duplicate-of-existing-roadmap` | Это уже locked law в roadmap, operations и maintainability contour. |
 
-### Что из PDF1 полезно только как future-R&D direction
+### Что из PDF1 осталось future-only или стало частично materialized
+
+Эта таблица больше не является "всё future-only" snapshot. После Queue 1-5
+часть идей уже имеет bounded production-visible slices. Статус ниже фиксирует
+текущую границу: что реально surfaced/proved, а что всё ещё нельзя объявлять
+готовым runtime/truth/policy layer.
 
 | Тезис | Ручной verdict | Почему |
 | --- | --- | --- |
 | Bayesian belief-layer для memory | `future-R&D-only` | Идея сильная, но сейчас нет materialized data/calibration/proof contour, чтобы честно объявлять её live roadmap item уровня implementation-ready. |
-| Markov/hazard lifecycle для forgetting | `future-R&D-only` | Архитектурно совместимо с Amai, но требует measured transition data и audit-safe modeling. |
-| Poisson arrival/capacity model | `future-R&D-only` | Полезно для future load/capacity planning, но пока не canonical runtime control layer. |
-| regression as explain surface | `future-R&D-only` | Уместно как auxiliary explainability contour, но не как authoritative truth/ranking source. |
+| KAN-style context-pack utility explain surface | `research_candidate / spec_only / not_materialized` | Полезная часть ограничена read-only explanation of already allowed context-pack candidates. Это не runtime ranking/truth layer и не roadmap promise до `shadow_approved` revision plus proof bundle. |
+| Markov/hazard lifecycle для forgetting | `materialized_minimal_slice / advisory-only` | Stale как pure future claim: Queue 3 уже surfaced через `memory cohort-risk`, governance/dashboard summary и MCP/`observe snapshot` summary. Не закрыто как broader policy-simulation/approval layer и не получает destructive authority. |
+| Poisson arrival/capacity model | `materialized_minimal_slice / forecast-only` | Stale как pure future claim: Queue 5 уже surfaced для `nats_events` через `src/capacity_forecast.rs`, `observe capacity-forecast`, dashboard card и snapshot block. Broader multi-family capacity model и runtime enforcement всё ещё blocked by proof/data. |
+| regression as explain surface | `materialized_minimal_slice / insufficient_sample_for_measured_quality` | Stale как pure future claim: Queue 4 уже surfaced через `src/regression_explain.rs`, `observe regression-explain`, snapshot block и dashboard card. Live measured model quality не достигнута, потому что текущий sample одноклассный/`insufficient_sample`. |
 
 ## Useful methodological primitives from `tv&ms_ff.pdf`
 
@@ -615,6 +838,28 @@ Exact v1 design contour:
 - regression разрешена только как explain/forecast contour;
 - regression не может стать authoritative truth/routing source без отдельного measured promotion path.
 
+### 8. KAN-style additive feature interaction as context-pack utility explanation
+
+Что берём:
+- explainable additive/spline feature interaction surface для already allowed
+  context-pack candidates;
+- decomposition of token utility, redundancy, scope risk, provenance support,
+  semantic/lexical/symbol interaction and evidence conflict;
+- stability/OOD reporting for the explanation itself.
+
+Куда ложится:
+- Candidate Queue 4A;
+- retrieval/context-pack diagnostics;
+- operator explainability near `Regression explain`, not a benchmark card and
+  not a truth layer.
+
+Жёсткое ограничение:
+- KAN-style output is advisory projection only;
+- it cannot change retrieval ordering, candidates, top-k, scope, truth,
+  retention, task state or dashboard truth;
+- if it does not beat simple transparent baselines under held-out proof and
+  stability checks, it remains research-only.
+
 ## Adoption matrix for Amai
 
 ### Adopt now as documentation/roadmap
@@ -635,12 +880,13 @@ Exact v1 design contour:
 - если contour входит в production scope и имеет очередь выше, его нужно реализовывать по execution program;
 - если contour явно вынесен в out-of-scope этого документа, его нельзя молча "добрать заодно".
 
-| Что ещё не materialized на момент ручной сверки | Почему тогда не было готово | Что должно появиться раньше |
-| --- | --- | --- |
-| Numeric posterior belief-layer | нет canonical calibration/data policy | measured datasets, calibration policy, proof contour |
-| Calibrated restore confidence | current restore still categorical | restore telemetry, label-quality study, calibration harness |
-| Markov/hazard lifecycle model | пока нет measured transition discipline | transition dataset, explainable policy model, audit-safe rollout |
-| Poisson capacity model | пока это полезнее как forecasting contour, чем как runtime law | observed arrival metrics, queue telemetry, capacity validation |
+| Что было не materialized на момент ручной сверки | Почему тогда не было готово | Текущий status-truth | Что должно появиться дальше |
+| --- | --- | --- | --- |
+| Numeric posterior belief-layer | нет canonical calibration/data policy | `future-R&D-only` | measured datasets, calibration policy, proof contour |
+| Calibrated restore confidence | current restore still categorical | `concept-only / blocked-by-calibration-data` | restore telemetry, label-quality study, calibration harness |
+| KAN-style context-pack utility explain surface | no approved trace schema, model stability proof or no-authority gate yet | `research_candidate / spec_only / not_materialized` | Queue 4A shadow contract, enabled-vs-disabled equality proof, OOD/stability guards, dashboard/raw parity |
+| Markov/hazard lifecycle model | не было measured transition discipline | `materialized_minimal_slice / advisory-only` через Queue 3; bounded `policy-simulate` CLI now materialized, but broader measured approval contour still pending | validation that recommendations improve revalidation/forgetting discipline, approval path before any policy authority |
+| Poisson capacity model | полезнее как forecasting contour, чем runtime law | `materialized_minimal_slice / forecast-only` через Queue 5 for `nats_events`; broader multi-family model/runtime enforcement pending | observed multi-family arrival metrics, queue telemetry validation, explicit policy approval before enforcement |
 
 ### Already materialized / duplicate
 
@@ -661,19 +907,23 @@ Exact v1 design contour:
 
 ## Immediate roadmap-worthy items
 
-Эти пункты стоит держать в canonical docs уже сейчас, но без объявления их implemented:
+Эти пункты стоит держать в canonical docs уже сейчас, но без ложного возврата в pre-materialized состояние:
 - `confidence/calibration` как future governance extension, а не текущий source of truth;
-- `benchmark significance + drift` как next-layer discipline для compare/evaluator surfaces;
-- `Markov/hazard lifecycle` как future extension для Stage 9, только через explainable transitions;
-- `Poisson capacity` как future planning contour, не runtime truth;
-- `regression explain surface` как optional explainability aid.
+- `KAN-style context-pack utility explain` как `research_candidate / spec_only`
+  extension candidate under Queue 4A, not a core roadmap promise;
+- `benchmark significance + drift hardening` как следующий disciplined hardening layer поверх уже materialized compare/evaluator surfaces, а не как ещё не начатую идею;
+- `Markov/hazard lifecycle` как уже materialized minimal advisory slice для Stage 9, включая bounded `memory policy-simulate` review contour поверх explainable transitions; broader measured approval/policy workflow still pending;
+- `Poisson/arrival capacity forecast` как уже materialized minimal advisory slice, а более широкий `Poisson capacity model` как future planning contour, не runtime truth;
+- `regression explain surface` как уже materialized minimal explainability aid, а не как purely future option.
 
 Целевые статусы для канонических docs:
 - `confidence/calibration` -> `concept-only`
-- `benchmark significance/drift` -> `planned`
-- `Markov/hazard lifecycle` -> `concept-only`
-- `Poisson capacity` -> `blocked by proof/data`
-- `regression explain surface` -> `planned`
+- `KAN-style context-pack utility explain` -> `research_candidate / spec_only / not_materialized`
+- `benchmark significance/drift` -> `in_progress / fresh-proof-green / measured-approval-human-gated`
+- `Markov/hazard lifecycle` -> `materialized_minimal_slice / advisory-only`
+- `Poisson/arrival capacity forecast` -> `materialized_minimal_slice`
+- `Poisson capacity model` -> `blocked by proof/data`
+- `regression explain surface` -> `materialized_minimal_slice`
 
 ## Future research stack
 

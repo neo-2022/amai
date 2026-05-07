@@ -112,11 +112,11 @@ pub async fn execute_context_pack_capture_with_options(
     track_token_usage: bool,
 ) -> Result<ContextPackResult> {
     if let Some(cached) = try_execute_context_pack_fast_cached(cfg, args, persist)? {
-        let payload =
+        let mut payload =
             materialize_context_pack_caller_payload(db, args, &cached.payload, &cached.stats)
                 .await?;
         if track_token_usage {
-            record_context_pack_token_budget_event(db, &payload, args).await?;
+            record_context_pack_token_budget_event(db, &mut payload, args).await?;
         }
         return Ok(ContextPackResult {
             payload,
@@ -129,7 +129,7 @@ pub async fn execute_context_pack_capture_with_options(
     }
     let durably_persisted = persist || prepared.durably_persisted;
     cache_context_pack_entry(cfg, args, &prepared, durably_persisted)?;
-    let payload = materialize_context_pack_caller_payload(
+    let mut payload = materialize_context_pack_caller_payload(
         db,
         args,
         prepared.payload.as_ref(),
@@ -137,7 +137,7 @@ pub async fn execute_context_pack_capture_with_options(
     )
     .await?;
     if track_token_usage {
-        record_context_pack_token_budget_event(db, &payload, args).await?;
+        record_context_pack_token_budget_event(db, &mut payload, args).await?;
     }
     Ok(ContextPackResult {
         payload,
@@ -147,7 +147,7 @@ pub async fn execute_context_pack_capture_with_options(
 
 async fn record_context_pack_token_budget_event(
     db: &Client,
-    payload: &Value,
+    payload: &mut Value,
     args: &ContextPackArgs,
 ) -> Result<()> {
     if !payload.is_object() {
@@ -159,7 +159,14 @@ async fn record_context_pack_token_budget_event(
     let skip_working_state_live_repeat = args.token_source_kind == "live_context_pack"
         && payload["retrieval_runtime"]["cache_hit"].as_bool() == Some(true);
     if !skip_working_state_live_repeat {
-        working_state::record_context_pack_event(db, payload, &args.token_source_kind).await?;
+        let write_status =
+            working_state::record_context_pack_event(db, payload, &args.token_source_kind).await?;
+        if let Some(root) = payload.as_object_mut() {
+            root.insert(
+                "working_state_write_status".to_string(),
+                serde_json::to_value(&write_status)?,
+            );
+        }
     }
     remember_thread_context_pack_delivery(payload)?;
     Ok(())
@@ -222,3 +229,31 @@ async fn same_thread_context_pack_previously_delivered(
     thread_context_pack_delivery_seen(thread_id, context_pack_id)
 }
 
+#[cfg(test)]
+mod context_pack_api_contract_tests {
+    use super::*;
+
+    #[test]
+    fn context_pack_payload_preserves_working_state_write_status_marker() {
+        let payload = json!({
+            "context_pack_id": "ctx-pack-1",
+            "query": "restore pack degraded path",
+            "working_state_write_status": {
+                "status": "degraded_after_primary_write",
+                "primary_write_persisted": true,
+                "restore_refresh_status": "degraded",
+                "warning": "context_pack.refresh_restore_snapshot degraded"
+            }
+        });
+
+        let visible = cli_visible_context_pack_payload(&payload, "live_context_pack");
+        assert_eq!(
+            visible["working_state_write_status"]["status"],
+            json!("degraded_after_primary_write")
+        );
+        assert_eq!(
+            visible["working_state_write_status"]["warning"],
+            json!("context_pack.refresh_restore_snapshot degraded")
+        );
+    }
+}

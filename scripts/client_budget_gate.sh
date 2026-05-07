@@ -54,6 +54,15 @@ normalize_front_door_gate_payload_shape() {
   ' 2>/dev/null || printf '%s' "$payload"
 }
 
+run_amai_release_or_exec() {
+  local -a args=("$@")
+  if [[ -x "$REPO_ROOT/target/release/amai" ]]; then
+    "$REPO_ROOT/target/release/amai" "${args[@]}"
+    return $?
+  fi
+  "$SCRIPT_DIR/amai_exec.sh" "${args[@]}"
+}
+
 maybe_auto_launch_same_thread_host_control() {
   local payload="${1:-}"
   local effective_thread_id="${2:-}"
@@ -111,7 +120,7 @@ maybe_auto_launch_same_thread_host_control() {
   else
     launch_args+=(--command-id "$command_id")
   fi
-  "$SCRIPT_DIR/amai_exec.sh" "${launch_args[@]}" >/dev/null 2>&1 || return 1
+  run_amai_release_or_exec "${launch_args[@]}" >/dev/null 2>&1 || return 1
   return 0
 }
 
@@ -166,6 +175,11 @@ case "$observe_host" in
     ;;
 esac
 
+observe_cli_fallback=("$SCRIPT_DIR/amai_exec.sh" observe client-budget-gate "${observe_passthrough_args[@]}")
+if [[ -x "$REPO_ROOT/target/release/amai" ]]; then
+  observe_cli_fallback=("$REPO_ROOT/target/release/amai" observe client-budget-gate "${observe_passthrough_args[@]}")
+fi
+
 root_cause_api_url="http://${observe_host}:${observe_port}/api/client-budget-root-cause"
 gate_api_url="http://${observe_host}:${observe_port}/api/client-budget-gate"
 if [[ -n "$thread_id" ]]; then
@@ -175,7 +189,7 @@ if [[ -n "$thread_id" ]]; then
 fi
 api_max_time="1.5"
 if [[ -n "$thread_id" ]]; then
-  api_max_time="7"
+  api_max_time="0.75"
 fi
 if [[ "$enforce_online_reply_prefix" == "true" ]]; then
   # Enforcing reply prefix must stay fail-fast even when a thread id is present.
@@ -398,17 +412,17 @@ if [[ -z "$gate_json" ]]; then
   else
     if command -v timeout >/dev/null 2>&1; then
       gate_json="$(
-        timeout 12 env \
+        timeout 20 env \
           AMAI_EXEC_DISABLE_BUDGET_HELPERS=1 \
           AMI_CLIENT_BUDGET_OBSERVE_HTTP_TIMEOUT_MS=1500 \
-            "$SCRIPT_DIR/amai_exec.sh" observe client-budget-gate "${observe_passthrough_args[@]}" \
+            "${observe_cli_fallback[@]}" \
           2>/dev/null || true
       )"
     else
       gate_json="$(
         AMAI_EXEC_DISABLE_BUDGET_HELPERS=1 \
         AMI_CLIENT_BUDGET_OBSERVE_HTTP_TIMEOUT_MS=1500 \
-          "$SCRIPT_DIR/amai_exec.sh" observe client-budget-gate "${observe_passthrough_args[@]}" \
+          "${observe_cli_fallback[@]}" \
           2>/dev/null || true
       )"
     fi
@@ -452,6 +466,11 @@ if [[ -z "$gate_json" ]]; then
       gate_json="$(printf '%s' "$root_cause_json" | extract_gate_from_root_cause || true)"
     fi
   fi
+fi
+
+if [[ -z "$gate_json" ]] && [[ "$enforce_reply_gate" == "true" ]]; then
+  echo "client budget gate: no gate payload available" >&2
+  exit 12
 fi
 
 gate_json="$(sanitize_gate_payload_for_removed_reply_blocking "$gate_json")"

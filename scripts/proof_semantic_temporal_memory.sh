@@ -31,6 +31,10 @@ cargo test --quiet \
   -- --exact
 
 cargo test --quiet \
+  retrieval::tests::temporal_queries_use_distinct_cache_keys \
+  -- --exact
+
+cargo test --quiet \
   retrieval::tests::proof_context_pack_disables_same_thread_cache_reuse_compaction \
   -- --exact
 

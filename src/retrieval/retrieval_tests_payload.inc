@@ -682,6 +682,12 @@
                 "included": [{"strategy": "exact_documents", "count": 1}],
                 "not_included": []
             },
+            "working_state_write_status": {
+                "status": "degraded_after_primary_write",
+                "primary_write_persisted": true,
+                "restore_refresh_status": "degraded",
+                "warning": "context_pack.refresh_restore_snapshot degraded"
+            },
             "retrieval_runtime": {"cache_hit": true},
             "retrieval": {
                 "exact_documents": [{
@@ -730,6 +736,14 @@
         assert_eq!(
             compact["cache_reuse_reference"]["source_context_pack_id"].as_str(),
             Some("ctx-reuse")
+        );
+        assert_eq!(
+            compact["working_state_write_status"]["status"].as_str(),
+            Some("degraded_after_primary_write")
+        );
+        assert_eq!(
+            compact["working_state_write_status"]["warning"].as_str(),
+            Some("context_pack.refresh_restore_snapshot degraded")
         );
         assert!(compact["cache_reuse_reference"].get("thread_id").is_none());
         assert!(compact["cache_reuse_reference"].get("note").is_none());
@@ -822,6 +836,12 @@
                     "included": [{"strategy": "lexical_chunks", "count": 1, "reason": "verbose"}],
                     "not_included": []
                 },
+                "working_state_write_status": {
+                    "status": "degraded_after_primary_write",
+                    "primary_write_persisted": true,
+                    "restore_refresh_status": "degraded",
+                    "warning": "context_pack.refresh_restore_snapshot degraded"
+                },
                 "retrieval": {
                     "exact_documents": [],
                     "symbol_hits": [],
@@ -849,11 +869,88 @@
             compact["cache_reuse_reference"]["source_context_pack_id"].as_str(),
             Some("ctx-reuse-visible")
         );
+        assert_eq!(
+            compact["working_state_write_status"]["status"].as_str(),
+            Some("degraded_after_primary_write")
+        );
+        assert_eq!(
+            compact["working_state_write_status"]["warning"].as_str(),
+            Some("context_pack.refresh_restore_snapshot degraded")
+        );
         assert_eq!(compact["project"]["code"].as_str(), Some("art"));
         assert_eq!(compact["namespace"]["code"].as_str(), Some("continuity"));
         assert!(compact.get("retrieval").is_none());
         assert!(compact.get("decision_trace").is_none());
         assert!(compact.get("query").is_none());
+    }
+
+    #[test]
+    fn same_thread_cache_reuse_payload_preserves_missing_write_status_as_null() {
+        let payload = json!({
+            "context_pack_id": "ctx-reuse-no-status",
+            "project": {
+                "code": "art",
+                "display_name": "Art",
+                "repo_root": "/home/art/Art"
+            },
+            "namespace": {
+                "code": "continuity",
+                "display_name": "Continuity"
+            },
+            "query": "Continuity snapshot",
+            "effective_retrieval_mode": "local_strict",
+            "visible_projects": [{
+                "project_code": "art",
+                "repo_root": "/home/art/Art"
+            }],
+            "retrieval_runtime": {"cache_hit": true},
+            "retrieval": {
+                "exact_documents": [],
+                "symbol_hits": [],
+                "lexical_chunks": [],
+                "semantic_chunks": []
+            }
+        });
+
+        let compact = build_same_thread_cache_reuse_payload(&payload, "thread-3");
+
+        assert!(compact["working_state_write_status"].is_null());
+    }
+
+    #[test]
+    fn model_visible_context_pack_payload_preserves_null_write_status_for_same_thread_cache_reuse() {
+        let payload = build_same_thread_cache_reuse_payload(
+            &json!({
+                "context_pack_id": "ctx-reuse-visible-null-status",
+                "project": {
+                    "code": "art",
+                    "display_name": "Art",
+                    "repo_root": "/home/art/Art"
+                },
+                "namespace": {
+                    "code": "continuity",
+                    "display_name": "Continuity"
+                },
+                "query": "Continuity snapshot",
+                "effective_retrieval_mode": "local_strict",
+                "visible_projects": [{
+                    "project_code": "art",
+                    "repo_root": "/home/art/Art"
+                }],
+                "working_state_write_status": null,
+                "retrieval": {
+                    "exact_documents": [],
+                    "symbol_hits": [],
+                    "lexical_chunks": [],
+                    "semantic_chunks": []
+                }
+            }),
+            "thread-4",
+        );
+
+        let compact = model_visible_context_pack_payload(&payload);
+
+        assert!(compact["working_state_write_status"].is_null());
     }
 
     #[test]

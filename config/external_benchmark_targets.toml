@@ -88,7 +88,7 @@ local_role = [
   "Сопоставлять с внутренним accuracy/isolation и continuity восстановлением.",
   "Не смешивать с online-window метриками."
 ]
-next_step = "Материализовать Rust-native runner для генерации ответов Amai + сохранить jsonl output, затем оценить через upstream scoring."
+next_step = "Rust-native request/runtime/score contract имеет synthetic smoke; следующий шаг — полный real dataset runtime+score proof и upstream scorer parity."
 
 [benchmarks.ama_bench]
 order = 5
@@ -128,7 +128,9 @@ local_role = [
   "Использовать как внешний quality benchmark памяти.",
   "Сопоставлять результаты с internal accuracy/isolation checks."
 ]
-next_step = "Материализовать Rust-адаптер чтения parquet и генерации Amai output + upstream scoring."
+next_step = "Rust-adapter чтения parquet и normalized cases materialized; следующий шаг — полный real dataset runtime+score proof и upstream scorer parity."
+
+[benchmarks.memoryagentbench.memory_runtime_policy]
 
 [benchmarks.locomo]
 order = 7
@@ -148,4 +150,4 @@ local_role = [
   "Использовать как long-horizon conversational benchmark.",
   "Сравнивать с internal memory-task matrix."
 ]
-next_step = "Добавить Rust-адаптер к locomo10.json и evaluator для QA."
+next_step = "Rust-normalization для locomo10.json materialized; следующий шаг — evaluator/upstream scoring parity и full real runtime+score proof."

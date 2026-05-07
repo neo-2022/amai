@@ -3941,9 +3941,12 @@ mod tests {
 
     #[test]
     fn compact_next_step_strips_nested_labels_and_markdown_noise() {
-        let text = "Ближайший обязательный следующий шаг: Следующий обязательный шаг: проверить новый чат ещё раз.`|";
+        let text = "Ближайший обязательный следующий шаг: Следующий обязательный шаг: проверить новую чистую рабочую поверхность ещё раз.`|";
         let next_step = compact_next_step_from_text(text).expect("next step");
-        assert_eq!(next_step, "проверить новый чат ещё раз.");
+        assert_eq!(
+            next_step,
+            "проверить новую чистую рабочую поверхность ещё раз."
+        );
     }
 
     #[test]

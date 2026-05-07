@@ -726,8 +726,11 @@ async fn decide_skill_refinement(
 #[derive(Debug, Clone)]
 pub(super) struct SkillCardCandidateExtraction {
     pub(super) source_basis_status: String,
+    #[allow(dead_code)]
     pub(super) source_event_count: usize,
+    #[allow(dead_code)]
     pub(super) artifact_ref_count: usize,
+    #[allow(dead_code)]
     pub(super) has_evidence_span: bool,
     pub(super) candidate_class: String,
     pub(super) derivation_kind: String,
@@ -1850,6 +1853,7 @@ pub(super) fn validate_skill_activity_basis(
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn create_skill_card_candidate(
     client: &Client,
     project_code: &str,

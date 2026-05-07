@@ -2,6 +2,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+repo_root="$(pwd)"
 
 temp_home="$(mktemp -d)"
 export AMAI_INSTALL_STATE_PATH="${temp_home}/install_state.json"
@@ -66,6 +67,7 @@ assert_startup_contract() {
   local path="$1"
   jq -e '
     .artifact_version == "workspace-startup-contract-v1" and
+    .startup_contract_sha256_scope == "startup_contract object only" and
     (.startup_contract_sha256 | type == "string" and length > 0) and
     .startup_contract.artifact_enforcement.missing_or_unreadable_fail_closed == true and
     .startup_contract.artifact_enforcement.sha256_mismatch_fail_closed == true and
@@ -82,9 +84,24 @@ assert_startup_contract() {
     .startup_contract.startup_execution_gate_enforcement.required_action_kind_resume_required_value == "resume_required_return_task" and
     .startup_contract.runtime_state_artifact.inspection_fallback_cli.command == "continuity startup-state" and
     .startup_contract.runtime_state_artifact.inspection_fallback_cli.shell_command == "./scripts/continuity_startup_state.sh" and
+    (.startup_contract.required_summary_fields | index("required_task_set") != null) and
+    (.startup_contract.required_summary_fields | index("required_task_set_summary") != null) and
     (.startup_contract.required_summary_fields | index("project_task_tree") != null) and
-    (.startup_contract.required_summary_fields | index("project_task_ledger") != null)
+    (.startup_contract.required_summary_fields | index("project_task_ledger") != null) and
+    (.startup_contract.restored_obligations | index("required_task_set") != null) and
+    (.startup_contract.restored_obligations | index("required_task_set_summary") != null)
   ' "${path}" >/dev/null
+}
+
+assert_startup_surface_sha() {
+  local path="$1"
+  local sha
+  sha="$(jq -r '.startup_contract_sha256 // empty' .amai/onboarding/project-chat-startup-contract.json)"
+  if [[ ! "${sha}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "proof_client_lifecycle: startup contract sha is missing or invalid"
+    exit 1
+  fi
+  grep -Fq "startup_contract_sha256 = \"${sha}\"" "${path}"
 }
 
 assert_contains_all() {
@@ -96,16 +113,37 @@ assert_contains_all() {
   done
 }
 
+assert_hermes_compact_startup() {
+  local path="$1"
+  local max_bytes="$2"
+  assert_contains_all "${path}" \
+    'AMAI MANAGED STARTUP INSTRUCTIONS v1' \
+    'compact contract-pointer' \
+    'до любого другого Amai шага.' \
+    './scripts/reconnect_local.sh --client hermes' \
+    './scripts/amai_exec.sh bootstrap reconnect --client hermes --yes'
+  local bytes
+  bytes="$(wc -c <"${path}")"
+  if (( bytes > max_bytes )); then
+    echo "proof_client_lifecycle: ${path} is too large for compact Hermes startup (${bytes} > ${max_bytes})"
+    exit 1
+  fi
+}
+
 snapshot_file "AGENTS.md" "AGENTS.md"
 snapshot_file ".cursor/rules/amai-continuity-startup.mdc" "cursor-rule"
 snapshot_file "CLAUDE.md" "CLAUDE.md"
 snapshot_file ".mcp.json" "repo-mcp-json"
+snapshot_file ".hermes.md" "hermes-startup"
+snapshot_file ".openclaw/AGENTS.md" "openclaw-startup"
 
 cleanup() {
   restore_file_from_snapshot "AGENTS.md" "AGENTS.md"
   restore_file_from_snapshot ".cursor/rules/amai-continuity-startup.mdc" "cursor-rule"
   restore_file_from_snapshot "CLAUDE.md" "CLAUDE.md"
   restore_file_from_snapshot ".mcp.json" "repo-mcp-json"
+  restore_file_from_snapshot ".hermes.md" "hermes-startup"
+  restore_file_from_snapshot ".openclaw/AGENTS.md" "openclaw-startup"
   rm -rf "${temp_home}"
 }
 
@@ -117,6 +155,7 @@ grep -q '\[mcp_servers.amai\]' "${temp_home}/.codex/config.toml"
 test -f AGENTS.md
 test -f .amai/onboarding/project-chat-startup-contract.json
 assert_startup_contract .amai/onboarding/project-chat-startup-contract.json
+assert_startup_surface_sha AGENTS.md
 assert_contains_all AGENTS.md \
   'AMAI MANAGED STARTUP INSTRUCTIONS v1' \
   'project `AGENTS.md`' \
@@ -128,6 +167,8 @@ assert_contains_all AGENTS.md \
   'previous_session_owner' \
   'resume_required_return_task' \
   'required_return_task' \
+  'required_task_set' \
+  'required_task_set_summary' \
   'startup_contract_sha256 = "' \
   'workspace_contract_required_before_tool_call = true' \
   'missing_or_unreadable_fail_closed = true' \
@@ -156,6 +197,7 @@ if grep -Fq 'AMAI MANAGED STARTUP INSTRUCTIONS v1' AGENTS.md; then
   echo "proof_client_lifecycle: codex managed startup block still present after disconnect"
   exit 1
 fi
+restore_file_from_snapshot "AGENTS.md" "AGENTS.md"
 
 HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/onboard_local.sh --client cursor --yes --skip-stack --skip-release-build
 test -f "${temp_home}/.cursor/mcp.json"
@@ -163,6 +205,7 @@ grep -q '"amai"' "${temp_home}/.cursor/mcp.json"
 test -f .amai/onboarding/project-chat-startup-contract.json
 assert_startup_contract .amai/onboarding/project-chat-startup-contract.json
 test -f .cursor/rules/amai-continuity-startup.mdc
+assert_startup_surface_sha .cursor/rules/amai-continuity-startup.mdc
 assert_contains_all .cursor/rules/amai-continuity-startup.mdc \
   'amai_continuity_startup' \
   'execctl_resume_contract_summary' \
@@ -173,6 +216,8 @@ assert_contains_all .cursor/rules/amai-continuity-startup.mdc \
   'previous_session_owner' \
   'resume_required_return_task' \
   'required_return_task' \
+  'required_task_set' \
+  'required_task_set_summary' \
   'startup_contract_sha256 = "' \
   'workspace_contract_required_before_tool_call = true' \
   'missing_or_unreadable_fail_closed = true' \
@@ -208,6 +253,7 @@ grep -q '"amai"' .mcp.json
 test -f .amai/onboarding/project-chat-startup-contract.json
 assert_startup_contract .amai/onboarding/project-chat-startup-contract.json
 test -f CLAUDE.md
+assert_startup_surface_sha CLAUDE.md
 assert_contains_all CLAUDE.md \
   'AMAI MANAGED STARTUP INSTRUCTIONS v1' \
   'amai_continuity_startup' \
@@ -219,6 +265,8 @@ assert_contains_all CLAUDE.md \
   'previous_session_owner' \
   'resume_required_return_task' \
   'required_return_task' \
+  'required_task_set' \
+  'required_task_set_summary' \
   'startup_contract_sha256 = "' \
   'workspace_contract_required_before_tool_call = true' \
   'missing_or_unreadable_fail_closed = true' \
@@ -245,6 +293,92 @@ if [[ -f .mcp.json ]] && grep -q '"amai"' .mcp.json; then
 fi
 if [[ -f CLAUDE.md ]] && grep -Fq 'AMAI MANAGED STARTUP INSTRUCTIONS v1' CLAUDE.md; then
   echo "proof_client_lifecycle: claude-code managed startup block still present after disconnect"
+  exit 1
+fi
+
+HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/onboard_local.sh --client hermes --yes --skip-stack --skip-release-build
+test -f "${temp_home}/.hermes/config.yaml"
+grep -q '^mcp_servers:' "${temp_home}/.hermes/config.yaml"
+grep -q '^  amai:' "${temp_home}/.hermes/config.yaml"
+test -f .amai/onboarding/project-chat-startup-contract.json
+assert_startup_contract .amai/onboarding/project-chat-startup-contract.json
+test -f .hermes.md
+assert_startup_surface_sha .hermes.md
+assert_hermes_compact_startup .hermes.md 4000
+test -f "${temp_home}/.hermes/active_profile"
+hermes_profile_name="$(cat "${temp_home}/.hermes/active_profile" | tr -d '\n')"
+if [[ "${hermes_profile_name}" != amai-* ]]; then
+  echo "proof_client_lifecycle: hermes active_profile is not a managed Amai profile"
+  exit 1
+fi
+test -f "${temp_home}/.hermes/profiles/${hermes_profile_name}/config.yaml"
+test -f "${temp_home}/.hermes/profiles/${hermes_profile_name}/SOUL.md"
+grep -q "^  cwd: '${repo_root}'\$" "${temp_home}/.hermes/profiles/${hermes_profile_name}/config.yaml"
+assert_startup_surface_sha "${temp_home}/.hermes/profiles/${hermes_profile_name}/SOUL.md"
+assert_contains_all "${temp_home}/.hermes/profiles/${hermes_profile_name}/SOUL.md" \
+  'AMAI MANAGED HERMES PROFILE STARTUP v1'
+assert_hermes_compact_startup "${temp_home}/.hermes/profiles/${hermes_profile_name}/SOUL.md" 5000
+test -f .amai/onboarding/hermes-profile-runtime.json
+
+HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/disconnect_local.sh --client hermes
+if [[ -f "${temp_home}/.hermes/config.yaml" ]] && grep -q '^  amai:' "${temp_home}/.hermes/config.yaml"; then
+  echo "proof_client_lifecycle: hermes server entry still present after disconnect"
+  exit 1
+fi
+if [[ -f .hermes.md ]]; then
+  echo "proof_client_lifecycle: hermes startup file still present after disconnect"
+  exit 1
+fi
+if [[ -d "${temp_home}/.hermes/profiles/${hermes_profile_name}" ]]; then
+  echo "proof_client_lifecycle: hermes managed profile still present after disconnect"
+  exit 1
+fi
+if [[ -f .amai/onboarding/hermes-profile-runtime.json ]]; then
+  echo "proof_client_lifecycle: hermes runtime artifact still present after disconnect"
+  exit 1
+fi
+if [[ -f "${temp_home}/.hermes/active_profile" ]] && [[ "$(cat "${temp_home}/.hermes/active_profile" | tr -d '\n')" == "${hermes_profile_name}" ]]; then
+  echo "proof_client_lifecycle: hermes active_profile still points to removed managed profile"
+  exit 1
+fi
+
+mkdir -p "${temp_home}/.openclaw"
+cat > "${temp_home}/.openclaw/openclaw.json" <<'EOF'
+{
+  // existing JSON5 comment must not break OpenClaw onboarding
+  gateway: {
+    mode: 'local',
+  },
+}
+EOF
+
+HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/onboard_local.sh --client openclaw --yes --skip-stack --skip-release-build
+test -f "${temp_home}/.openclaw/openclaw.json"
+grep -q '"gateway"' "${temp_home}/.openclaw/openclaw.json"
+HOME="${temp_home}" openclaw mcp list | grep -q 'amai'
+HOME="${temp_home}" openclaw mcp show amai --json | grep -q 'run_mcp_stdio'
+test -f .amai/onboarding/project-chat-startup-contract.json
+assert_startup_contract .amai/onboarding/project-chat-startup-contract.json
+test -f .openclaw/AGENTS.md
+assert_startup_surface_sha .openclaw/AGENTS.md
+assert_contains_all .openclaw/AGENTS.md \
+  'AMAI MANAGED STARTUP INSTRUCTIONS v1' \
+  'amai_continuity_startup' \
+  './scripts/reconnect_local.sh --client openclaw' \
+  './scripts/amai_exec.sh bootstrap reconnect --client openclaw --yes'
+HOME="${temp_home}" openclaw agents list --json | jq -e --arg workspace "$(pwd)/.openclaw" '.[] | select(.workspace == $workspace)' >/dev/null
+
+HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/disconnect_local.sh --client openclaw
+if HOME="${temp_home}" openclaw mcp show amai --json >/dev/null 2>&1; then
+  echo "proof_client_lifecycle: openclaw server entry still present after disconnect"
+  exit 1
+fi
+if HOME="${temp_home}" openclaw agents list --json | jq -e --arg workspace "$(pwd)/.openclaw" '.[] | select(.workspace == $workspace)' >/dev/null; then
+  echo "proof_client_lifecycle: openclaw project agent still present after disconnect"
+  exit 1
+fi
+if [[ -f .openclaw/AGENTS.md ]]; then
+  echo "proof_client_lifecycle: openclaw startup workspace still present after disconnect"
   exit 1
 fi
 

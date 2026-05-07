@@ -109,6 +109,108 @@ fn continuity_profile_log(stage: &str, elapsed_ms: u128, extra: &str) {
     }
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct WorkingStateWriteStatus {
+    pub(crate) status: String,
+    pub(crate) primary_write_persisted: bool,
+    pub(crate) restore_refresh_status: String,
+    pub(crate) warning: Option<String>,
+}
+
+impl WorkingStateWriteStatus {
+    fn refreshed() -> Self {
+        Self {
+            status: "ok".to_string(),
+            primary_write_persisted: true,
+            restore_refresh_status: "refreshed".to_string(),
+            warning: None,
+        }
+    }
+
+    fn degraded_after_primary_write(operation: &str, error: &anyhow::Error) -> Self {
+        Self {
+            status: "degraded_after_primary_write".to_string(),
+            primary_write_persisted: true,
+            restore_refresh_status: "degraded".to_string(),
+            warning: Some(format!(
+                "{operation}: working_state event persisted, but restore snapshot refresh degraded: {error:#}"
+            )),
+        }
+    }
+
+    pub(crate) fn is_degraded(&self) -> bool {
+        self.status == "degraded_after_primary_write"
+    }
+}
+
+async fn refresh_restore_snapshot_after_primary_write(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    operation: &str,
+) -> WorkingStateWriteStatus {
+    match refresh_restore_snapshot(db, project, namespace).await {
+        Ok(()) => WorkingStateWriteStatus::refreshed(),
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                project = %project.code,
+                namespace = %namespace.code,
+                operation,
+                "working_state primary write persisted but restore snapshot refresh degraded"
+            );
+            WorkingStateWriteStatus::degraded_after_primary_write(operation, &error)
+        }
+    }
+}
+
+async fn insert_restore_snapshot_and_materialize_pack(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    bundle: &Value,
+) -> Result<Uuid> {
+    let payload = persisted_restore_snapshot_payload(bundle);
+    let snapshot_id = match postgres::insert_observability_snapshot_detailed(
+        db,
+        WORKING_STATE_RESTORE_KIND,
+        &payload,
+    )
+    .await
+    {
+        Ok(snapshot_id) => snapshot_id,
+        Err(error)
+            if error.phase
+                == postgres::ObservabilityInsertErrorPhase::OutcomeUnknownAfterWrite =>
+        {
+            let recovered_snapshot_id = postgres::lookup_observability_snapshot_id_for_payload(
+                db,
+                WORKING_STATE_RESTORE_KIND,
+                &payload,
+            )
+            .await?
+            .with_context(|| {
+                format!(
+                    "working_state_restore insert outcome unknown but no persisted snapshot found for event_key={}",
+                    error.event_key
+                )
+            })?;
+            continuity_profile_log(
+                "insert_restore_snapshot_and_materialize_pack.recovered_snapshot_after_unknown_outcome",
+                0,
+                &format!(
+                    "project={} namespace={} event_key={}",
+                    project.code, namespace.code, error.event_key
+                ),
+            );
+            recovered_snapshot_id
+        }
+        Err(error) => return Err(error.error),
+    };
+    materialize_restore_pack(db, project, namespace, bundle, snapshot_id).await?;
+    Ok(snapshot_id)
+}
+
 async fn mirror_handoff_into_commitment_graph(
     db: &Client,
     project: &ProjectRecord,
@@ -669,6 +771,7 @@ pub(crate) fn client_budget_guard_blocks_expensive_tool_turn(guard: &Value) -> b
     false
 }
 
+#[cfg(test)]
 pub async fn record_handoff_event(
     db: &Client,
     project: &ProjectRecord,
@@ -787,6 +890,93 @@ async fn record_handoff_event_with_refresh(
         session_id_started.elapsed().as_millis(),
         &format!("project={} namespace={}", project.code, namespace.code),
     );
+    if handoff_semantic_replay_matches_previous_restore(
+        previous_restore.as_ref(),
+        local_path,
+        headline,
+        &next_step,
+        details,
+        recorded_at_epoch_ms,
+        resolve_current_goal,
+        resolved_headlines,
+        resolved_task_ids,
+    ) {
+        if let Some((source_event_id, source_snapshot_id)) =
+            semantic_handoff_replay_previous_binding(previous_restore.as_ref(), local_path)
+        {
+            let lease_expires_at_epoch_ms =
+                recorded_at_epoch_ms.saturating_add(EXECCTL_LEASE_TTL_MS) as i64;
+            let lease_started = Instant::now();
+            postgres::upsert_execctl_task_lease(
+                db,
+                &postgres::ExecCtlTaskLeaseInsert {
+                    project_id: project.project_id,
+                    namespace_id: namespace.namespace_id,
+                    agent_scope: &agent_scope,
+                    owner_session_id: Some(session_id.as_str()),
+                    owner_thread_id: thread_id.as_deref(),
+                    source_snapshot_id,
+                    source_event_id: source_event_id.as_str(),
+                    source_kind: "continuity_handoff",
+                    lease_state: "active",
+                    headline,
+                    next_step: &next_step,
+                    local_path: Some(local_path),
+                    acquired_at_epoch_ms: recorded_at_epoch_ms as i64,
+                    heartbeat_at_epoch_ms: recorded_at_epoch_ms as i64,
+                    expires_at_epoch_ms: lease_expires_at_epoch_ms,
+                },
+            )
+            .await?;
+            continuity_profile_log(
+                "record_handoff.semantic_replay_upsert_lease",
+                lease_started.elapsed().as_millis(),
+                &format!("project={} namespace={}", project.code, namespace.code),
+            );
+            if refresh_restore_snapshot_after_write {
+                let refresh_started = Instant::now();
+                if let (Some(previous_restore_value), Some(restore_node), Some(source_snapshot_id)) = (
+                    previous_restore.as_ref(),
+                    previous_restore
+                        .as_ref()
+                        .and_then(|value| value.get("working_state_restore")),
+                    source_snapshot_id,
+                ) {
+                    let authoritative_event = semantic_handoff_replay_authoritative_event(
+                        restore_node,
+                        source_event_id.as_str(),
+                        local_path,
+                        recorded_at_epoch_ms,
+                    );
+                    let _ = force_refresh_restore_snapshot_from_previous_handoff(
+                        db,
+                        project,
+                        namespace,
+                        previous_restore_value,
+                        &authoritative_event,
+                        source_snapshot_id,
+                    )
+                    .await?;
+                } else {
+                    let _ = force_refresh_restore_snapshot(db, project, namespace).await?;
+                }
+                continuity_profile_log(
+                    "record_handoff.semantic_replay_refresh_restore_snapshot",
+                    refresh_started.elapsed().as_millis(),
+                    &format!("project={} namespace={}", project.code, namespace.code),
+                );
+            }
+            continuity_profile_log(
+                "record_handoff.total",
+                total_started.elapsed().as_millis(),
+                &format!(
+                    "project={} namespace={} semantic_replay_noop=true",
+                    project.code, namespace.code
+                ),
+            );
+            return Ok(());
+        }
+    }
     let event_id = Uuid::new_v4().to_string();
     let active_files = extract_paths_from_text(details);
     let recent_paths = active_files.clone();
@@ -955,7 +1145,7 @@ pub async fn record_client_budget_target_event(
     project: &ProjectRecord,
     namespace: &NamespaceRecord,
     target_percent: u64,
-) -> Result<()> {
+) -> Result<WorkingStateWriteStatus> {
     record_client_budget_target_event_with_thread_hint(db, project, namespace, target_percent, None)
         .await
 }
@@ -966,7 +1156,7 @@ pub async fn record_client_budget_target_event_with_thread_hint(
     namespace: &NamespaceRecord,
     target_percent: u64,
     thread_id_hint: Option<&str>,
-) -> Result<()> {
+) -> Result<WorkingStateWriteStatus> {
     let total_started = Instant::now();
     let target_percent =
         normalize_client_budget_target_percent(target_percent).ok_or_else(|| {
@@ -1062,7 +1252,13 @@ pub async fn record_client_budget_target_event_with_thread_hint(
         ),
     );
     let refresh_started = Instant::now();
-    refresh_restore_snapshot(db, project, namespace).await?;
+    let write_status = refresh_restore_snapshot_after_primary_write(
+        db,
+        project,
+        namespace,
+        "client_budget_target.refresh_restore_snapshot",
+    )
+    .await;
     continuity_profile_log(
         "client_budget_target.refresh_restore_snapshot",
         refresh_started.elapsed().as_millis(),
@@ -1079,7 +1275,7 @@ pub async fn record_client_budget_target_event_with_thread_hint(
             project.code, namespace.code
         ),
     );
-    Ok(())
+    Ok(write_status)
 }
 
 pub async fn record_host_current_thread_control_feedback_with_thread_hint(
@@ -1089,7 +1285,7 @@ pub async fn record_host_current_thread_control_feedback_with_thread_hint(
     feedback_kind: &str,
     command_id_hint: Option<&str>,
     thread_id_hint: Option<&str>,
-) -> Result<()> {
+) -> Result<WorkingStateWriteStatus> {
     let feedback_kind = normalize_host_current_thread_control_feedback_kind(feedback_kind)
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -1180,22 +1376,29 @@ pub async fn record_host_current_thread_control_feedback_with_thread_hint(
         }
     });
     let _ = postgres::insert_observability_snapshot(db, WORKING_STATE_EVENT_KIND, &payload).await?;
-    refresh_restore_snapshot(db, project, namespace).await?;
-    Ok(())
+    Ok(
+        refresh_restore_snapshot_after_primary_write(
+            db,
+            project,
+            namespace,
+            "host_current_thread_control_feedback.refresh_restore_snapshot",
+        )
+        .await,
+    )
 }
 
 pub async fn record_context_pack_event(
     db: &Client,
     payload: &Value,
     token_source_kind: &str,
-) -> Result<()> {
+) -> Result<WorkingStateWriteStatus> {
     let node = payload
         .as_object()
         .context("context pack payload must be a JSON object")?;
     let project_code = node["project"]["code"].as_str().unwrap_or_default();
     let namespace_code = node["namespace"]["code"].as_str().unwrap_or_default();
     if project_code.is_empty() || namespace_code.is_empty() {
-        return Ok(());
+        return Ok(WorkingStateWriteStatus::refreshed());
     }
     let project = ProjectSummary {
         code: project_code.to_string(),
@@ -1347,8 +1550,15 @@ pub async fn record_context_pack_event(
         display_name: namespace.display_name,
         retrieval_mode: persisted_namespace.retrieval_mode,
     };
-    refresh_restore_snapshot(db, &project_record, &namespace_record).await?;
-    Ok(())
+    Ok(
+        refresh_restore_snapshot_after_primary_write(
+            db,
+            &project_record,
+            &namespace_record,
+            "context_pack.refresh_restore_snapshot",
+        )
+        .await,
+    )
 }
 
 async fn build_restore_bundle_without_live_guard(
@@ -1872,10 +2082,11 @@ pub async fn load_recent_restore_bundle_without_live_guard(
     build_restore_bundle_without_live_guard(db, project, namespace).await
 }
 
-pub async fn build_restore_bundle(
+pub async fn build_restore_bundle_with_options(
     db: &Client,
     project: &ProjectRecord,
     namespace: &NamespaceRecord,
+    skip_live_client_budget_guard: bool,
 ) -> Result<Option<Value>> {
     let total_started = Instant::now();
     let Some(mut bundle) = build_restore_bundle_without_live_guard(db, project, namespace).await?
@@ -1890,6 +2101,22 @@ pub async fn build_restore_bundle(
         );
         return Ok(None);
     };
+    if skip_live_client_budget_guard {
+        continuity_profile_log(
+            "build_restore_bundle.skip_live_current_session_budget_guard",
+            0,
+            &format!("project={} namespace={}", project.code, namespace.code),
+        );
+        continuity_profile_log(
+            "build_restore_bundle.total",
+            total_started.elapsed().as_millis(),
+            &format!(
+                "project={} namespace={} skipped_live_client_budget_guard=true",
+                project.code, namespace.code
+            ),
+        );
+        return Ok(Some(bundle));
+    }
     let step_started = Instant::now();
     let client_budget_guard =
         token_budget::collect_live_current_session_budget_guard(db, Some(&bundle))
@@ -1920,6 +2147,14 @@ pub async fn build_restore_bundle(
         &format!("project={} namespace={}", project.code, namespace.code),
     );
     Ok(Some(bundle))
+}
+
+pub async fn build_restore_bundle(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+) -> Result<Option<Value>> {
+    build_restore_bundle_with_options(db, project, namespace, false).await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2201,21 +2436,18 @@ async fn refresh_restore_snapshot(
         build_bundle_started.elapsed().as_millis(),
         &format!("project={} namespace={}", project.code, namespace.code),
     );
-    let payload = persisted_restore_snapshot_payload(&bundle);
     let insert_snapshot_started = Instant::now();
     let snapshot_id =
-        postgres::insert_observability_snapshot(db, WORKING_STATE_RESTORE_KIND, &payload).await?;
+        insert_restore_snapshot_and_materialize_pack(db, project, namespace, &bundle).await?;
     continuity_profile_log(
         "refresh_restore_snapshot.insert_snapshot",
         insert_snapshot_started.elapsed().as_millis(),
         &format!("project={} namespace={}", project.code, namespace.code),
     );
-    let materialize_started = Instant::now();
-    materialize_restore_pack(db, project, namespace, &bundle, snapshot_id).await?;
     continuity_profile_log(
         "refresh_restore_snapshot.materialize_restore_pack",
-        materialize_started.elapsed().as_millis(),
-        &format!("project={} namespace={}", project.code, namespace.code),
+        insert_snapshot_started.elapsed().as_millis(),
+        &format!("project={} namespace={} snapshot_id={snapshot_id}", project.code, namespace.code),
     );
     continuity_profile_log(
         "refresh_restore_snapshot.total",
@@ -2237,10 +2469,7 @@ async fn force_refresh_restore_snapshot(
     else {
         return Ok(None);
     };
-    let payload = persisted_restore_snapshot_payload(&bundle);
-    let snapshot_id =
-        postgres::insert_observability_snapshot(db, WORKING_STATE_RESTORE_KIND, &payload).await?;
-    materialize_restore_pack(db, project, namespace, &bundle, snapshot_id).await?;
+    let _ = insert_restore_snapshot_and_materialize_pack(db, project, namespace, &bundle).await?;
     Ok(Some(bundle))
 }
 
@@ -2683,21 +2912,18 @@ async fn force_refresh_restore_snapshot_from_previous_handoff(
         &format!("project={} namespace={}", project.code, namespace.code),
     );
 
-    let payload = persisted_restore_snapshot_payload(&bundle);
     let insert_snapshot_started = Instant::now();
     let snapshot_id =
-        postgres::insert_observability_snapshot(db, WORKING_STATE_RESTORE_KIND, &payload).await?;
+        insert_restore_snapshot_and_materialize_pack(db, project, namespace, &bundle).await?;
     continuity_profile_log(
         "force_refresh_restore_snapshot_from_previous_handoff.insert_snapshot",
         insert_snapshot_started.elapsed().as_millis(),
         &format!("project={} namespace={}", project.code, namespace.code),
     );
-    let materialize_started = Instant::now();
-    materialize_restore_pack(db, project, namespace, &bundle, snapshot_id).await?;
     continuity_profile_log(
         "force_refresh_restore_snapshot_from_previous_handoff.materialize_restore_pack",
-        materialize_started.elapsed().as_millis(),
-        &format!("project={} namespace={}", project.code, namespace.code),
+        insert_snapshot_started.elapsed().as_millis(),
+        &format!("project={} namespace={} snapshot_id={snapshot_id}", project.code, namespace.code),
     );
     Ok(Some(bundle))
 }
@@ -3739,6 +3965,7 @@ fn is_meta_continuity_event(event: &Value) -> bool {
     headline.contains("continuity restored")
         || headline.contains("continuity reported")
         || headline.contains("restored and reported for new chat")
+        || headline.contains("restored and reported for new clean work surface")
         || next_step.contains("ждать указание пользователя")
         || summary.contains("пользователь спросил, на чем остановились")
         || summary.contains("пользователь спросил, на чём остановились")
@@ -4383,6 +4610,173 @@ fn prepend_pending_return_item(queue: &mut Vec<Value>, candidate: Value) {
         !(item_headline == candidate_headline && item_next_step == candidate_next_step)
     });
     queue.insert(0, candidate);
+}
+
+fn semantic_handoff_replay_previous_binding(
+    previous_restore: Option<&Value>,
+    local_path: &str,
+) -> Option<(String, Option<Uuid>)> {
+    let restore = previous_restore?.get("working_state_restore")?;
+    if restore["state_lineage"]["authoritative_event_kind"].as_str() != Some("continuity_handoff") {
+        return None;
+    }
+    if restore["state_lineage"]["authoritative_local_path"].as_str() != Some(local_path) {
+        return None;
+    }
+    let authoritative_event_id = restore["state_lineage"]["authoritative_event_id"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())?
+        .to_string();
+    let source_snapshot_id = restore["state_lineage"]["source_snapshot_id"]
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok());
+    Some((authoritative_event_id, source_snapshot_id))
+}
+
+fn semantic_handoff_replay_authoritative_event(
+    restore: &Value,
+    authoritative_event_id: &str,
+    local_path: &str,
+    recorded_at_epoch_ms: u64,
+) -> Value {
+    let summary = restore["recent_actions"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| item["summary"].as_str())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            restore["last_results_summary"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or("Зафиксирован handoff.")
+        .to_string();
+    json!({
+        "event_id": authoritative_event_id,
+        "event_kind": "continuity_handoff",
+        "source_kind": "continuity_handoff",
+        "recorded_at_epoch_ms": recorded_at_epoch_ms,
+        "headline": restore["current_goal"].clone(),
+        "next_step_hint": restore["next_step"].clone(),
+        "summary": summary,
+        "active_files": restore["active_files"].clone(),
+        "visible_projects": restore["visible_projects"].clone(),
+        "query": restore["query"].clone(),
+        "query_type": restore["query_type"].clone(),
+        "current_hypothesis": restore["current_hypothesis"].clone(),
+        "rejected_hypotheses": restore["rejected_hypotheses"].clone(),
+        "open_questions": restore["open_questions"].clone(),
+        "materialized_notes": restore["materialized_notes"].clone(),
+        "pending_return_queue": restore["pending_return_queue"].clone(),
+        "client_budget_target_percent": restore["client_budget_target_percent"].clone(),
+        "last_command": restore["last_command"].clone(),
+        "last_results_summary": restore["last_results_summary"].clone(),
+        "local_path": local_path,
+    })
+}
+
+pub(crate) fn handoff_semantic_replay_matches_previous_restore(
+    previous_restore: Option<&Value>,
+    local_path: &str,
+    headline: &str,
+    next_step: &str,
+    details: &str,
+    queued_at_epoch_ms: u64,
+    resolve_current_goal: bool,
+    resolved_headlines: &[String],
+    resolved_task_ids: &[String],
+) -> bool {
+    if resolve_current_goal || !resolved_headlines.is_empty() || !resolved_task_ids.is_empty() {
+        continuity_profile_log(
+            "handoff.semantic_replay.reject",
+            0,
+            "reason=resolved_or_force_resolve",
+        );
+        return false;
+    }
+    let Some(restore) = previous_restore.and_then(|value| value.get("working_state_restore")) else {
+        continuity_profile_log(
+            "handoff.semantic_replay.reject",
+            0,
+            "reason=missing_previous_restore",
+        );
+        return false;
+    };
+    let Some((_authoritative_event_id, _source_snapshot_id)) =
+        semantic_handoff_replay_previous_binding(previous_restore, local_path)
+    else {
+        continuity_profile_log(
+            "handoff.semantic_replay.reject",
+            0,
+            "reason=missing_previous_binding",
+        );
+        return false;
+    };
+    let normalized_next_step = normalize_next_step_hint(next_step);
+    let expected_pending_return_queue = json!(derive_pending_return_queue(
+        Some(restore),
+        headline,
+        &normalized_next_step,
+        queued_at_epoch_ms,
+        resolve_current_goal,
+        resolved_headlines,
+        resolved_task_ids,
+    ));
+    let expected_active_files = json!(extract_paths_from_text(details));
+    let expected_open_questions = json!(derive_open_questions(details));
+    let expected_materialized_notes = json!(extract_materialized_notes(details));
+    let expected_required_task_set = json!(extract_required_task_set(details));
+    let expected_current_hypothesis = extract_first_question(details)
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.to_string());
+    let current_hypothesis = restore["current_hypothesis"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned);
+    let restore_current_goal = restore["current_goal"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty());
+    let restore_next_step = restore["next_step"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .map(normalize_next_step_hint);
+    let recent_action_matches = restore["recent_actions"]
+        .as_array()
+        .and_then(|items| items.first())
+        .is_some_and(|item| {
+            item["event_kind"].as_str() == Some("continuity_handoff")
+                && item["headline"].as_str() == Some(headline)
+                && item["execution_state"].as_str() == Some("succeeded")
+        });
+
+    let matched = restore_current_goal == Some(headline)
+        && restore_next_step.as_deref() == Some(normalized_next_step.as_str())
+        && restore["pending_return_queue"] == expected_pending_return_queue
+        && restore["active_files"] == expected_active_files
+        && restore["open_questions"] == expected_open_questions
+        && restore["materialized_notes"] == expected_materialized_notes
+        && restore["required_task_set"] == expected_required_task_set
+        && current_hypothesis == expected_current_hypothesis
+        && recent_action_matches;
+    if !matched {
+        continuity_profile_log(
+            "handoff.semantic_replay.reject",
+            0,
+            &format!(
+                "reason=field_mismatch goal={} next_step={} pending={} active_files={} open_questions={} notes={} required_task_set={} hypothesis={} recent_action={}",
+                restore_current_goal == Some(headline),
+                restore_next_step.as_deref() == Some(normalized_next_step.as_str()),
+                restore["pending_return_queue"] == expected_pending_return_queue,
+                restore["active_files"] == expected_active_files,
+                restore["open_questions"] == expected_open_questions,
+                restore["materialized_notes"] == expected_materialized_notes,
+                restore["required_task_set"] == expected_required_task_set,
+                current_hypothesis == expected_current_hypothesis,
+                recent_action_matches,
+            ),
+        );
+    }
+    matched
 }
 
 fn is_meaningful_pending_return_headline(value: &str) -> bool {
@@ -5039,13 +5433,20 @@ fn summarize_execctl_resume_contract(value: &Value) -> Option<String> {
         .as_str()
         .filter(|item| !item.is_empty())
         .unwrap_or("ещё нет данных");
-    let count = value["pending_return_count"].as_u64().unwrap_or(0);
-    let required_task_set_count = value["required_task_set_count"].as_u64().unwrap_or(0);
+    let count = value["pending_return_count"]
+        .as_u64()
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let required_task_set_count = value["required_task_set_count"].as_u64().or_else(|| {
+        value["required_task_set"]
+            .as_array()
+            .map(|items| items.len() as u64)
+    });
     let mut summary = format!(
         "return_required({count}): {}",
         collapse_human_text(headline, 72)
     );
-    if required_task_set_count > 0 {
+    if let Some(required_task_set_count) = required_task_set_count.filter(|count| *count > 0) {
         summary.push_str(&format!(" + required_task_set({required_task_set_count})"));
     }
     Some(summary)
@@ -5212,6 +5613,24 @@ pub(crate) fn build_rotate_chat_action_bundle_for_stage_with_preference_and_prim
             "run_continuity_startup"
         ])
     };
+    let delivery_surface_order = if same_thread_host_control_primary {
+        json!([
+            "run_same_thread_host_control",
+            "confirm_surface_effect",
+            "fallback_rotate_chat"
+        ])
+    } else {
+        json!([
+            "run_rotate_helper",
+            "open_delivery_surface",
+            "run_continuity_startup"
+        ])
+    };
+    let open_delivery_surface_summary = if same_thread_host_control_primary {
+        "если same-thread compact control не снизил burn, открой новую чистую рабочую поверхность клиента вручную"
+    } else {
+        "после rotate helper открой новую чистую рабочую поверхность клиента вручную"
+    };
     json!({
         "bundle_version": "rotate-chat-action-bundle-v1",
         "ready_for_automation": missing_inputs.is_empty(),
@@ -5231,14 +5650,12 @@ pub(crate) fn build_rotate_chat_action_bundle_for_stage_with_preference_and_prim
                 host_current_thread_control_launch_command,
             "rotate_helper_command": rotate_helper_command,
             "handoff_command": handoff_command,
-            "open_fresh_chat_summary": if same_thread_host_control_primary {
-                "если same-thread compact control не снизил burn, открой свежий чат клиента вручную"
-            } else {
-                "после rotate helper открой свежий чат клиента вручную"
-            },
+            "open_fresh_chat_summary": open_delivery_surface_summary,
+            "open_delivery_surface_summary": open_delivery_surface_summary,
             "startup_command": startup_command,
         },
         "order": order,
+        "delivery_surface_order": delivery_surface_order,
         "run_same_thread_host_control": {
             "subcommand": "observe client-budget-host-control-launch",
             "argv_template": if let Some(thread_id) =
@@ -5324,6 +5741,10 @@ pub(crate) fn build_rotate_chat_action_bundle_for_stage_with_preference_and_prim
             "details_file_optional": true
         },
         "open_fresh_chat": {
+            "action_kind": "open_fresh_client_chat",
+            "required": true
+        },
+        "open_delivery_surface": {
             "action_kind": "open_fresh_client_chat",
             "required": true
         },
@@ -6403,7 +6824,7 @@ mod tests {
                     "session_id": "session-a",
                     "event_kind": "retrieval_context_pack",
                     "headline": "Рабочий запрос: startup restore pack",
-                    "next_step_hint": "Проверить новый чат.",
+                    "next_step_hint": "Проверить новую чистую рабочую поверхность.",
                     "summary": "Проверили startup restore pack.",
                     "recorded_at_epoch_ms": 4,
                     "open_questions": [
@@ -6510,7 +6931,7 @@ mod tests {
             agent_scope: "art::continuity::default",
             session_id: "session-a",
             event_kind: "continuity_handoff",
-            headline: "Continuity restored and reported for new chat",
+            headline: "Continuity restored and reported for new clean work surface",
             next_step_hint: "Ждать указание пользователя",
             summary: "Пользователь спросил, на чём остановились",
             offset: 3,
@@ -6896,7 +7317,7 @@ mod tests {
         let restore = json!({
             "working_state_restore": {
                 "current_goal": "Продолжить активную рабочую линию",
-                "next_step": "продолжить работу в свежем чате через continuity startup",
+                "next_step": "продолжить работу в новой рабочей поверхности через continuity startup",
                 "pending_return_queue": [],
                 "state_lineage": {
                     "authoritative_event_id": "event-123",
@@ -8267,6 +8688,17 @@ mod tests {
                 .unwrap_or_default()
                 .contains("--headline")
         );
+        assert_eq!(
+            bundle["operator_flow"]["open_delivery_surface_summary"],
+            bundle["operator_flow"]["open_fresh_chat_summary"]
+        );
+        assert_eq!(bundle["open_delivery_surface"], bundle["open_fresh_chat"]);
+        assert!(
+            bundle["operator_flow"]["open_delivery_surface_summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("новую чистую рабочую поверхность")
+        );
     }
 
     #[test]
@@ -8431,6 +8863,42 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("thread-current")
+        );
+    }
+
+    #[test]
+    fn rotate_chat_action_bundle_with_same_thread_disabled_falls_back_to_rotate_helper() {
+        let bundle =
+            super::build_rotate_chat_action_bundle_for_stage_with_preference_and_primary_command(
+                Some("amai"),
+                Some("continuity"),
+                Some("/tmp/amai"),
+                true,
+                Some("Same-meter spend control"),
+                Some("Fallback to rotate helper."),
+                super::HostContextCompactionStage::Preserve,
+                false,
+                Some("thread-current"),
+                Some(super::HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID),
+            );
+        assert_eq!(
+            bundle["operator_flow"]["primary_command_kind"],
+            json!("rotate_helper_command")
+        );
+        assert!(
+            bundle["operator_flow"]["primary_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("rotate-chat")
+        );
+        assert!(bundle["operator_flow"]["host_current_thread_control_launch_command"].is_null());
+        assert_eq!(
+            bundle["order"],
+            json!([
+                "run_rotate_helper",
+                "open_fresh_chat",
+                "run_continuity_startup"
+            ])
         );
     }
 
@@ -8697,7 +9165,7 @@ mod tests {
                 {
                     "task_role": "pending_return",
                     "headline": "Продолжить активную рабочую линию",
-                    "next_step": "продолжить работу в свежем чате через continuity startup",
+                    "next_step": "продолжить работу в новой рабочей поверхности через continuity startup",
                     "resume_state": "pending_return"
                 }
             ]
@@ -8705,7 +9173,7 @@ mod tests {
         let pending_return_queue = json!([
             {
                 "headline": "Продолжить активную рабочую линию",
-                "next_step": "продолжить работу в свежем чате через continuity startup",
+                "next_step": "продолжить работу в новой рабочей поверхности через continuity startup",
                 "resume_state": "pending_return"
             }
         ]);
@@ -8713,6 +9181,42 @@ mod tests {
             super::build_execctl_resume_contract(&project_task_tree, &pending_return_queue, &[]);
         assert_eq!(contract["resume_state"], json!("clear"));
         assert_eq!(contract["required_return_task"], Value::Null);
+    }
+
+    #[test]
+    fn summarize_execctl_resume_contract_does_not_mask_missing_counts_as_zero() {
+        let summary = super::summarize_execctl_resume_contract(&json!({
+            "resume_state": "return_required",
+            "required_return_task": {
+                "headline": "Pending line",
+                "next_step": "Close drift."
+            }
+        }))
+        .expect("summary");
+
+        assert_eq!(summary, "return_required(?): Pending line");
+    }
+
+    #[test]
+    fn summarize_execctl_resume_contract_recovers_required_task_set_count_from_array() {
+        let summary = super::summarize_execctl_resume_contract(&json!({
+            "resume_state": "return_required",
+            "pending_return_count": 1,
+            "required_return_task": {
+                "headline": "Pending line",
+                "next_step": "Close drift."
+            },
+            "required_task_set": [
+                "Fix card A",
+                "Fix card B"
+            ]
+        }))
+        .expect("summary");
+
+        assert_eq!(
+            summary,
+            "return_required(1): Pending line + required_task_set(2)"
+        );
     }
 
     #[test]
@@ -8970,8 +9474,88 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn record_handoff_event_materializes_workspace_restore_pack() {
+    #[test]
+    fn handoff_semantic_replay_matches_previous_restore_for_identical_state() {
+        let previous_restore = json!({
+            "working_state_restore": {
+                "current_goal": "Same line",
+                "next_step": "Replay same line twice.",
+                "pending_return_queue": [],
+                "active_files": [],
+                "open_questions": [],
+                "materialized_notes": [],
+                "required_task_set": [],
+                "current_hypothesis": null,
+                "recent_actions": [
+                    {
+                        "event_kind": "continuity_handoff",
+                        "headline": "Same line",
+                        "execution_state": "succeeded"
+                    }
+                ],
+                "state_lineage": {
+                    "authoritative_event_id": "event-1",
+                    "authoritative_event_kind": "continuity_handoff",
+                    "authoritative_local_path": "/tmp/live-handoff.md",
+                    "source_snapshot_id": "11111111-1111-1111-1111-111111111111"
+                }
+            }
+        });
+
+        assert!(super::handoff_semantic_replay_matches_previous_restore(
+            Some(&previous_restore),
+            "/tmp/live-handoff.md",
+            "Same line",
+            "Replay same line twice.",
+            "",
+            1_000,
+            false,
+            &[],
+            &[],
+        ));
+    }
+
+    #[test]
+    fn handoff_semantic_replay_rejects_materialized_note_drift() {
+        let previous_restore = json!({
+            "working_state_restore": {
+                "current_goal": "Same line",
+                "next_step": "Replay same line twice.",
+                "pending_return_queue": [],
+                "active_files": [],
+                "open_questions": [],
+                "materialized_notes": [],
+                "required_task_set": [],
+                "current_hypothesis": null,
+                "recent_actions": [
+                    {
+                        "event_kind": "continuity_handoff",
+                        "headline": "Same line",
+                        "execution_state": "succeeded"
+                    }
+                ],
+                "state_lineage": {
+                    "authoritative_event_id": "event-1",
+                    "authoritative_event_kind": "continuity_handoff",
+                    "authoritative_local_path": "/tmp/live-handoff.md"
+                }
+            }
+        });
+
+        assert!(!super::handoff_semantic_replay_matches_previous_restore(
+            Some(&previous_restore),
+            "/tmp/live-handoff.md",
+            "Same line",
+            "Replay same line twice.",
+            "Reviewed src/continuity.rs.",
+            1_000,
+            false,
+            &[],
+            &[],
+        ));
+    }
+
+    fn load_working_state_test_env() {
         if let Ok(env_text) =
             std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
         {
@@ -8990,6 +9574,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    async fn setup_working_state_test_scope(
+        label: &str,
+    ) -> (AppConfig, Client, ProjectRecord, NamespaceRecord, String) {
+        load_working_state_test_env();
+
+        let cfg = AppConfig::from_env().expect("config");
+        let client = postgres::connect_admin(&cfg).await.expect("postgres");
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("unix epoch")
+            .as_nanos();
+        let workspace_code = format!("{label}_ws_{suffix}");
+        let project_code = format!("{label}_proj_{suffix}");
+        let repo_root = format!("/tmp/{project_code}");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+
+        postgres::ensure_workspace(&client, &workspace_code, "Working State Test Workspace", "active")
+            .await
+            .expect("workspace");
+        let project = postgres::upsert_project(
+            &client,
+            &project_code,
+            "Working State Test Project",
+            &repo_root,
+            Some("main"),
+            &workspace_code,
+            "project_shared",
+            "local_strict",
+        )
+        .await
+        .expect("project");
+        let namespace = postgres::get_namespace_by_code(&client, project.project_id, "default")
+            .await
+            .expect("default namespace");
+        (cfg, client, project, namespace, repo_root)
+    }
+
+    #[tokio::test]
+    async fn record_handoff_event_materializes_workspace_restore_pack() {
+        load_working_state_test_env();
 
         let cfg = AppConfig::from_env().expect("config");
         let client = postgres::connect_admin(&cfg).await.expect("postgres");
@@ -9100,25 +9726,366 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_handoff_event_surfaces_compact_restore_execution_card() {
-        if let Ok(env_text) =
-            std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
-        {
-            for line in env_text.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() || trimmed.starts_with('#') {
-                    continue;
-                }
-                let Some((key, value)) = trimmed.split_once('=') else {
-                    continue;
-                };
-                if std::env::var_os(key).is_none() {
-                    unsafe {
-                        std::env::set_var(key.trim(), value.trim_matches('\"'));
-                    }
-                }
-            }
+    async fn force_refresh_restore_snapshot_outcome_unknown_after_write_still_materializes_restore_pack(
+    ) {
+        load_working_state_test_env();
+
+        let cfg = AppConfig::from_env().expect("config");
+        let client = postgres::connect_admin(&cfg).await.expect("postgres");
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("unix epoch")
+            .as_nanos();
+        let workspace_code = format!("restore_pack_unknown_ws_{suffix}");
+        let project_code = format!("restore_pack_unknown_proj_{suffix}");
+        let repo_root = format!("/tmp/{project_code}");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "restore pack unknown outcome test").expect("handoff file");
+
+        postgres::ensure_workspace(
+            &client,
+            &workspace_code,
+            "Restore Pack Unknown Workspace",
+            "active",
+        )
+        .await
+        .expect("workspace");
+        let project = postgres::upsert_project(
+            &client,
+            &project_code,
+            "Restore Pack Unknown Project",
+            &repo_root,
+            Some("main"),
+            &workspace_code,
+            "project_shared",
+            "local_strict",
+        )
+        .await
+        .expect("project");
+        let namespace = postgres::get_namespace_by_code(&client, project.project_id, "default")
+            .await
+            .expect("default namespace");
+
+        super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Unknown outcome restore proof",
+            "Reconcile restore pack after ambiguous insert.",
+            "Reviewed outcome_unknown_after_write path for working_state_restore.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect("record handoff without refresh");
+
+        let initial_restore_pack_count: i64 = client
+            .query_one(
+                r#"
+                SELECT COUNT(*)
+                FROM ami.restore_packs
+                WHERE project_id = $1
+                  AND namespace_id = $2
+                "#,
+                &[&project.project_id, &namespace.namespace_id],
+            )
+            .await
+            .expect("initial restore pack count")
+            .get(0);
+        assert_eq!(initial_restore_pack_count, 0);
+
+        unsafe {
+            std::env::set_var(
+                "AMAI_TEST_FORCE_OBSERVABILITY_INSERT_FAILURE",
+                "outcome_unknown_after_write:08006",
+            );
         }
+        let refreshed = super::force_refresh_restore_snapshot(&client, &project, &namespace)
+            .await
+            .expect("force refresh after ambiguous insert");
+        unsafe {
+            std::env::remove_var("AMAI_TEST_FORCE_OBSERVABILITY_INSERT_FAILURE");
+        }
+        let refreshed = refreshed.expect("refreshed restore bundle");
+
+        let snapshot_row = client
+            .query_one(
+                r#"
+                SELECT snapshot_id
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = 'working_state_restore'
+                  AND scope_project_code = $1
+                  AND scope_namespace_code = $2
+                ORDER BY captured_at_epoch_ms DESC NULLS LAST, last_seen_at DESC, snapshot_id DESC
+                LIMIT 1
+                "#,
+                &[&project.code, &namespace.code],
+            )
+            .await
+            .expect("restore snapshot row");
+        let snapshot_id: Uuid = snapshot_row.get(0);
+
+        let restore_pack_row = client
+            .query_one(
+                r#"
+                SELECT payload, source_snapshot_id
+                FROM ami.restore_packs
+                WHERE project_id = $1
+                  AND namespace_id = $2
+                ORDER BY created_at DESC, restore_pack_id DESC
+                LIMIT 1
+                "#,
+                &[&project.project_id, &namespace.namespace_id],
+            )
+            .await
+            .expect("restore pack row");
+        let payload: Value = restore_pack_row.get(0);
+        let source_snapshot_id: Option<Uuid> = restore_pack_row.get(1);
+        assert_eq!(
+            payload["current_goal"],
+            refreshed["workspace_restore_pack"]["current_goal"]
+        );
+        assert_eq!(source_snapshot_id, Some(snapshot_id));
+    }
+
+    #[tokio::test]
+    async fn force_refresh_restore_snapshot_outcome_unknown_restore_pack_create_still_completes() {
+        load_working_state_test_env();
+
+        let cfg = AppConfig::from_env().expect("config");
+        let client = postgres::connect_admin(&cfg).await.expect("postgres");
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("unix epoch")
+            .as_nanos();
+        let workspace_code = format!("restore_pack_create_unknown_ws_{suffix}");
+        let project_code = format!("restore_pack_create_unknown_proj_{suffix}");
+        let repo_root = format!("/tmp/{project_code}");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "restore pack create unknown outcome test")
+            .expect("handoff file");
+
+        postgres::ensure_workspace(
+            &client,
+            &workspace_code,
+            "Restore Pack Create Unknown Workspace",
+            "active",
+        )
+        .await
+        .expect("workspace");
+        let project = postgres::upsert_project(
+            &client,
+            &project_code,
+            "Restore Pack Create Unknown Project",
+            &repo_root,
+            Some("main"),
+            &workspace_code,
+            "project_shared",
+            "local_strict",
+        )
+        .await
+        .expect("project");
+        let namespace = postgres::get_namespace_by_code(&client, project.project_id, "default")
+            .await
+            .expect("default namespace");
+
+        super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Unknown restore-pack create outcome proof",
+            "Reconcile restore-pack after ambiguous create.",
+            "Reviewed outcome_unknown_after_write path for workspace_restore_pack.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect("record handoff without refresh");
+
+        unsafe {
+            std::env::set_var(
+                "AMAI_TEST_FORCE_RESTORE_PACK_CREATE_FAILURE",
+                "outcome_unknown_after_write",
+            );
+        }
+        let refreshed = super::force_refresh_restore_snapshot(&client, &project, &namespace)
+            .await
+            .expect("force refresh after ambiguous restore-pack create");
+        unsafe {
+            std::env::remove_var("AMAI_TEST_FORCE_RESTORE_PACK_CREATE_FAILURE");
+        }
+        let refreshed = refreshed.expect("refreshed restore bundle");
+
+        let snapshot_row = client
+            .query_one(
+                r#"
+                SELECT snapshot_id
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = 'working_state_restore'
+                  AND scope_project_code = $1
+                  AND scope_namespace_code = $2
+                ORDER BY captured_at_epoch_ms DESC NULLS LAST, last_seen_at DESC, snapshot_id DESC
+                LIMIT 1
+                "#,
+                &[&project.code, &namespace.code],
+            )
+            .await
+            .expect("restore snapshot row");
+        let snapshot_id: Uuid = snapshot_row.get(0);
+
+        let restore_pack_row = client
+            .query_one(
+                r#"
+                SELECT payload, source_snapshot_id
+                FROM ami.restore_packs
+                WHERE project_id = $1
+                  AND namespace_id = $2
+                ORDER BY created_at DESC, restore_pack_id DESC
+                LIMIT 1
+                "#,
+                &[&project.project_id, &namespace.namespace_id],
+            )
+            .await
+            .expect("restore pack row");
+        let payload: Value = restore_pack_row.get(0);
+        let source_snapshot_id: Option<Uuid> = restore_pack_row.get(1);
+        assert_eq!(
+            payload["current_goal"],
+            refreshed["workspace_restore_pack"]["current_goal"]
+        );
+        assert_eq!(source_snapshot_id, Some(snapshot_id));
+    }
+
+    #[tokio::test]
+    async fn record_client_budget_target_event_reports_degraded_refresh_after_primary_write() {
+        let (_cfg, client, project, namespace, _repo_root) =
+            setup_working_state_test_scope("client_budget_target_degraded_refresh").await;
+
+        unsafe {
+            std::env::set_var("AMAI_TEST_FORCE_RESTORE_PACK_CREATE_FAILURE", "before_write");
+        }
+        let write_status =
+            super::record_client_budget_target_event(&client, &project, &namespace, 80)
+                .await
+                .expect("record client budget target event");
+        unsafe {
+            std::env::remove_var("AMAI_TEST_FORCE_RESTORE_PACK_CREATE_FAILURE");
+        }
+
+        assert!(write_status.is_degraded());
+        assert_eq!(write_status.primary_write_persisted, true);
+        assert_eq!(write_status.restore_refresh_status, "degraded");
+        assert!(write_status
+            .warning
+            .as_deref()
+            .is_some_and(|value| value.contains("client_budget_target.refresh_restore_snapshot")));
+
+        let row = client
+            .query_one(
+                r#"
+                SELECT payload
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = 'working_state_event'
+                  AND scope_project_code = $1
+                  AND scope_namespace_code = $2
+                  AND payload->'working_state_event'->>'event_kind' = 'client_budget_target_update'
+                ORDER BY captured_at_epoch_ms DESC NULLS LAST, last_seen_at DESC, snapshot_id DESC
+                LIMIT 1
+                "#,
+                &[&project.code, &namespace.code],
+            )
+            .await
+            .expect("client budget target event row");
+        let payload: Value = row.get(0);
+        assert_eq!(
+            payload["working_state_event"]["client_budget_target_percent"],
+            json!(80)
+        );
+    }
+
+    #[tokio::test]
+    async fn record_context_pack_event_reports_degraded_refresh_after_primary_write() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("context_pack_degraded_refresh").await;
+        let payload = json!({
+            "project": {
+                "code": project.code,
+                "display_name": project.display_name,
+                "repo_root": repo_root,
+            },
+            "namespace": {
+                "code": namespace.code,
+                "display_name": namespace.display_name,
+            },
+            "query": "restore pack degraded context pack proof",
+            "context_pack_id": "ctx-pack-proof",
+            "effective_retrieval_mode": "lexical",
+            "retrieval_runtime": {
+                "total_ms": 12,
+                "cache_hit": false
+            },
+            "retrieval": {
+                "exact_documents": [],
+                "symbol_hits": [],
+                "lexical_chunks": [],
+                "semantic_chunks": [],
+                "memory_cards": []
+            }
+        });
+
+        unsafe {
+            std::env::set_var("AMAI_TEST_FORCE_RESTORE_PACK_CREATE_FAILURE", "before_write");
+        }
+        let write_status =
+            super::record_context_pack_event(&client, &payload, "verify_context_pack")
+                .await
+                .expect("record context pack event");
+        unsafe {
+            std::env::remove_var("AMAI_TEST_FORCE_RESTORE_PACK_CREATE_FAILURE");
+        }
+
+        assert!(write_status.is_degraded());
+        assert!(write_status
+            .warning
+            .as_deref()
+            .is_some_and(|value| value.contains("context_pack.refresh_restore_snapshot")));
+
+        let row = client
+            .query_one(
+                r#"
+                SELECT payload
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = 'working_state_event'
+                  AND scope_project_code = $1
+                  AND scope_namespace_code = $2
+                  AND payload->'working_state_event'->>'event_kind' = 'retrieval_context_pack'
+                ORDER BY captured_at_epoch_ms DESC NULLS LAST, last_seen_at DESC, snapshot_id DESC
+                LIMIT 1
+                "#,
+                &[&project.code, &namespace.code],
+            )
+            .await
+            .expect("context pack event row");
+        let persisted_payload: Value = row.get(0);
+        assert_eq!(
+            persisted_payload["working_state_event"]["source_kind"],
+            json!("context_pack")
+        );
+    }
+
+    #[tokio::test]
+    async fn record_handoff_event_surfaces_compact_restore_execution_card() {
+        load_working_state_test_env();
 
         unsafe {
             std::env::set_var("AMAI_RESTORE_EXECUTION_CARD_RUNTIME", "codex");
@@ -9348,31 +10315,31 @@ mod tests {
             .expect("restore pack row");
         let payload: Value = row.get(0);
         assert_eq!(
-            payload["skill_execution_card"]["skill_title"],
+            payload["relevant_procedures"][0]["card"]["skill_title"],
             json!("Restore Continuity Card")
         );
         assert_eq!(
-            payload["skill_execution_card"]["skill_execution_steps"][0],
+            payload["relevant_procedures"][0]["card"]["skill_execution_steps"][0],
             json!("inspect startup gate")
         );
         assert_eq!(
-            payload["skill_execution_card"]["binding"]["model"],
+            payload["relevant_procedures"][0]["binding"]["model"],
             json!("gpt-5")
         );
         assert_eq!(
-            payload["skill_execution_card"]["binding"]["runtime"],
+            payload["relevant_procedures"][0]["binding"]["runtime"],
             json!("codex")
         );
         assert_eq!(
-            payload["skill_execution_card"]["binding"]["tool"],
+            payload["relevant_procedures"][0]["binding"]["tool"],
             json!("exec_command")
         );
         assert_eq!(
-            payload["skill_execution_card"]["skill_trust_state"],
+            payload["relevant_procedures"][0]["card"]["skill_trust_state"],
             json!("trial")
         );
         assert!(
-            payload["skill_execution_card_summary"]
+            payload["relevant_procedures"][0]["summary"]
                 .as_str()
                 .is_some_and(|value| value.contains("Restore Continuity Card"))
         );
@@ -9704,7 +10671,7 @@ mod tests {
 
     #[test]
     fn persisted_restore_snapshot_payload_compacts_project_task_ledger_and_strips_runtime_derived_fields()
-     {
+    {
         let mut entries = vec![
             json!({
                 "task_role": "active",
@@ -9723,6 +10690,9 @@ mod tests {
         }
         let bundle = json!({
             "working_state_restore": {
+                "state_lineage": {
+                    "authoritative_event_id": "event-restore-1"
+                },
                 "project_task_ledger": {
                     "ledger_version": "project-task-ledger-v2",
                     "open_tasks_count": 2,
@@ -9772,5 +10742,31 @@ mod tests {
         assert!(restore.get("skill_execution_card").is_none());
         assert!(restore.get("skill_execution_card_summary").is_none());
         assert!(restore.get("skill_execution_card_binding").is_none());
+        assert_eq!(
+            payload["_observability"]["source_event_id"],
+            json!("event-restore-1")
+        );
+        assert_eq!(
+            payload["_observability"]["source_kind"],
+            json!("working_state_restore_runtime")
+        );
+    }
+
+    #[test]
+    fn persisted_restore_snapshot_payload_skips_observability_source_event_without_authoritative_id() {
+        let bundle = json!({
+            "working_state_restore": {
+                "state_lineage": {},
+                "project_task_ledger": {
+                    "ledger_version": "project-task-ledger-v2",
+                    "open_tasks_count": 0,
+                    "historical_handoffs_count": 0,
+                    "entries": []
+                }
+            }
+        });
+
+        let payload = super::persisted_restore_snapshot_payload(&bundle);
+        assert!(payload.get("_observability").is_none());
     }
 }

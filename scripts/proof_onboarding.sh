@@ -27,13 +27,15 @@ grep -q '"servers"' "${output}"
 grep -q 'run_mcp_stdio.sh' "${output}"
 jq -e '.artifact_version == "workspace-startup-contract-v1"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract_sha256 | type == "string" and length > 0' "${startup_contract}" >/dev/null
+jq -e '.startup_contract_sha256_scope == "startup_contract object only"' "${startup_contract}" >/dev/null
+startup_sha="$(jq -r '.startup_contract_sha256' "${startup_contract}")"
 jq -e '.startup_contract.artifact_enforcement.workspace_contract_relative_path == ".amai/onboarding/project-chat-startup-contract.json"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.artifact_enforcement.missing_or_unreadable_fail_closed == true' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.artifact_enforcement.sha256_mismatch_fail_closed == true' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.runtime_state_artifact.workspace_runtime_state_artifact_version == "workspace-startup-runtime-state-v4"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.resume_enforcement.required_action_kind_when_resume_required == "resume_required_return_task"' "${startup_contract}" >/dev/null
-jq -e '.startup_contract.live_client_budget_enforcement.blocking_action_kinds == ["wait_for_global_client_budget_recovery"]' "${startup_contract}" >/dev/null
-jq -e '.startup_contract.live_client_budget_enforcement.blocking_reply_response_kind == "wait_for_budget_only"' "${startup_contract}" >/dev/null
+jq -e '.startup_contract.live_client_budget_enforcement.blocking_action_kinds == []' "${startup_contract}" >/dev/null
+jq -e '.startup_contract.live_client_budget_enforcement.blocking_reply_response_kind == null' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.live_client_budget_enforcement.reply_prefix_field == "reply_prefix"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.live_client_budget_enforcement.target_control.exact_chat_command_pattern == "^экономия_(0|10|20|30|40|50|60|70|80|90)%$"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.live_client_budget_enforcement.target_control.cli_command == "continuity client-budget-target"' "${startup_contract}" >/dev/null
@@ -71,19 +73,24 @@ jq -e '.startup_contract.startup_execution_gate_enforcement.must_follow_true_blo
 jq -e '.startup_contract.startup_execution_gate_enforcement.required_action_kind_resume_required_value == "resume_required_return_task"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.runtime_state_artifact.inspection_fallback_cli.command == "continuity startup-state"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.runtime_state_artifact.startup_execution_gate_field == "startup_execution_gate"' "${startup_contract}" >/dev/null
+jq -e '.startup_contract.required_summary_fields | index("required_task_set") != null' "${startup_contract}" >/dev/null
+jq -e '.startup_contract.required_summary_fields | index("required_task_set_summary") != null' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.required_summary_fields | index("project_task_tree") != null' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.required_summary_fields | index("project_task_ledger") != null' "${startup_contract}" >/dev/null
+jq -e '.startup_contract.restored_obligations | index("required_task_set") != null' "${startup_contract}" >/dev/null
+jq -e '.startup_contract.restored_obligations | index("required_task_set_summary") != null' "${startup_contract}" >/dev/null
 jq -e '.artifact_version == "workspace-agent-preflight-contract-v1"' "${agent_preflight_contract}" >/dev/null
 jq -e '.preflight_contract.contract_version == "agent-preflight-contract-v1"' "${agent_preflight_contract}" >/dev/null
 jq -e '.preflight_contract.refresh_commands.shell_command == "./scripts/agent_preflight.sh"' "${agent_preflight_contract}" >/dev/null
 jq -e '.artifact_version == "workspace-agent-preflight-agent-contract-v1"' "${agent_preflight_agent_contract}" >/dev/null
 jq -e '.runtime_state_artifact.workspace_runtime_state_relative_path == ".amai/onboarding/project-agent-preflight-state.json"' "${agent_preflight_agent_contract}" >/dev/null
+jq -e '.full_startup_contract_sha256 == "'"${startup_sha}"'"' ".amai/onboarding/project-chat-startup-agent-contract.json" >/dev/null
 jq -e '.artifact_version == "workspace-agent-preflight-state-v1"' "${agent_preflight_state}" >/dev/null
 jq -e '.agent_preflight_summary.stage_checklist | length > 0' "${agent_preflight_state}" >/dev/null
-jq -e '.agent_preflight_summary.next_required_stage.label | type == "string" and length > 0' "${agent_preflight_state}" >/dev/null
+jq -e '.agent_preflight_summary.declared_next_stage_label | type == "string" and length > 0' "${agent_preflight_state}" >/dev/null
 grep -q 'amai_continuity_startup' "${startup_output}"
 grep -q '.amai/onboarding/project-chat-startup-contract.json' "${startup_output}"
-grep -q 'startup_contract_sha256 = "' "${startup_output}"
+grep -Fq "startup_contract_sha256 = \"${startup_sha}\"" "${startup_output}"
 grep -q 'workspace_contract_required_before_tool_call = true' "${startup_output}"
 grep -q 'missing_or_unreadable_fail_closed = true' "${startup_output}"
 grep -q 'sha256_mismatch_fail_closed = true' "${startup_output}"
@@ -117,18 +124,22 @@ grep -q 'lease_owner_state' "${startup_output}"
 grep -q 'execctl_active_lease_summary' "${startup_output}"
 grep -q 'previous_session_owner' "${startup_output}"
 grep -q 'resume_required_return_task' "${startup_output}"
+grep -q 'required_task_set' "${startup_output}"
+grep -q 'required_task_set_summary' "${startup_output}"
 grep -q 'reply_execution_gate.reply_prefix' "${startup_output}"
 grep -q 'точную команду `компакт_чат`' "${startup_output}"
 grep -q './scripts/continuity_client_budget_target.sh --repo-root' "${startup_output}"
 grep -q './scripts/continuity_compact_chat.sh --repo-root' "${startup_output}"
 grep -q 'open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable' "${startup_output}"
-grep -q 'warning/advisory pressure signal' "${startup_output}"
-grep -q 'response_kind = "wait_for_budget_only"' "${startup_output}"
+grep -q 'advisory/compact pressure signal' "${startup_output}"
+grep -q 'reply_blocking_removed = true' "${startup_output}"
 grep -q 'required_return_task' "${startup_output}"
 grep -q 'project_task_tree' "${startup_output}"
 grep -q 'project_task_tree_summary' "${startup_output}"
 grep -q 'project_task_ledger' "${startup_output}"
 grep -q 'project_task_ledger_summary' "${startup_output}"
+grep -q 'Amai stack autostart ready: amai-stack.service' "${human_output}"
+grep -q 'Unit: /home/art/.config/systemd/user/amai-stack.service' "${human_output}"
 grep -q 'Auto-start readiness: instruction-backed' "${human_output}"
 grep -q 'Machine-readable startup contract:' "${human_output}"
 grep -q 'Machine-readable agent preflight:' "${human_output}"
@@ -139,6 +150,17 @@ grep -q 'Startup contract SHA-256:' "${human_output}"
 grep -q 'Почему такой режим:' "${human_output}"
 grep -q 'Что машина реально показала после установки:' "${human_output}"
 
-cargo run --quiet -- status >/dev/null
+status_ok=0
+for _ in $(seq 1 20); do
+  if ./target/release/amai status >/dev/null 2>&1; then
+    status_ok=1
+    break
+  fi
+  sleep 0.5
+done
+if [[ "${status_ok}" != "1" ]]; then
+  echo "proof_onboarding: status did not become green after install"
+  exit 1
+fi
 
 echo "proof_onboarding: ok"

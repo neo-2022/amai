@@ -786,6 +786,8 @@ pub(super) fn build_governance_card(snapshot: &Value) -> Value {
     let top_conflict = governance["open_conflict_breakdown"]
         .as_array()
         .and_then(|items| items.first());
+    let lifecycle_risk = &governance["lifecycle_risk_summary"];
+    let lifecycle_risk_available = lifecycle_risk["status"].as_str() == Some("advisory");
     let headline_value = if status == "alert" {
         let mut parts = Vec::new();
         if active_quarantine > 0 {
@@ -813,6 +815,14 @@ pub(super) fn build_governance_card(snapshot: &Value) -> Value {
         } else {
             parts.join(" • ")
         }
+    } else if lifecycle_risk_available {
+        format!(
+            "next={} • {} / 7д",
+            lifecycle_risk["top_expected_next_state"]
+                .as_str()
+                .unwrap_or("unknown"),
+            format_ratio_percent(lifecycle_risk["max_pending_review_risk_7d"].as_f64())
+        )
     } else if forgetting_total > 0 {
         format!(
             "{} forgetting-действий зафиксировано",
@@ -832,8 +842,20 @@ pub(super) fn build_governance_card(snapshot: &Value) -> Value {
                     .to_string()
             })
         } else {
-            "Здесь видно, как Amai реально чистит и пересматривает память: pruning, archive, revalidation и dedup surfaced отдельно, а protected truth не должен исчезать тихо."
-                .to_string()
+            let lifecycle_note = if lifecycle_risk_available {
+                format!(
+                    " Queue 3 advisory contour surfaced отдельно: top cohort {}.",
+                    lifecycle_risk["top_cohort_reason_summary"]
+                        .as_str()
+                        .unwrap_or("reason_missing")
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                "Здесь видно, как Amai реально чистит и пересматривает память: pruning, archive, revalidation и dedup surfaced отдельно, а protected truth не должен исчезать тихо.{}",
+                lifecycle_note
+            )
         },
         status,
         Some(
@@ -889,6 +911,46 @@ pub(super) fn build_governance_card(snapshot: &Value) -> Value {
                 "Открытые конфликты",
                 format_u64(Some(open_conflicts)),
                 Some("Сколько wrong-link / truth конфликтов сейчас ещё не закрыто."),
+            ),
+            metric_row(
+                "Risk scope",
+                if lifecycle_risk_available {
+                    format!(
+                        "{}/{}",
+                        lifecycle_risk["project_code"].as_str().unwrap_or("unknown"),
+                        lifecycle_risk["namespace_code"].as_str().unwrap_or("unknown")
+                    )
+                } else {
+                    "ещё нет данных".to_string()
+                },
+                Some("Queue 3 advisory lifecycle risk summary для текущего repo-bound project scope. Эта строка не даёт policy authority."),
+            ),
+            metric_row(
+                "Expected next state",
+                if lifecycle_risk_available {
+                    lifecycle_risk["top_expected_next_state"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string()
+                } else {
+                    "ещё нет данных".to_string()
+                },
+                Some("Какой следующий lifecycle-state сейчас ожидается для самого рискованного scoped cohort по Queue 3 advisory model."),
+            ),
+            metric_row(
+                "Pending review risk 7d",
+                format_ratio_percent(lifecycle_risk["max_pending_review_risk_7d"].as_f64()),
+                Some("Advisory-only риск быстрого перехода в pending_review на горизонте 7 дней."),
+            ),
+            metric_row(
+                "Archive risk 30d",
+                format_ratio_percent(lifecycle_risk["max_archive_risk_30d"].as_f64()),
+                Some("Advisory-only риск archive transition на горизонте 30 дней."),
+            ),
+            metric_row(
+                "Prune risk 30d",
+                format_ratio_percent(lifecycle_risk["max_prune_risk_30d"].as_f64()),
+                Some("Advisory-only риск prune transition на горизонте 30 дней."),
             ),
         ],
     )
@@ -1476,6 +1538,16 @@ mod tests {
                 "stale_memory_error_rate": {
                     "rate": 0.125
                 },
+                "lifecycle_risk_summary": {
+                    "status": "advisory",
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "top_expected_next_state": "pending_review",
+                    "max_pending_review_risk_7d": 0.42,
+                    "max_archive_risk_30d": 0.19,
+                    "max_prune_risk_30d": 0.03,
+                    "top_cohort_reason_summary": "observed=active_stale cohort=summary / standard / decay / stale / medium / low sample_size=5 expected_next_state=pending_review"
+                },
                 "forgetting_job_breakdown": {
                     "pruning_job": 7,
                     "cold_archive_job": 3,
@@ -1494,6 +1566,8 @@ mod tests {
         assert_eq!(card["rows"][2]["value"], json!("4"));
         assert_eq!(card["rows"][3]["value"], json!("2"));
         assert_eq!(card["rows"][4]["value"], json!("0"));
+        assert_eq!(card["rows"][9]["value"], json!("amai/continuity"));
+        assert_eq!(card["rows"][10]["value"], json!("pending_review"));
     }
 
     #[test]
@@ -1526,6 +1600,9 @@ mod tests {
                 ],
                 "trust_state_distribution": {
                     "disputed_memory_items": 0
+                },
+                "lifecycle_risk_summary": {
+                    "status": "not_available"
                 },
                 "stale_memory_error_rate": {
                     "rate": 0.0095
@@ -1584,6 +1661,9 @@ mod tests {
                 ],
                 "trust_state_distribution": {
                     "disputed_memory_items": 0
+                },
+                "lifecycle_risk_summary": {
+                    "status": "not_available"
                 },
                 "stale_memory_error_rate": {
                     "rate": 0.0

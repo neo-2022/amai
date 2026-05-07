@@ -1,17 +1,101 @@
 use super::*;
+use anyhow::Error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObservabilityInsertErrorPhase {
+    BeforeWrite,
+    OutcomeUnknownAfterWrite,
+}
+
+#[derive(Debug)]
+pub(crate) struct ObservabilityInsertError {
+    pub(crate) phase: ObservabilityInsertErrorPhase,
+    pub(crate) snapshot_kind: String,
+    pub(crate) event_key: String,
+    pub(crate) sqlstate_code: Option<String>,
+    pub(crate) error: Error,
+}
+
+impl ObservabilityInsertError {
+    fn before_write(snapshot_kind: &str, event_key: &str, error: Error) -> Self {
+        Self {
+            phase: ObservabilityInsertErrorPhase::BeforeWrite,
+            snapshot_kind: snapshot_kind.to_string(),
+            event_key: event_key.to_string(),
+            sqlstate_code: extract_sqlstate_code(&error),
+            error,
+        }
+    }
+
+    fn before_write_with_sqlstate(
+        snapshot_kind: &str,
+        event_key: &str,
+        sqlstate_code: Option<String>,
+        error: Error,
+    ) -> Self {
+        Self {
+            phase: ObservabilityInsertErrorPhase::BeforeWrite,
+            snapshot_kind: snapshot_kind.to_string(),
+            event_key: event_key.to_string(),
+            sqlstate_code,
+            error,
+        }
+    }
+
+    fn outcome_unknown_after_write(
+        snapshot_kind: &str,
+        event_key: &str,
+        sqlstate_code: Option<String>,
+        error: Error,
+    ) -> Self {
+        Self {
+            phase: ObservabilityInsertErrorPhase::OutcomeUnknownAfterWrite,
+            snapshot_kind: snapshot_kind.to_string(),
+            event_key: event_key.to_string(),
+            sqlstate_code,
+            error,
+        }
+    }
+}
 
 pub async fn insert_observability_snapshot(
     client: &Client,
     snapshot_kind: &str,
     payload: &Value,
 ) -> Result<Uuid> {
+    insert_observability_snapshot_detailed(client, snapshot_kind, payload)
+        .await
+        .map_err(|error| error.error)
+}
+
+pub(crate) async fn lookup_observability_snapshot_id_for_payload(
+    client: &Client,
+    snapshot_kind: &str,
+    payload: &Value,
+) -> Result<Option<Uuid>> {
+    let (_, meta) = prepare_observability_payload(snapshot_kind, payload)?;
+    lookup_observability_snapshot_id_by_event_key(client, snapshot_kind, &meta.event_key).await
+}
+
+pub(crate) async fn insert_observability_snapshot_detailed(
+    client: &Client,
+    snapshot_kind: &str,
+    payload: &Value,
+) -> std::result::Result<Uuid, ObservabilityInsertError> {
     let prepare_started = Instant::now();
-    let (stored_payload, meta) = prepare_observability_payload(snapshot_kind, payload)?;
+    let (stored_payload, meta) = prepare_observability_payload(snapshot_kind, payload)
+        .map_err(|error| ObservabilityInsertError::before_write(snapshot_kind, "prepare_failed", error))?;
     observability_profile_log(
         "insert_observability_snapshot.prepare_payload",
         prepare_started.elapsed().as_millis(),
         &format!("snapshot_kind={snapshot_kind}"),
     );
+    #[cfg(test)]
+    if let Some(forced_error) =
+        forced_observability_insert_error_for_tests(snapshot_kind, &meta.event_key, false)
+    {
+        return Err(forced_error);
+    }
     let insert_started = Instant::now();
     let row = client
         .query_opt(
@@ -31,14 +115,94 @@ pub async fn insert_observability_snapshot(
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
             ON CONFLICT (snapshot_kind, event_key) DO UPDATE
-            SET payload = EXCLUDED.payload,
-                source_event_id = EXCLUDED.source_event_id,
-                source_kind = EXCLUDED.source_kind,
-                source_class = EXCLUDED.source_class,
-                scope_project_code = EXCLUDED.scope_project_code,
-                scope_namespace_code = EXCLUDED.scope_namespace_code,
-                captured_at_epoch_ms = EXCLUDED.captured_at_epoch_ms,
-                payload_sha256 = EXCLUDED.payload_sha256,
+            SET payload = CASE
+                    WHEN $1 = 'working_state_restore'
+                     AND ami.observability_snapshots.source_event_id IS NOT NULL
+                     AND EXCLUDED.source_event_id IS NOT NULL
+                     AND ami.observability_snapshots.source_event_id = EXCLUDED.source_event_id
+                     AND EXCLUDED.captured_at_epoch_ms IS NOT NULL
+                     AND ami.observability_snapshots.captured_at_epoch_ms IS NOT NULL
+                     AND EXCLUDED.captured_at_epoch_ms <= ami.observability_snapshots.captured_at_epoch_ms
+                    THEN ami.observability_snapshots.payload
+                    ELSE EXCLUDED.payload
+                END,
+                source_event_id = CASE
+                    WHEN $1 = 'working_state_restore'
+                     AND ami.observability_snapshots.source_event_id IS NOT NULL
+                     AND EXCLUDED.source_event_id IS NOT NULL
+                     AND ami.observability_snapshots.source_event_id = EXCLUDED.source_event_id
+                     AND EXCLUDED.captured_at_epoch_ms IS NOT NULL
+                     AND ami.observability_snapshots.captured_at_epoch_ms IS NOT NULL
+                     AND EXCLUDED.captured_at_epoch_ms <= ami.observability_snapshots.captured_at_epoch_ms
+                    THEN ami.observability_snapshots.source_event_id
+                    ELSE EXCLUDED.source_event_id
+                END,
+                source_kind = CASE
+                    WHEN $1 = 'working_state_restore'
+                     AND ami.observability_snapshots.source_event_id IS NOT NULL
+                     AND EXCLUDED.source_event_id IS NOT NULL
+                     AND ami.observability_snapshots.source_event_id = EXCLUDED.source_event_id
+                     AND EXCLUDED.captured_at_epoch_ms IS NOT NULL
+                     AND ami.observability_snapshots.captured_at_epoch_ms IS NOT NULL
+                     AND EXCLUDED.captured_at_epoch_ms <= ami.observability_snapshots.captured_at_epoch_ms
+                    THEN ami.observability_snapshots.source_kind
+                    ELSE EXCLUDED.source_kind
+                END,
+                source_class = CASE
+                    WHEN $1 = 'working_state_restore'
+                     AND ami.observability_snapshots.source_event_id IS NOT NULL
+                     AND EXCLUDED.source_event_id IS NOT NULL
+                     AND ami.observability_snapshots.source_event_id = EXCLUDED.source_event_id
+                     AND EXCLUDED.captured_at_epoch_ms IS NOT NULL
+                     AND ami.observability_snapshots.captured_at_epoch_ms IS NOT NULL
+                     AND EXCLUDED.captured_at_epoch_ms <= ami.observability_snapshots.captured_at_epoch_ms
+                    THEN ami.observability_snapshots.source_class
+                    ELSE EXCLUDED.source_class
+                END,
+                scope_project_code = CASE
+                    WHEN $1 = 'working_state_restore'
+                     AND ami.observability_snapshots.source_event_id IS NOT NULL
+                     AND EXCLUDED.source_event_id IS NOT NULL
+                     AND ami.observability_snapshots.source_event_id = EXCLUDED.source_event_id
+                     AND EXCLUDED.captured_at_epoch_ms IS NOT NULL
+                     AND ami.observability_snapshots.captured_at_epoch_ms IS NOT NULL
+                     AND EXCLUDED.captured_at_epoch_ms <= ami.observability_snapshots.captured_at_epoch_ms
+                    THEN ami.observability_snapshots.scope_project_code
+                    ELSE EXCLUDED.scope_project_code
+                END,
+                scope_namespace_code = CASE
+                    WHEN $1 = 'working_state_restore'
+                     AND ami.observability_snapshots.source_event_id IS NOT NULL
+                     AND EXCLUDED.source_event_id IS NOT NULL
+                     AND ami.observability_snapshots.source_event_id = EXCLUDED.source_event_id
+                     AND EXCLUDED.captured_at_epoch_ms IS NOT NULL
+                     AND ami.observability_snapshots.captured_at_epoch_ms IS NOT NULL
+                     AND EXCLUDED.captured_at_epoch_ms <= ami.observability_snapshots.captured_at_epoch_ms
+                    THEN ami.observability_snapshots.scope_namespace_code
+                    ELSE EXCLUDED.scope_namespace_code
+                END,
+                captured_at_epoch_ms = CASE
+                    WHEN $1 = 'working_state_restore'
+                     AND ami.observability_snapshots.source_event_id IS NOT NULL
+                     AND EXCLUDED.source_event_id IS NOT NULL
+                     AND ami.observability_snapshots.source_event_id = EXCLUDED.source_event_id
+                     AND EXCLUDED.captured_at_epoch_ms IS NOT NULL
+                     AND ami.observability_snapshots.captured_at_epoch_ms IS NOT NULL
+                     AND EXCLUDED.captured_at_epoch_ms <= ami.observability_snapshots.captured_at_epoch_ms
+                    THEN ami.observability_snapshots.captured_at_epoch_ms
+                    ELSE EXCLUDED.captured_at_epoch_ms
+                END,
+                payload_sha256 = CASE
+                    WHEN $1 = 'working_state_restore'
+                     AND ami.observability_snapshots.source_event_id IS NOT NULL
+                     AND EXCLUDED.source_event_id IS NOT NULL
+                     AND ami.observability_snapshots.source_event_id = EXCLUDED.source_event_id
+                     AND EXCLUDED.captured_at_epoch_ms IS NOT NULL
+                     AND ami.observability_snapshots.captured_at_epoch_ms IS NOT NULL
+                     AND EXCLUDED.captured_at_epoch_ms <= ami.observability_snapshots.captured_at_epoch_ms
+                    THEN ami.observability_snapshots.payload_sha256
+                    ELSE EXCLUDED.payload_sha256
+                END,
                 replay_count = ami.observability_snapshots.replay_count + 1,
                 last_seen_at = now()
             WHERE ami.observability_snapshots.payload_sha256 = EXCLUDED.payload_sha256
@@ -49,6 +213,17 @@ pub async fn insert_observability_snapshot(
                     AND EXCLUDED.captured_at_epoch_ms IS NOT NULL
                     AND ami.observability_snapshots.captured_at_epoch_ms IS NOT NULL
                     AND EXCLUDED.captured_at_epoch_ms <= ami.observability_snapshots.captured_at_epoch_ms
+               )
+               OR (
+                    $1 = 'working_state_restore'
+                    AND ami.observability_snapshots.source_event_id IS NOT NULL
+                    AND EXCLUDED.source_event_id IS NOT NULL
+                    AND ami.observability_snapshots.source_event_id = EXCLUDED.source_event_id
+                    AND (
+                        EXCLUDED.captured_at_epoch_ms IS NULL
+                        OR ami.observability_snapshots.captured_at_epoch_ms IS NULL
+                        OR EXCLUDED.captured_at_epoch_ms >= ami.observability_snapshots.captured_at_epoch_ms
+                    )
                )
             RETURNING snapshot_id
             "#,
@@ -66,13 +241,22 @@ pub async fn insert_observability_snapshot(
             ],
         )
         .await
-        .context("failed to insert observability snapshot")?;
+        .context("failed to insert observability snapshot")
+        .map_err(|error| {
+            ObservabilityInsertError::before_write(snapshot_kind, &meta.event_key, error)
+        })?;
     observability_profile_log(
         "insert_observability_snapshot.sql_insert",
         insert_started.elapsed().as_millis(),
         &format!("snapshot_kind={snapshot_kind} conflict={}", row.is_none()),
     );
     if let Some(row) = row {
+        #[cfg(test)]
+        if let Some(forced_error) =
+            forced_observability_insert_error_for_tests(snapshot_kind, &meta.event_key, true)
+        {
+            return Err(forced_error);
+        }
         return Ok(row.get(0));
     }
 
@@ -88,13 +272,16 @@ pub async fn insert_observability_snapshot(
             &[&snapshot_kind, &meta.event_key],
         )
         .await
-        .context("failed to inspect conflicting observability snapshot")?
+        .context("failed to inspect conflicting observability snapshot")
+        .map_err(|error| {
+            ObservabilityInsertError::before_write(snapshot_kind, &meta.event_key, error)
+        })?
         .ok_or_else(|| {
-            anyhow!(
+            ObservabilityInsertError::before_write(snapshot_kind, &meta.event_key, anyhow!(
                 "observability snapshot conflict vanished unexpectedly for {} :: {}",
                 snapshot_kind,
                 meta.event_key
-            )
+            ))
         })?;
     observability_profile_log(
         "insert_observability_snapshot.inspect_conflict",
@@ -112,22 +299,50 @@ pub async fn insert_observability_snapshot(
             .zip(existing_captured_at_epoch_ms)
             .is_some_and(|(incoming, existing)| incoming > existing)
     {
-        return Err(observability_conflict_error(
+        return Err(ObservabilityInsertError::before_write(
+            snapshot_kind,
+            &meta.event_key,
+            observability_conflict_error(
+                snapshot_kind,
+                &meta,
+                existing_snapshot_id,
+                existing_source_event_id.as_deref(),
+                existing_captured_at_epoch_ms,
+            ),
+        ));
+    }
+
+    Err(ObservabilityInsertError::before_write(
+        snapshot_kind,
+        &meta.event_key,
+        observability_conflict_error(
             snapshot_kind,
             &meta,
             existing_snapshot_id,
             existing_source_event_id.as_deref(),
             existing_captured_at_epoch_ms,
-        ));
-    }
-
-    Err(observability_conflict_error(
-        snapshot_kind,
-        &meta,
-        existing_snapshot_id,
-        existing_source_event_id.as_deref(),
-        existing_captured_at_epoch_ms,
+        ),
     ))
+}
+
+async fn lookup_observability_snapshot_id_by_event_key(
+    client: &Client,
+    snapshot_kind: &str,
+    event_key: &str,
+) -> Result<Option<Uuid>> {
+    client
+        .query_opt(
+            r#"
+            SELECT snapshot_id
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = $1
+              AND event_key = $2
+            "#,
+            &[&snapshot_kind, &event_key],
+        )
+        .await
+        .context("failed to lookup observability snapshot by event_key")
+        .map(|row| row.map(|row| row.get(0)))
 }
 
 pub async fn insert_execctl_task_ledger_entry(
@@ -1044,6 +1259,66 @@ pub(super) fn observability_conflict_error(
     }
 }
 
+fn extract_sqlstate_code(error: &Error) -> Option<String> {
+    if let Some(pg_error) = error.downcast_ref::<tokio_postgres::Error>() {
+        return pg_error
+            .as_db_error()
+            .map(|db_error| db_error.code().code().to_string());
+    }
+    for cause in error.chain() {
+        if let Some(pg_error) = cause.downcast_ref::<tokio_postgres::Error>() {
+            return pg_error
+                .as_db_error()
+                .map(|db_error| db_error.code().code().to_string());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+fn forced_observability_insert_error_for_tests(
+    snapshot_kind: &str,
+    event_key: &str,
+    write_may_have_succeeded: bool,
+) -> Option<ObservabilityInsertError> {
+    let raw = std::env::var("AMAI_TEST_FORCE_OBSERVABILITY_INSERT_FAILURE").ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (phase_raw, sqlstate_raw) = trimmed.split_once(':').unwrap_or((trimmed, "XX000"));
+    let sqlstate_code = Some(sqlstate_raw.trim().to_string());
+    match phase_raw.trim() {
+        "before_write" if !write_may_have_succeeded => Some(
+            ObservabilityInsertError::before_write_with_sqlstate(
+                snapshot_kind,
+                event_key,
+                sqlstate_code,
+                anyhow!(
+                    "forced observability insert failure for tests snapshot_kind={} event_key={} phase=before_write sqlstate={}",
+                    snapshot_kind,
+                    event_key,
+                    sqlstate_raw.trim()
+                ),
+            ),
+        ),
+        "outcome_unknown_after_write" if write_may_have_succeeded => Some(
+            ObservabilityInsertError::outcome_unknown_after_write(
+                snapshot_kind,
+                event_key,
+                sqlstate_code,
+                anyhow!(
+                    "forced observability insert failure for tests snapshot_kind={} event_key={} phase=outcome_unknown_after_write sqlstate={}",
+                    snapshot_kind,
+                    event_key,
+                    sqlstate_raw.trim()
+                ),
+            ),
+        ),
+        _ => None,
+    }
+}
+
 pub(super) fn validate_observability_update(
     snapshot_kind: &str,
     snapshot_id: &Uuid,
@@ -1065,6 +1340,7 @@ pub(super) fn prepare_observability_payload(
     snapshot_kind: &str,
     payload: &Value,
 ) -> Result<(Value, ObservabilityInsertMeta)> {
+    validate_snapshot_payload_shape(snapshot_kind, payload)?;
     let payload_sha256 = hex_sha256(
         &serde_json::to_vec(payload).context("failed to serialize observability payload")?,
     );
@@ -1192,6 +1468,64 @@ pub(super) fn prepare_observability_payload(
     }
 
     Ok((stored_payload, meta))
+}
+
+fn validate_snapshot_payload_shape(snapshot_kind: &str, payload: &Value) -> Result<()> {
+    if snapshot_kind != "working_state_restore" {
+        return Ok(());
+    }
+    let restore = payload
+        .get("working_state_restore")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            anyhow!("working_state_restore observability payload must include object root")
+        })?;
+    let project_code = restore
+        .get("project")
+        .and_then(Value::as_object)
+        .and_then(|project| project.get("code"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow!("working_state_restore observability payload must include project.code")
+        })?;
+    let namespace_code = restore
+        .get("namespace")
+        .and_then(Value::as_object)
+        .and_then(|namespace| namespace.get("code"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow!("working_state_restore observability payload must include namespace.code")
+        })?;
+    let _ = (project_code, namespace_code);
+    if restore.get("captured_at_epoch_ms").is_some() && !restore["captured_at_epoch_ms"].is_i64() {
+        return Err(anyhow!(
+            "working_state_restore observability payload captured_at_epoch_ms must be integer"
+        ));
+    }
+    if let Some(source_event_id) = payload["_observability"]["source_event_id"].as_str() {
+        let authoritative_event_id = restore
+            .get("state_lineage")
+            .and_then(Value::as_object)
+            .and_then(|lineage| lineage.get("authoritative_event_id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow!(
+                    "working_state_restore observability payload must include state_lineage.authoritative_event_id when _observability.source_event_id is set"
+                )
+            })?;
+        if authoritative_event_id != source_event_id.trim() {
+            return Err(anyhow!(
+                "working_state_restore observability payload source_event_id must match authoritative_event_id"
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn observability_source_class(snapshot_kind: &str, payload: &Value) -> &'static str {

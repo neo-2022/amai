@@ -2060,6 +2060,42 @@ CREATE TABLE IF NOT EXISTS ami.memory_conflicts (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS ami.observability_snapshots (
+    snapshot_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    snapshot_kind TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS ami.artifact_refs (
+    artifact_ref_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID REFERENCES ami.projects(project_id) ON DELETE CASCADE,
+    namespace_id UUID REFERENCES ami.namespaces(namespace_id) ON DELETE CASCADE,
+    artifact_kind TEXT NOT NULL,
+    bucket TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    content_type TEXT,
+    source_kind TEXT,
+    source_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    message_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence_span JSONB NOT NULL DEFAULT '{}'::jsonb,
+    derivation_kind TEXT NOT NULL DEFAULT 'extract' CHECK (
+        derivation_kind IN (
+            'raw_capture',
+            'extract',
+            'summary',
+            'merge',
+            'import',
+            'verified_write_back',
+            'operator_write'
+        )
+    ),
+    schema_version TEXT NOT NULL DEFAULT 'artifact-ref-envelope-v1',
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (bucket, object_key)
+);
+
 CREATE TABLE IF NOT EXISTS ami.memory_provenance (
     memory_provenance_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     workspace_id UUID NOT NULL REFERENCES ami.workspaces(workspace_id) ON DELETE CASCADE,
@@ -2068,7 +2104,7 @@ CREATE TABLE IF NOT EXISTS ami.memory_provenance (
     memory_item_id UUID REFERENCES ami.memory_items(memory_item_id) ON DELETE CASCADE,
     source_kind TEXT NOT NULL,
     source_event_id TEXT,
-    source_snapshot_id UUID REFERENCES ami.observability_snapshots(snapshot_id) ON DELETE SET NULL,
+    source_snapshot_id UUID REFERENCES ami.observability_snapshots(snapshot_id) ON DELETE RESTRICT,
     artifact_ref_id UUID REFERENCES ami.artifact_refs(artifact_ref_id) ON DELETE SET NULL,
     trust_level TEXT NOT NULL DEFAULT 'raw' CHECK (
         trust_level IN ('raw', 'extracted', 'proposed', 'verified', 'disputed', 'quarantined')
@@ -2195,6 +2231,97 @@ BEGIN
     RAISE EXCEPTION 'ami.task_events is append-only';
 END
 $$;
+
+CREATE TABLE IF NOT EXISTS ami.task_nodes (
+    task_node_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES ami.workspaces(workspace_id) ON DELETE CASCADE,
+    project_id UUID NOT NULL REFERENCES ami.projects(project_id) ON DELETE CASCADE,
+    namespace_id UUID REFERENCES ami.namespaces(namespace_id) ON DELETE CASCADE,
+    parent_task_node_id UUID REFERENCES ami.task_nodes(task_node_id) ON DELETE SET NULL,
+    memory_item_id UUID REFERENCES ami.memory_items(memory_item_id) ON DELETE SET NULL,
+    task_key TEXT CHECK (task_key IS NULL OR btrim(task_key) <> ''),
+    task_role TEXT NOT NULL DEFAULT 'workline' CHECK (
+        task_role IN ('root', 'workline', 'child', 'pending_return', 'proposal', 'historical')
+    ),
+    headline TEXT NOT NULL,
+    summary TEXT,
+    next_step TEXT,
+    execution_state TEXT NOT NULL DEFAULT 'proposed' CHECK (
+        execution_state IN ('proposed', 'ready', 'active', 'blocked', 'waiting_external', 'in_review', 'done', 'failed', 'canceled', 'superseded')
+    ),
+    lifecycle_state TEXT NOT NULL DEFAULT 'hot' CHECK (
+        lifecycle_state IN ('hot', 'closed', 'archived', 'deprecated', 'quarantined')
+    ),
+    confidence DOUBLE PRECISION,
+    current_score DOUBLE PRECISION,
+    reopened_count INTEGER NOT NULL DEFAULT 0,
+    child_count INTEGER NOT NULL DEFAULT 0,
+    closed_child_count INTEGER NOT NULL DEFAULT 0,
+    pending_return_count INTEGER NOT NULL DEFAULT 0,
+    source_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    artifact_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence_span JSONB NOT NULL DEFAULT '{}'::jsonb,
+    candidate_class TEXT NOT NULL DEFAULT 'commitment' CHECK (
+        candidate_class IN ('fact', 'decision', 'commitment', 'skill_hint', 'artifact_ref')
+    ),
+    derivation_kind TEXT NOT NULL DEFAULT 'extract' CHECK (
+        derivation_kind IN (
+            'raw_capture',
+            'extract',
+            'summary',
+            'merge',
+            'import',
+            'verified_write_back',
+            'operator_write'
+        )
+    ),
+    source_kind TEXT,
+    hot_path_write_eligible BOOLEAN NOT NULL DEFAULT TRUE,
+    background_consolidation_recommended BOOLEAN NOT NULL DEFAULT FALSE,
+    status_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    opened_at_epoch_ms BIGINT,
+    closed_at_epoch_ms BIGINT,
+    archived_at_epoch_ms BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS ami.task_events (
+    task_event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES ami.workspaces(workspace_id) ON DELETE CASCADE,
+    project_id UUID NOT NULL REFERENCES ami.projects(project_id) ON DELETE CASCADE,
+    namespace_id UUID REFERENCES ami.namespaces(namespace_id) ON DELETE CASCADE,
+    task_node_id UUID NOT NULL REFERENCES ami.task_nodes(task_node_id) ON DELETE CASCADE,
+    source_snapshot_id UUID REFERENCES ami.observability_snapshots(snapshot_id) ON DELETE RESTRICT,
+    source_event_id TEXT,
+    event_kind TEXT NOT NULL CHECK (
+        event_kind IN ('created', 'continued', 'branched_child', 'branched_new', 'resumed', 'pending_return', 'closed', 'archived', 'reopened', 'superseded', 'state_change', 'evidence_request')
+    ),
+    prior_execution_state TEXT,
+    next_execution_state TEXT,
+    prior_lifecycle_state TEXT,
+    next_lifecycle_state TEXT,
+    source_kind TEXT,
+    artifact_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    message_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence_span JSONB NOT NULL DEFAULT '{}'::jsonb,
+    derivation_kind TEXT NOT NULL DEFAULT 'raw_capture' CHECK (
+        derivation_kind IN (
+            'raw_capture',
+            'extract',
+            'summary',
+            'merge',
+            'import',
+            'verified_write_back',
+            'operator_write'
+        )
+    ),
+    schema_version TEXT NOT NULL DEFAULT 'task-event-envelope-v1',
+    event_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    recorded_at_epoch_ms BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 DROP TRIGGER IF EXISTS trg_ami_task_events_reject_update ON ami.task_events;
 CREATE TRIGGER trg_ami_task_events_reject_update
@@ -2325,6 +2452,58 @@ ALTER TABLE ami.memory_conflicts
         )
     );
 
+CREATE TABLE IF NOT EXISTS ami.context_packs (
+    context_pack_id UUID PRIMARY KEY,
+    project_id UUID NOT NULL REFERENCES ami.projects(project_id) ON DELETE CASCADE,
+    namespace_id UUID NOT NULL REFERENCES ami.namespaces(namespace_id) ON DELETE CASCADE,
+    retrieval_mode TEXT NOT NULL CHECK (
+        retrieval_mode IN ('local_strict', 'local_plus_related', 'explicit_foreign', 'audit_global')
+    ),
+    query_text TEXT NOT NULL,
+    visible_projects JSONB NOT NULL DEFAULT '[]'::jsonb,
+    payload JSONB NOT NULL,
+    artifact_ref_id UUID REFERENCES ami.artifact_refs(artifact_ref_id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS ami.retrieval_traces (
+    retrieval_trace_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES ami.workspaces(workspace_id) ON DELETE CASCADE,
+    project_id UUID NOT NULL REFERENCES ami.projects(project_id) ON DELETE CASCADE,
+    namespace_id UUID REFERENCES ami.namespaces(namespace_id) ON DELETE CASCADE,
+    context_pack_id UUID REFERENCES ami.context_packs(context_pack_id) ON DELETE SET NULL,
+    query_text TEXT NOT NULL,
+    requested_mode TEXT,
+    effective_mode TEXT,
+    scope_filter JSONB NOT NULL DEFAULT '{}'::jsonb,
+    candidate_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+    rerank_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+    evidence_sufficiency JSONB NOT NULL DEFAULT '{}'::jsonb,
+    source_kind TEXT,
+    source_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    artifact_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    message_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence_span JSONB NOT NULL DEFAULT '{}'::jsonb,
+    derivation_kind TEXT NOT NULL DEFAULT 'extract' CHECK (
+        derivation_kind IN (
+            'raw_capture',
+            'extract',
+            'summary',
+            'merge',
+            'import',
+            'verified_write_back',
+            'operator_write'
+        )
+    ),
+    schema_version TEXT NOT NULL DEFAULT 'retrieval-trace-envelope-v1',
+    final_decision TEXT NOT NULL DEFAULT 'abstain' CHECK (
+        final_decision IN ('continue', 'child', 'new', 'abstain', 'escalate')
+    ),
+    temporal_query_epoch_ms BIGINT,
+    trace_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 ALTER TABLE ami.retrieval_traces
     ADD COLUMN IF NOT EXISTS source_kind TEXT,
     ADD COLUMN IF NOT EXISTS source_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -2362,6 +2541,45 @@ ALTER TABLE ami.retrieval_traces
             'operator_write'
         )
     );
+
+CREATE TABLE IF NOT EXISTS ami.restore_packs (
+    restore_pack_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES ami.workspaces(workspace_id) ON DELETE CASCADE,
+    project_id UUID NOT NULL REFERENCES ami.projects(project_id) ON DELETE CASCADE,
+    namespace_id UUID REFERENCES ami.namespaces(namespace_id) ON DELETE CASCADE,
+    agent_scope TEXT,
+    session_id TEXT,
+    thread_id TEXT,
+    source_snapshot_id UUID REFERENCES ami.observability_snapshots(snapshot_id) ON DELETE RESTRICT,
+    pack_kind TEXT NOT NULL CHECK (
+        pack_kind IN ('startup', 'restore', 'workspace_restore_pack', 'handoff', 'manual')
+    ),
+    source_kind TEXT,
+    source_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    artifact_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    message_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence_span JSONB NOT NULL DEFAULT '{}'::jsonb,
+    derivation_kind TEXT NOT NULL DEFAULT 'summary' CHECK (
+        derivation_kind IN (
+            'raw_capture',
+            'extract',
+            'summary',
+            'merge',
+            'import',
+            'verified_write_back',
+            'operator_write'
+        )
+    ),
+    schema_version TEXT NOT NULL DEFAULT 'restore-pack-envelope-v1',
+    headline TEXT,
+    summary TEXT,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    captured_at_epoch_ms BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT restore_packs_workspace_restore_pack_requires_source_snapshot_check CHECK (
+        pack_kind <> 'workspace_restore_pack' OR source_snapshot_id IS NOT NULL
+    )
+);
 
 ALTER TABLE ami.restore_packs
     ADD COLUMN IF NOT EXISTS source_kind TEXT,
@@ -2401,6 +2619,65 @@ ALTER TABLE ami.restore_packs
         )
     );
 
+DELETE FROM ami.restore_packs
+WHERE pack_kind = 'workspace_restore_pack'
+  AND source_snapshot_id IS NULL;
+
+ALTER TABLE ami.restore_packs
+    DROP CONSTRAINT IF EXISTS restore_packs_source_snapshot_id_fkey;
+
+ALTER TABLE ami.restore_packs
+    ADD CONSTRAINT restore_packs_source_snapshot_id_fkey
+    FOREIGN KEY (source_snapshot_id)
+    REFERENCES ami.observability_snapshots(snapshot_id)
+    ON DELETE RESTRICT;
+
+ALTER TABLE ami.restore_packs
+    DROP CONSTRAINT IF EXISTS restore_packs_workspace_restore_pack_requires_source_snapshot_check;
+
+ALTER TABLE ami.restore_packs
+    ADD CONSTRAINT restore_packs_workspace_restore_pack_requires_source_snapshot_check CHECK (
+        pack_kind <> 'workspace_restore_pack' OR source_snapshot_id IS NOT NULL
+    );
+
+CREATE TABLE IF NOT EXISTS ami.policy_rules (
+    policy_rule_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES ami.workspaces(workspace_id) ON DELETE CASCADE,
+    project_id UUID REFERENCES ami.projects(project_id) ON DELETE CASCADE,
+    namespace_id UUID REFERENCES ami.namespaces(namespace_id) ON DELETE CASCADE,
+    rule_code TEXT NOT NULL CHECK (btrim(rule_code) <> ''),
+    rule_scope TEXT NOT NULL CHECK (
+        rule_scope IN ('workspace', 'project', 'namespace', 'agent', 'shared')
+    ),
+    rule_kind TEXT NOT NULL CHECK (
+        rule_kind IN ('scope_filter', 'link_decision', 'import', 'restore', 'retrieval', 'quarantine', 'other')
+    ),
+    rule_status TEXT NOT NULL DEFAULT 'active' CHECK (
+        rule_status IN ('active', 'disabled', 'archived', 'quarantined')
+    ),
+    precedence INTEGER NOT NULL DEFAULT 100,
+    source_kind TEXT,
+    source_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    artifact_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    message_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence_span JSONB NOT NULL DEFAULT '{}'::jsonb,
+    derivation_kind TEXT NOT NULL DEFAULT 'operator_write' CHECK (
+        derivation_kind IN (
+            'raw_capture',
+            'extract',
+            'summary',
+            'merge',
+            'import',
+            'verified_write_back',
+            'operator_write'
+        )
+    ),
+    schema_version TEXT NOT NULL DEFAULT 'policy-rule-envelope-v1',
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 ALTER TABLE ami.policy_rules
     ADD COLUMN IF NOT EXISTS source_kind TEXT,
     ADD COLUMN IF NOT EXISTS source_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -2438,6 +2715,47 @@ ALTER TABLE ami.policy_rules
             'operator_write'
         )
     );
+
+CREATE TABLE IF NOT EXISTS ami.quarantine_items (
+    quarantine_item_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES ami.workspaces(workspace_id) ON DELETE CASCADE,
+    project_id UUID REFERENCES ami.projects(project_id) ON DELETE CASCADE,
+    namespace_id UUID REFERENCES ami.namespaces(namespace_id) ON DELETE CASCADE,
+    entity_kind TEXT NOT NULL CHECK (
+        entity_kind IN (
+            'memory_item',
+            'memory_edge',
+            'memory_conflict',
+            'import_packet',
+            'policy_rule',
+            'project_relation',
+            'skill_card',
+            'artifact_ref',
+            'other'
+        )
+    ),
+    entity_id TEXT NOT NULL,
+    quarantine_reason TEXT NOT NULL,
+    source_kind TEXT,
+    source_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    artifact_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    message_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence_span JSONB NOT NULL DEFAULT '{}'::jsonb,
+    derivation_kind TEXT NOT NULL DEFAULT 'extract' CHECK (
+        derivation_kind IN (
+            'raw_capture',
+            'extract',
+            'summary',
+            'merge',
+            'import',
+            'verified_write_back',
+            'operator_write'
+        )
+    ),
+    schema_version TEXT NOT NULL DEFAULT 'quarantine-item-envelope-v1',
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 ALTER TABLE ami.quarantine_items
     ADD COLUMN IF NOT EXISTS source_kind TEXT,
@@ -2494,35 +2812,6 @@ ALTER TABLE ami.quarantine_items
             'other'
         )
     );
-
-CREATE TABLE IF NOT EXISTS ami.artifact_refs (
-    artifact_ref_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id UUID REFERENCES ami.projects(project_id) ON DELETE CASCADE,
-    namespace_id UUID REFERENCES ami.namespaces(namespace_id) ON DELETE CASCADE,
-    artifact_kind TEXT NOT NULL,
-    bucket TEXT NOT NULL,
-    object_key TEXT NOT NULL,
-    content_type TEXT,
-    source_kind TEXT,
-    source_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    message_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
-    evidence_span JSONB NOT NULL DEFAULT '{}'::jsonb,
-    derivation_kind TEXT NOT NULL DEFAULT 'extract' CHECK (
-        derivation_kind IN (
-            'raw_capture',
-            'extract',
-            'summary',
-            'merge',
-            'import',
-            'verified_write_back',
-            'operator_write'
-        )
-    ),
-    schema_version TEXT NOT NULL DEFAULT 'artifact-ref-envelope-v1',
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (bucket, object_key)
-);
 
 CREATE OR REPLACE VIEW ami.memory_envelopes AS
 SELECT
@@ -2701,7 +2990,7 @@ CREATE TABLE IF NOT EXISTS ami.restore_packs (
     agent_scope TEXT,
     session_id TEXT,
     thread_id TEXT,
-    source_snapshot_id UUID REFERENCES ami.observability_snapshots(snapshot_id) ON DELETE SET NULL,
+    source_snapshot_id UUID REFERENCES ami.observability_snapshots(snapshot_id) ON DELETE RESTRICT,
     pack_kind TEXT NOT NULL CHECK (
         pack_kind IN ('startup', 'restore', 'workspace_restore_pack', 'handoff', 'manual')
     ),
@@ -2726,7 +3015,10 @@ CREATE TABLE IF NOT EXISTS ami.restore_packs (
     summary TEXT,
     payload JSONB NOT NULL DEFAULT '{}'::jsonb,
     captured_at_epoch_ms BIGINT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT restore_packs_workspace_restore_pack_requires_source_snapshot_check CHECK (
+        pack_kind <> 'workspace_restore_pack' OR source_snapshot_id IS NOT NULL
+    )
 );
 
 ALTER TABLE ami.context_packs
@@ -2783,13 +3075,6 @@ WHERE cp.artifact_ref_id = ar.artifact_ref_id
       OR cp.artifact_object_key IS NULL
       OR cp.artifact_state IS DISTINCT FROM 'materialized'
   );
-
-CREATE TABLE IF NOT EXISTS ami.observability_snapshots (
-    snapshot_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    snapshot_kind TEXT NOT NULL,
-    payload JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
 
 CREATE TABLE IF NOT EXISTS ami.policy_rules (
     policy_rule_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -3316,6 +3601,44 @@ ALTER TABLE ami.task_events
         )
     );
 
+CREATE TABLE IF NOT EXISTS ami.memory_link_decisions (
+    memory_link_decision_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES ami.workspaces(workspace_id) ON DELETE CASCADE,
+    project_id UUID NOT NULL REFERENCES ami.projects(project_id) ON DELETE CASCADE,
+    namespace_id UUID REFERENCES ami.namespaces(namespace_id) ON DELETE CASCADE,
+    task_node_id UUID REFERENCES ami.task_nodes(task_node_id) ON DELETE SET NULL,
+    retrieval_trace_id UUID REFERENCES ami.retrieval_traces(retrieval_trace_id) ON DELETE SET NULL,
+    candidate_task_node_id UUID REFERENCES ami.task_nodes(task_node_id) ON DELETE SET NULL,
+    decision_outcome TEXT NOT NULL CHECK (
+        decision_outcome IN ('continue', 'child', 'new', 'abstain', 'escalate', 'pending_link_proposal')
+    ),
+    legality_passed BOOLEAN NOT NULL DEFAULT FALSE,
+    scope_filter_passed BOOLEAN NOT NULL DEFAULT FALSE,
+    evidence_sufficient BOOLEAN NOT NULL DEFAULT FALSE,
+    classifier_label TEXT,
+    classifier_score DOUBLE PRECISION,
+    decision_reason TEXT,
+    decision_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    source_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    artifact_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    message_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence_span JSONB NOT NULL DEFAULT '{}'::jsonb,
+    derivation_kind TEXT NOT NULL DEFAULT 'extract' CHECK (
+        derivation_kind IN (
+            'raw_capture',
+            'extract',
+            'summary',
+            'merge',
+            'import',
+            'verified_write_back',
+            'operator_write'
+        )
+    ),
+    schema_version TEXT NOT NULL DEFAULT 'memory-link-decision-envelope-v1',
+    recorded_at_epoch_ms BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 ALTER TABLE ami.memory_link_decisions
     ADD COLUMN IF NOT EXISTS source_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
 
@@ -3349,6 +3672,42 @@ ALTER TABLE ami.memory_link_decisions
             'operator_write'
         )
     );
+
+CREATE TABLE IF NOT EXISTS ami.pending_link_proposals (
+    pending_link_proposal_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES ami.workspaces(workspace_id) ON DELETE CASCADE,
+    project_id UUID NOT NULL REFERENCES ami.projects(project_id) ON DELETE CASCADE,
+    namespace_id UUID REFERENCES ami.namespaces(namespace_id) ON DELETE CASCADE,
+    task_node_id UUID REFERENCES ami.task_nodes(task_node_id) ON DELETE SET NULL,
+    retrieval_trace_id UUID REFERENCES ami.retrieval_traces(retrieval_trace_id) ON DELETE SET NULL,
+    candidate_task_node_id UUID REFERENCES ami.task_nodes(task_node_id) ON DELETE SET NULL,
+    proposal_state TEXT NOT NULL DEFAULT 'pending' CHECK (
+        proposal_state IN ('pending', 'accepted', 'rejected', 'expired', 'escalated', 'archived')
+    ),
+    proposal_reason TEXT NOT NULL,
+    evidence_request TEXT,
+    evidence_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    classifier_score DOUBLE PRECISION,
+    ttl_epoch_ms BIGINT,
+    source_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    artifact_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    message_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence_span JSONB NOT NULL DEFAULT '{}'::jsonb,
+    derivation_kind TEXT NOT NULL DEFAULT 'extract' CHECK (
+        derivation_kind IN (
+            'raw_capture',
+            'extract',
+            'summary',
+            'merge',
+            'import',
+            'verified_write_back',
+            'operator_write'
+        )
+    ),
+    schema_version TEXT NOT NULL DEFAULT 'pending-link-proposal-envelope-v1',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 ALTER TABLE ami.pending_link_proposals
     ADD COLUMN IF NOT EXISTS source_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
@@ -3827,6 +4186,23 @@ CREATE INDEX IF NOT EXISTS idx_ami_retrieval_traces_scope_created
     ON ami.retrieval_traces(project_id, namespace_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ami_restore_packs_scope_created
     ON ami.restore_packs(project_id, namespace_id, pack_kind, created_at DESC);
+WITH ranked_restore_packs AS (
+    SELECT
+        restore_pack_id,
+        ROW_NUMBER() OVER (
+            PARTITION BY project_id, namespace_id, pack_kind, source_snapshot_id
+            ORDER BY captured_at_epoch_ms DESC NULLS LAST, created_at DESC, restore_pack_id DESC
+        ) AS row_rank
+    FROM ami.restore_packs
+    WHERE source_snapshot_id IS NOT NULL
+)
+DELETE FROM ami.restore_packs rp
+USING ranked_restore_packs ranked
+WHERE rp.restore_pack_id = ranked.restore_pack_id
+  AND ranked.row_rank > 1;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ami_restore_packs_same_source_snapshot
+    ON ami.restore_packs(project_id, namespace_id, pack_kind, source_snapshot_id)
+    WHERE source_snapshot_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_ami_observability_snapshots_kind_created
     ON ami.observability_snapshots(snapshot_kind, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ami_policy_rules_scope_status
@@ -3961,3 +4337,188 @@ CREATE INDEX IF NOT EXISTS idx_forgetting_audit_log_memory_item_id
 
 CREATE INDEX IF NOT EXISTS idx_forgetting_audit_log_recorded_at
     ON ami.forgetting_audit_log(recorded_at);
+
+DROP MATERIALIZED VIEW IF EXISTS ami.lifecycle_transition_stats_v1;
+
+DROP VIEW IF EXISTS ami.lifecycle_transition_events_v1;
+
+CREATE VIEW ami.lifecycle_transition_events_v1 AS
+WITH audit_base AS (
+    SELECT
+        fal.audit_id AS transition_event_id,
+        fal.memory_item_id,
+        fal.action,
+        fal.previous_state,
+        fal.new_state,
+        fal.project_code,
+        fal.namespace_code,
+        fal.recorded_at,
+        mi.created_at AS memory_created_at,
+        mi.derivation_kind,
+        mi.retention_class,
+        mi.decay_policy,
+        mi.freshness_score,
+        mi.utility_score,
+        mi.access_count,
+        mi.visibility_scope,
+        mi.item_kind,
+        mi.truth_state,
+        mi.trust_state,
+        mi.verification_state,
+        mi.lifecycle_state,
+        LAG(fal.recorded_at) OVER (
+            PARTITION BY fal.memory_item_id
+            ORDER BY fal.recorded_at, fal.audit_id
+        ) AS previous_recorded_at
+    FROM ami.forgetting_audit_log fal
+    JOIN ami.memory_items mi ON mi.memory_item_id = fal.memory_item_id
+),
+classified AS (
+    SELECT
+        *,
+        (
+            derivation_kind IN ('raw_capture', 'operator_write', 'verified_write_back')
+            OR retention_class IN ('durable', 'legal_hold')
+            OR decay_policy = 'retain_forever'
+        ) AS is_protected,
+        (
+            visibility_scope = 'quarantine'
+            OR item_kind = 'quarantine'
+            OR truth_state = 'quarantined'
+            OR trust_state = 'quarantined'
+            OR verification_state = 'quarantined'
+            OR lifecycle_state = 'quarantined'
+        ) AS is_quarantined,
+        CASE
+            WHEN freshness_score < 0.30 THEN 'active_stale'
+            ELSE 'active_hot'
+        END AS active_state_variant,
+        CASE
+            WHEN freshness_score < 0.05 THEN 'critical_stale'
+            WHEN freshness_score < 0.30 THEN 'stale'
+            WHEN freshness_score < 0.70 THEN 'warm'
+            ELSE 'fresh'
+        END AS freshness_band,
+        CASE
+            WHEN utility_score < 0.05 THEN 'low'
+            WHEN utility_score < 0.30 THEN 'medium'
+            ELSE 'high'
+        END AS utility_band,
+        CASE
+            WHEN access_count <= 0 THEN 'none'
+            WHEN access_count < 3 THEN 'low'
+            WHEN access_count < 10 THEN 'medium'
+            ELSE 'high'
+        END AS access_band
+    FROM audit_base
+)
+SELECT
+    transition_event_id,
+    memory_item_id,
+    CASE
+        WHEN previous_state = 'pending_review' THEN 'pending_review'
+        WHEN previous_state = 'compacted' THEN 'compacted'
+        WHEN previous_state = 'archived' THEN 'archived'
+        WHEN previous_state = 'pruned' THEN 'pruned'
+        WHEN previous_state = 'quarantined' THEN 'quarantined'
+        WHEN previous_state = 'protected' THEN 'protected'
+        WHEN previous_state = 'active' THEN
+            CASE
+                WHEN is_quarantined THEN 'quarantined'
+                WHEN is_protected THEN 'protected'
+                WHEN action IN (
+                    'prune_ttl_expired',
+                    'prune_low_utility',
+                    'archive_cold_tier',
+                    'revalidate_stale',
+                    'dedup_compacted'
+                ) THEN 'active_stale'
+                ELSE active_state_variant
+            END
+        ELSE
+            CASE
+                WHEN is_quarantined THEN 'quarantined'
+                WHEN is_protected THEN 'protected'
+                ELSE active_state_variant
+            END
+    END AS observed_state,
+    CASE
+        WHEN new_state = 'pending_review' THEN 'pending_review'
+        WHEN new_state = 'compacted' THEN 'compacted'
+        WHEN new_state = 'archived' THEN 'archived'
+        WHEN new_state = 'pruned' THEN 'pruned'
+        WHEN new_state = 'quarantined' THEN 'quarantined'
+        WHEN new_state = 'protected' THEN 'protected'
+        WHEN new_state = 'active' THEN
+            CASE
+                WHEN is_quarantined THEN 'quarantined'
+                WHEN is_protected THEN 'protected'
+                ELSE active_state_variant
+            END
+        ELSE
+            CASE
+                WHEN is_quarantined THEN 'quarantined'
+                WHEN is_protected THEN 'protected'
+                ELSE active_state_variant
+            END
+    END AS next_state,
+    GREATEST(
+        0,
+        FLOOR(
+            EXTRACT(
+                EPOCH FROM (
+                    recorded_at - COALESCE(previous_recorded_at, memory_created_at)
+                )
+            ) * 1000.0
+        )
+    )::BIGINT AS dwell_ms,
+    derivation_kind,
+    retention_class,
+    decay_policy,
+    freshness_band,
+    utility_band,
+    access_band,
+    project_code,
+    namespace_code,
+    recorded_at
+FROM classified;
+
+CREATE MATERIALIZED VIEW ami.lifecycle_transition_stats_v1 AS
+SELECT
+    project_code,
+    namespace_code,
+    observed_state,
+    next_state,
+    derivation_kind,
+    retention_class,
+    decay_policy,
+    freshness_band,
+    utility_band,
+    access_band,
+    COUNT(*)::BIGINT AS transition_count,
+    COALESCE(SUM(dwell_ms), 0)::BIGINT AS total_dwell_ms,
+    COALESCE(ROUND(AVG(dwell_ms)), 0)::BIGINT AS avg_dwell_ms,
+    COALESCE(
+        percentile_cont(0.5) WITHIN GROUP (ORDER BY dwell_ms::DOUBLE PRECISION)::BIGINT,
+        0::BIGINT
+    ) AS p50_dwell_ms,
+    COALESCE(
+        percentile_cont(0.9) WITHIN GROUP (ORDER BY dwell_ms::DOUBLE PRECISION)::BIGINT,
+        0::BIGINT
+    ) AS p90_dwell_ms,
+    MAX(recorded_at) AS last_recorded_at
+FROM ami.lifecycle_transition_events_v1
+GROUP BY
+    project_code,
+    namespace_code,
+    observed_state,
+    next_state,
+    derivation_kind,
+    retention_class,
+    decay_policy,
+    freshness_band,
+    utility_band,
+    access_band;
+
+CREATE INDEX IF NOT EXISTS idx_lifecycle_transition_stats_v1_scope
+    ON ami.lifecycle_transition_stats_v1(project_code, namespace_code);

@@ -5,6 +5,17 @@ cd "$(dirname "$0")/.."
 
 clean_output="$(./scripts/benchmark_contamination_preflight.sh --json)"
 printf '%s\n' "$clean_output" | jq -e '.status == "pass"' >/dev/null
+printf '%s\n' "$clean_output" | jq -e '.strict_heavy == false' >/dev/null
+
+if AMI_BENCHMARK_HEAVY_CPU_THRESHOLD=0 ./scripts/benchmark_contamination_preflight.sh --json --strict-heavy >/tmp/benchmark_contamination_preflight_strict_fail.json 2>/dev/null; then
+  echo "proof_benchmark_contamination_preflight: expected strict heavy preflight to fail" >&2
+  exit 1
+fi
+
+jq -e '.status == "fail"' /tmp/benchmark_contamination_preflight_strict_fail.json >/dev/null
+jq -e '.strict_heavy == true' /tmp/benchmark_contamination_preflight_strict_fail.json >/dev/null
+jq -e '.strict_heavy_processes | length >= 1' /tmp/benchmark_contamination_preflight_strict_fail.json >/dev/null
+jq -e '.reasons | index("heavy external process detected in strict benchmark mode")' /tmp/benchmark_contamination_preflight_strict_fail.json >/dev/null
 
 fake_pid=""
 cleanup() {
@@ -31,5 +42,6 @@ cleanup
 trap - EXIT
 
 rm -f /tmp/benchmark_contamination_preflight_fail.json
+rm -f /tmp/benchmark_contamination_preflight_strict_fail.json
 
 printf 'proof_benchmark_contamination_preflight: ok\n'

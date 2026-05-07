@@ -1,5 +1,46 @@
 use super::*;
 
+enum BenchmarkSourceKind<'a> {
+    Snapshot {
+        snapshot_key: &'a str,
+        payload_root: &'a str,
+        scope: Option<&'a str>,
+        suffix: Option<&'a str>,
+    },
+    LiveProgress {
+        progress_key: &'a str,
+        final_snapshot_key: &'a str,
+    },
+}
+
+fn benchmark_source_sentence(source: BenchmarkSourceKind<'_>) -> String {
+    match source {
+        BenchmarkSourceKind::Snapshot {
+            snapshot_key,
+            payload_root,
+            scope,
+            suffix,
+        } => {
+            let mut sentence = format!(
+                "Источник: benchmark snapshot {snapshot_key}.{payload_root}. Это read-only measured source; live-данные страницы сюда не подмешиваются"
+            );
+            if let Some(scope) = scope.filter(|value| !value.is_empty()) {
+                sentence.push_str(&format!(". Scope: {scope}"));
+            }
+            if let Some(suffix) = suffix.filter(|value| !value.is_empty()) {
+                sentence.push_str(&format!(". {suffix}"));
+            }
+            sentence
+        }
+        BenchmarkSourceKind::LiveProgress {
+            progress_key,
+            final_snapshot_key,
+        } => format!(
+            "Источник: live progress {progress_key}. Это частичный online-progress, а не финальный snapshot; {final_snapshot_key} обновится после завершения прогона"
+        ),
+    }
+}
+
 pub(super) fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
     let hot_load = &snapshot["latest_retrieval_load_hot"]["load_verification"];
     let hot_retrieval = &snapshot["latest_retrieval_hot"]["benchmark"];
@@ -58,9 +99,12 @@ pub(super) fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
             ),
             hot_load_status,
             Some(source_label(
-                &format!(
-                    "Источник: benchmark snapshot latest_retrieval_load_hot.load_verification. Scope: {hot_load_scope}. Live-данные страницы сюда не подмешиваются"
-                ),
+                &benchmark_source_sentence(BenchmarkSourceKind::Snapshot {
+                    snapshot_key: "latest_retrieval_load_hot",
+                    payload_root: "load_verification",
+                    scope: Some(&hot_load_scope),
+                    suffix: None,
+                }),
                 hot_load["captured_at_epoch_ms"].as_u64(),
             )),
             Some("Это отдельный параллельный load-contour. Он нужен для Burst QPS, worker-ов и error-rate под нагрузкой. Его нельзя один к одному сравнивать с retrieval hot benchmark, который питает SLA `retrieval.hot_p95_ms`.".to_string()),
@@ -171,9 +215,12 @@ pub(super) fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
             ),
             hot_retrieval_status,
             Some(source_label(
-                &format!(
-                    "Источник: benchmark snapshot latest_retrieval_hot.benchmark. Этот snapshot напрямую кормит SLA retrieval.hot_p95_ms. Scope: {hot_retrieval_scope}"
-                ),
+                &benchmark_source_sentence(BenchmarkSourceKind::Snapshot {
+                    snapshot_key: "latest_retrieval_hot",
+                    payload_root: "benchmark",
+                    scope: Some(&hot_retrieval_scope),
+                    suffix: Some("Этот snapshot напрямую кормит SLA retrieval.hot_p95_ms"),
+                }),
                 hot_retrieval["captured_at_epoch_ms"].as_u64(),
             )),
             Some("Это короткий retrieval-бенчмарк одиночного повторного запроса. Он показывает latency самого retrieval-контура и именно его значения идут в SLA `retrieval.hot_p95_ms`.".to_string()),
@@ -539,6 +586,19 @@ pub(super) fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     ),
                 ),
     ]);
+    let cold_source_label = if cold_live_running {
+        benchmark_source_sentence(BenchmarkSourceKind::LiveProgress {
+            progress_key: "cold_path_benchmark_progress.cold_benchmark_progress",
+            final_snapshot_key: "latest_cold_path_benchmark",
+        })
+    } else {
+        benchmark_source_sentence(BenchmarkSourceKind::Snapshot {
+            snapshot_key: "latest_cold_path_benchmark",
+            payload_root: "cold_benchmark",
+            scope: None,
+            suffix: Some("Coverage-qualified proof/smoke runs эту витрину не подменяют"),
+        })
+    };
     let mut cold_card = compare_table_card(
         "Новый запрос без прогрева",
         if cold_live_running {
@@ -548,11 +608,7 @@ pub(super) fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
         },
         cold_status,
         Some(source_label(
-            if cold_live_running {
-                "Источник: live progress cold_path_benchmark_progress.cold_benchmark_progress. Финальный snapshot latest_cold_path_benchmark обновится после завершения этого прогона"
-            } else {
-                "Источник: coverage-qualified benchmark snapshot latest_cold_path_benchmark.cold_benchmark. Live-данные страницы сюда не подмешиваются"
-            },
+            &cold_source_label,
             if cold_live_running {
                 snapshot["captured_at_epoch_ms"].as_u64()
             } else {
@@ -598,7 +654,12 @@ pub(super) fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                         .to_string(),
                     accuracy_status,
                     Some(source_label(
-                        "Источник: benchmark snapshot latest_retrieval_accuracy.accuracy_verification. Live-данные страницы сюда не подмешиваются",
+                        &benchmark_source_sentence(BenchmarkSourceKind::Snapshot {
+                            snapshot_key: "latest_retrieval_accuracy",
+                            payload_root: "accuracy_verification",
+                            scope: None,
+                            suffix: None,
+                        }),
                         accuracy["captured_at_epoch_ms"].as_u64(),
                     )),
                     Some("Проверка точности и изоляции показывает, не течёт ли один проект в другой и насколько точно Amai попадает в нужные символы и семантику.".to_string()),
@@ -680,7 +741,12 @@ pub(super) fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
         ),
         memory_status,
         Some(source_label(
-            "Источник: benchmark snapshot latest_memory_benchmark_score.memory_benchmark_score. Live-данные страницы сюда не подмешиваются",
+            &benchmark_source_sentence(BenchmarkSourceKind::Snapshot {
+                snapshot_key: "latest_memory_benchmark_score",
+                payload_root: "memory_benchmark_score",
+                scope: None,
+                suffix: None,
+            }),
             snapshot["latest_memory_benchmark_score"]["_observability"]["captured_at_epoch_ms"]
                 .as_u64(),
         )),
@@ -983,7 +1049,12 @@ pub(super) fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
         ),
         procedural_status,
         Some(source_label(
-            "Источник: benchmark snapshot latest_procedural_benchmark.procedural_benchmark. Live-данные страницы сюда не подмешиваются",
+            &benchmark_source_sentence(BenchmarkSourceKind::Snapshot {
+                snapshot_key: "latest_procedural_benchmark",
+                payload_root: "procedural_benchmark",
+                scope: None,
+                suffix: None,
+            }),
             snapshot["latest_procedural_benchmark"]["captured_at_epoch_ms"].as_u64(),
         )),
         Some(
@@ -1068,7 +1139,423 @@ pub(super) fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
         ),
         memory_card,
         procedural_card,
+        benchmark_statistics_card(
+            snapshot,
+            "latest_memory_task_matrix",
+            "memory_task_matrix",
+            "Memory task matrix compare",
+            "Контур данных: latest_memory_task_matrix.memory_task_matrix.statistics. Это matrix compare/drift lane для memory task matrix. Она обязана честно показывать, materialized ли baseline/candidate pair и какие statistical methods уже измерены, а какие ещё не применимы.",
+        ),
+        benchmark_statistics_card(
+            snapshot,
+            "latest_mcp_task_matrix",
+            "mcp_task_matrix",
+            "MCP task matrix compare",
+            "Контур данных: latest_mcp_task_matrix.mcp_task_matrix.statistics. Это matrix compare/drift lane для MCP task matrix. Она не подменяет promotion law и должна честно показывать pairwise statistical completeness отдельно от final promotability.",
+        ),
     ]
+}
+
+fn benchmark_statistics_card(
+    snapshot: &Value,
+    snapshot_key: &str,
+    payload_root: &str,
+    title: &str,
+    note: &str,
+) -> Value {
+    let root = &snapshot[snapshot_key][payload_root];
+    let statistics = &root["statistics"];
+    let sample_size = statistics["sample_size"].as_u64();
+    let baseline_run_id = statistics["baseline_run_id"].as_str().map(str::trim);
+    let candidate_run_id = statistics["candidate_run_id"].as_str().map(str::trim);
+    let drift_status = statistics["drift_summary"]["status"]
+        .as_str()
+        .unwrap_or("not_measured");
+    let promotion_law_materialized = root["promotion_law"].as_object().is_some();
+    let promotion_law = root["promotion_law"]
+        .as_object()
+        .map(|_| &root["promotion_law"])
+        .unwrap_or(&statistics["promotion"]);
+    let measured_approval_materialized = root["measured_approval"].as_object().is_some();
+    let measured_approval = root["measured_approval"]
+        .as_object()
+        .map(|_| &root["measured_approval"]);
+    let promotion_fail_closed = promotion_law["fail_closed"].as_bool();
+    let promotion_state = promotion_law["state"].as_str();
+    let measured_approval_fail_closed = measured_approval
+        .and_then(|value| value["fail_closed"].as_bool())
+        .unwrap_or(false);
+    let measured_approval_state = measured_approval.and_then(|value| value["state"].as_str());
+    let promotion_state_unexpected =
+        promotion_state.is_some_and(|state| !known_promotion_law_state(state));
+    let measured_approval_state_unexpected =
+        measured_approval_state.is_some_and(|state| !known_measured_approval_state(state));
+    let status =
+        if statistics["statistics_version"].as_str().is_none() || sample_size.unwrap_or(0) == 0 {
+            "waiting"
+        } else if baseline_run_id.filter(|value| !value.is_empty()).is_none() {
+            "waiting"
+        } else if !promotion_law_materialized || !measured_approval_materialized {
+            "critical"
+        } else if promotion_state.is_none()
+            || measured_approval_state.is_none()
+            || promotion_state_unexpected
+            || measured_approval_state_unexpected
+        {
+            "critical"
+        } else if promotion_fail_closed == Some(true)
+            || measured_approval_fail_closed
+            || promotion_state == Some("blocked_benchmark_gates")
+            || measured_approval_state == Some("blocked_benchmark_gates")
+            || drift_status == "partially_measured"
+        {
+            "critical"
+        } else {
+            "pass"
+        };
+    let headline_value = Some(if statistics["statistics_version"].as_str().is_none() {
+        "ещё нет данных".to_string()
+    } else if baseline_run_id.filter(|value| !value.is_empty()).is_none() {
+        format!(
+            "{} задач • baseline pair ещё не materialized",
+            format_u64(sample_size)
+        )
+    } else {
+        format_benchmark_compare_headline(
+            sample_size,
+            drift_status,
+            promotion_law,
+            measured_approval,
+        )
+    });
+    let source_epoch_ms = snapshot[snapshot_key]["_observability"]["captured_at_epoch_ms"].as_u64();
+    let statistics_payload_root = format!("{payload_root}.statistics");
+    compare_table_card(
+        title,
+        note.to_string(),
+        status,
+        Some(source_label(
+                &benchmark_source_sentence(BenchmarkSourceKind::Snapshot {
+                    snapshot_key,
+                    payload_root: &statistics_payload_root,
+                    scope: None,
+                    suffix: None,
+                }),
+                source_epoch_ms,
+            )),
+        Some("Карточка показывает честную полноту pairwise compare/drift contour. Она не имеет права притворяться promotion-law verdict или скрывать not_measured / not_applicable methods.".to_string()),
+        headline_value,
+        vec![
+            compare_table_row(
+                "Statistics block",
+                "Какая версия machine-readable statistics block materialized в benchmark payload.",
+                compare_pair(
+                    "benchmark-statistics-v1".to_string(),
+                    statistics["statistics_version"]
+                        .as_str()
+                        .unwrap_or("ещё нет данных")
+                        .to_string(),
+                ),
+            ),
+            compare_table_row(
+                "Выборка",
+                "Сколько task-result вошло в candidate benchmark run.",
+                compare_pair(">= 1".to_string(), format_u64(sample_size)),
+            ),
+            compare_table_row(
+                "Baseline pair",
+                "Есть ли честная baseline/candidate пара из предыдущего scoped observability snapshot.",
+                compare_pair(
+                    "предыдущий scoped snapshot".to_string(),
+                    format_baseline_pair(baseline_run_id, candidate_run_id),
+                ),
+            ),
+            compare_table_row(
+                "Success-rate CI",
+                "Wilson 95% confidence interval для success_rate candidate run.",
+                compare_pair(
+                    "wilson_95".to_string(),
+                    format_statistics_method_summary(
+                        &statistics["methods"]["success_rate_confidence_interval"],
+                    ),
+                ),
+            ),
+            compare_table_row(
+                "Score delta CI",
+                "Pairwise bootstrap percentile 95% interval для score delta. Для payload без score обязан быть not_applicable.",
+                compare_pair(
+                    "bootstrap_percentile_95".to_string(),
+                    format_statistics_method_summary(
+                        &statistics["methods"]["score_delta_confidence_interval"],
+                    ),
+                ),
+            ),
+            compare_table_row(
+                "Mean delta CI",
+                "Pairwise bootstrap percentile 95% interval для mean delta. Для payload без mean_ms обязан быть not_applicable.",
+                compare_pair(
+                    "bootstrap_percentile_95".to_string(),
+                    format_statistics_method_summary(
+                        &statistics["methods"]["mean_delta_confidence_interval"],
+                    ),
+                ),
+            ),
+            compare_table_row(
+                "Median latency CI",
+                "Pairwise bootstrap percentile 95% interval для медианного latency delta.",
+                compare_pair(
+                    "bootstrap_percentile_95".to_string(),
+                    format_statistics_method_summary(
+                        &statistics["methods"]["median_latency_delta_confidence_interval"],
+                    ),
+                ),
+            ),
+            compare_table_row(
+                "P95 latency CI",
+                "Pairwise bootstrap percentile 95% interval для тяжёлого latency tail delta.",
+                compare_pair(
+                    "bootstrap_percentile_95".to_string(),
+                    format_statistics_method_summary(
+                        &statistics["methods"]["p95_latency_delta_confidence_interval"],
+                    ),
+                ),
+            ),
+            compare_table_row(
+                "Verdict drift",
+                "Jensen-Shannon divergence для распределения eval verdict classes между baseline и candidate.",
+                compare_pair(
+                    "jensen_shannon_divergence".to_string(),
+                    format_statistics_method_summary(
+                        &statistics["methods"]["verdict_distribution_drift"],
+                    ),
+                ),
+            ),
+            compare_table_row(
+                "Latency drift",
+                "Kolmogorov-Smirnov statistic для latency distribution между baseline и candidate.",
+                compare_pair(
+                    "kolmogorov_smirnov".to_string(),
+                    format_statistics_method_summary(
+                        &statistics["methods"]["latency_distribution_drift"],
+                    ),
+                ),
+            ),
+            compare_table_row(
+                "Drift summary",
+                "Честный aggregate status статистического compare/drift contour.",
+                compare_pair(
+                    "measured после materialized baseline pair".to_string(),
+                    format_drift_summary(statistics),
+                ),
+            ),
+            compare_table_row(
+                "Promotion",
+                "Final promotion law materialized отдельно от statistics completeness. Карточка должна показывать отдельный policy state, а не путать его с completeness-only fail-closed сигналом.",
+                compare_pair(
+                    "separate measured approval law".to_string(),
+                    format_promotion_summary(promotion_law),
+                ),
+            ),
+            compare_table_row(
+                "Measured approval",
+                "Отдельный measured approval review packet обязан честно говорить, готов ли benchmark contour к human sign-off, без auto-promotion и без подмены promotion law.",
+                compare_pair(
+                    "explicit human sign-off".to_string(),
+                    format_measured_approval_summary(measured_approval),
+                ),
+            ),
+        ],
+    )
+}
+
+fn format_baseline_pair(baseline_run_id: Option<&str>, candidate_run_id: Option<&str>) -> String {
+    let baseline = baseline_run_id.filter(|value| !value.is_empty());
+    let candidate = candidate_run_id.filter(|value| !value.is_empty());
+    match (baseline, candidate) {
+        (Some(baseline), Some(candidate)) => {
+            format!(
+                "{} → {}",
+                shorten_run_id(baseline),
+                shorten_run_id(candidate)
+            )
+        }
+        (None, Some(candidate)) => {
+            format!("ещё нет baseline → {}", shorten_run_id(candidate))
+        }
+        (Some(baseline), None) => format!("{} → ещё нет candidate", shorten_run_id(baseline)),
+        (None, None) => "ещё нет данных".to_string(),
+    }
+}
+
+fn shorten_run_id(run_id: &str) -> String {
+    run_id.chars().take(8).collect()
+}
+
+fn format_statistics_method_summary(method: &Value) -> String {
+    let status = method["status"].as_str().unwrap_or("ещё нет данных");
+    match status {
+        "measured" => {
+            if method["metric"].as_str() == Some("success_rate")
+                && method["lower"].is_number()
+                && method["upper"].is_number()
+            {
+                return format!(
+                    "measured • [{}; {}]",
+                    format_ratio_percent(method["lower"].as_f64()),
+                    format_ratio_percent(method["upper"].as_f64()),
+                );
+            }
+            if method["delta"].is_number()
+                && method["lower"].is_number()
+                && method["upper"].is_number()
+            {
+                return format!(
+                    "measured • Δ {} • [{}; {}]",
+                    format_signed_decimal(method["delta"].as_f64()),
+                    format_signed_decimal(method["lower"].as_f64()),
+                    format_signed_decimal(method["upper"].as_f64()),
+                );
+            }
+            if method["value"].is_number() {
+                return format!(
+                    "measured • {}",
+                    format_signed_decimal(method["value"].as_f64())
+                );
+            }
+            "measured".to_string()
+        }
+        "not_applicable" | "not_measured" => format!(
+            "{} • {}",
+            status,
+            method["reason"].as_str().unwrap_or("reason_missing")
+        ),
+        _ => status.to_string(),
+    }
+}
+
+fn format_signed_decimal(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:+.4}"))
+        .unwrap_or_else(|| "ещё нет данных".to_string())
+}
+
+fn format_drift_summary(statistics: &Value) -> String {
+    let status = statistics["drift_summary"]["status"]
+        .as_str()
+        .unwrap_or("ещё нет данных");
+    let measured = statistics["drift_summary"]["measured_methods"]
+        .as_array()
+        .map(|items| items.len())
+        .unwrap_or(0);
+    let not_applicable = statistics["drift_summary"]["not_applicable_methods"]
+        .as_array()
+        .map(|items| items.len())
+        .unwrap_or(0);
+    let not_measured = statistics["drift_summary"]["not_measured_methods"]
+        .as_array()
+        .map(|items| items.len())
+        .unwrap_or(0);
+    format!(
+        "{} • measured {} • not_applicable {} • not_measured {}",
+        status, measured, not_applicable, not_measured
+    )
+}
+
+fn format_benchmark_compare_headline(
+    sample_size: Option<u64>,
+    drift_status: &str,
+    promotion_law: &Value,
+    measured_approval: Option<&Value>,
+) -> String {
+    let promotion_state = promotion_law["state"]
+        .as_str()
+        .or_else(|| promotion_law["verdict"].as_str())
+        .unwrap_or("ещё нет данных");
+    let approval_state = measured_approval
+        .and_then(|value| {
+            value["state"]
+                .as_str()
+                .or_else(|| value["verdict"].as_str())
+        })
+        .unwrap_or("ещё нет данных");
+    format!(
+        "{} задач • drift {} • promotion {} • approval {}",
+        format_u64(sample_size),
+        drift_status,
+        promotion_state,
+        approval_state,
+    )
+}
+
+fn known_promotion_law_state(state: &str) -> bool {
+    matches!(
+        state,
+        "blocked_statistics_incomplete"
+            | "blocked_benchmark_gates"
+            | "candidate_ready_for_measured_approval"
+    )
+}
+
+fn known_measured_approval_state(state: &str) -> bool {
+    matches!(
+        state,
+        "blocked_promotion_law_missing"
+            | "blocked_statistics_incomplete"
+            | "blocked_benchmark_gates"
+            | "blocked_promotion_law_unexpected_state"
+            | "blocked_evidence_incomplete"
+            | "pending_human_review"
+    )
+}
+
+fn format_promotion_summary(promotion: &Value) -> String {
+    let verdict = promotion["verdict"].as_str().unwrap_or("ещё нет данных");
+    let state = promotion["state"].as_str();
+    let fail_closed = promotion["fail_closed"]
+        .as_bool()
+        .map(|value| {
+            if value {
+                "fail_closed"
+            } else {
+                "not_fail_closed"
+            }
+        })
+        .unwrap_or("ещё нет данных");
+    let reason = promotion["reason"].as_str().unwrap_or("ещё нет данных");
+    match state {
+        Some(state) => format!("{verdict} • {state} • {fail_closed} • {reason}"),
+        None => format!("{verdict} • {fail_closed} • {reason}"),
+    }
+}
+
+fn format_measured_approval_summary(measured_approval: Option<&Value>) -> String {
+    let Some(measured_approval) = measured_approval else {
+        return "ещё не materialized".to_string();
+    };
+    let verdict = measured_approval["verdict"]
+        .as_str()
+        .unwrap_or("ещё нет данных");
+    let state = measured_approval["state"]
+        .as_str()
+        .unwrap_or("ещё нет данных");
+    let fail_closed = measured_approval["fail_closed"]
+        .as_bool()
+        .map(|value| {
+            if value {
+                "fail_closed"
+            } else {
+                "not_fail_closed"
+            }
+        })
+        .unwrap_or("ещё нет данных");
+    let reason = measured_approval["reason"]
+        .as_str()
+        .unwrap_or("ещё нет данных");
+    if verdict == "pending_human_review" {
+        format!("{verdict} • review_packet_ready • {reason}")
+    } else {
+        format!("{verdict} • {state} • {fail_closed} • {reason}")
+    }
 }
 
 fn hot_retrieval_benchmark_status(hot_retrieval: &Value, thresholds: &Value) -> &'static str {
@@ -1510,6 +1997,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn benchmark_source_sentence_renders_snapshot_with_scope_and_suffix() {
+        let text = benchmark_source_sentence(BenchmarkSourceKind::Snapshot {
+            snapshot_key: "latest_retrieval_hot",
+            payload_root: "benchmark",
+            scope: Some("project=amai / namespace=continuity"),
+            suffix: Some("Этот snapshot напрямую кормит SLA retrieval.hot_p95_ms"),
+        });
+
+        assert!(text.contains("Источник: benchmark snapshot latest_retrieval_hot.benchmark."));
+        assert!(
+            text.contains(
+                "Это read-only measured source; live-данные страницы сюда не подмешиваются"
+            )
+        );
+        assert!(text.contains("Scope: project=amai / namespace=continuity"));
+        assert!(text.contains("Этот snapshot напрямую кормит SLA retrieval.hot_p95_ms"));
+    }
+
+    #[test]
+    fn benchmark_source_sentence_renders_live_progress_boundary() {
+        let text = benchmark_source_sentence(BenchmarkSourceKind::LiveProgress {
+            progress_key: "cold_path_benchmark_progress.cold_benchmark_progress",
+            final_snapshot_key: "latest_cold_path_benchmark",
+        });
+
+        assert!(text.contains(
+            "Источник: live progress cold_path_benchmark_progress.cold_benchmark_progress."
+        ));
+        assert!(text.contains("Это частичный online-progress, а не финальный snapshot"));
+        assert!(text.contains("latest_cold_path_benchmark обновится после завершения прогона"));
+    }
+
+    #[test]
     fn benchmark_cards_name_lanes_explicitly() {
         let snapshot = json!({
             "latest_retrieval_load_hot": {
@@ -1688,6 +2208,179 @@ mod tests {
                     }
                 }
             },
+            "latest_memory_task_matrix": {
+                "_observability": {
+                    "captured_at_epoch_ms": 7
+                },
+                "memory_task_matrix": {
+                    "statistics": {
+                        "statistics_version": "benchmark-statistics-v1",
+                        "sample_size": 7,
+                        "baseline_run_id": "11111111-1111-1111-1111-111111111111",
+                        "candidate_run_id": "22222222-2222-2222-2222-222222222222",
+                        "methods": {
+                            "success_rate_confidence_interval": {
+                                "status": "measured",
+                                "metric": "success_rate",
+                                "lower": 0.91,
+                                "upper": 1.0
+                            },
+                            "score_delta_confidence_interval": {
+                                "status": "measured",
+                                "metric": "score_delta",
+                                "delta": 0.125,
+                                "lower": 0.0501,
+                                "upper": 0.2017
+                            },
+                            "mean_delta_confidence_interval": {
+                                "status": "not_applicable",
+                                "metric": "mean_delta",
+                                "reason": "metric_not_available_for_payload_kind"
+                            },
+                            "median_latency_delta_confidence_interval": {
+                                "status": "measured",
+                                "metric": "median_latency_delta",
+                                "delta": -1.0,
+                                "lower": -2.0,
+                                "upper": -0.5
+                            },
+                            "p95_latency_delta_confidence_interval": {
+                                "status": "measured",
+                                "metric": "p95_latency_delta",
+                                "delta": -2.0,
+                                "lower": -3.0,
+                                "upper": -1.0
+                            },
+                            "verdict_distribution_drift": {
+                                "status": "measured",
+                                "metric": "verdict_distribution",
+                                "value": 0.0512
+                            },
+                            "latency_distribution_drift": {
+                                "status": "measured",
+                                "metric": "latency_distribution",
+                                "value": 0.1011
+                            }
+                        },
+                        "drift_summary": {
+                            "status": "measured",
+                            "measured_methods": [
+                                "success_rate_confidence_interval",
+                                "score_delta_confidence_interval",
+                                "median_latency_delta_confidence_interval",
+                                "p95_latency_delta_confidence_interval",
+                                "verdict_distribution_drift",
+                                "latency_distribution_drift"
+                            ],
+                            "not_applicable_methods": [
+                                "mean_delta_confidence_interval"
+                            ],
+                            "not_measured_methods": []
+                        },
+                        "promotion": {
+                            "verdict": "not_promotable",
+                            "fail_closed": false,
+                            "reason": "promotion_policy_not_materialized"
+                        }
+                    },
+                    "promotion_law": {
+                        "verdict": "not_promotable",
+                        "state": "candidate_ready_for_measured_approval",
+                        "fail_closed": false,
+                        "reason": "measured_approval_policy_not_materialized"
+                    },
+                    "measured_approval": {
+                        "verdict": "pending_human_review",
+                        "state": "pending_human_review",
+                        "fail_closed": false,
+                        "reason": "explicit_human_signoff_required"
+                    }
+                }
+            },
+            "latest_mcp_task_matrix": {
+                "_observability": {
+                    "captured_at_epoch_ms": 8
+                },
+                "mcp_task_matrix": {
+                    "statistics": {
+                        "statistics_version": "benchmark-statistics-v1",
+                        "sample_size": 5,
+                        "baseline_run_id": null,
+                        "candidate_run_id": "33333333-3333-3333-3333-333333333333",
+                        "methods": {
+                            "success_rate_confidence_interval": {
+                                "status": "measured",
+                                "metric": "success_rate",
+                                "lower": 0.55,
+                                "upper": 0.92
+                            },
+                            "score_delta_confidence_interval": {
+                                "status": "not_applicable",
+                                "metric": "score_delta",
+                                "reason": "metric_not_available_for_payload_kind"
+                            },
+                            "mean_delta_confidence_interval": {
+                                "status": "not_measured",
+                                "metric": "mean_delta",
+                                "reason": "baseline_candidate_pair_not_materialized"
+                            },
+                            "median_latency_delta_confidence_interval": {
+                                "status": "not_measured",
+                                "metric": "median_latency_delta",
+                                "reason": "baseline_candidate_pair_not_materialized"
+                            },
+                            "p95_latency_delta_confidence_interval": {
+                                "status": "not_measured",
+                                "metric": "p95_latency_delta",
+                                "reason": "baseline_candidate_pair_not_materialized"
+                            },
+                            "verdict_distribution_drift": {
+                                "status": "not_measured",
+                                "metric": "verdict_distribution",
+                                "reason": "baseline_candidate_pair_not_materialized"
+                            },
+                            "latency_distribution_drift": {
+                                "status": "not_measured",
+                                "metric": "latency_distribution",
+                                "reason": "baseline_candidate_pair_not_materialized"
+                            }
+                        },
+                        "drift_summary": {
+                            "status": "not_measured",
+                            "measured_methods": [
+                                "success_rate_confidence_interval"
+                            ],
+                            "not_applicable_methods": [
+                                "score_delta_confidence_interval"
+                            ],
+                            "not_measured_methods": [
+                                "mean_delta_confidence_interval",
+                                "median_latency_delta_confidence_interval",
+                                "p95_latency_delta_confidence_interval",
+                                "verdict_distribution_drift",
+                                "latency_distribution_drift"
+                            ]
+                        },
+                        "promotion": {
+                            "verdict": "not_promotable",
+                            "fail_closed": true,
+                            "reason": "statistics_block_incomplete_for_promotion"
+                        }
+                    },
+                    "promotion_law": {
+                        "verdict": "not_promotable",
+                        "state": "blocked_statistics_incomplete",
+                        "fail_closed": true,
+                        "reason": "statistics_incomplete"
+                    },
+                    "measured_approval": {
+                        "verdict": "blocked",
+                        "state": "blocked_statistics_incomplete",
+                        "fail_closed": true,
+                        "reason": "statistics_incomplete"
+                    }
+                }
+            },
             "procedural_benchmark_history": {
                 "history_count": 2,
                 "with_amai_history_count": 2,
@@ -1790,6 +2483,24 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("источник SLA-метрики retrieval.hot_p95_ms")
+        );
+        assert!(
+            cards[0]["source_label"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("read-only measured source")
+        );
+        assert!(
+            cards[1]["source_label"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Этот snapshot напрямую кормит SLA retrieval.hot_p95_ms")
+        );
+        assert!(
+            cards[3]["source_label"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("read-only measured source")
         );
         assert_eq!(cards[1]["headline_value"].as_str(), Some("271 ns"));
         assert_eq!(
@@ -1977,7 +2688,56 @@ mod tests {
                 .map(|items| items.len()),
             Some(2)
         );
+        assert_eq!(
+            cards[6]["title"].as_str(),
+            Some("Memory task matrix compare")
+        );
+        assert_eq!(cards[6]["status"].as_str(), Some("pass"));
+        assert_eq!(
+            cards[6]["headline_value"].as_str(),
+            Some(
+                "7 задач • drift measured • promotion candidate_ready_for_measured_approval • approval pending_human_review"
+            )
+        );
+        assert_eq!(
+            cards[6]["table"]["rows"][2]["values"][1].as_str(),
+            Some("11111111 → 22222222")
+        );
+        assert_eq!(
+            cards[6]["table"]["rows"][5]["values"][1].as_str(),
+            Some("not_applicable • metric_not_available_for_payload_kind")
+        );
+        assert_eq!(cards[7]["title"].as_str(), Some("MCP task matrix compare"));
+        assert_eq!(cards[7]["status"].as_str(), Some("waiting"));
+        assert_eq!(
+            cards[7]["headline_value"].as_str(),
+            Some("5 задач • baseline pair ещё не materialized")
+        );
+        assert_eq!(
+            cards[7]["table"]["rows"][2]["values"][1].as_str(),
+            Some("ещё нет baseline → 33333333")
+        );
+        assert_eq!(
+            cards[7]["table"]["rows"][10]["values"][1].as_str(),
+            Some("not_measured • measured 1 • not_applicable 1 • not_measured 5")
+        );
+        assert_eq!(
+            cards[7]["table"]["rows"][11]["values"][1].as_str(),
+            Some(
+                "not_promotable • blocked_statistics_incomplete • fail_closed • statistics_incomplete"
+            )
+        );
+        assert_eq!(
+            cards[6]["table"]["rows"][12]["values"][1].as_str(),
+            Some("pending_human_review • review_packet_ready • explicit_human_signoff_required")
+        );
+        assert_eq!(
+            cards[7]["table"]["rows"][12]["values"][1].as_str(),
+            Some("blocked • blocked_statistics_incomplete • fail_closed • statistics_incomplete")
+        );
         assert!(titles.contains(&"Память и изоляция"));
+        assert!(titles.contains(&"Memory task matrix compare"));
+        assert!(titles.contains(&"MCP task matrix compare"));
     }
 
     #[test]
@@ -2146,6 +2906,12 @@ mod tests {
                 .unwrap_or_default()
                 .contains("обновляются по мере прогона")
         );
+        assert!(
+            cold_card["source_label"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Это частичный online-progress, а не финальный snapshot")
+        );
         assert_eq!(
             cold_card["table"]["columns"][2]["label"].as_str(),
             Some("Онлайн\nсейчас")
@@ -2184,5 +2950,484 @@ mod tests {
                 .unwrap_or_default()
                 .contains("Сейчас индексируется репозиторий Amai")
         );
+    }
+
+    #[test]
+    fn benchmark_statistics_headline_uses_promotion_law_and_measured_approval_states() {
+        let promotion_law = json!({
+            "verdict": "not_promotable",
+            "state": "candidate_ready_for_measured_approval",
+            "fail_closed": false,
+            "reason": "measured_approval_policy_not_materialized"
+        });
+        let measured_approval = json!({
+            "verdict": "pending_human_review",
+            "state": "pending_human_review",
+            "fail_closed": false,
+            "reason": "explicit_human_signoff_required"
+        });
+
+        assert_eq!(
+            format_benchmark_compare_headline(
+                Some(7),
+                "measured",
+                &promotion_law,
+                Some(&measured_approval),
+            ),
+            "7 задач • drift measured • promotion candidate_ready_for_measured_approval • approval pending_human_review"
+        );
+    }
+
+    #[test]
+    fn format_measured_approval_summary_surfaces_fail_closed_for_blocked_state() {
+        let measured_approval = json!({
+            "verdict": "blocked",
+            "state": "blocked_promotion_law_missing",
+            "fail_closed": true,
+            "reason": "promotion_law_missing"
+        });
+
+        assert_eq!(
+            format_measured_approval_summary(Some(&measured_approval)),
+            "blocked • blocked_promotion_law_missing • fail_closed • promotion_law_missing"
+        );
+    }
+
+    #[test]
+    fn benchmark_statistics_card_marks_fail_closed_partial_measurement_as_critical() {
+        let snapshot = json!({
+            "latest_memory_task_matrix": {
+                "_observability": {
+                    "captured_at_epoch_ms": 42
+                },
+                "memory_task_matrix": {
+                    "statistics": {
+                        "statistics_version": "benchmark-statistics-v1",
+                        "sample_size": 4,
+                        "baseline_run_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                        "candidate_run_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                        "methods": {
+                            "success_rate_confidence_interval": {
+                                "status": "measured",
+                                "metric": "success_rate",
+                                "lower": 0.6,
+                                "upper": 0.9
+                            },
+                            "score_delta_confidence_interval": {
+                                "status": "measured",
+                                "metric": "score_delta",
+                                "delta": 0.1,
+                                "lower": 0.01,
+                                "upper": 0.2
+                            },
+                            "mean_delta_confidence_interval": {
+                                "status": "not_applicable",
+                                "metric": "mean_delta",
+                                "reason": "metric_not_available_for_payload_kind"
+                            },
+                            "median_latency_delta_confidence_interval": {
+                                "status": "measured",
+                                "metric": "median_latency_delta",
+                                "delta": -2.0,
+                                "lower": -3.0,
+                                "upper": -1.0
+                            },
+                            "p95_latency_delta_confidence_interval": {
+                                "status": "not_measured",
+                                "metric": "p95_latency_delta",
+                                "reason": "insufficient_pairwise_samples"
+                            },
+                            "verdict_distribution_drift": {
+                                "status": "measured",
+                                "metric": "verdict_distribution",
+                                "value": 0.041
+                            },
+                            "latency_distribution_drift": {
+                                "status": "measured",
+                                "metric": "latency_distribution",
+                                "value": 0.082
+                            }
+                        },
+                        "drift_summary": {
+                            "status": "partially_measured",
+                            "measured_methods": [
+                                "success_rate_confidence_interval",
+                                "score_delta_confidence_interval",
+                                "median_latency_delta_confidence_interval",
+                                "verdict_distribution_drift",
+                                "latency_distribution_drift"
+                            ],
+                            "not_applicable_methods": [
+                                "mean_delta_confidence_interval"
+                            ],
+                            "not_measured_methods": [
+                                "p95_latency_delta_confidence_interval"
+                            ]
+                        },
+                        "promotion": {
+                            "verdict": "not_promotable",
+                            "fail_closed": false,
+                            "reason": "promotion_policy_not_materialized"
+                        }
+                    },
+                    "promotion_law": {
+                        "verdict": "not_promotable",
+                        "state": "blocked_statistics_incomplete",
+                        "fail_closed": true,
+                        "reason": "statistics_incomplete"
+                    },
+                    "measured_approval": {
+                        "verdict": "blocked",
+                        "state": "blocked_statistics_incomplete",
+                        "fail_closed": true,
+                        "reason": "statistics_incomplete"
+                    }
+                }
+            }
+        });
+
+        let card = benchmark_statistics_card(
+            &snapshot,
+            "latest_memory_task_matrix",
+            "memory_task_matrix",
+            "Memory task matrix compare",
+            "note",
+        );
+
+        assert_eq!(card["status"].as_str(), Some("critical"));
+        assert_eq!(
+            card["headline_value"].as_str(),
+            Some(
+                "4 задач • drift partially_measured • promotion blocked_statistics_incomplete • approval blocked_statistics_incomplete"
+            )
+        );
+    }
+
+    #[test]
+    fn benchmark_statistics_card_fail_closes_when_policy_blocks_are_missing() {
+        let snapshot = json!({
+            "latest_memory_task_matrix": {
+                "_observability": {
+                    "captured_at_epoch_ms": 42
+                },
+                "memory_task_matrix": {
+                    "statistics": {
+                        "statistics_version": "benchmark-statistics-v1",
+                        "sample_size": 3,
+                        "baseline_run_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                        "candidate_run_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                        "methods": {
+                            "success_rate_confidence_interval": {
+                                "status": "measured",
+                                "metric": "success_rate",
+                                "lower": 0.5,
+                                "upper": 0.9
+                            }
+                        },
+                        "drift_summary": {
+                            "status": "measured",
+                            "measured_methods": [
+                                "success_rate_confidence_interval"
+                            ],
+                            "not_applicable_methods": [],
+                            "not_measured_methods": []
+                        },
+                        "promotion": {
+                            "verdict": "not_promotable",
+                            "fail_closed": false,
+                            "reason": "promotion_policy_not_materialized"
+                        }
+                    }
+                }
+            }
+        });
+
+        let card = benchmark_statistics_card(
+            &snapshot,
+            "latest_memory_task_matrix",
+            "memory_task_matrix",
+            "Memory task matrix compare",
+            "note",
+        );
+
+        assert_eq!(card["status"].as_str(), Some("critical"));
+        assert_eq!(
+            card["headline_value"].as_str(),
+            Some("3 задач • drift measured • promotion not_promotable • approval ещё нет данных")
+        );
+        assert_eq!(
+            card["table"]["rows"][11]["values"][1].as_str(),
+            Some("not_promotable • not_fail_closed • promotion_policy_not_materialized")
+        );
+        assert_eq!(
+            card["table"]["rows"][12]["values"][1].as_str(),
+            Some("ещё не materialized")
+        );
+    }
+
+    #[test]
+    fn benchmark_statistics_card_marks_measured_approval_fail_closed_as_critical() {
+        let snapshot = json!({
+            "latest_memory_task_matrix": {
+                "_observability": {
+                    "captured_at_epoch_ms": 42
+                },
+                "memory_task_matrix": {
+                    "statistics": {
+                        "statistics_version": "benchmark-statistics-v1",
+                        "sample_size": 5,
+                        "baseline_run_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                        "candidate_run_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                        "methods": {
+                            "success_rate_confidence_interval": {
+                                "status": "measured",
+                                "metric": "success_rate",
+                                "lower": 0.5,
+                                "upper": 0.9
+                            }
+                        },
+                        "drift_summary": {
+                            "status": "measured",
+                            "measured_methods": [
+                                "success_rate_confidence_interval"
+                            ],
+                            "not_applicable_methods": [],
+                            "not_measured_methods": []
+                        },
+                        "promotion": {
+                            "verdict": "not_promotable",
+                            "fail_closed": false,
+                            "reason": "promotion_policy_not_materialized"
+                        }
+                    },
+                    "promotion_law": {
+                        "verdict": "not_promotable",
+                        "state": "candidate_ready_for_measured_approval",
+                        "fail_closed": false,
+                        "reason": "measured_approval_policy_not_materialized"
+                    },
+                    "measured_approval": {
+                        "verdict": "blocked",
+                        "state": "blocked_promotion_law_missing",
+                        "fail_closed": true,
+                        "reason": "promotion_law_missing"
+                    }
+                }
+            }
+        });
+
+        let card = benchmark_statistics_card(
+            &snapshot,
+            "latest_memory_task_matrix",
+            "memory_task_matrix",
+            "Memory task matrix compare",
+            "note",
+        );
+
+        assert_eq!(card["status"].as_str(), Some("critical"));
+        assert_eq!(
+            card["headline_value"].as_str(),
+            Some(
+                "5 задач • drift measured • promotion candidate_ready_for_measured_approval • approval blocked_promotion_law_missing"
+            )
+        );
+        assert_eq!(
+            card["table"]["rows"][12]["values"][1].as_str(),
+            Some("blocked • blocked_promotion_law_missing • fail_closed • promotion_law_missing")
+        );
+    }
+
+    #[test]
+    fn benchmark_statistics_card_marks_blocked_benchmark_gates_as_critical() {
+        let snapshot = json!({
+            "latest_memory_task_matrix": {
+                "_observability": {
+                    "captured_at_epoch_ms": 42
+                },
+                "memory_task_matrix": {
+                    "statistics": {
+                        "statistics_version": "benchmark-statistics-v1",
+                        "sample_size": 5,
+                        "baseline_run_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                        "candidate_run_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                        "methods": {
+                            "success_rate_confidence_interval": {
+                                "status": "measured",
+                                "metric": "success_rate",
+                                "lower": 0.5,
+                                "upper": 0.9
+                            }
+                        },
+                        "drift_summary": {
+                            "status": "measured",
+                            "measured_methods": [
+                                "success_rate_confidence_interval"
+                            ],
+                            "not_applicable_methods": [],
+                            "not_measured_methods": []
+                        },
+                        "promotion": {
+                            "verdict": "not_promotable",
+                            "fail_closed": false,
+                            "reason": "promotion_policy_not_materialized"
+                        }
+                    },
+                    "promotion_law": {
+                        "verdict": "not_promotable",
+                        "state": "blocked_benchmark_gates",
+                        "fail_closed": false,
+                        "reason": "benchmark_gates_not_met"
+                    },
+                    "measured_approval": {
+                        "verdict": "blocked",
+                        "state": "blocked_benchmark_gates",
+                        "fail_closed": false,
+                        "reason": "benchmark_gates_not_met"
+                    }
+                }
+            }
+        });
+
+        let card = benchmark_statistics_card(
+            &snapshot,
+            "latest_memory_task_matrix",
+            "memory_task_matrix",
+            "Memory task matrix compare",
+            "note",
+        );
+
+        assert_eq!(card["status"].as_str(), Some("critical"));
+        assert_eq!(
+            card["headline_value"].as_str(),
+            Some(
+                "5 задач • drift measured • promotion blocked_benchmark_gates • approval blocked_benchmark_gates"
+            )
+        );
+        assert_eq!(
+            card["table"]["rows"][12]["values"][1].as_str(),
+            Some("blocked • blocked_benchmark_gates • not_fail_closed • benchmark_gates_not_met")
+        );
+    }
+
+    #[test]
+    fn benchmark_statistics_card_fail_closes_when_materialized_policy_state_is_missing() {
+        let snapshot = json!({
+            "latest_memory_task_matrix": {
+                "_observability": {
+                    "captured_at_epoch_ms": 42
+                },
+                "memory_task_matrix": {
+                    "statistics": {
+                        "statistics_version": "benchmark-statistics-v1",
+                        "sample_size": 5,
+                        "baseline_run_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                        "candidate_run_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                        "methods": {
+                            "success_rate_confidence_interval": {
+                                "status": "measured",
+                                "metric": "success_rate",
+                                "lower": 0.5,
+                                "upper": 0.9
+                            }
+                        },
+                        "drift_summary": {
+                            "status": "measured",
+                            "measured_methods": [
+                                "success_rate_confidence_interval"
+                            ],
+                            "not_applicable_methods": [],
+                            "not_measured_methods": []
+                        },
+                        "promotion": {
+                            "verdict": "not_promotable",
+                            "fail_closed": false,
+                            "reason": "promotion_policy_not_materialized"
+                        }
+                    },
+                    "promotion_law": {
+                        "verdict": "not_promotable",
+                        "fail_closed": false,
+                        "reason": "state_missing_from_payload"
+                    },
+                    "measured_approval": {
+                        "verdict": "blocked",
+                        "fail_closed": false,
+                        "reason": "state_missing_from_payload"
+                    }
+                }
+            }
+        });
+
+        let card = benchmark_statistics_card(
+            &snapshot,
+            "latest_memory_task_matrix",
+            "memory_task_matrix",
+            "Memory task matrix compare",
+            "note",
+        );
+
+        assert_eq!(card["status"].as_str(), Some("critical"));
+    }
+
+    #[test]
+    fn benchmark_statistics_card_fail_closes_when_materialized_policy_state_is_unexpected() {
+        let snapshot = json!({
+            "latest_memory_task_matrix": {
+                "_observability": {
+                    "captured_at_epoch_ms": 42
+                },
+                "memory_task_matrix": {
+                    "statistics": {
+                        "statistics_version": "benchmark-statistics-v1",
+                        "sample_size": 5,
+                        "baseline_run_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                        "candidate_run_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                        "methods": {
+                            "success_rate_confidence_interval": {
+                                "status": "measured",
+                                "metric": "success_rate",
+                                "lower": 0.5,
+                                "upper": 0.9
+                            }
+                        },
+                        "drift_summary": {
+                            "status": "measured",
+                            "measured_methods": [
+                                "success_rate_confidence_interval"
+                            ],
+                            "not_applicable_methods": [],
+                            "not_measured_methods": []
+                        },
+                        "promotion": {
+                            "verdict": "not_promotable",
+                            "fail_closed": false,
+                            "reason": "promotion_policy_not_materialized"
+                        }
+                    },
+                    "promotion_law": {
+                        "verdict": "not_promotable",
+                        "state": "unexpected_future_state",
+                        "fail_closed": false,
+                        "reason": "state_not_understood"
+                    },
+                    "measured_approval": {
+                        "verdict": "blocked",
+                        "state": "unexpected_future_state",
+                        "fail_closed": false,
+                        "reason": "state_not_understood"
+                    }
+                }
+            }
+        });
+
+        let card = benchmark_statistics_card(
+            &snapshot,
+            "latest_memory_task_matrix",
+            "memory_task_matrix",
+            "Memory task matrix compare",
+            "note",
+        );
+
+        assert_eq!(card["status"].as_str(), Some("critical"));
     }
 }

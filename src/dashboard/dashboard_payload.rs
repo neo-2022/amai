@@ -82,6 +82,7 @@ pub fn build_live_summary_payload(
         "headline": build_headline(snapshot, captured_at_epoch_ms),
         "active_agent_card": build_active_agent_budget_session_card(snapshot),
         "top_cards": build_top_cards(snapshot),
+        "service_cards": build_service_cards(snapshot),
     }))
 }
 
@@ -312,6 +313,7 @@ mod tests {
         assert_eq!(top_cards.len(), 2);
         assert_eq!(top_cards[0]["title"].as_str(), Some("Скорость ответа"));
         assert_eq!(top_cards[1]["title"].as_str(), Some("Текущая работа"));
+        assert!(payload["service_cards"].is_array());
     }
 
     #[test]

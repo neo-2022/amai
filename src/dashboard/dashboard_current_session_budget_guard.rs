@@ -1,5 +1,8 @@
 use super::*;
 
+pub(super) const CLIENT_BUDGET_ADVISORY_STATUS_PREFIX: &str =
+    "Это advisory-статус для оператора и он требует внимания по следующим причинам:";
+
 pub fn current_session_budget_guard(snapshot: &Value) -> Value {
     current_session_budget_guard_with_restore_context(
         snapshot,
@@ -228,15 +231,14 @@ fn current_session_budget_guard_with_restore_context(
     } else if session_full_turn_savings_pct.is_none()
         && current_session_client_live_meter_available(client_live_meter)
     {
-        Some(
-            "Статус требует внимания по следующим причинам:\n- Для текущего живого turn ещё нет доказанной same-turn пары `без Amai / с Amai`.\n- Значит реальную экономию на полной шкале клиента пока нельзя честно показать числом.\n- Пока эта пара не materialized, нижняя строка про учтённую часть остаётся внутренним Amai-срезом, а не полным client spend.\n- Чтобы получить реальную экономию, нужно быстрее фиксировать exact pair на коротком live turn и для этого сначала сжать текущий giant thread через same-thread compact window, а не расширять его новыми ходами."
-                .to_string(),
-        )
+        Some(format!(
+            "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- Для текущего живого turn ещё нет доказанной same-turn пары `без Amai / с Amai`.\n- Значит реальную экономию на полной шкале клиента пока нельзя честно показать числом.\n- Пока эта пара не materialized, нижняя строка про учтённую часть остаётся внутренним Amai-срезом, а не полным client spend.\n- Чтобы получить реальную экономию, нужно быстрее фиксировать exact pair на коротком live turn и для этого сначала сжать текущий giant thread через same-thread compact window, а не расширять его новыми ходами."
+        ))
     } else if let Some(full_turn_savings_pct) = session_full_turn_savings_pct
         .filter(|value| client_budget_target_active && *value < client_budget_target_percent_f64)
     {
         Some(format!(
-            "Статус требует внимания по следующим причинам:\n- Реальная экономия на полной шкале клиента сейчас всего {}.\n- {}\n- Значит текущий thread пока жжёт почти весь полный client turn/context, а Amai экономит только малую долю.\n- Чтобы реально улучшить картину без потери точности, нужно дальше уменьшать полный размер turn и жёстко удерживать same-thread compact surface, чтобы следующий exact pair materialized на коротком live turn.",
+            "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- Реальная экономия на полной шкале клиента сейчас всего {}.\n- {}\n- Значит текущий thread пока жжёт почти весь полный client turn/context, а Amai экономит только малую долю.\n- Чтобы реально улучшить картину без потери точности, нужно дальше уменьшать полный размер turn и жёстко удерживать same-thread compact surface, чтобы следующий exact pair materialized на коротком live turn.",
             format_percent(Some(full_turn_savings_pct)),
             client_budget_target_sentence(client_budget_target_percent)
         ))
@@ -246,7 +248,7 @@ fn current_session_budget_guard_with_restore_context(
         })
     {
         Some(format!(
-            "Статус требует внимания по следующим причинам:\n- В этой сессии savings-KPI пока не показывает положительную подтверждённую экономию.\n- При этом observed continuity startup уже сжёг {} токенов.\n- Strict same-meter slice по клиентскому запросу пока даёт только {} токенов.\n- Значит лимит сейчас уходит главным образом в continuity restore, а не в retrieval/workflow effect.",
+            "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- В этой сессии savings-KPI пока не показывает положительную подтверждённую экономию.\n- При этом observed continuity startup уже сжёг {} токенов.\n- Strict same-meter slice по клиентскому запросу пока даёт только {} токенов.\n- Значит лимит сейчас уходит главным образом в continuity restore, а не в retrieval/workflow effect.",
             format_u64(Some(boundary_tokens)),
             format_u64(Some(strict_tokens))
         ))
@@ -257,7 +259,7 @@ fn current_session_budget_guard_with_restore_context(
         )
     } else if session_events > 0 && session_saved.unwrap_or_default() < 0 {
         Some(format!(
-            "Статус требует внимания по следующим причинам:\n- В подтверждённой части текущей сессии экономия сейчас отрицательная: {}.\n- Это значит, что в уже проверенных случаях контекст от Amai вышел тяжелее обычного пути без Amai.\n- Нижние строки со всем живым потоком показаны отдельно и не отменяют этот итог.",
+            "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- В подтверждённой части текущей сессии экономия сейчас отрицательная: {}.\n- Это значит, что в уже проверенных случаях контекст от Amai вышел тяжелее обычного пути без Amai.\n- Нижние строки со всем живым потоком показаны отдельно и не отменяют этот итог.",
             format_signed_count(session_saved)
         ))
     } else {
@@ -317,6 +319,7 @@ fn current_session_budget_guard_with_restore_context(
                 same_thread_compaction_advisory,
             )
         });
+    let delivery_surface_status_label = delivery_surface_status_label(status_label);
     let global_limit_note = global_limit_guard.map(|guard| {
         global_client_limit_guard_note(
             guard,
@@ -361,6 +364,7 @@ fn current_session_budget_guard_with_restore_context(
         "source": "dashboard_current_session_budget_guard_v2",
         "status": status,
         "status_label": status_label,
+        "delivery_surface_status_label": delivery_surface_status_label,
         "reply_prefix": reply_prefix,
         "global_reply_prefix": global_reply_prefix,
         "reply_prefix_source": reply_prefix_source,
@@ -571,6 +575,7 @@ pub(super) fn build_client_budget_reply_execution_gate_with_primary_command(
         "gate_version": "client-reply-budget-gate-v1",
         "status": status,
         "status_label": status_label,
+        "delivery_surface_status_label": delivery_surface_status_label(status_label),
         "reply_prefix": reply_prefix,
         "global_reply_prefix": global_reply_prefix,
         "reply_prefix_source": reply_prefix_source,
@@ -598,6 +603,7 @@ pub(super) fn build_client_budget_reply_execution_gate_with_primary_command(
             host_context_compaction_stage.critical_regrowth_active(),
         "save_handoff_before_rotate": save_handoff_before_rotate,
         "fresh_chat_requires_continuity_startup": fresh_chat_requires_continuity_startup,
+        "delivery_surface_requires_continuity_startup": fresh_chat_requires_continuity_startup,
         "full_scale_client_truth_required": true,
         "guard_observed_at_epoch_ms": observed_at_epoch_ms,
         "max_guard_age_seconds": max_guard_age_seconds,
@@ -651,11 +657,27 @@ pub(super) fn build_client_budget_reply_execution_gate_with_primary_command(
                             "fallback_rotate_chat"
                         ]),
                     );
+                    action_bundle.insert(
+                        "delivery_surface_order".to_string(),
+                        json!([
+                            "confirm_same_thread_host_control_feedback",
+                            "measure_existing_same_thread_effect",
+                            "fallback_rotate_chat"
+                        ]),
+                    );
                 } else {
                     action_bundle
                         .insert("measurement_before_retry_required".to_string(), json!(true));
                     action_bundle.insert(
                         "order".to_string(),
+                        json!([
+                            "measure_existing_same_thread_effect",
+                            "reuse_latest_live_diagnostics",
+                            "fallback_rotate_chat"
+                        ]),
+                    );
+                    action_bundle.insert(
+                        "delivery_surface_order".to_string(),
                         json!([
                             "measure_existing_same_thread_effect",
                             "reuse_latest_live_diagnostics",
@@ -728,6 +750,15 @@ pub(super) fn build_client_budget_reply_execution_gate_with_primary_command(
                         "run_continuity_startup"
                     ]),
                 );
+                action_bundle.insert(
+                    "delivery_surface_order".to_string(),
+                    json!([
+                        "confirm_same_thread_host_control_feedback",
+                        "run_rotate_helper",
+                        "open_delivery_surface",
+                        "run_continuity_startup"
+                    ]),
+                );
             }
             if feedback_pending
                 && let Some(operator_flow) = action_bundle
@@ -773,6 +804,14 @@ pub(super) fn build_client_budget_reply_execution_gate_with_primary_command(
                 json!([
                     "run_rotate_helper",
                     "open_fresh_chat",
+                    "run_continuity_startup"
+                ]),
+            );
+            action_bundle.insert(
+                "delivery_surface_order".to_string(),
+                json!([
+                    "run_rotate_helper",
+                    "open_delivery_surface",
                     "run_continuity_startup"
                 ]),
             );
@@ -886,6 +925,10 @@ mod tests {
         assert_eq!(guard["should_rotate_chat_soon"], json!(true));
         assert_eq!(guard["status_label"], json!("сожми текущий чат сейчас"));
         assert_eq!(
+            guard["delivery_surface_status_label"],
+            json!("сожми текущий чат сейчас")
+        );
+        assert_eq!(
             guard["reply_execution_gate"]["gate_version"],
             json!("client-reply-budget-gate-v1")
         );
@@ -919,8 +962,20 @@ mod tests {
             json!(working_state::CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES)
         );
         assert_eq!(
+            guard["reply_execution_gate"]["delivery_surface_requires_continuity_startup"],
+            json!(false)
+        );
+        assert_eq!(
             guard["reply_execution_gate"]["action_bundle"]["bundle_version"],
             json!("rotate-chat-action-bundle-v1")
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["action_bundle"]["delivery_surface_order"],
+            json!([
+                "run_same_thread_host_control",
+                "confirm_surface_effect",
+                "fallback_rotate_chat"
+            ])
         );
         assert_eq!(
             guard["reply_execution_gate"]["action_bundle"]["run_continuity_startup"]["project"],
@@ -1135,7 +1190,7 @@ mod tests {
                     "client_budget_target_percent": 50,
                     "execctl_resume_state": "pending_return_queue_present",
                     "current_goal": "same-thread ctl-launch now materializes fresh thread-bound budget surfaces immediately",
-                    "next_step": "First continue from a fresh chat via continuity startup to satisfy the required return task, then continue reducing remaining current-session/live-turn cost and giant-thread burn.",
+                    "next_step": "First continue from a new clean work surface via continuity startup to satisfy the required return task, then continue reducing remaining current-session/live-turn cost and giant-thread burn.",
                     "thread_id": "",
                     "recent_actions": [{
                         "source_kind": "host_current_thread_control_feedback",
@@ -2073,6 +2128,10 @@ mod tests {
             json!("глобальный лимит клиента почти исчерпан")
         );
         assert_eq!(
+            guard["delivery_surface_status_label"],
+            json!("глобальный лимит клиента почти исчерпан")
+        );
+        assert_eq!(
             guard["reply_execution_gate"]["action_kind"],
             json!("wait_for_global_client_budget_recovery")
         );
@@ -2340,6 +2399,14 @@ mod tests {
                 "run_continuity_startup"
             ])
         );
+        assert_eq!(
+            gate["action_bundle"]["delivery_surface_order"],
+            json!([
+                "run_rotate_helper",
+                "open_delivery_surface",
+                "run_continuity_startup"
+            ])
+        );
     }
 
     #[test]
@@ -2401,6 +2468,15 @@ mod tests {
                 "confirm_same_thread_host_control_feedback",
                 "run_rotate_helper",
                 "open_fresh_chat",
+                "run_continuity_startup"
+            ])
+        );
+        assert_eq!(
+            gate["action_bundle"]["delivery_surface_order"],
+            json!([
+                "confirm_same_thread_host_control_feedback",
+                "run_rotate_helper",
+                "open_delivery_surface",
                 "run_continuity_startup"
             ])
         );

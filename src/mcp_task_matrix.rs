@@ -1,3 +1,6 @@
+use crate::benchmark_measured_approval;
+use crate::benchmark_promotion;
+use crate::benchmark_statistics;
 use crate::bootstrap;
 use crate::cli::VerifyMcpMatrixArgs;
 use crate::config::AppConfig;
@@ -13,6 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tokio::process::Command as ProcessCommand;
+use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
 struct MatrixRegistry {
@@ -146,6 +150,7 @@ async fn run_matrix_inner(
     session: &mut mcp::McpProofSession,
 ) -> Result<()> {
     let db = postgres::connect_admin(cfg).await?;
+    let matrix_run_id = Uuid::new_v4();
     let mut task_results = Vec::with_capacity(ordered_tasks.len());
 
     for (task_code, task) in ordered_tasks {
@@ -173,6 +178,18 @@ async fn run_matrix_inner(
         .unwrap_or_default();
     let mean_ms = mean_f64(&latencies);
 
+    let baseline_snapshot = postgres::list_observability_snapshots_by_kind_for_scope(
+        &db,
+        "mcp_task_matrix",
+        "mcp_task_matrix",
+        "amai",
+        &args.matrix,
+        Some(1),
+    )
+    .await?
+    .into_iter()
+    .next();
+
     let mut class_breakdown = BTreeMap::<String, Value>::new();
     for class in [
         MatrixTaskClass::HappyPath,
@@ -199,30 +216,24 @@ async fn run_matrix_inner(
         );
     }
 
-    if success_rate < args.min_success_rate.unwrap_or(matrix.min_success_rate) {
-        return Err(anyhow!(
-            "MCP task matrix success_rate={success_rate:.3} below required {:.3}",
-            args.min_success_rate.unwrap_or(matrix.min_success_rate)
-        ));
-    }
+    let required_success_rate = args.min_success_rate.unwrap_or(matrix.min_success_rate);
+    let required_max_p95_ms = args.max_p95_ms.or(matrix.max_p95_ms);
+    let gate_failures = matrix_gate_failures(
+        success_rate,
+        required_success_rate,
+        tasks_failed,
+        matrix.max_failures,
+        p95_ms,
+        required_max_p95_ms,
+    );
 
-    if tasks_failed > matrix.max_failures {
-        return Err(anyhow!(
-            "MCP task matrix tasks_failed={} exceeds allowed {}",
-            tasks_failed,
-            matrix.max_failures
-        ));
-    }
-
-    if let Some(limit) = args.max_p95_ms.or(matrix.max_p95_ms)
-        && p95_ms > limit
-    {
-        return Err(anyhow!(
-            "MCP task matrix p95_ms={p95_ms:.3} exceeds allowed {limit:.3}"
-        ));
-    }
-
-    let payload = json!({
+    let mut payload = json!({
+        "_observability": {
+            "source_event_id": matrix_run_id,
+            "source_kind": "mcp_task_matrix_run",
+            "scope_project_code": "amai",
+            "scope_namespace_code": args.matrix,
+        },
         "mcp_task_matrix": {
             "matrix": args.matrix,
             "display_name": matrix.display_name,
@@ -241,6 +252,7 @@ async fn run_matrix_inner(
             "p50_ms": p50_ms,
             "p95_ms": p95_ms,
             "max_ms": max_ms,
+            "gate_failures": gate_failures,
             "class_breakdown": class_breakdown,
             "canonical_eval": eval_verdict::summarize_eval_layer(
                 task_results
@@ -250,10 +262,65 @@ async fn run_matrix_inner(
             "tasks": task_results.iter().map(TaskResult::as_json).collect::<Vec<_>>(),
         }
     });
+    let statistics_gate_failures = gate_failures_from_payload(&payload);
+    let statistics = benchmark_statistics::statistics_block_from_pair(
+        "mcp_task_matrix",
+        &payload,
+        baseline_snapshot.as_ref().map(|record| &record.payload),
+        matrix_run_id,
+        &statistics_gate_failures,
+    );
+    payload["mcp_task_matrix"]["statistics"] = statistics;
+    payload["mcp_task_matrix"]["promotion_law"] =
+        benchmark_promotion::promotion_law_block("mcp_task_matrix", &payload);
+    payload["mcp_task_matrix"]["measured_approval"] =
+        benchmark_measured_approval::measured_approval_block("mcp_task_matrix", &payload);
 
     let _ = postgres::insert_observability_snapshot(&db, "mcp_task_matrix", &payload).await?;
     println!("{}", serde_json::to_string_pretty(&payload)?);
+    if !statistics_gate_failures.is_empty() {
+        return Err(anyhow!(
+            "MCP task matrix failed gates: {}",
+            statistics_gate_failures.join("; ")
+        ));
+    }
     Ok(())
+}
+
+fn matrix_gate_failures(
+    success_rate: f64,
+    required_success_rate: f64,
+    tasks_failed: usize,
+    max_failures: usize,
+    p95_ms: f64,
+    required_max_p95_ms: Option<f64>,
+) -> Vec<String> {
+    let mut gate_failures = Vec::new();
+    if success_rate < required_success_rate {
+        gate_failures.push(format!(
+            "success_rate={success_rate:.3} below required {required_success_rate:.3}"
+        ));
+    }
+    if tasks_failed > max_failures {
+        gate_failures.push(format!(
+            "tasks_failed={tasks_failed} exceeds allowed {max_failures}"
+        ));
+    }
+    if let Some(limit) = required_max_p95_ms
+        && p95_ms > limit
+    {
+        gate_failures.push(format!("p95_ms={p95_ms:.3} exceeds allowed {limit:.3}"));
+    }
+    gate_failures
+}
+
+fn gate_failures_from_payload(payload: &Value) -> Vec<String> {
+    payload["mcp_task_matrix"]["gate_failures"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+        .collect()
 }
 
 async fn run_task(
@@ -551,11 +618,49 @@ async fn run_observe_snapshot_green_task(session: &mut mcp::McpProofSession) -> 
             "observe snapshot not green: critical={critical}, unknown={unknown}"
         ));
     }
+    let observe_refresh_total_ms = response["snapshot"]["observe_refresh"]["total_ms"]
+        .as_u64()
+        .unwrap_or_default();
+    let (observe_refresh_slowest_stage, observe_refresh_slowest_stage_ms) =
+        response["snapshot"]["observe_refresh"]["stage_ms"]
+            .as_object()
+            .map(|stages| {
+                stages
+                    .iter()
+                    .filter_map(|(stage, value)| value.as_u64().map(|ms| (stage.clone(), ms)))
+                    .max_by_key(|(_, ms)| *ms)
+                    .unwrap_or_else(|| ("unknown".to_string(), 0))
+            })
+            .unwrap_or_else(|| ("unknown".to_string(), 0));
+    let token_budget_dashboard_precache_stage_ms = response["snapshot"]["token_budget_report"]
+        ["token_budget_report"]["cache_debug"]["pre_cache_stage_ms"]
+        .clone();
+    let (
+        token_budget_dashboard_precache_slowest_stage,
+        token_budget_dashboard_precache_slowest_stage_ms,
+    ) = token_budget_dashboard_precache_stage_ms
+        .as_object()
+        .map(|stages| {
+            stages
+                .iter()
+                .filter_map(|(stage, value)| value.as_u64().map(|ms| (stage.clone(), ms)))
+                .max_by_key(|(_, ms)| *ms)
+                .unwrap_or_else(|| ("unknown".to_string(), 0))
+        })
+        .unwrap_or_else(|| ("unknown".to_string(), 0));
     Ok(json!({
         "pass": summary["pass"].as_u64().unwrap_or_default(),
         "alert": summary["alert"].as_u64().unwrap_or_default(),
         "critical": critical,
         "unknown": unknown,
+        "observe_refresh_total_ms": observe_refresh_total_ms,
+        "observe_refresh_slowest_stage": observe_refresh_slowest_stage,
+        "observe_refresh_slowest_stage_ms": observe_refresh_slowest_stage_ms,
+        "token_budget_dashboard_precache_stage_ms": token_budget_dashboard_precache_stage_ms,
+        "token_budget_dashboard_precache_slowest_stage":
+            token_budget_dashboard_precache_slowest_stage,
+        "token_budget_dashboard_precache_slowest_stage_ms":
+            token_budget_dashboard_precache_slowest_stage_ms,
     }))
 }
 
@@ -578,23 +683,50 @@ async fn run_token_report_live_task(
         )
         .await?;
     let headline = &response["token_budget_report"]["headline"];
+    let metric_code = headline["metric_code"]
+        .as_str()
+        .ok_or_else(|| anyhow!("token_report headline.metric_code is missing"))?;
+    let headline_events_count = headline["events_count"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("token_report headline.events_count is missing"))?;
+    let headline_counted_events = headline["counted_events"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("token_report headline.counted_events is missing"))?;
     let events_total = response["token_budget_report"]["current_session"]["events_total"]
         .as_u64()
         .ok_or_else(|| anyhow!("token_report current_session.events_total is missing"))?;
-    if headline["metric_code"].as_str() != Some("verified_effective_savings_pct") {
-        return Err(anyhow!(
-            "unexpected token headline metric: {:?}",
-            headline["metric_code"]
-        ));
-    }
-    if events_total == 0 {
-        return Err(anyhow!("token report returned zero current session events"));
-    }
+    let honest_empty_state = match metric_code {
+        "verified_effective_savings_pct" => {
+            if headline_events_count == 0 || headline_counted_events == 0 {
+                return Err(anyhow!(
+                    "token report returned verified_effective_savings_pct without counted headline events"
+                ));
+            }
+            false
+        }
+        "no_live_events" => {
+            if headline_events_count != 0 || headline_counted_events != 0 {
+                return Err(anyhow!(
+                    "token report returned no_live_events despite headline events_count={headline_events_count} counted_events={headline_counted_events}"
+                ));
+            }
+            true
+        }
+        _ => {
+            return Err(anyhow!(
+                "unexpected token headline metric: {:?}",
+                headline["metric_code"]
+            ));
+        }
+    };
     Ok(json!({
         "budget_profile": budget_profile,
-        "metric_code": headline["metric_code"],
+        "metric_code": metric_code,
         "events_total": events_total,
+        "headline_events_count": headline_events_count,
+        "headline_counted_events": headline_counted_events,
         "value_percent": headline["value_percent"],
+        "honest_empty_state": honest_empty_state,
     }))
 }
 
@@ -978,7 +1110,10 @@ impl TaskResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{MatrixTask, MatrixTaskClass, MatrixTaskKind, derive_task_eval, load_registry};
+    use super::{
+        MatrixTask, MatrixTaskClass, MatrixTaskKind, derive_task_eval, gate_failures_from_payload,
+        load_registry, matrix_gate_failures,
+    };
     use crate::eval_verdict::EvalPattern;
     use serde_json::json;
 
@@ -1051,5 +1186,37 @@ mod tests {
         };
         let verdict = derive_task_eval(&task, &json!({"status":"fail_closed"})).expect("verdict");
         assert_eq!(verdict.class_key, "hit_correct_target");
+    }
+
+    #[test]
+    fn matrix_gate_failures_collect_threshold_violations() {
+        assert_eq!(
+            matrix_gate_failures(0.8, 0.9, 2, 0, 26_000.0, Some(25_000.0)),
+            vec![
+                "success_rate=0.800 below required 0.900",
+                "tasks_failed=2 exceeds allowed 0",
+                "p95_ms=26000.000 exceeds allowed 25000.000",
+            ]
+        );
+    }
+
+    #[test]
+    fn gate_failures_are_collected_from_payload() {
+        let payload = json!({
+            "mcp_task_matrix": {
+                "gate_failures": [
+                    "success_rate=0.800 below required 0.900",
+                    "p95_ms=26000.000 exceeds allowed 25000.000"
+                ]
+            }
+        });
+
+        assert_eq!(
+            gate_failures_from_payload(&payload),
+            vec![
+                "success_rate=0.800 below required 0.900",
+                "p95_ms=26000.000 exceeds allowed 25000.000",
+            ]
+        );
     }
 }

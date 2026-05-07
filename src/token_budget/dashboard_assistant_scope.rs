@@ -64,6 +64,97 @@ pub(super) struct DashboardAssistantScopeDebug {
     pub(super) scope_total_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct DashboardAssistantScopeTargetedSummary {
+    pub(super) snapshot_kind: String,
+    pub(super) matched_rows: i64,
+    pub(super) latest_created_at_epoch_ms: Option<i64>,
+}
+
+async fn dashboard_assistant_scope_targeted_string_field_summary(
+    db: &Client,
+    snapshot_kind: &str,
+    payload_root: &str,
+    field_name: &str,
+    target_ids: &BTreeSet<String>,
+) -> Result<DashboardAssistantScopeTargetedSummary> {
+    if target_ids.is_empty() {
+        return Ok(DashboardAssistantScopeTargetedSummary {
+            snapshot_kind: snapshot_kind.to_string(),
+            matched_rows: 0,
+            latest_created_at_epoch_ms: None,
+        });
+    }
+    let target_ids = target_ids.iter().cloned().collect::<Vec<_>>();
+    let row = db
+        .query_one(
+            &format!(
+                r#"
+                SELECT
+                    COUNT(*)::bigint AS matched_rows,
+                    MAX((EXTRACT(EPOCH FROM created_at) * 1000)::bigint) AS latest_created_at_epoch_ms
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = $1
+                  AND payload->'{payload_root}'->>'{field_name}' = ANY($2)
+                "#
+            ),
+            &[&snapshot_kind, &target_ids],
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to summarize targeted {snapshot_kind} snapshots for {payload_root}.{field_name}"
+            )
+        })?;
+    Ok(DashboardAssistantScopeTargetedSummary {
+        snapshot_kind: snapshot_kind.to_string(),
+        matched_rows: row.get(0),
+        latest_created_at_epoch_ms: row.get(1),
+    })
+}
+
+async fn dashboard_assistant_scope_targeted_array_field_summary(
+    db: &Client,
+    snapshot_kind: &str,
+    payload_root: &str,
+    field_name: &str,
+    target_ids: &BTreeSet<String>,
+) -> Result<DashboardAssistantScopeTargetedSummary> {
+    if target_ids.is_empty() {
+        return Ok(DashboardAssistantScopeTargetedSummary {
+            snapshot_kind: snapshot_kind.to_string(),
+            matched_rows: 0,
+            latest_created_at_epoch_ms: None,
+        });
+    }
+    let target_ids = target_ids.iter().cloned().collect::<Vec<_>>();
+    let row = db
+        .query_one(
+            &format!(
+                r#"
+                SELECT
+                    COUNT(*)::bigint AS matched_rows,
+                    MAX((EXTRACT(EPOCH FROM created_at) * 1000)::bigint) AS latest_created_at_epoch_ms
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = $1
+                  AND ((payload->'{payload_root}'->'{field_name}') ?| $2)
+                "#
+            ),
+            &[&snapshot_kind, &target_ids],
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to summarize targeted {snapshot_kind} snapshots for {payload_root}.{field_name}"
+            )
+        })?;
+    Ok(DashboardAssistantScopeTargetedSummary {
+        snapshot_kind: snapshot_kind.to_string(),
+        matched_rows: row.get(0),
+        latest_created_at_epoch_ms: row.get(1),
+    })
+}
+
 async fn dashboard_assistant_scope_sources(
     db: &Client,
     repo_root: &Path,
@@ -82,17 +173,26 @@ async fn dashboard_assistant_scope_sources(
         ..Default::default()
     };
     let stage_started_at = Instant::now();
-    let working_state_summary =
-        postgres::summarize_observability_snapshots_by_kinds(db, &["working_state_event"]).await?;
+    let working_state_summary = dashboard_assistant_scope_targeted_string_field_summary(
+        db,
+        "working_state_event",
+        "working_state_event",
+        "context_pack_id",
+        union_target_ids,
+    )
+    .await?;
     record_dashboard_stage_ms(
         &mut debug.source_stage_ms,
         "working_state_summary",
         stage_started_at,
     );
     let stage_started_at = Instant::now();
-    let direct_turn_summary = postgres::summarize_observability_snapshots_by_kinds(
+    let direct_turn_summary = dashboard_assistant_scope_targeted_array_field_summary(
         db,
-        &[ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND],
+        ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND,
+        ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND,
+        "context_pack_ids",
+        union_target_ids,
     )
     .await?;
     record_dashboard_stage_ms(
@@ -101,8 +201,14 @@ async fn dashboard_assistant_scope_sources(
         stage_started_at,
     );
     let stage_started_at = Instant::now();
-    let token_budget_summary =
-        postgres::summarize_observability_snapshots_by_kinds(db, &["token_budget_event"]).await?;
+    let token_budget_summary = dashboard_assistant_scope_targeted_string_field_summary(
+        db,
+        "token_budget_event",
+        "token_budget_event",
+        "context_pack_id",
+        union_target_ids,
+    )
+    .await?;
     record_dashboard_stage_ms(
         &mut debug.source_stage_ms,
         "token_budget_summary",
@@ -426,28 +532,16 @@ fn dashboard_assistant_scope_signature(
 
 pub(super) fn dashboard_assistant_scope_source_signature(
     target_context_pack_ids: &BTreeSet<String>,
-    working_state_summary: &[postgres::ObservabilitySnapshotKindSummary],
-    direct_turn_summary: &[postgres::ObservabilitySnapshotKindSummary],
-    token_budget_summary: &[postgres::ObservabilitySnapshotKindSummary],
+    working_state_summary: &DashboardAssistantScopeTargetedSummary,
+    direct_turn_summary: &DashboardAssistantScopeTargetedSummary,
+    token_budget_summary: &DashboardAssistantScopeTargetedSummary,
     rollout_thread_signatures: &BTreeMap<String, String>,
 ) -> String {
-    let summary_json = |items: &[postgres::ObservabilitySnapshotKindSummary]| {
-        items
-            .iter()
-            .map(|item| {
-                json!({
-                    "snapshot_kind": item.snapshot_kind,
-                    "snapshots_count": item.snapshots_count,
-                    "latest_created_at_epoch_ms": item.latest_created_at_epoch_ms,
-                })
-            })
-            .collect::<Vec<_>>()
-    };
     let payload = json!({
         "target_context_pack_ids": target_context_pack_ids.iter().cloned().collect::<Vec<_>>(),
-        "working_state_summary": summary_json(working_state_summary),
-        "direct_turn_summary": summary_json(direct_turn_summary),
-        "token_budget_summary": summary_json(token_budget_summary),
+        "working_state_summary": working_state_summary,
+        "direct_turn_summary": direct_turn_summary,
+        "token_budget_summary": token_budget_summary,
         "rollout_thread_signatures": rollout_thread_signatures,
     });
     hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
@@ -568,9 +662,9 @@ fn write_shared_dashboard_assistant_generation_scopes(
 fn cached_dashboard_assistant_scope_sources(
     repo_root: &Path,
     target_context_pack_ids: &BTreeSet<String>,
-    working_state_summary: &[postgres::ObservabilitySnapshotKindSummary],
-    direct_turn_summary: &[postgres::ObservabilitySnapshotKindSummary],
-    token_budget_summary: &[postgres::ObservabilitySnapshotKindSummary],
+    working_state_summary: &DashboardAssistantScopeTargetedSummary,
+    direct_turn_summary: &DashboardAssistantScopeTargetedSummary,
+    token_budget_summary: &DashboardAssistantScopeTargetedSummary,
 ) -> Result<
     Option<(
         Vec<AssistantGenerationTurnObservedSnapshot>,

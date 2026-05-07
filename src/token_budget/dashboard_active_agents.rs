@@ -1,6 +1,10 @@
 use super::dashboard_agent_scope_activity::active_agent_activity_entries;
 use super::*;
 
+fn active_agent_profile_log(stage: &str, elapsed_ms: u128, extra: &str) {
+    continuity_profile_log(&format!("active_agent_budget.{stage}"), elapsed_ms, extra);
+}
+
 fn parse_scope_parts(scope: &str) -> (Option<String>, Option<String>) {
     let mut parts = scope
         .split("::")
@@ -356,16 +360,29 @@ pub(crate) async fn collect_active_agent_live_budget_surface(
     current_repo_root: &Path,
     activity: &Value,
 ) -> Result<Value> {
+    let total_started = std::time::Instant::now();
     let config = load_config(current_repo_root)?;
     let profile = resolve_profile(&config, None, current_repo_root)?;
     let session_gap_ms = profile.session_gap_minutes as i64 * 60_000;
+    let live_events_started = std::time::Instant::now();
     let mut live_events = load_dashboard_token_events(db, current_repo_root, false).await?;
+    active_agent_profile_log(
+        "load_dashboard_token_events",
+        live_events_started.elapsed().as_millis(),
+        &format!("events={}", live_events.len()),
+    );
     live_events.sort_by_key(|event| event.created_at_epoch_ms);
     let live_events = reconcile_followup_recovery(&live_events, session_gap_ms);
     let now_epoch_ms = current_epoch_ms()?;
+    let exact_limits_started = std::time::Instant::now();
     let exact_client_limits_observation = dashboard_exact_client_rate_limits_resolution()
         .await?
         .observation;
+    active_agent_profile_log(
+        "exact_client_limits_resolution",
+        exact_limits_started.elapsed().as_millis(),
+        &format!("observed={}", exact_client_limits_observation.is_some()),
+    );
     let current_repo_root_fallback = current_repo_root.display().to_string();
     let threads_by_id = activity["client_recent_threads"]
         .as_array()
@@ -385,11 +402,18 @@ pub(crate) async fn collect_active_agent_live_budget_surface(
         .iter()
         .filter_map(|item| item["agent_scope"].as_str().map(str::to_string))
         .collect::<Vec<_>>();
+    let overrides_started = std::time::Instant::now();
     let agent_display_name_overrides =
         load_agent_display_name_overrides_for_scopes(db, active_agent_scopes).await?;
+    active_agent_profile_log(
+        "load_agent_display_name_overrides",
+        overrides_started.elapsed().as_millis(),
+        &format!("overrides={}", agent_display_name_overrides.len()),
+    );
     let mut seen = BTreeSet::new();
     let mut agents = Vec::new();
     for active in active_entries {
+        let entry_started = std::time::Instant::now();
         let Some((selector, project_repo_root)) = active_agent_selector_from_activity(&active)
         else {
             continue;
@@ -439,16 +463,22 @@ pub(crate) async fn collect_active_agent_live_budget_surface(
         let repo_root_string = project_repo_root
             .clone()
             .unwrap_or_else(|| current_repo_root_fallback.clone());
+        let rollout_started = std::time::Instant::now();
         let live_rollout_meter = selector.thread_id.as_deref().and_then(|thread_id| {
             codex_threads::latest_rollout_client_meter_observation_for_thread(thread_id)
                 .ok()
                 .flatten()
         });
+        let rollout_elapsed_ms = rollout_started.elapsed().as_millis();
+        let snapshot_fields_started = std::time::Instant::now();
         let snapshot_fields = active_agent_budget_fields_from_thread_bound_snapshot(
             current_repo_root,
             &selector,
             now_epoch_ms as u64,
         );
+        let snapshot_fields_present = snapshot_fields.is_some();
+        let snapshot_fields_elapsed_ms = snapshot_fields_started.elapsed().as_millis();
+        let client_meter_started = std::time::Instant::now();
         let (client_live_meter, mut personal_agent_kpi) =
             if let Some(rollout_meter) = live_rollout_meter.as_ref() {
                 let client_live_meter = build_client_live_meter_json(
@@ -483,6 +513,7 @@ pub(crate) async fn collect_active_agent_live_budget_surface(
                 );
                 (client_live_meter, personal_agent_kpi)
             };
+        let client_meter_elapsed_ms = client_meter_started.elapsed().as_millis();
         if used_scope_fallback && personal_agent_kpi["status"].as_str() == Some("missing") {
             if let Some(node) = personal_agent_kpi.as_object_mut() {
                 node.insert(
@@ -536,11 +567,25 @@ pub(crate) async fn collect_active_agent_live_budget_surface(
                 "secondary_window_tokens": active_agent_limit_weight_tokens(&secondary_limit_summary),
             },
         }));
+        active_agent_profile_log(
+            "entry",
+            entry_started.elapsed().as_millis(),
+            &format!(
+                "scope={} thread_id={} rollout_ms={} snapshot_fields_ms={} client_meter_ms={} rollout_present={} snapshot_present={}",
+                selector.agent_scope,
+                selector.thread_id.as_deref().unwrap_or("none"),
+                rollout_elapsed_ms,
+                snapshot_fields_elapsed_ms,
+                client_meter_elapsed_ms,
+                live_rollout_meter.is_some(),
+                snapshot_fields_present,
+            ),
+        );
     }
     let mut agents = dedup_active_agents_by_identity(agents);
     attach_active_agent_personal_limit_surfaces(&mut agents);
     let aggregate = active_agent_kpi_aggregate(&agents);
-    Ok(json!({
+    let result = json!({
         "source": "observe_active_agent_budget_v1",
         "captured_at_epoch_ms": now_epoch_ms,
         "headline": {
@@ -550,7 +595,19 @@ pub(crate) async fn collect_active_agent_live_budget_surface(
         },
         "aggregate": aggregate,
         "agents": agents,
-    }))
+    });
+    active_agent_profile_log(
+        "total",
+        total_started.elapsed().as_millis(),
+        &format!(
+            "agents={}",
+            result["agents"]
+                .as_array()
+                .map(|items| items.len())
+                .unwrap_or(0)
+        ),
+    );
+    Ok(result)
 }
 
 #[cfg(test)]

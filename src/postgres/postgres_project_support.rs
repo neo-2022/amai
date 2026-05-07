@@ -445,9 +445,13 @@ pub(super) fn memory_card_record_from_row(row: &Row) -> MemoryCardRecord {
 #[derive(Debug, Clone)]
 pub(super) struct MemoryCardCandidateExtraction {
     pub(super) source_basis_status: String,
+    #[allow(dead_code)]
     pub(super) source_event_count: usize,
+    #[allow(dead_code)]
     pub(super) artifact_ref_count: usize,
+    #[allow(dead_code)]
     pub(super) message_ref_count: usize,
+    #[allow(dead_code)]
     pub(super) has_evidence_span: bool,
     pub(super) derivation_kind: String,
     pub(super) candidate_class: String,

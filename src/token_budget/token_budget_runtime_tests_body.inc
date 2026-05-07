@@ -37,6 +37,7 @@ use super::{
     suppress_shadowed_live_events,
 };
 use crate::postgres::{ObservabilitySnapshotKindSummary, ObservabilitySnapshotRecord};
+use crate::token_budget::dashboard_assistant_scope::DashboardAssistantScopeTargetedSummary;
 use anyhow::anyhow;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -9125,21 +9126,21 @@ fn dashboard_token_events_delta_limit_rejects_non_append_changes() {
 #[test]
 fn dashboard_assistant_scope_source_signature_changes_with_rollout_threads() {
     let target_context_pack_ids = BTreeSet::from(["ctx-a".to_string(), "ctx-b".to_string()]);
-    let working_state_summary = vec![ObservabilitySnapshotKindSummary {
+    let working_state_summary = DashboardAssistantScopeTargetedSummary {
         snapshot_kind: "working_state_event".to_string(),
-        snapshots_count: 10,
+        matched_rows: 10,
         latest_created_at_epoch_ms: Some(100),
-    }];
-    let direct_turn_summary = vec![ObservabilitySnapshotKindSummary {
+    };
+    let direct_turn_summary = DashboardAssistantScopeTargetedSummary {
         snapshot_kind: "assistant_generation_turn_observed".to_string(),
-        snapshots_count: 3,
+        matched_rows: 3,
         latest_created_at_epoch_ms: Some(90),
-    }];
-    let token_budget_summary = vec![ObservabilitySnapshotKindSummary {
+    };
+    let token_budget_summary = DashboardAssistantScopeTargetedSummary {
         snapshot_kind: "token_budget_event".to_string(),
-        snapshots_count: 12,
+        matched_rows: 12,
         latest_created_at_epoch_ms: Some(110),
-    }];
+    };
     let left = dashboard_assistant_scope_source_signature(
         &target_context_pack_ids,
         &working_state_summary,
@@ -9156,6 +9157,51 @@ fn dashboard_assistant_scope_source_signature_changes_with_rollout_threads() {
     );
 
     assert_ne!(left, right);
+}
+
+#[test]
+fn dashboard_assistant_scope_source_signature_ignores_unrelated_global_snapshot_noise() {
+    let target_context_pack_ids = BTreeSet::from(["ctx-a".to_string()]);
+    let left = dashboard_assistant_scope_source_signature(
+        &target_context_pack_ids,
+        &DashboardAssistantScopeTargetedSummary {
+            snapshot_kind: "working_state_event".to_string(),
+            matched_rows: 4,
+            latest_created_at_epoch_ms: Some(100),
+        },
+        &DashboardAssistantScopeTargetedSummary {
+            snapshot_kind: "assistant_generation_turn_observed".to_string(),
+            matched_rows: 1,
+            latest_created_at_epoch_ms: Some(80),
+        },
+        &DashboardAssistantScopeTargetedSummary {
+            snapshot_kind: "token_budget_event".to_string(),
+            matched_rows: 5,
+            latest_created_at_epoch_ms: Some(110),
+        },
+        &BTreeMap::from([("thread-a".to_string(), "sig-a".to_string())]),
+    );
+    let right = dashboard_assistant_scope_source_signature(
+        &target_context_pack_ids,
+        &DashboardAssistantScopeTargetedSummary {
+            snapshot_kind: "working_state_event".to_string(),
+            matched_rows: 4,
+            latest_created_at_epoch_ms: Some(100),
+        },
+        &DashboardAssistantScopeTargetedSummary {
+            snapshot_kind: "assistant_generation_turn_observed".to_string(),
+            matched_rows: 1,
+            latest_created_at_epoch_ms: Some(80),
+        },
+        &DashboardAssistantScopeTargetedSummary {
+            snapshot_kind: "token_budget_event".to_string(),
+            matched_rows: 5,
+            latest_created_at_epoch_ms: Some(110),
+        },
+        &BTreeMap::from([("thread-a".to_string(), "sig-a".to_string())]),
+    );
+
+    assert_eq!(left, right);
 }
 
 #[test]
@@ -10147,6 +10193,38 @@ fn shared_dashboard_exact_client_limits_cache_reuses_fresh_observation() {
         Some(33.0)
     );
     let _ = fs::remove_dir_all(&temp_root);
+}
+
+#[test]
+fn shared_dashboard_exact_client_limits_cache_rejects_fresh_missing_entry() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "amai-exact-client-limits-cache-missing-{}",
+        Uuid::new_v4()
+    ));
+    let cache_path = temp_root.join("state/token_budget/exact_client_limits_cache.json");
+    let entry = super::DashboardExactClientLimitsCache {
+        fetched_at_epoch_ms: 5_000,
+        observation: None,
+    };
+    super::write_shared_dashboard_exact_client_limits_cache(&cache_path, &entry)
+        .expect("write shared missing cache");
+    assert!(
+        super::load_shared_dashboard_exact_client_limits_cache(&cache_path, 7_500).is_none()
+    );
+    let _ = fs::remove_dir_all(&temp_root);
+}
+
+#[test]
+fn fresh_dashboard_exact_client_limits_cache_entry_rejects_missing_observation() {
+    crate::token_budget::dashboard_exact_client_limits::set_dashboard_exact_client_limits_cache(
+        super::DashboardExactClientLimitsCache {
+        fetched_at_epoch_ms: 5_000,
+        observation: None,
+    });
+    assert!(
+        crate::token_budget::dashboard_exact_client_limits::fresh_dashboard_exact_client_limits_cache_entry(7_500)
+            .is_none()
+    );
 }
 
 #[test]

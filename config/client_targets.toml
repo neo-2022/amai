@@ -61,6 +61,36 @@ default_output = "${repo_root}/AGENTS.md"
 install_scope = "workspace_local"
 format = "codex_agents_snippet"
 
+[clients.hermes]
+display_name = "Hermes"
+default_output = "${home}/.hermes/config.yaml"
+install_scope = "user_global"
+priority = 75
+detect_env_vars = ["HERMES_HOME"]
+detect_workspace_markers = []
+detect_home_markers = [".hermes", ".hermes/config.yaml"]
+
+[clients.hermes.startup_instructions]
+mode = "managed_workspace_file"
+default_output = "${repo_root}/.hermes.md"
+install_scope = "workspace_local"
+format = "hermes_compact_markdown"
+
+[clients.openclaw]
+display_name = "OpenClaw"
+default_output = "${home}/.openclaw/openclaw.json"
+install_scope = "user_global"
+priority = 72
+detect_env_vars = ["OPENCLAW_CONFIG_PATH", "OPENCLAW_STATE_DIR"]
+detect_workspace_markers = []
+detect_home_markers = [".openclaw", ".openclaw/openclaw.json"]
+
+[clients.openclaw.startup_instructions]
+mode = "managed_workspace_file"
+default_output = "${repo_root}/.openclaw/AGENTS.md"
+install_scope = "workspace_local"
+format = "generic_markdown"
+
 [clients.claude-desktop]
 display_name = "Claude Desktop"
 default_output = "${repo_root}/tmp/onboarding/claude-desktop-mcp.json"

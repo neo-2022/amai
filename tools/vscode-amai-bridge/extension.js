@@ -1,0 +1,422 @@
+const vscode = require("vscode");
+const fs = require("fs/promises");
+const packageJson = require("./package.json");
+
+const COMMAND_ID = "amaiVscodeBridge.openCleanChat";
+const EXTENSION_URI_AUTHORITY = "amai.amai-vscode-bridge";
+const EXTENSION_VERSION = packageJson.version;
+
+function publicBridgeIdentity() {
+  return {
+    authority: EXTENSION_URI_AUTHORITY,
+    command_id: COMMAND_ID,
+    version: EXTENSION_VERSION,
+    capabilities: {
+      ui_cleanup: true,
+      visible_surface: true,
+    },
+  };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeString(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeBoolean(value, defaultValue) {
+  if (typeof value !== "string") {
+    return defaultValue;
+  }
+  switch (value.trim().toLowerCase()) {
+    case "1":
+    case "true":
+    case "yes":
+      return true;
+    case "0":
+    case "false":
+    case "no":
+      return false;
+    default:
+      return defaultValue;
+  }
+}
+
+function paramsToPayload(params) {
+  return {
+    promptFile: normalizeString(params.get("prompt_file")),
+    resultFile: normalizeString(params.get("result_file")),
+    repoRoot: normalizeString(params.get("repo_root")),
+    target: normalizeString(params.get("target")) || "sidebar",
+    autoSubmit: normalizeBoolean(params.get("auto_submit"), true),
+  };
+}
+
+function isBridgeUriLike(value) {
+  return typeof value === "string" && value.includes(`${EXTENSION_URI_AUTHORITY}/open-clean-chat`);
+}
+
+function tabMatchesBridgeUri(tab, uriText) {
+  if (!tab) {
+    return false;
+  }
+  if (isBridgeUriLike(tab.label)) {
+    return true;
+  }
+  const input = tab.input;
+  const candidates = [
+    input?.uri?.toString?.(true),
+    input?.modified?.toString?.(true),
+    input?.original?.toString?.(true),
+  ];
+  return candidates.some((value) => value === uriText || isBridgeUriLike(value));
+}
+
+function summarizeTabInput(input) {
+  if (!input) {
+    return {
+      kind: null,
+      uri: null,
+      original_uri: null,
+      modified_uri: null,
+    };
+  }
+  return {
+    kind: input.constructor?.name ?? null,
+    uri: input.uri?.toString?.(true) ?? null,
+    original_uri: input.original?.toString?.(true) ?? null,
+    modified_uri: input.modified?.toString?.(true) ?? null,
+  };
+}
+
+function summarizeTab(tab, activeTab) {
+  if (!tab) {
+    return null;
+  }
+  return {
+    label: normalizeString(tab.label),
+    is_active: Boolean(activeTab && tab === activeTab),
+    is_dirty: Boolean(tab.isDirty),
+    is_pinned: Boolean(tab.isPinned),
+    is_preview: Boolean(tab.isPreview),
+    input: summarizeTabInput(tab.input),
+  };
+}
+
+function collectVisibleSurfaceState(uriText) {
+  const groups = [];
+  let totalTabs = 0;
+  let bridgeTabCount = 0;
+  let nonBridgeTabCount = 0;
+  const nonBridgeTabLabels = [];
+
+  for (const group of vscode.window.tabGroups.all) {
+    const activeTab = group.activeTab ?? null;
+    const tabs = group.tabs.map((tab) => {
+      totalTabs += 1;
+      const isBridgeTab = tabMatchesBridgeUri(tab, uriText);
+      if (isBridgeTab) {
+        bridgeTabCount += 1;
+      } else {
+        nonBridgeTabCount += 1;
+        const label = normalizeString(tab.label);
+        if (label) {
+          nonBridgeTabLabels.push(label);
+        }
+      }
+      return {
+        ...summarizeTab(tab, activeTab),
+        is_bridge_tab: isBridgeTab,
+      };
+    });
+    groups.push({
+      is_active: Boolean(vscode.window.tabGroups.activeTabGroup === group),
+      view_column: group.viewColumn ?? null,
+      tab_count: tabs.length,
+      tabs,
+    });
+  }
+
+  const activeTextEditorUri = vscode.window.activeTextEditor?.document?.uri?.toString?.(true) ?? null;
+  const activeTab = vscode.window.tabGroups.activeTabGroup?.activeTab ?? null;
+  return {
+    active_text_editor_uri: activeTextEditorUri,
+    active_tab: summarizeTab(activeTab, activeTab),
+    bridge_tab_count: bridgeTabCount,
+    group_count: groups.length,
+    non_bridge_tab_count: nonBridgeTabCount,
+    non_bridge_tab_labels,
+    tab_groups: groups,
+    total_tab_count: totalTabs,
+  };
+}
+
+function summarizeVisibleSurfaceDelta(before, after) {
+  const beforeLabels = new Set(before?.non_bridge_tab_labels ?? []);
+  const afterLabels = new Set(after?.non_bridge_tab_labels ?? []);
+  const addedLabels = [...afterLabels].filter((label) => !beforeLabels.has(label));
+  const removedLabels = [...beforeLabels].filter((label) => !afterLabels.has(label));
+  return {
+    active_tab_label_before: before?.active_tab?.label ?? null,
+    active_tab_label_after: after?.active_tab?.label ?? null,
+    active_tab_kind_before: before?.active_tab?.input?.kind ?? null,
+    active_tab_kind_after: after?.active_tab?.input?.kind ?? null,
+    group_count_before: before?.group_count ?? 0,
+    group_count_after: after?.group_count ?? 0,
+    total_tab_count_before: before?.total_tab_count ?? 0,
+    total_tab_count_after: after?.total_tab_count ?? 0,
+    bridge_tab_count_before: before?.bridge_tab_count ?? 0,
+    bridge_tab_count_after: after?.bridge_tab_count ?? 0,
+    non_bridge_tab_count_before: before?.non_bridge_tab_count ?? 0,
+    non_bridge_tab_count_after: after?.non_bridge_tab_count ?? 0,
+    non_bridge_tab_labels_added: addedLabels,
+    non_bridge_tab_labels_removed: removedLabels,
+    new_non_bridge_surface_detected: addedLabels.length > 0,
+  };
+}
+
+function collectBridgeUiState(uriText) {
+  let matchingTabCount = 0;
+  for (const group of vscode.window.tabGroups.all) {
+    for (const tab of group.tabs) {
+      if (tabMatchesBridgeUri(tab, uriText)) {
+        matchingTabCount += 1;
+      }
+    }
+  }
+  const activeUri = vscode.window.activeTextEditor?.document?.uri?.toString?.(true) ?? null;
+  const activeEditorMatchesBridgeUri =
+    activeUri === uriText || isBridgeUriLike(activeUri);
+  return {
+    active_editor_matches_bridge_uri: activeEditorMatchesBridgeUri,
+    active_editor_uri: activeEditorMatchesBridgeUri ? activeUri : null,
+    matching_tab_count: matchingTabCount,
+  };
+}
+
+async function writeResultFile(resultFile, payload) {
+  if (!resultFile) {
+    return;
+  }
+  await fs.mkdir(require("path").dirname(resultFile), { recursive: true });
+  await fs.writeFile(resultFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+async function ensureCodexCommandsAvailable() {
+  const commands = await vscode.commands.getCommands(true);
+  for (const command of ["chatgpt.openSidebar", "chatgpt.newChat", "chatgpt.newCodexPanel"]) {
+    if (!commands.includes(command)) {
+      throw new Error(`Missing required Codex command: ${command}`);
+    }
+  }
+}
+
+async function closeTransientUriEditors(uriText) {
+  if (!normalizeString(uriText)) {
+    return {
+      active_editor_matches_bridge_uri_after: false,
+      active_editor_matches_bridge_uri_before: false,
+      active_editor_uri_after: null,
+      active_editor_uri_before: null,
+      closed_active_editor: false,
+      close_attempts: 0,
+      closed_tab_candidates_total: 0,
+      matching_tabs_after: 0,
+      matching_tabs_before: 0,
+      skipped_reason: "source_uri_missing",
+      success: false,
+      uri_cleanup_requested: false,
+    };
+  }
+
+  const before = collectBridgeUiState(uriText);
+  let closeAttempts = 0;
+  let closedActiveEditor = false;
+  let closedTabCandidatesTotal = 0;
+
+  const closeMatchingActiveEditor = async () => {
+    const active = vscode.window.activeTextEditor;
+    const activeUri = active?.document?.uri?.toString?.(true);
+    if (activeUri === uriText || isBridgeUriLike(activeUri)) {
+      await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+      return true;
+    }
+    return false;
+  };
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    closeAttempts += 1;
+    let closedSomething = false;
+    const tabsToClose = [];
+    for (const group of vscode.window.tabGroups.all) {
+      for (const tab of group.tabs) {
+        if (tabMatchesBridgeUri(tab, uriText)) {
+          tabsToClose.push(tab);
+        }
+      }
+    }
+
+    if (tabsToClose.length > 0) {
+      closedTabCandidatesTotal += tabsToClose.length;
+      await vscode.window.tabGroups.close(tabsToClose, true);
+      closedSomething = true;
+    }
+
+    if (await closeMatchingActiveEditor()) {
+      closedActiveEditor = true;
+      closedSomething = true;
+    }
+
+    if (!closedSomething) {
+      break;
+    }
+    await sleep(120);
+  }
+
+  const after = collectBridgeUiState(uriText);
+  return {
+    active_editor_matches_bridge_uri_after: after.active_editor_matches_bridge_uri,
+    active_editor_matches_bridge_uri_before: before.active_editor_matches_bridge_uri,
+    active_editor_uri_after: after.active_editor_uri,
+    active_editor_uri_before: before.active_editor_uri,
+    closed_active_editor: closedActiveEditor,
+    close_attempts: closeAttempts,
+    closed_tab_candidates_total: closedTabCandidatesTotal,
+    matching_tabs_after: after.matching_tab_count,
+    matching_tabs_before: before.matching_tab_count,
+    skipped_reason: null,
+    success:
+      after.matching_tab_count === 0 && !after.active_editor_matches_bridge_uri,
+    uri_cleanup_requested: true,
+  };
+}
+
+async function executeBridgeLaunch({ target, promptText, autoSubmit }) {
+  await ensureCodexCommandsAvailable();
+  if (target === "panel") {
+    await vscode.commands.executeCommand("chatgpt.newCodexPanel");
+  } else {
+    await vscode.commands.executeCommand("chatgpt.openSidebar");
+    await sleep(250);
+    await vscode.commands.executeCommand("chatgpt.newChat");
+  }
+  await sleep(450);
+  await vscode.commands.executeCommand("type", { text: promptText });
+  if (autoSubmit) {
+    await sleep(120);
+    await vscode.commands.executeCommand("type", { text: "\n" });
+  }
+}
+
+async function openCleanChat(input, sourceUriText = null) {
+  const startedAt = new Date().toISOString();
+  const promptFile = normalizeString(input?.promptFile);
+  const resultFile = normalizeString(input?.resultFile);
+  const repoRoot = normalizeString(input?.repoRoot);
+  const target = normalizeString(input?.target) || "sidebar";
+  const autoSubmit = input?.autoSubmit !== false;
+
+  try {
+    if (!promptFile) {
+      throw new Error("prompt_file is required");
+    }
+
+    const promptText = (await fs.readFile(promptFile, "utf8")).trim();
+    if (!promptText) {
+      throw new Error(`prompt_file is blank: ${promptFile}`);
+    }
+
+    const visibleSurfaceBeforeLaunch = collectVisibleSurfaceState(sourceUriText);
+    await writeResultFile(resultFile, {
+      status: "launch_started",
+      started_at: startedAt,
+      prompt_file: promptFile,
+      repo_root: repoRoot,
+      target,
+      auto_submit: autoSubmit,
+      prompt_chars: promptText.length,
+      public_bridge: publicBridgeIdentity(),
+      visible_surface: {
+        before_launch: visibleSurfaceBeforeLaunch,
+      },
+      commands: target === "panel"
+        ? ["chatgpt.newCodexPanel", "type"]
+        : ["chatgpt.openSidebar", "chatgpt.newChat", "type"],
+    });
+
+    await executeBridgeLaunch({ target, promptText, autoSubmit });
+    const uiCleanup = await closeTransientUriEditors(sourceUriText);
+    await sleep(150);
+    const visibleSurfaceAfterLaunch = collectVisibleSurfaceState(sourceUriText);
+
+    await writeResultFile(resultFile, {
+      status: "launch_requested",
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+      prompt_file: promptFile,
+      repo_root: repoRoot,
+      target,
+      auto_submit: autoSubmit,
+      prompt_chars: promptText.length,
+      public_bridge: publicBridgeIdentity(),
+      ui_cleanup: uiCleanup,
+      visible_surface: {
+        before_launch: visibleSurfaceBeforeLaunch,
+        after_launch: visibleSurfaceAfterLaunch,
+        delta: summarizeVisibleSurfaceDelta(
+          visibleSurfaceBeforeLaunch,
+          visibleSurfaceAfterLaunch
+        ),
+      },
+      commands: target === "panel"
+        ? ["chatgpt.newCodexPanel", "type"]
+        : ["chatgpt.openSidebar", "chatgpt.newChat", "type"],
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await writeResultFile(resultFile, {
+      status: "launch_failed",
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+      prompt_file: promptFile,
+      repo_root: repoRoot,
+      target,
+      auto_submit: autoSubmit,
+      error: message,
+      public_bridge: publicBridgeIdentity(),
+    });
+    throw error;
+  }
+}
+
+function activate(context) {
+  context.subscriptions.push(
+    vscode.commands.registerCommand(COMMAND_ID, async (input) => {
+      await openCleanChat(input ?? {});
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.window.registerUriHandler({
+      handleUri: async (uri) => {
+        await openCleanChat(
+          paramsToPayload(new URLSearchParams(uri.query)),
+          uri.toString(true)
+        );
+      },
+    })
+  );
+}
+
+function deactivate() {}
+
+module.exports = {
+  activate,
+  deactivate,
+};

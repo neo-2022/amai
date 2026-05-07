@@ -4,6 +4,9 @@ use crate::cli::{
 };
 use crate::config;
 use crate::continuity;
+use crate::dashboard::{
+    CLIENT_TURN_PRESSURE_ROTATE_STATUS_LABELS, client_turn_pressure_display_status_label,
+};
 use crate::mcp;
 use crate::observe;
 use crate::profiles;
@@ -15,6 +18,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -45,6 +49,10 @@ struct InstallState {
     startup_contract_status: Option<String>,
     #[serde(default)]
     startup_contract_sha256: Option<String>,
+    #[serde(default)]
+    client_runtime_path: Option<String>,
+    #[serde(default)]
+    client_runtime_status: Option<String>,
     #[serde(default)]
     agent_preflight_contract_path: Option<String>,
     #[serde(default)]
@@ -213,8 +221,16 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
         dotenvy::from_path_override(repo_root.join(".env"))
             .context("failed to load generated .env for onboarding")?;
 
-        check_dependency("docker", &["--version"]).await?;
-        check_dependency("cargo", &["--version"]).await?;
+        check_dependency(&repo_root, "docker", &["--version"]).await?;
+        let cargo_bin = check_dependency(&repo_root, "cargo", &["--version"]).await?;
+        let rustc_bin = check_dependency(&repo_root, "rustc", &["--version"]).await?;
+
+        if !args.skip_release_build {
+            let mut build_release =
+                command_in(&repo_root, cargo_bin.as_os_str(), ["build", "--release"]);
+            build_release.env("RUSTC", &rustc_bin);
+            run_command("cargo build --release", build_release).await?;
+        }
 
         if !args.skip_stack {
             let mut bootstrap_stack = script_command(
@@ -226,13 +242,11 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
             run_command("bootstrap stack", bootstrap_stack).await?;
         }
 
-        if !args.skip_release_build {
-            run_command(
-                "cargo build --release",
-                command_in(&repo_root, "cargo", ["build", "--release"]),
-            )
-            .await?;
-        }
+        run_command(
+            "install managed stack autostart",
+            script_command(&repo_root, "scripts/install_stack_autostart.sh", []),
+        )
+        .await?;
 
         local_memory_bridge_summary = Some(install_memory_bridge(&repo_root)?);
 
@@ -244,8 +258,14 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     mcp::write_client_config(&config_args)?;
     let startup_contract_summary = install_startup_contract_artifact(&workspace_root, &repo_root)?;
     let agent_preflight_summary = install_agent_preflight_artifacts(&workspace_root, &repo_root)?;
-    let startup_instructions_summary =
+    let mut startup_instructions_summary =
         install_startup_instructions(&workspace_root, &repo_root, &client_resolution)?;
+    let client_runtime_summary = install_client_runtime_artifacts(
+        &repo_root,
+        &output,
+        &client_resolution,
+        startup_instructions_summary.as_mut(),
+    )?;
     let install_status = build_install_status(
         install_state_before.as_ref(),
         config_existed_before,
@@ -285,6 +305,12 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
             startup_contract_sha256: startup_contract_summary
                 .as_ref()
                 .map(|summary| summary.sha256.clone()),
+            client_runtime_path: client_runtime_summary
+                .as_ref()
+                .map(|summary| summary.output_path.display().to_string()),
+            client_runtime_status: client_runtime_summary
+                .as_ref()
+                .map(|summary| summary.status.clone()),
             agent_preflight_contract_path: agent_preflight_summary
                 .as_ref()
                 .map(|summary| summary.contract_output_path.display().to_string()),
@@ -371,6 +397,18 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
         println!("Почему такой режим: {}", summary.reason);
     } else {
         println!("Startup contract для клиента: отдельный artifact не materialized");
+    }
+    if let Some(summary) = &client_runtime_summary {
+        println!("Client runtime artifact: {}", summary.status);
+        println!(
+            "Где лежит runtime artifact: {}",
+            summary.output_path.display()
+        );
+        println!(
+            "Где лежит runtime artifact по scope: {}",
+            install_scope_status(&summary.install_scope)
+        );
+        println!("Почему runtime materialized: {}", summary.reason);
     }
     if let Some(summary) = &startup_contract_summary {
         println!("Machine-readable startup contract: {}", summary.status);
@@ -622,6 +660,10 @@ pub fn print_agent_preflight(args: &BootstrapAgentPreflightArgs) -> Result<()> {
         payload["agent_preflight_summary"]["next_required_stage"]["label"].as_str()
     {
         println!("Следующий обязательный этап: {next_stage}");
+    } else if payload["agent_preflight_summary"]["stage_progress_state"].as_str()
+        == Some("all_stages_closed")
+    {
+        println!("Stage checklist: все этапы закрыты по current status snapshot");
     }
     if let Some(focus) = payload["agent_preflight_summary"]["active_focus"].as_array() {
         if !focus.is_empty() {
@@ -757,6 +799,17 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         .as_ref()
         .map(|path| path.is_file())
         .unwrap_or(false);
+    let startup_instruction_content = if startup_instruction_exists {
+        let path = startup_instruction_path
+            .as_ref()
+            .expect("startup instruction path must exist when marked present");
+        Some(
+            fs::read_to_string(path)
+                .with_context(|| format!("failed to read {}", path.display()))?,
+        )
+    } else {
+        None
+    };
     let (
         startup_instruction_contains_expected_sha,
         startup_instruction_contains_required_before_tool_call,
@@ -785,11 +838,9 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_instruction_contains_gate_field_enforcement,
         startup_instruction_contains_gate_semantics_consistent,
     ) = if startup_instruction_exists {
-        let path = startup_instruction_path
-            .as_ref()
-            .expect("startup instruction path must exist when marked present");
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
+        let content = startup_instruction_content
+            .as_deref()
+            .expect("startup instruction content must exist when marked present");
         let instruction_references_required_summary_fields =
             content.contains("required_summary_fields");
         let instruction_references_restored_obligations = content.contains("restored_obligations");
@@ -1081,37 +1132,61 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         .startup_contract_sha256
         .as_deref()
         .map(|sha| sha == expected_contract_sha);
+    let hermes_compact_instruction = state.client_key == "hermes"
+        && startup_instruction_content
+            .as_deref()
+            .map_or(false, |content| {
+                content.contains("compact contract-pointer")
+            });
+
+    let startup_instruction_ok = if hermes_compact_instruction {
+        startup_instruction_contains_expected_sha == Some(true)
+            && startup_instruction_contains_required_before_tool_call == Some(true)
+            && startup_instruction_contains_missing_fail_closed == Some(true)
+            && startup_instruction_contains_sha_mismatch_fail_closed == Some(true)
+            && startup_instruction_contains_startup_next_action == Some(true)
+            && startup_instruction_contains_required_return_task == Some(true)
+            && startup_instruction_contains_resume_required_action_kind == Some(true)
+            && startup_instruction_contains_execctl_resume_contract_summary == Some(true)
+            && startup_instruction_contains_execctl_resume_obligation == Some(true)
+            && startup_instruction_contains_runtime_state_artifact == Some(true)
+            && startup_instruction_contains_startup_execution_gate == Some(true)
+            && startup_instruction_contains_startup_state_fallback_cli == Some(true)
+            && startup_instruction_contains_gate_semantics_consistent == Some(true)
+    } else {
+        startup_instruction_contains_expected_sha == Some(true)
+            && startup_instruction_contains_required_before_tool_call == Some(true)
+            && startup_instruction_contains_missing_fail_closed == Some(true)
+            && startup_instruction_contains_sha_mismatch_fail_closed == Some(true)
+            && startup_instruction_contains_startup_next_action == Some(true)
+            && startup_instruction_contains_required_return_task == Some(true)
+            && startup_instruction_contains_resume_required_action_kind == Some(true)
+            && startup_instruction_contains_execctl_resume_contract_summary == Some(true)
+            && startup_instruction_contains_execctl_resume_obligation == Some(true)
+            && startup_instruction_contains_execctl_active_lease_summary == Some(true)
+            && startup_instruction_contains_lease_owner_state == Some(true)
+            && startup_instruction_contains_previous_session_owner_value == Some(true)
+            && startup_instruction_contains_previous_session_owner_follow == Some(true)
+            && startup_instruction_contains_no_silent_drop == Some(true)
+            && startup_instruction_contains_runtime_state_artifact == Some(true)
+            && startup_instruction_contains_runtime_state_artifact_version == Some(true)
+            && startup_instruction_contains_runtime_state_written_by_tool == Some(true)
+            && startup_instruction_contains_runtime_state_source_summary_field == Some(true)
+            && startup_instruction_contains_project_task_tree == Some(true)
+            && startup_instruction_contains_project_task_tree_summary == Some(true)
+            && startup_instruction_contains_project_task_ledger == Some(true)
+            && startup_instruction_contains_project_task_ledger_summary == Some(true)
+            && startup_instruction_contains_startup_execution_gate == Some(true)
+            && startup_instruction_contains_startup_state_fallback_cli == Some(true)
+            && startup_instruction_contains_gate_field_enforcement == Some(true)
+            && startup_instruction_contains_gate_semantics_consistent == Some(true)
+    };
+
     let status = if !startup_instruction_exists {
         "missing_startup_instruction".to_string()
     } else if !startup_contract_exists {
         "missing_startup_contract".to_string()
-    } else if startup_instruction_contains_expected_sha != Some(true)
-        || startup_instruction_contains_required_before_tool_call != Some(true)
-        || startup_instruction_contains_missing_fail_closed != Some(true)
-        || startup_instruction_contains_sha_mismatch_fail_closed != Some(true)
-        || startup_instruction_contains_startup_next_action != Some(true)
-        || startup_instruction_contains_required_return_task != Some(true)
-        || startup_instruction_contains_resume_required_action_kind != Some(true)
-        || startup_instruction_contains_execctl_resume_contract_summary != Some(true)
-        || startup_instruction_contains_execctl_resume_obligation != Some(true)
-        || startup_instruction_contains_execctl_active_lease_summary != Some(true)
-        || startup_instruction_contains_lease_owner_state != Some(true)
-        || startup_instruction_contains_previous_session_owner_value != Some(true)
-        || startup_instruction_contains_previous_session_owner_follow != Some(true)
-        || startup_instruction_contains_no_silent_drop != Some(true)
-        || startup_instruction_contains_runtime_state_artifact != Some(true)
-        || startup_instruction_contains_runtime_state_artifact_version != Some(true)
-        || startup_instruction_contains_runtime_state_written_by_tool != Some(true)
-        || startup_instruction_contains_runtime_state_source_summary_field != Some(true)
-        || startup_instruction_contains_project_task_tree != Some(true)
-        || startup_instruction_contains_project_task_tree_summary != Some(true)
-        || startup_instruction_contains_project_task_ledger != Some(true)
-        || startup_instruction_contains_project_task_ledger_summary != Some(true)
-        || startup_instruction_contains_startup_execution_gate != Some(true)
-        || startup_instruction_contains_startup_state_fallback_cli != Some(true)
-        || startup_instruction_contains_gate_field_enforcement != Some(true)
-        || startup_instruction_contains_gate_semantics_consistent != Some(true)
-    {
+    } else if !startup_instruction_ok {
         "startup_instruction_drift".to_string()
     } else if startup_contract_sha_matches_current_contract != Some(true)
         || install_state_sha_matches_current_contract != Some(true)
@@ -1674,6 +1749,8 @@ pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
     let target = client_resolution.target.clone();
     let output = resolve_output_path(&repo_root, &target, args.output.as_ref())?;
     let backup = maybe_backup_user_global(&output, &target.install_scope)?;
+    let client_runtime_removed =
+        remove_client_runtime_artifacts(&repo_root, &client_resolution.client_key, &output)?;
     let startup_instructions_removed =
         remove_startup_instructions(&repo_root, &target).unwrap_or(None);
 
@@ -1715,6 +1792,13 @@ pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
         println!("startup_instruction_status: {}", summary.status);
     } else {
         println!("startup_instruction_removed: false");
+    }
+    if let Some(summary) = client_runtime_removed {
+        println!("client_runtime_removed: true");
+        println!("client_runtime_path: {}", summary.output_path.display());
+        println!("client_runtime_status: {}", summary.status);
+    } else {
+        println!("client_runtime_removed: false");
     }
     if let Some(state) = &install_state_before {
         if let Some(startup_contract_path) = &state.startup_contract_path {
@@ -1860,8 +1944,9 @@ fn env_keys(content: &str) -> BTreeSet<String> {
         .collect()
 }
 
-async fn check_dependency(program: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(program)
+async fn check_dependency(repo_root: &Path, program: &str, args: &[&str]) -> Result<PathBuf> {
+    let resolved_program = resolve_program_path(repo_root, program).await?;
+    let status = Command::new(&resolved_program)
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1871,7 +1956,40 @@ async fn check_dependency(program: &str, args: &[&str]) -> Result<()> {
     if !status.success() {
         bail!("{program} is required for onboarding but is not available");
     }
-    Ok(())
+    Ok(resolved_program)
+}
+
+async fn resolve_program_path(repo_root: &Path, program: &str) -> Result<PathBuf> {
+    let resolver_script = match program {
+        "cargo" => Some(repo_root.join("scripts/resolve_cargo.sh")),
+        "rustc" => Some(repo_root.join("scripts/resolve_rustc.sh")),
+        _ => None,
+    };
+    let Some(resolver_script) = resolver_script else {
+        return Ok(PathBuf::from(program));
+    };
+
+    let output = Command::new(&resolver_script)
+        .current_dir(repo_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .with_context(|| format!("failed to run resolver for {program}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            bail!("{program} is required for onboarding but is not available");
+        }
+        bail!("{stderr}");
+    }
+    let resolved = String::from_utf8(output.stdout)
+        .with_context(|| format!("resolver for {program} returned non-utf8 output"))?;
+    let trimmed = resolved.trim();
+    if trimmed.is_empty() {
+        bail!("{program} is required for onboarding but is not available");
+    }
+    Ok(PathBuf::from(trimmed))
 }
 
 async fn best_effort_cleanup_mcp_orphans(repo_root: &Path) {
@@ -1907,7 +2025,11 @@ async fn best_effort_cleanup_mcp_orphans(repo_root: &Path) {
     }
 }
 
-fn command_in<const N: usize>(repo_root: &Path, program: &str, args: [&str; N]) -> Command {
+fn command_in<const N: usize, S: AsRef<OsStr>>(
+    repo_root: &Path,
+    program: S,
+    args: [&str; N],
+) -> Command {
     let mut command = Command::new(program);
     command.current_dir(repo_root);
     command.args(args);
@@ -1979,6 +2101,29 @@ struct StartupInstructionsInstallSummary {
     install_scope: String,
     auto_start_ready: bool,
     reason: String,
+}
+
+#[derive(Debug, Clone)]
+struct ClientRuntimeInstallSummary {
+    status: String,
+    output_path: PathBuf,
+    install_scope: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HermesRuntimeArtifact {
+    profile_name: String,
+    profile_dir: String,
+    previous_active_profile: String,
+}
+
+#[derive(Debug, Clone)]
+struct HermesProfileInstallSummary {
+    profile_name: String,
+    profile_dir: PathBuf,
+    #[allow(dead_code)]
+    runtime_artifact_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -2149,6 +2294,11 @@ pub(crate) fn describe_client_surface(
     let home = dirs::home_dir().ok_or_else(|| anyhow!("failed to resolve user home directory"))?;
     let startup_instruction_path =
         startup.map(|startup| expand_target_template(&startup.default_output, repo_root, &home));
+    let openclaw_agent_id =
+        (resolution.client_key == "openclaw").then(|| openclaw_agent_id(repo_root));
+    let openclaw_agent_workspace = openclaw_agent_id
+        .as_ref()
+        .map(|_| repo_root.join(".openclaw").display().to_string());
     let reconnect_shell_command = format!(
         "./scripts/reconnect_local.sh --client {}",
         resolution.client_key
@@ -2156,6 +2306,10 @@ pub(crate) fn describe_client_surface(
     let reconnect_bootstrap_command = format!(
         "./scripts/amai_exec.sh bootstrap reconnect --client {} --yes",
         resolution.client_key
+    );
+    let delivery_surface_assist_summary = format!(
+        "Для front-door новой чистой рабочей поверхности используй {} или {}.",
+        reconnect_shell_command, reconnect_bootstrap_command
     );
     Ok(json!({
         "client_key": resolution.client_key,
@@ -2171,13 +2325,12 @@ pub(crate) fn describe_client_surface(
         "startup_instruction_install_scope": startup.map(|item| item.install_scope.clone()),
         "startup_instruction_install_scope_label": startup.map(|item| install_scope_status(&item.install_scope)),
         "startup_instruction_path": startup_instruction_path.map(|path| path.display().to_string()),
+        "client_runtime_agent_id": openclaw_agent_id,
+        "client_runtime_workspace_path": openclaw_agent_workspace,
         "reconnect_shell_command": reconnect_shell_command,
         "reconnect_bootstrap_command": reconnect_bootstrap_command,
-        "fresh_chat_assist_summary": format!(
-            "Для fresh chat front-door используй {} или {}.",
-            reconnect_shell_command,
-            reconnect_bootstrap_command
-        ),
+        "fresh_chat_assist_summary": delivery_surface_assist_summary,
+        "delivery_surface_assist_summary": delivery_surface_assist_summary,
     }))
 }
 
@@ -2400,6 +2553,72 @@ fn install_startup_instructions(
             "unsupported startup_instructions.mode in config/client_targets.toml: {other}"
         )),
     }
+}
+
+fn install_client_runtime_artifacts(
+    repo_root: &Path,
+    client_config_path: &Path,
+    client_resolution: &ClientResolution,
+    startup_summary: Option<&mut StartupInstructionsInstallSummary>,
+) -> Result<Option<ClientRuntimeInstallSummary>> {
+    if client_resolution.client_key == "hermes" {
+        let Some(startup_summary) = startup_summary else {
+            return Ok(None);
+        };
+        if startup_summary.status != "managed_workspace_instruction_installed" {
+            return Ok(None);
+        }
+        let summary = ensure_hermes_project_profile(
+            repo_root,
+            client_config_path,
+            &startup_summary.output_path,
+        )?;
+        startup_summary.status = "managed_hermes_profile_installed".to_string();
+        startup_summary.auto_start_ready = true;
+        startup_summary.reason =
+            "dedicated Hermes profile is now the sticky default and carries repo-bound Amai startup automatically".to_string();
+        return Ok(Some(ClientRuntimeInstallSummary {
+            status: "managed_hermes_profile_registered".to_string(),
+            output_path: summary.profile_dir,
+            install_scope: "user_global".to_string(),
+            reason: format!(
+                "Hermes profile `{}` is now the sticky default and boots with repo-bound Amai startup even outside the repo cwd",
+                summary.profile_name
+            ),
+        }));
+    }
+
+    if client_resolution.client_key != "openclaw" {
+        return Ok(None);
+    }
+    let Some(startup_summary) = startup_summary else {
+        return Ok(None);
+    };
+    if startup_summary.status != "managed_workspace_instruction_installed" {
+        return Ok(None);
+    }
+    let workspace_root = startup_summary
+        .output_path
+        .parent()
+        .ok_or_else(|| anyhow!("OpenClaw startup instruction path has no parent workspace"))?;
+    let workspace_root = workspace_root.to_path_buf();
+    fs::create_dir_all(&workspace_root)
+        .with_context(|| format!("failed to create {}", workspace_root.display()))?;
+    let agent_id = openclaw_agent_id(repo_root);
+    let agent = ensure_openclaw_project_agent(client_config_path, &agent_id, &workspace_root)?;
+    startup_summary.status = "managed_openclaw_agent_workspace_installed".to_string();
+    startup_summary.auto_start_ready = true;
+    startup_summary.reason =
+        "dedicated OpenClaw agent now points at the repo-local managed workspace".to_string();
+    Ok(Some(ClientRuntimeInstallSummary {
+        status: "managed_openclaw_agent_registered".to_string(),
+        output_path: workspace_root,
+        install_scope: "workspace_local".to_string(),
+        reason: format!(
+            "OpenClaw agent `{}` is registered against the repo-local workspace",
+            agent.agent_id
+        ),
+    }))
 }
 
 fn install_startup_contract_artifact(
@@ -2871,6 +3090,11 @@ fn render_agent_preflight_state_artifact(
     } else {
         Vec::new()
     };
+    let stage_progress_state = if next_required_stage.is_some() {
+        "next_stage_required"
+    } else {
+        "all_stages_closed"
+    };
 
     let payload = json!({
         "artifact_version": "workspace-agent-preflight-state-v1",
@@ -2888,6 +3112,7 @@ fn render_agent_preflight_state_artifact(
             "blockers": markdown_bullets_under_heading(&status_text, "### Фундаментальные blocker-ы")?,
             "stage_checklist": stage_checklist,
             "declared_next_stage_label": declared_next_stage,
+            "stage_progress_state": stage_progress_state,
             "next_required_stage": next_required_stage,
             "next_stage_ready_mechanisms": next_stage_ready_mechanisms,
             "ready_harnesses_source_path": "docs/IMPLEMENTATION_STATUS.md",
@@ -2997,6 +3222,30 @@ fn remove_startup_instructions(
     }
 }
 
+fn remove_client_runtime_artifacts(
+    repo_root: &Path,
+    client_key: &str,
+    client_config_path: &Path,
+) -> Result<Option<ClientRuntimeInstallSummary>> {
+    if client_key == "hermes" {
+        return remove_hermes_project_profile(repo_root);
+    }
+    if client_key != "openclaw" {
+        return Ok(None);
+    }
+    let agent_id = openclaw_agent_id(repo_root);
+    if !openclaw_agent_exists(client_config_path, &agent_id)? {
+        return Ok(None);
+    }
+    delete_openclaw_project_agent(client_config_path, &agent_id)?;
+    Ok(Some(ClientRuntimeInstallSummary {
+        status: "openclaw_agent_removed".to_string(),
+        output_path: repo_root.join(".openclaw"),
+        install_scope: "workspace_local".to_string(),
+        reason: format!("OpenClaw agent `{agent_id}` removed from user config"),
+    }))
+}
+
 fn render_startup_instructions(
     workspace_root: &Path,
     helper_repo_root: &Path,
@@ -3004,7 +3253,12 @@ fn render_startup_instructions(
     client_key: &str,
     format: &str,
 ) -> Result<String> {
-    let body = render_startup_instruction_body(workspace_root, helper_repo_root, client_key)?;
+    let body = match format {
+        "hermes_compact_markdown" => {
+            render_hermes_compact_startup_body(workspace_root, helper_repo_root, client_key)?
+        }
+        _ => render_startup_instruction_body(workspace_root, helper_repo_root, client_key)?,
+    };
     match format {
         "vscode_instructions_md" => Ok(format!(
             "{STARTUP_INSTRUCTIONS_MARKER}\n---\napplyTo: \"**\"\ndescription: \"Amai continuity startup for this workspace\"\n---\n\n# Amai continuity startup ({client_display_name})\n\n{body}\n{STARTUP_INSTRUCTIONS_END_MARKER}\n"
@@ -3015,6 +3269,9 @@ fn render_startup_instructions(
         "codex_agents_snippet" => Ok(format!(
             "{STARTUP_INSTRUCTIONS_MARKER}\n# Amai continuity startup for Codex\n\nЭтот managed block должен жить в project `AGENTS.md`, а не в global config.\n\n{body}\n{STARTUP_INSTRUCTIONS_END_MARKER}\n"
         )),
+        "hermes_compact_markdown" => Ok(format!(
+            "{STARTUP_INSTRUCTIONS_MARKER}\n# Amai continuity startup ({client_display_name})\n\nЭтот managed startup должен оставаться compact contract-pointer, а не копией полного startup-law. Machine-readable startup contract остаётся source-of-truth.\n\n{body}\n{STARTUP_INSTRUCTIONS_END_MARKER}\n"
+        )),
         "generic_markdown" => Ok(format!(
             "{STARTUP_INSTRUCTIONS_MARKER}\n# Amai continuity startup ({client_display_name})\n\n{body}\n{STARTUP_INSTRUCTIONS_END_MARKER}\n"
         )),
@@ -3022,6 +3279,198 @@ fn render_startup_instructions(
             "unsupported startup instructions format for client {client_key}: {other}"
         )),
     }
+}
+
+fn render_hermes_compact_startup_body(
+    workspace_root: &Path,
+    helper_repo_root: &Path,
+    client_key: &str,
+) -> Result<String> {
+    let (contract, startup_contract_sha256) =
+        startup_contract_for_workspace(workspace_root, helper_repo_root)?;
+    let tool = contract["tool"]
+        .as_str()
+        .ok_or_else(|| anyhow!("project_chat_startup contract is missing tool"))?;
+    let namespace = contract["default_namespace"]
+        .as_str()
+        .ok_or_else(|| anyhow!("project_chat_startup contract is missing default_namespace"))?;
+    let artifact_enforcement = &contract["artifact_enforcement"];
+    let startup_contract_required_before_tool_call =
+        artifact_enforcement["workspace_contract_required_before_tool_call"]
+            .as_bool()
+            .unwrap_or(false);
+    let startup_contract_missing_or_unreadable_fail_closed =
+        artifact_enforcement["missing_or_unreadable_fail_closed"]
+            .as_bool()
+            .unwrap_or(false);
+    let startup_contract_sha256_mismatch_fail_closed =
+        artifact_enforcement["sha256_mismatch_fail_closed"]
+            .as_bool()
+            .unwrap_or(false);
+    let startup_contract_sha256_field = artifact_enforcement["workspace_contract_sha256_field"]
+        .as_str()
+        .unwrap_or("startup_contract_sha256");
+
+    let tool_runtime_reconcile = &contract["tool_runtime_reconcile"];
+    let reconcile_error_class = tool_runtime_reconcile["error_class"]
+        .as_str()
+        .unwrap_or("tool_execution_failed");
+    let reconcile_error_detail_contains = tool_runtime_reconcile["error_detail_contains"]
+        .as_str()
+        .unwrap_or("no continuity import found for");
+    let reconcile_local_cli_shell_command = tool_runtime_reconcile["local_cli"]["shell_command"]
+        .as_str()
+        .unwrap_or("./scripts/continuity_startup.sh");
+    let reconcile_transport_error_detail_contains =
+        tool_runtime_reconcile["transport_error_detail_contains"]
+            .as_str()
+            .unwrap_or("Transport closed");
+    let reconnect_helper = &tool_runtime_reconcile["reconnect_helper"];
+    let reconnect_helper_shell_relative_path = reconnect_helper["shell_helper_relative_path"]
+        .as_str()
+        .unwrap_or("./scripts/reconnect_local.sh");
+    let reconnect_helper_bootstrap_command = reconnect_helper["bootstrap_command"]
+        .as_str()
+        .unwrap_or("bootstrap reconnect");
+    let reconnect_helper_requires_client_argument = reconnect_helper["requires_client_argument"]
+        .as_bool()
+        .unwrap_or(false);
+    let reconnect_helper_requires_yes_argument = reconnect_helper["requires_yes_argument"]
+        .as_bool()
+        .unwrap_or(false);
+    let reconnect_shell_command = if helper_repo_root != workspace_root {
+        let helper = helper_repo_root.display();
+        if reconnect_helper_requires_client_argument {
+            format!(
+                "{reconnect_helper_shell_relative_path} --client {client_key} --cwd {} --workspace-root {} --yes",
+                helper,
+                workspace_root.display()
+            )
+        } else {
+            format!(
+                "{reconnect_helper_shell_relative_path} --cwd {} --workspace-root {} --yes",
+                helper,
+                workspace_root.display()
+            )
+        }
+    } else if reconnect_helper_requires_client_argument {
+        format!("{reconnect_helper_shell_relative_path} --client {client_key}")
+    } else {
+        reconnect_helper_shell_relative_path.to_string()
+    };
+    let reconnect_bootstrap_command = if helper_repo_root != workspace_root {
+        let helper_exec = helper_repo_root.join("scripts/amai_exec.sh");
+        if reconnect_helper_requires_client_argument {
+            format!(
+                "{} {} --client {client_key} --cwd {} --workspace-root {} --yes",
+                helper_exec.display(),
+                reconnect_helper_bootstrap_command,
+                helper_repo_root.display(),
+                workspace_root.display()
+            )
+        } else {
+            format!(
+                "{} {} --cwd {} --workspace-root {} --yes",
+                helper_exec.display(),
+                reconnect_helper_bootstrap_command,
+                helper_repo_root.display(),
+                workspace_root.display()
+            )
+        }
+    } else if reconnect_helper_requires_client_argument {
+        if reconnect_helper_requires_yes_argument {
+            format!(
+                "./scripts/amai_exec.sh {reconnect_helper_bootstrap_command} --client {client_key} --yes"
+            )
+        } else {
+            format!(
+                "./scripts/amai_exec.sh {reconnect_helper_bootstrap_command} --client {client_key}"
+            )
+        }
+    } else if reconnect_helper_requires_yes_argument {
+        format!("./scripts/amai_exec.sh {reconnect_helper_bootstrap_command} --yes")
+    } else {
+        format!("./scripts/amai_exec.sh {reconnect_helper_bootstrap_command}")
+    };
+
+    let runtime_state_artifact = &contract["runtime_state_artifact"];
+    let runtime_state_relative_path =
+        runtime_state_artifact["workspace_runtime_state_relative_path"]
+            .as_str()
+            .unwrap_or(".amai/continuity/project-chat-startup-state.json");
+    let startup_execution_gate_field = runtime_state_artifact["startup_execution_gate_field"]
+        .as_str()
+        .unwrap_or("startup_execution_gate");
+    let gate_semantics_consistent_field = runtime_state_artifact["gate_semantics_consistent_field"]
+        .as_str()
+        .unwrap_or("gate_semantics_consistent");
+    let startup_state_fallback_shell_command =
+        runtime_state_artifact["inspection_fallback_cli"]["shell_command"]
+            .as_str()
+            .unwrap_or("./scripts/continuity_startup_state.sh");
+
+    let resume_enforcement = &contract["resume_enforcement"];
+    let resume_state_field = resume_enforcement["resume_state_field"]
+        .as_str()
+        .unwrap_or("execctl_resume_state");
+    let resume_contract_field = resume_enforcement["contract_field"]
+        .as_str()
+        .unwrap_or("execctl_resume_contract_summary");
+    let resume_obligation_field = resume_enforcement["obligation_field"]
+        .as_str()
+        .unwrap_or("execctl_resume_obligation");
+    let startup_next_action_field = resume_enforcement["startup_next_action_field"]
+        .as_str()
+        .unwrap_or("startup_next_action");
+    let active_lease_field = resume_enforcement["active_lease_field"]
+        .as_str()
+        .unwrap_or("execctl_active_lease");
+    let required_action_kind = resume_enforcement["required_action_kind_when_resume_required"]
+        .as_str()
+        .unwrap_or("resume_required_return_task");
+
+    let live_budget = &contract["live_client_budget_enforcement"];
+    let client_budget_guard_shell_command = live_budget["guard_shell_command"]
+        .as_str()
+        .unwrap_or("./scripts/client_budget_gate.sh");
+    let client_budget_reply_execution_gate_field = live_budget["reply_execution_gate_field"]
+        .as_str()
+        .unwrap_or("reply_execution_gate");
+    let client_budget_reply_prefix_field = live_budget["reply_prefix_field"]
+        .as_str()
+        .unwrap_or("reply_prefix");
+    let client_budget_required_reply_prefix_source = live_budget["required_reply_prefix_source"]
+        .as_str()
+        .unwrap_or("personal_agent_online_limit_contour");
+    let fail_closed_conditions = contract["fail_closed_conditions"]
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+
+    let repo_root_display = workspace_root.display().to_string();
+    let agent_contract_path_display = startup_agent_contract_artifact_path(workspace_root)
+        .display()
+        .to_string();
+    let contract_path_display = startup_contract_artifact_path(workspace_root)
+        .display()
+        .to_string();
+
+    Ok(format!(
+        "Перед первым содержательным ответом в новом или resumed чате и дальше перед каждым следующим содержательным ответом:\n\
+1. Workspace = `{repo_root_display}`. Прочитай compact agent contract `{agent_contract_path_display}` и machine-readable startup contract `{contract_path_display}`. Startup contract остаётся pinned source-of-truth; до MCP tool call проверь `{startup_contract_sha256_field} = \"{startup_contract_sha256}\"`, `workspace_contract_required_before_tool_call = {startup_contract_required_before_tool_call}`, `missing_or_unreadable_fail_closed = {startup_contract_missing_or_unreadable_fail_closed}`, `sha256_mismatch_fail_closed = {startup_contract_sha256_mismatch_fail_closed}`.\n\
+2. Затем вызови MCP tool `{tool}` с `repo_root = \"{repo_root_display}\"` и `namespace = \"{namespace}\"` до любого другого Amai шага.\n\
+3. Если tool вернул `{reconcile_error_class}` с detail `{reconcile_error_detail_contains}` или transport error с detail `{reconcile_transport_error_detail_contains}`, немедленно делай local reconcile: `{reconcile_local_cli_shell_command} --repo-root \"{repo_root_display}\" --namespace \"{namespace}\" --json`. Если он успешен, продолжай от локального startup payload и требуй reconnect exact front-door-ом: `{reconnect_shell_command}` или `{reconnect_bootstrap_command}`.\n\
+4. После startup прочитай runtime artifact `{runtime_state_relative_path}` и obey fail-closed только по полям `{startup_execution_gate_field}`, `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}`, `{active_lease_field}`. `{gate_semantics_consistent_field}` должен быть `true`; если resume требует `{required_action_kind}`, follow startup_next_action first. No silent drop.\n\
+5. Перед каждым содержательным ответом обновляй `{client_budget_guard_shell_command} --enforce-reply-gate` и работай только по `client_budget_reply_gate.{client_budget_reply_execution_gate_field}`. Начинать user-visible reply можно только с exact non-empty `client_budget_reply_gate.{client_budget_reply_prefix_field}` из `{client_budget_required_reply_prefix_source}`.\n\
+6. Fallback для runtime-state inspection: `{startup_state_fallback_shell_command} --repo-root \"{repo_root_display}\" --json`.\n\
+7. Любой fail-closed scenario ({fail_closed_conditions}) сообщай как блокер и не угадывай continuity."
+    ))
 }
 
 fn render_startup_instruction_body(
@@ -3383,11 +3832,14 @@ fn render_startup_instruction_body(
             values
                 .iter()
                 .filter_map(Value::as_str)
+                .map(|value| client_turn_pressure_display_status_label(value, true))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect::<Vec<_>>()
                 .join(", ")
         })
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "сожми текущий чат сейчас".to_string());
+        .unwrap_or_else(|| CLIENT_TURN_PRESSURE_ROTATE_STATUS_LABELS.join(", "));
     let client_budget_save_handoff_before_rotate =
         client_budget_enforcement["save_handoff_before_rotate"]
             .as_bool()
@@ -3760,7 +4212,7 @@ fn render_startup_instruction_body(
             "4. В runtime artifact смотри только `{startup_execution_gate_field}`, `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}`, `{active_lease_field}`. Restore бери из `required_summary_fields`, obligations из `restored_obligations`. Fail-closed, если `{gate_semantics_consistent_field} != true` (`gate_semantics_consistent_true_required = {gate_semantics_consistent_true_required_text}`), `{startup_execution_gate_field}.{gate_must_follow_field} != true`, `{startup_execution_gate_field}.{gate_unrelated_work_allowed_field} != false`, `{startup_execution_gate_field}.{gate_prompt_read_field} != true` или `{startup_execution_gate_field}.{gate_no_silent_drop_field} != true`."
         ),
         format!(
-            "5. Resume law: если `{startup_execution_gate_field}.{gate_required_action_kind_field} == \"{required_action_kind}\"`, `{startup_next_action_field}.action_kind == \"{required_action_kind}\"` (`must_resume_required_return_task_before_unrelated_work = {must_resume_before_unrelated_text}`) или `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"` (`previous_session_owner_must_follow_startup_next_action = {previous_session_owner_must_follow_startup_next_action_text}`), follow startup_next_action first. `no_silent_drop = {no_silent_drop_text}`. Для resume смотри `execctl_active_lease_summary`, `required_return_task`, `project_task_tree`, `project_task_tree_summary`, `project_task_ledger`, `project_task_ledger_summary`."
+            "5. Resume law: если `{startup_execution_gate_field}.{gate_required_action_kind_field} == \"{required_action_kind}\"`, `{startup_next_action_field}.action_kind == \"{required_action_kind}\"` (`must_resume_required_return_task_before_unrelated_work = {must_resume_before_unrelated_text}`) или `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"` (`previous_session_owner_must_follow_startup_next_action = {previous_session_owner_must_follow_startup_next_action_text}`), follow startup_next_action first. `no_silent_drop = {no_silent_drop_text}`. Для resume смотри `execctl_active_lease_summary`, `required_return_task`, `required_task_set`, `required_task_set_summary`, `project_task_tree`, `project_task_tree_summary`, `project_task_ledger`, `project_task_ledger_summary`."
         ),
         format!(
             "6. Перед каждым содержательным ответом обновляй guard `{client_budget_guard_shell_command}` и работай только по `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}`. `must_check_before_each_substantive_reply = {client_budget_must_check_before_each_reply_text}`; stale старше `{client_budget_max_guard_age_seconds_text}` секунд запрещён (`stale_guard_requires_refresh = {client_budget_stale_guard_requires_refresh_text}`). Hard gate automation: `{client_budget_guard_enforcement_flag}` (`guard_enforcement_exit_on_blocking = {client_budget_guard_enforcement_exit_on_blocking_text}`). Prefix preflight: `{client_budget_reply_prefix_enforcement_flag}` (`required_reply_prefix_source = {client_budget_required_reply_prefix_source}`, `required_reply_prefix_non_empty = {client_budget_required_reply_prefix_non_empty_text}`, `reply_prefix_preflight_blocks_substantive_reply = {client_budget_reply_prefix_preflight_blocks_substantive_reply_text}`, `output_prefix_enforcement_mode = {client_budget_output_prefix_enforcement_mode}`, `output_prefix_host_enforced = {client_budget_output_prefix_host_enforced_text}`). Continuity write-side maintenance в Amai ({client_budget_continuity_write_operations}) не блокируется reply guard (`continuity_write_exempt_from_reply_guard = {client_budget_continuity_write_exempt_from_reply_guard_text}`) и при rotate/advisory pressure остаётся обязательным перед уходом (`continuity_write_required_before_rotate = {client_budget_continuity_write_required_before_rotate_text}`). Для KPI/guard/exact-pair root-cause сначала используй `{client_budget_compact_diagnostics_shell_command}`; `must_prefer_compact_diagnostics_over_full_snapshot = {client_budget_prefer_compact_diagnostics_text}`."
@@ -3769,7 +4221,7 @@ fn render_startup_instruction_body(
             "7. Gate version pinned: `{client_budget_reply_execution_gate_version}`. Начинать user-visible reply можно только если `{client_budget_reply_execution_gate_field}.{client_budget_reply_prefix_field}` не пустой и источник равен `{client_budget_required_reply_prefix_source}`; иначе substantive reply запрещён и сначала нужен новый guard-check через `{client_budget_reply_prefix_enforcement_flag}`. Если prefix готов, начинай reply с этой exact строки. Если `{client_budget_reply_budget_mode_field} == \"{client_budget_compact_reply_mode_value}\"`, substantive reply разрешён только по `{client_budget_reply_budget_contract_field}` с `contract_version = \"{client_budget_compact_reply_contract_version}\"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing. Exact operator-switch для target режима: matching `{client_budget_target_command_pattern}` -> `{client_budget_target_shell_command} --repo-root \"{repo_root_display}\" {client_budget_target_namespace_argument} \"{namespace}\" {client_budget_target_percent_argument} N` (`repo_root_argument_required = {client_budget_target_repo_root_argument_required_text}`, `switch_immediately_on_exact_chat_command = {client_budget_target_switch_immediately_text}`, `reply_with_confirmation_after_switch = {client_budget_target_reply_with_confirmation_text}`). Пример exact chat-команды: `{client_budget_target_example_command}`. Exact operator-switch для huge-chat rebase: точную команду `{client_budget_compact_chat_exact_command}` обработай через `{client_budget_compact_chat_shell_command} --repo-root \"{repo_root_display}\" {client_budget_compact_chat_namespace_argument} \"{namespace}\" --json` (`repo_root_argument_required = {client_budget_compact_chat_repo_root_argument_required}`, `switch_immediately_on_exact_chat_command = {client_budget_compact_chat_switch_immediately}`, `reply_with_confirmation_after_prepare = {client_budget_compact_chat_reply_with_confirmation}`, `prompt_text_required_for_rebase = {client_budget_compact_chat_prompt_text_required}`), верни `prompt_text` и `operator_notice`, и требуй host action `{client_budget_compact_chat_required_host_action}`."
         ),
         format!(
-            "8. Client-budget blocked reply mechanism removed: `reply_blocking_removed = {client_budget_reply_blocking_removed_text}`. Tool-turn blocked mechanism removed too: `tool_turn_blocking_removed = {client_budget_tool_turn_blocking_removed_text}`. Если `{client_budget_reply_execution_gate_field}.must_rotate_before_reply = true`, `{client_budget_reply_execution_gate_field}.must_wait_for_budget_recovery_before_reply = true`, `{client_budget_rotate_now_field} = true`, `{client_budget_status_label_field}` равен одному из [{client_budget_rotate_status_labels}], `same_meter_pure_burn_turn_active = true`, `must_avoid_new_tool_turn_without_specific_delta_goal = true` или `max_tool_roundtrips_soft = 0`, считай это только advisory/compact pressure signal. User-visible blocked wait template использовать запрещено; `amai_context_pack`, continuity write и другие Amai tools не блокируй только из-за этих полей. `save_handoff_before_rotate = {client_budget_save_handoff_before_rotate_text}` и `fresh_chat_requires_continuity_startup = {client_budget_fresh_chat_requires_startup_text}` остаются operator guidance."
+            "8. Client-budget blocked reply mechanism removed: `reply_blocking_removed = {client_budget_reply_blocking_removed_text}`. Tool-turn blocked mechanism removed too: `tool_turn_blocking_removed = {client_budget_tool_turn_blocking_removed_text}`. Если `{client_budget_reply_execution_gate_field}.must_rotate_before_reply = true`, `{client_budget_reply_execution_gate_field}.must_wait_for_budget_recovery_before_reply = true`, `{client_budget_rotate_now_field} = true`, `{client_budget_status_label_field}` равен одному из current normalized same-thread advisory labels [{client_budget_rotate_status_labels}], `same_meter_pure_burn_turn_active = true`, `must_avoid_new_tool_turn_without_specific_delta_goal = true` или `max_tool_roundtrips_soft = 0`, считай это только advisory/compact pressure signal. Этот список в startup instructions является non-binding human-readable snapshot канонического shared advisory source, а не отдельным policy-list. User-visible blocked wait template использовать запрещено; `amai_context_pack`, continuity write и другие Amai tools не блокируй только из-за этих полей. `save_handoff_before_rotate = {client_budget_save_handoff_before_rotate_text}` и `fresh_chat_requires_continuity_startup = {client_budget_fresh_chat_requires_startup_text}` остаются operator guidance."
         ),
         format!(
             "9. Не подменяй полную клиентскую шкалу внутренним Amai-slice: `full_scale_client_truth_required = {client_budget_full_scale_truth_required_text}`. Любой fail-closed scenario ({fail_closed}) сообщай как блокер и не угадывай continuity."
@@ -3888,6 +4340,514 @@ fn render_startup_agent_contract_artifact(
         "fail_closed_conditions": contract["fail_closed_conditions"].clone()
     });
     serde_json::to_string(&payload).context("failed to serialize startup agent contract artifact")
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenClawAgentListEntry {
+    id: String,
+    #[serde(default)]
+    workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenClawAgentAddSummary {
+    #[serde(rename = "agentId")]
+    agent_id: String,
+    #[serde(rename = "workspace")]
+    _workspace: String,
+}
+
+fn openclaw_base_command(config_path: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("openclaw");
+    command.env("OPENCLAW_CONFIG_PATH", config_path);
+    command.env("OPENCLAW_HIDE_BANNER", "1");
+    command
+}
+
+fn openclaw_agent_id(repo_root: &Path) -> String {
+    let basename = repo_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("repo")
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    let digest = hex::encode(Sha256::digest(repo_root.display().to_string().as_bytes()));
+    format!("amai-{}-{}", basename, &digest[..8])
+}
+
+fn hermes_profile_id(repo_root: &Path) -> String {
+    let basename = repo_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("repo")
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    let digest = hex::encode(Sha256::digest(repo_root.display().to_string().as_bytes()));
+    format!("amai-{}-{}", basename, &digest[..8])
+}
+
+fn hermes_runtime_artifact_path(repo_root: &Path) -> PathBuf {
+    repo_root
+        .join(".amai")
+        .join("onboarding")
+        .join("hermes-profile-runtime.json")
+}
+
+fn hermes_default_home() -> Result<PathBuf> {
+    Ok(home_dir()
+        .ok_or_else(|| anyhow!("failed to resolve user home directory for Hermes runtime"))?
+        .join(".hermes"))
+}
+
+fn hermes_profiles_root() -> Result<PathBuf> {
+    Ok(hermes_default_home()?.join("profiles"))
+}
+
+fn hermes_profile_dir(profile_name: &str) -> Result<PathBuf> {
+    Ok(hermes_profiles_root()?.join(profile_name))
+}
+
+fn hermes_active_profile_path() -> Result<PathBuf> {
+    Ok(hermes_default_home()?.join("active_profile"))
+}
+
+fn read_hermes_active_profile() -> Result<String> {
+    let path = hermes_active_profile_path()?;
+    match fs::read_to_string(&path) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Ok("default".to_string())
+            } else {
+                Ok(trimmed.to_string())
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok("default".to_string()),
+        Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+fn write_hermes_active_profile(profile_name: &str) -> Result<()> {
+    let path = hermes_active_profile_path()?;
+    if profile_name == "default" {
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(&path, format!("{profile_name}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn ensure_hermes_profile_dirs(profile_dir: &Path) -> Result<()> {
+    for dir in [
+        "memories",
+        "sessions",
+        "skills",
+        "skins",
+        "logs",
+        "plans",
+        "workspace",
+        "cron",
+        "home",
+    ] {
+        fs::create_dir_all(profile_dir.join(dir)).with_context(|| {
+            format!(
+                "failed to create Hermes profile directory {}",
+                profile_dir.join(dir).display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn copy_optional_file(src: &Path, dst: &Path) -> Result<()> {
+    if !src.is_file() {
+        return Ok(());
+    }
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::copy(src, dst).with_context(|| {
+        format!(
+            "failed to copy optional file {} -> {}",
+            src.display(),
+            dst.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn copy_optional_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    if !src.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(dst).with_context(|| format!("failed to create {}", dst.display()))?;
+    for entry in fs::read_dir(src).with_context(|| format!("failed to read {}", src.display()))? {
+        let entry = entry.with_context(|| format!("failed to inspect {}", src.display()))?;
+        let path = entry.path();
+        let dest = dst.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        if file_type.is_dir() {
+            copy_optional_dir_recursive(&path, &dest)?;
+        } else if file_type.is_file() {
+            copy_optional_file(&path, &dest)?;
+        }
+    }
+    Ok(())
+}
+
+fn upsert_yaml_section_scalar(
+    document: &str,
+    section_key: &str,
+    scalar_key: &str,
+    value: &str,
+) -> String {
+    let spans = yaml_line_spans(document);
+    if let Some((section_start, section_end)) =
+        find_yaml_section_bounds_local(document, section_key)
+    {
+        let mut entry_start = None;
+        for (start, end) in spans
+            .iter()
+            .copied()
+            .filter(|(start, _)| *start > section_start && *start < section_end)
+        {
+            let line = &document[start..end];
+            if parse_yaml_nested_scalar_key(line).is_some_and(|key| key == scalar_key) {
+                entry_start = Some((start, end));
+                break;
+            }
+        }
+        if let Some((start, end)) = entry_start {
+            return format!(
+                "{}  {}: {}\n{}",
+                &document[..start],
+                scalar_key,
+                yaml_scalar_local(value),
+                &document[end..]
+            );
+        }
+        let insertion = format!("  {}: {}\n", scalar_key, yaml_scalar_local(value));
+        return format!(
+            "{}{}{}",
+            &document[..section_end],
+            insertion,
+            &document[section_end..]
+        );
+    }
+    let mut merged = document.to_string();
+    if !merged.is_empty() && !merged.ends_with('\n') {
+        merged.push('\n');
+    }
+    merged.push_str(section_key);
+    merged.push_str(":\n");
+    merged.push_str(&format!("  {}: {}\n", scalar_key, yaml_scalar_local(value)));
+    merged
+}
+
+fn yaml_scalar_local(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn yaml_line_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = 0;
+    for (index, byte) in text.as_bytes().iter().enumerate() {
+        if *byte == b'\n' {
+            spans.push((start, index + 1));
+            start = index + 1;
+        }
+    }
+    if start < text.len() {
+        spans.push((start, text.len()));
+    }
+    spans
+}
+
+fn parse_yaml_top_level_key_local(line: &str) -> Option<&str> {
+    if line.starts_with(' ') || line.starts_with('\t') {
+        return None;
+    }
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    trimmed.strip_suffix(':')
+}
+
+fn parse_yaml_nested_scalar_key(line: &str) -> Option<String> {
+    if !line.starts_with("  ") || line.starts_with("    ") {
+        return None;
+    }
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let (key, _) = trimmed.split_once(':')?;
+    Some(key.trim_matches('\'').trim_matches('"').to_string())
+}
+
+fn find_yaml_section_bounds_local(existing: &str, section_key: &str) -> Option<(usize, usize)> {
+    let spans = yaml_line_spans(existing);
+    for (index, (start, _end)) in spans.iter().enumerate() {
+        let line = &existing[*start..spans[index].1];
+        if parse_yaml_top_level_key_local(line).is_some_and(|key| key == section_key) {
+            for (next_start, next_end) in spans.iter().skip(index + 1) {
+                let next_line = &existing[*next_start..*next_end];
+                if parse_yaml_top_level_key_local(next_line).is_some() {
+                    return Some((*start, *next_start));
+                }
+            }
+            return Some((*start, existing.len()));
+        }
+    }
+    None
+}
+
+fn render_hermes_profile_soul(base: Option<&str>, startup_instructions: &str) -> String {
+    const BEGIN: &str = "<!-- AMAI MANAGED HERMES PROFILE STARTUP v1 -->";
+    const END: &str = "<!-- /AMAI MANAGED HERMES PROFILE STARTUP v1 -->";
+    let mut body = base.unwrap_or_default().trim().to_string();
+    if !body.is_empty() {
+        body.push_str("\n\n");
+    }
+    body.push_str(BEGIN);
+    body.push('\n');
+    body.push_str(
+        "Этот managed block materialized Amai onboarding-ом и должен оставаться в project-bound Hermes profile.\n\n",
+    );
+    body.push_str(startup_instructions.trim());
+    body.push('\n');
+    body.push_str(END);
+    body.push('\n');
+    body
+}
+
+fn ensure_hermes_project_profile(
+    repo_root: &Path,
+    client_config_path: &Path,
+    startup_instruction_path: &Path,
+) -> Result<HermesProfileInstallSummary> {
+    let profile_name = hermes_profile_id(repo_root);
+    let profile_dir = hermes_profile_dir(&profile_name)?;
+    let runtime_artifact_path = hermes_runtime_artifact_path(repo_root);
+    let previous_active_profile = if runtime_artifact_path.is_file() {
+        let content = fs::read_to_string(&runtime_artifact_path)
+            .with_context(|| format!("failed to read {}", runtime_artifact_path.display()))?;
+        serde_json::from_str::<HermesRuntimeArtifact>(&content)
+            .with_context(|| format!("failed to parse {}", runtime_artifact_path.display()))?
+            .previous_active_profile
+    } else {
+        read_hermes_active_profile()?
+    };
+
+    ensure_hermes_profile_dirs(&profile_dir)?;
+
+    let default_home = hermes_default_home()?;
+    let startup_instructions = fs::read_to_string(startup_instruction_path)
+        .with_context(|| format!("failed to read {}", startup_instruction_path.display()))?;
+
+    let base_config = fs::read_to_string(client_config_path)
+        .with_context(|| format!("failed to read {}", client_config_path.display()))?;
+    let updated_config = upsert_yaml_section_scalar(
+        &base_config,
+        "terminal",
+        "cwd",
+        &repo_root.display().to_string(),
+    );
+    fs::write(profile_dir.join("config.yaml"), updated_config.as_bytes()).with_context(|| {
+        format!(
+            "failed to write {}",
+            profile_dir.join("config.yaml").display()
+        )
+    })?;
+
+    copy_optional_file(&default_home.join(".env"), &profile_dir.join(".env"))?;
+    copy_optional_file(
+        &default_home.join("memories").join("MEMORY.md"),
+        &profile_dir.join("memories").join("MEMORY.md"),
+    )?;
+    copy_optional_file(
+        &default_home.join("memories").join("USER.md"),
+        &profile_dir.join("memories").join("USER.md"),
+    )?;
+    copy_optional_dir_recursive(&default_home.join("skills"), &profile_dir.join("skills"))?;
+
+    let base_soul = fs::read_to_string(default_home.join("SOUL.md")).ok();
+    let rendered_soul = render_hermes_profile_soul(base_soul.as_deref(), &startup_instructions);
+    fs::write(profile_dir.join("SOUL.md"), rendered_soul.as_bytes())
+        .with_context(|| format!("failed to write {}", profile_dir.join("SOUL.md").display()))?;
+
+    if let Some(parent) = runtime_artifact_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let runtime_artifact = HermesRuntimeArtifact {
+        profile_name: profile_name.clone(),
+        profile_dir: profile_dir.display().to_string(),
+        previous_active_profile,
+    };
+    fs::write(
+        &runtime_artifact_path,
+        serde_json::to_string_pretty(&runtime_artifact)
+            .context("failed to serialize Hermes runtime artifact")?,
+    )
+    .with_context(|| format!("failed to write {}", runtime_artifact_path.display()))?;
+    write_hermes_active_profile(&profile_name)?;
+
+    Ok(HermesProfileInstallSummary {
+        profile_name,
+        profile_dir,
+        runtime_artifact_path,
+    })
+}
+
+fn remove_hermes_project_profile(repo_root: &Path) -> Result<Option<ClientRuntimeInstallSummary>> {
+    let runtime_artifact_path = hermes_runtime_artifact_path(repo_root);
+    if !runtime_artifact_path.is_file() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&runtime_artifact_path)
+        .with_context(|| format!("failed to read {}", runtime_artifact_path.display()))?;
+    let artifact: HermesRuntimeArtifact = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {}", runtime_artifact_path.display()))?;
+    let active_profile = read_hermes_active_profile()?;
+    if active_profile == artifact.profile_name {
+        let previous_profile_dir = if artifact.previous_active_profile == "default" {
+            Some(hermes_default_home()?)
+        } else {
+            Some(hermes_profile_dir(&artifact.previous_active_profile)?)
+        };
+        let restore_to = if artifact.previous_active_profile == "default"
+            || previous_profile_dir.is_some_and(|path| path.is_dir())
+        {
+            artifact.previous_active_profile.as_str()
+        } else {
+            "default"
+        };
+        write_hermes_active_profile(restore_to)?;
+    }
+    let profile_dir = PathBuf::from(&artifact.profile_dir);
+    if profile_dir.is_dir() {
+        fs::remove_dir_all(&profile_dir)
+            .with_context(|| format!("failed to remove {}", profile_dir.display()))?;
+    }
+    fs::remove_file(&runtime_artifact_path)
+        .with_context(|| format!("failed to remove {}", runtime_artifact_path.display()))?;
+    Ok(Some(ClientRuntimeInstallSummary {
+        status: "managed_hermes_profile_removed".to_string(),
+        output_path: profile_dir,
+        install_scope: "user_global".to_string(),
+        reason: format!(
+            "Hermes project profile `{}` removed and sticky default restored",
+            artifact.profile_name
+        ),
+    }))
+}
+
+fn openclaw_list_agents(config_path: &Path) -> Result<Vec<OpenClawAgentListEntry>> {
+    let output = openclaw_base_command(config_path)
+        .arg("agents")
+        .arg("list")
+        .arg("--json")
+        .output()
+        .with_context(|| "failed to run openclaw agents list")?;
+    if !output.status.success() {
+        bail!(
+            "openclaw agents list failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("failed to parse openclaw agents list json")
+}
+
+fn openclaw_agent_exists(config_path: &Path, agent_id: &str) -> Result<bool> {
+    Ok(openclaw_list_agents(config_path)?
+        .iter()
+        .any(|agent| agent.id == agent_id))
+}
+
+fn ensure_openclaw_project_agent(
+    config_path: &Path,
+    agent_id: &str,
+    workspace_root: &Path,
+) -> Result<OpenClawAgentAddSummary> {
+    let workspace = workspace_root.display().to_string();
+    let agents = openclaw_list_agents(config_path)?;
+    if agents
+        .iter()
+        .any(|agent| agent.id == agent_id && agent.workspace.as_deref() == Some(workspace.as_str()))
+    {
+        return Ok(OpenClawAgentAddSummary {
+            agent_id: agent_id.to_string(),
+            _workspace: workspace,
+        });
+    }
+    if agents.iter().any(|agent| agent.id == agent_id) {
+        delete_openclaw_project_agent(config_path, agent_id)?;
+    }
+    let output = openclaw_base_command(config_path)
+        .arg("agents")
+        .arg("add")
+        .arg(agent_id)
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--non-interactive")
+        .arg("--json")
+        .output()
+        .with_context(|| "failed to run openclaw agents add")?;
+    if !output.status.success() {
+        bail!(
+            "openclaw agents add failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("failed to parse openclaw agents add json")
+}
+
+fn delete_openclaw_project_agent(config_path: &Path, agent_id: &str) -> Result<()> {
+    let output = openclaw_base_command(config_path)
+        .arg("agents")
+        .arg("delete")
+        .arg(agent_id)
+        .arg("--force")
+        .arg("--json")
+        .output()
+        .with_context(|| "failed to run openclaw agents delete")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    bail!(
+        "openclaw agents delete failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 }
 
 fn startup_contract_for_workspace(
@@ -4029,8 +4989,9 @@ fn maybe_backup_user_global(path: &Path, install_scope: &str) -> Result<Option<P
 #[cfg(test)]
 mod tests {
     use super::{
-        InstallState, describe_client_surface, detection_score, env_keys, expand_target_template,
-        inspect_startup_artifacts, install_scope_status, merge_managed_startup_block,
+        InstallState, describe_client_surface, detection_score, ensure_hermes_project_profile,
+        env_keys, expand_target_template, hermes_profile_id, inspect_startup_artifacts,
+        install_scope_status, merge_managed_startup_block, remove_hermes_project_profile,
         render_agent_preflight_contract_artifact, render_agent_preflight_state_artifact,
         render_startup_agent_contract_artifact, render_startup_contract_artifact,
         render_startup_instructions, resolve_client_target, resolve_output_path,
@@ -4043,6 +5004,21 @@ mod tests {
     use serde_json::{Value, json};
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn hermes_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("amai-{label}-{nanos}"))
+    }
 
     #[test]
     fn env_keys_ignore_comments_and_blanks() {
@@ -4080,6 +5056,24 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             .expect("codex startup instructions must be configured");
         assert_eq!(codex_startup.mode, "managed_append_block");
         assert_eq!(codex_startup.install_scope, "workspace_local");
+        let hermes = resolve_client_target(repo, "hermes", false)
+            .expect("hermes target must exist")
+            .target;
+        let hermes_startup = hermes
+            .startup_instructions
+            .expect("hermes startup instructions must be configured");
+        assert_eq!(hermes.default_output, "${home}/.hermes/config.yaml");
+        assert_eq!(hermes_startup.mode, "managed_workspace_file");
+        assert_eq!(hermes_startup.install_scope, "workspace_local");
+        let openclaw = resolve_client_target(repo, "openclaw", false)
+            .expect("openclaw target must exist")
+            .target;
+        let openclaw_startup = openclaw
+            .startup_instructions
+            .expect("openclaw startup instructions must be configured");
+        assert_eq!(openclaw.default_output, "${home}/.openclaw/openclaw.json");
+        assert_eq!(openclaw_startup.mode, "managed_workspace_file");
+        assert_eq!(openclaw_startup.install_scope, "workspace_local");
     }
 
     #[test]
@@ -4135,6 +5129,60 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
                 |value| value.contains("./scripts/reconnect_local.sh --client generic")
             )
         );
+        assert_eq!(
+            generic["delivery_surface_assist_summary"],
+            generic["fresh_chat_assist_summary"]
+        );
+
+        let hermes = describe_client_surface(repo, Some("hermes")).expect("hermes surface");
+        assert_eq!(hermes["client_key"], json!("hermes"));
+        assert_eq!(hermes["display_name"], json!("Hermes"));
+        assert_eq!(
+            hermes["startup_instruction_mode"],
+            json!("managed_workspace_file")
+        );
+        assert!(
+            hermes["config_output_path"]
+                .as_str()
+                .is_some_and(|value| value.ends_with(".hermes/config.yaml"))
+        );
+        assert_eq!(
+            hermes["delivery_surface_assist_summary"],
+            hermes["fresh_chat_assist_summary"]
+        );
+        assert!(
+            hermes["startup_instruction_path"]
+                .as_str()
+                .is_some_and(|value| value.ends_with(".hermes.md"))
+        );
+
+        let openclaw = describe_client_surface(repo, Some("openclaw")).expect("openclaw surface");
+        assert_eq!(openclaw["client_key"], json!("openclaw"));
+        assert_eq!(openclaw["display_name"], json!("OpenClaw"));
+        assert_eq!(
+            openclaw["startup_instruction_mode"],
+            json!("managed_workspace_file")
+        );
+        assert!(
+            openclaw["config_output_path"]
+                .as_str()
+                .is_some_and(|value| value.ends_with(".openclaw/openclaw.json"))
+        );
+        assert!(
+            openclaw["startup_instruction_path"]
+                .as_str()
+                .is_some_and(|value| value.ends_with(".openclaw/AGENTS.md"))
+        );
+        assert!(
+            openclaw["client_runtime_agent_id"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("amai-"))
+        );
+        assert!(
+            openclaw["client_runtime_workspace_path"]
+                .as_str()
+                .is_some_and(|value| value.ends_with(".openclaw"))
+        );
     }
 
     #[test]
@@ -4151,6 +5199,128 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             install_scope_status("manual_generated"),
             "сгенерирован для ручного импорта"
         );
+    }
+
+    #[test]
+    fn hermes_runtime_profile_install_and_remove_manage_sticky_default() {
+        let _guard = hermes_env_lock().lock().expect("Hermes env lock poisoned");
+        let previous_home = std::env::var_os("HOME");
+        let home = unique_test_dir("hermes-runtime-profile");
+        let repo_root = home.join("repo");
+        let startup_path = repo_root.join(".hermes.md");
+        let runtime_artifact_path = repo_root
+            .join(".amai")
+            .join("onboarding")
+            .join("hermes-profile-runtime.json");
+        let client_config_path = home.join(".hermes").join("config.yaml");
+        let skills_src = home.join(".hermes").join("skills");
+        let active_profile_path = home.join(".hermes").join("active_profile");
+        let managed_profile_name = hermes_profile_id(&repo_root);
+        let managed_profile_dir = home
+            .join(".hermes")
+            .join("profiles")
+            .join(&managed_profile_name);
+
+        fs::create_dir_all(repo_root.join(".amai").join("onboarding"))
+            .expect("failed to create repo onboarding dir");
+        fs::create_dir_all(client_config_path.parent().expect("config parent"))
+            .expect("failed to create Hermes config dir");
+        fs::create_dir_all(home.join(".hermes").join("memories"))
+            .expect("failed to create Hermes memories dir");
+        fs::create_dir_all(&skills_src).expect("failed to create Hermes skills dir");
+        fs::write(
+            &client_config_path,
+            "model:\n  default: gemma4:e4b\nmcp_servers:\n  amai:\n    command: amai\n",
+        )
+        .expect("failed to write Hermes config");
+        fs::write(
+            startup_path
+                .parent()
+                .expect("startup parent")
+                .join(".hermes.md"),
+            "<!-- AMAI MANAGED STARTUP INSTRUCTIONS v1 -->\namai_continuity_startup\n",
+        )
+        .expect("failed to write startup instructions");
+        fs::write(home.join(".hermes").join("SOUL.md"), "Base Hermes soul\n")
+            .expect("failed to write base SOUL");
+        fs::write(
+            home.join(".hermes").join("memories").join("MEMORY.md"),
+            "remember this\n",
+        )
+        .expect("failed to write MEMORY");
+        fs::write(
+            home.join(".hermes").join("memories").join("USER.md"),
+            "prefer concise answers\n",
+        )
+        .expect("failed to write USER");
+        fs::write(skills_src.join("sample.txt"), "skill payload\n")
+            .expect("failed to write sample skill");
+        fs::write(&active_profile_path, "default\n").expect("failed to seed active profile");
+
+        unsafe { std::env::set_var("HOME", &home) };
+        let install = ensure_hermes_project_profile(&repo_root, &client_config_path, &startup_path)
+            .expect("failed to install Hermes profile");
+
+        assert_eq!(install.profile_name, managed_profile_name);
+        assert_eq!(install.profile_dir, managed_profile_dir);
+        assert!(install.runtime_artifact_path.is_file());
+        assert_eq!(
+            fs::read_to_string(&active_profile_path).expect("active profile"),
+            format!("{}\n", install.profile_name)
+        );
+        let managed_config =
+            fs::read_to_string(managed_profile_dir.join("config.yaml")).expect("managed config");
+        assert!(managed_config.contains("mcp_servers:"));
+        assert!(managed_config.contains("  amai:"));
+        assert!(managed_config.contains("terminal:"));
+        assert!(managed_config.contains(&format!("  cwd: '{}'", repo_root.display().to_string())));
+        let managed_soul =
+            fs::read_to_string(managed_profile_dir.join("SOUL.md")).expect("managed SOUL");
+        assert!(managed_soul.contains("AMAI MANAGED HERMES PROFILE STARTUP v1"));
+        assert!(managed_soul.contains("amai_continuity_startup"));
+        assert!(managed_soul.contains("Base Hermes soul"));
+        assert_eq!(
+            fs::read_to_string(managed_profile_dir.join("memories").join("MEMORY.md"))
+                .expect("managed MEMORY"),
+            "remember this\n"
+        );
+        assert_eq!(
+            fs::read_to_string(managed_profile_dir.join("memories").join("USER.md"))
+                .expect("managed USER"),
+            "prefer concise answers\n"
+        );
+        assert_eq!(
+            fs::read_to_string(managed_profile_dir.join("skills").join("sample.txt"))
+                .expect("managed skill"),
+            "skill payload\n"
+        );
+        let runtime_artifact: Value = serde_json::from_str(
+            &fs::read_to_string(&runtime_artifact_path).expect("runtime artifact"),
+        )
+        .expect("runtime artifact json");
+        assert_eq!(
+            runtime_artifact["profile_name"],
+            json!(install.profile_name.clone())
+        );
+        assert_eq!(
+            runtime_artifact["previous_active_profile"],
+            json!("default")
+        );
+
+        let remove_summary = remove_hermes_project_profile(&repo_root)
+            .expect("remove should succeed")
+            .expect("remove summary");
+        assert_eq!(remove_summary.status, "managed_hermes_profile_removed");
+        assert!(!active_profile_path.exists());
+        assert!(!managed_profile_dir.exists());
+        assert!(!runtime_artifact_path.exists());
+
+        if let Some(previous_home) = previous_home {
+            unsafe { std::env::set_var("HOME", previous_home) };
+        } else {
+            unsafe { std::env::remove_var("HOME") };
+        }
+        fs::remove_dir_all(&home).expect("failed to remove test home");
     }
 
     #[test]
@@ -4317,6 +5487,15 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("User-visible blocked wait template использовать запрещено"));
         assert!(text.contains("amai_context_pack"));
         assert!(text.contains("сожми текущий чат сейчас"));
+        assert!(text.contains("сожми текущий чат"));
+        assert!(text.contains("current normalized same-thread advisory labels"));
+        assert!(
+            text.contains(
+                "non-binding human-readable snapshot канонического shared advisory source"
+            )
+        );
+        assert!(!text.contains("новый чат нужен сейчас"));
+        assert!(!text.contains("новый чат рекомендован"));
         assert!(text.contains("advisory/compact pressure signal"));
         assert!(text.contains("full_scale_client_truth_required = true"));
         assert!(text.contains("внутренним Amai-slice"));
@@ -4490,7 +5669,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert_eq!(
             payload["startup_contract"]["purpose"],
             json!(
-                "project-scoped continuity restore plus live client-budget discipline before each substantive reply in a new, resumed, or ongoing chat"
+                "project-scoped continuity restore plus live client-budget discipline before each substantive reply on a new, resumed, or ongoing work surface"
             )
         );
         assert_eq!(
@@ -4779,16 +5958,42 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
                 .as_array()
                 .is_some_and(|items| !items.is_empty())
         );
+        let stage_progress_state = payload["agent_preflight_summary"]["stage_progress_state"]
+            .as_str()
+            .expect("stage_progress_state must be surfaced");
         assert!(
-            payload["agent_preflight_summary"]["next_required_stage"]["label"]
-                .as_str()
-                .is_some_and(|label| !label.is_empty())
+            matches!(
+                stage_progress_state,
+                "next_stage_required" | "all_stages_closed"
+            ),
+            "unexpected stage_progress_state: {stage_progress_state}"
         );
-        assert!(
-            payload["agent_preflight_summary"]["next_stage_ready_mechanisms"]
-                .as_array()
-                .is_some_and(|items| !items.is_empty())
-        );
+        if stage_progress_state == "next_stage_required" {
+            assert!(
+                payload["agent_preflight_summary"]["next_required_stage"]["label"]
+                    .as_str()
+                    .is_some_and(|label| !label.is_empty())
+            );
+            assert!(
+                payload["agent_preflight_summary"]["next_stage_ready_mechanisms"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty())
+            );
+        } else {
+            assert!(payload["agent_preflight_summary"]["next_required_stage"].is_null());
+            assert!(
+                payload["agent_preflight_summary"]["next_stage_ready_mechanisms"]
+                    .as_array()
+                    .is_some_and(|items| items.is_empty())
+            );
+            assert!(
+                payload["agent_preflight_summary"]["stage_checklist"]
+                    .as_array()
+                    .is_some_and(|items| items
+                        .iter()
+                        .all(|item| item["checked"].as_bool() == Some(true)))
+            );
+        }
         assert!(
             payload["source_documents"]
                 .as_array()
@@ -4917,6 +6122,8 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
                     "workspace_startup_contract_materialized".to_string(),
                 ),
                 startup_contract_sha256: Some(contract_sha),
+                client_runtime_path: None,
+                client_runtime_status: None,
                 agent_preflight_contract_path: None,
                 agent_preflight_agent_contract_path: None,
                 agent_preflight_state_path: None,
@@ -5103,6 +6310,20 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
     }
 
     #[test]
+    fn hermes_compact_startup_instructions_render_as_contract_pointer() {
+        let repo = Path::new("/tmp/amai-hermes");
+        let instructions =
+            render_startup_instructions(repo, repo, "Hermes", "hermes", "hermes_compact_markdown")
+                .expect("hermes startup instructions must render");
+        assert!(instructions.contains("compact contract-pointer"));
+        assert!(instructions.contains("startup_contract_sha256 = \""));
+        assert!(instructions.contains("./scripts/client_budget_gate.sh --enforce-reply-gate"));
+        assert!(instructions.contains("./scripts/reconnect_local.sh --client hermes"));
+        assert!(instructions.contains(".amai/continuity/project-chat-startup-state.json"));
+        assert!(!instructions.contains("Exact operator-switch для target режима"));
+    }
+
+    #[test]
     fn startup_artifact_audit_reports_ok_for_external_workspace_install_state() {
         let unique = format!(
             "amai-external-startup-artifact-audit-{}",
@@ -5156,6 +6377,8 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
                     "workspace_startup_contract_materialized".to_string(),
                 ),
                 startup_contract_sha256: Some(contract_sha),
+                client_runtime_path: None,
+                client_runtime_status: None,
                 agent_preflight_contract_path: None,
                 agent_preflight_agent_contract_path: None,
                 agent_preflight_state_path: None,
@@ -5170,6 +6393,97 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             .expect("startup artifact audit payload");
         assert_eq!(audit.status, "ok");
         assert_eq!(audit.startup_instruction_contains_expected_sha, Some(true));
+        assert_eq!(audit.install_state_sha_matches_current_contract, Some(true));
+        assert_eq!(
+            audit.startup_contract_sha_matches_current_contract,
+            Some(true)
+        );
+
+        fs::remove_dir_all(&helper_repo).expect("cleanup helper repo");
+        fs::remove_dir_all(&workspace).expect("cleanup workspace");
+    }
+
+    #[test]
+    fn startup_artifact_audit_accepts_hermes_compact_contract_pointer() {
+        let unique = format!(
+            "amai-hermes-compact-audit-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("epoch")
+                .as_nanos()
+        );
+        let helper_repo = std::env::temp_dir().join(format!("{unique}-helper"));
+        let workspace = std::env::temp_dir().join(format!("{unique}-workspace"));
+        fs::create_dir_all(&helper_repo).expect("temp helper repo");
+        fs::create_dir_all(&workspace).expect("temp workspace");
+
+        let startup_contract_path = startup_contract_artifact_path(&workspace);
+        if let Some(parent) = startup_contract_path.parent() {
+            fs::create_dir_all(parent).expect("startup contract dir");
+        }
+        let (contract_text, contract_sha) =
+            render_startup_contract_artifact(&workspace, &helper_repo).expect("startup contract");
+        fs::write(&startup_contract_path, contract_text).expect("write startup contract");
+
+        let startup_instruction_path = workspace.join(".hermes.md");
+        let startup_instructions = render_startup_instructions(
+            &workspace,
+            &helper_repo,
+            "Hermes",
+            "hermes",
+            "hermes_compact_markdown",
+        )
+        .expect("hermes startup instructions");
+        fs::write(&startup_instruction_path, startup_instructions)
+            .expect("write startup instructions");
+
+        save_install_state(
+            &helper_repo,
+            &InstallState {
+                package_version: "0.1.0".to_string(),
+                repo_revision: "test".to_string(),
+                client_key: "hermes".to_string(),
+                client_config: helper_repo
+                    .join(".hermes/config.yaml")
+                    .display()
+                    .to_string(),
+                stack_profile: "default".to_string(),
+                installed_at_epoch_seconds: 1,
+                memory_bridge_path: None,
+                memory_bridge_backup_path: None,
+                startup_instruction_path: Some(startup_instruction_path.display().to_string()),
+                startup_instruction_status: Some(
+                    "managed_workspace_instruction_installed".to_string(),
+                ),
+                startup_contract_path: Some(startup_contract_path.display().to_string()),
+                startup_contract_status: Some(
+                    "workspace_startup_contract_materialized".to_string(),
+                ),
+                startup_contract_sha256: Some(contract_sha),
+                client_runtime_path: None,
+                client_runtime_status: None,
+                agent_preflight_contract_path: None,
+                agent_preflight_agent_contract_path: None,
+                agent_preflight_state_path: None,
+                agent_preflight_contract_status: None,
+                agent_preflight_contract_sha256: None,
+            },
+        )
+        .expect("save install state");
+
+        let audit = inspect_startup_artifacts(&helper_repo)
+            .expect("startup artifact audit")
+            .expect("startup artifact audit payload");
+        assert_eq!(audit.status, "ok");
+        assert_eq!(audit.startup_instruction_contains_expected_sha, Some(true));
+        assert_eq!(
+            audit.startup_instruction_contains_execctl_active_lease_summary,
+            Some(false)
+        );
+        assert_eq!(
+            audit.startup_instruction_contains_runtime_state_artifact_version,
+            Some(false)
+        );
         assert_eq!(audit.install_state_sha_matches_current_contract, Some(true));
         assert_eq!(
             audit.startup_contract_sha_matches_current_contract,

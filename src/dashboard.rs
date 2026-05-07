@@ -34,13 +34,14 @@ use self::dashboard_card_support::{
     metric_row_with_key, status_label, status_reason_tooltip, tcp_port_is_open, with_extra_class,
     with_status, with_status_label, with_status_tooltip, with_table_orientation,
 };
-use self::dashboard_client_budget_diagnostics::*;
 #[allow(unused_imports)]
-pub(crate) use self::dashboard_client_budget_diagnostics::{
-    client_budget_root_cause_payload, client_budget_root_cause_payload_with_guard,
-};
-pub(crate) use self::dashboard_client_budget_support::client_budget_live_payload;
+pub(crate) use self::dashboard_client_budget_diagnostics::client_budget_root_cause_payload_with_guard;
+use self::dashboard_client_budget_diagnostics::*;
 use self::dashboard_client_budget_support::*;
+pub(crate) use self::dashboard_client_budget_support::{
+    CLIENT_TURN_PRESSURE_ROTATE_STATUS_LABELS, client_budget_live_payload,
+    client_turn_pressure_display_status_label,
+};
 use self::dashboard_client_limit_alignment::*;
 pub use self::dashboard_context::browser_base_url;
 pub use self::dashboard_current_session_budget_guard::current_session_budget_guard;
@@ -60,6 +61,9 @@ use self::dashboard_runtime_support::{
     build_glossary, build_governance_card, build_links, build_machine_cards, build_warnings,
 };
 use self::dashboard_service_cards::build_service_cards;
+pub(crate) use self::dashboard_service_cards::{
+    build_capacity_forecast_card, build_regression_explain_card,
+};
 use self::dashboard_working_state_card::*;
 
 pub use crate::dashboard_assets::{brand_lockup_svg, brand_mark_svg, favicon_ico};
