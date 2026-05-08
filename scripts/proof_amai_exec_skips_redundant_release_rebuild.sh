@@ -18,6 +18,13 @@ copy_into_sandbox() {
 copy_into_sandbox "scripts/amai_exec.sh"
 chmod +x "${sandbox_repo}/scripts/amai_exec.sh"
 
+cat >"${sandbox_repo}/scripts/run_stack_service.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'helper script newer than binary should not force cargo build\n'
+EOF
+chmod +x "${sandbox_repo}/scripts/run_stack_service.sh"
+
 cat >"${sandbox_repo}/target/release/amai" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -27,6 +34,8 @@ chmod +x "${sandbox_repo}/target/release/amai"
 
 sleep 1
 touch "${sandbox_repo}/target/release/amai"
+sleep 1
+touch "${sandbox_repo}/scripts/run_stack_service.sh"
 
 cat >"${fake_bin}/cargo" <<'EOF'
 #!/usr/bin/env bash

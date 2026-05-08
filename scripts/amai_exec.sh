@@ -14,7 +14,7 @@ release_binary_is_fresh() {
     fi
   done
   local path
-  for path in src sql scripts; do
+  for path in src sql; do
     [[ -e "$path" ]] || continue
     if find "$path" -type f -newer "$binary" -print -quit 2>/dev/null | grep -q .; then
       return 1
