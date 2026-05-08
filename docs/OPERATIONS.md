@@ -178,6 +178,22 @@ bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/i
   --yes
 ```
 
+Если `raw.githubusercontent.com` недоступен или таймаутит, supported hostile-network path теперь такой:
+
+```bash
+clone_dir="${HOME}/.local/share/amai/repo" && \
+if [ -d "${clone_dir}/.git" ]; then
+  git -C "${clone_dir}" fetch --depth 1 origin && \
+  git -C "${clone_dir}" checkout --force main && \
+  git -C "${clone_dir}" reset --hard origin/main
+else
+  git clone --depth 1 https://github.com/neo-2022/amai.git "${clone_dir}"
+fi && \
+"${clone_dir}/scripts/install_amai.sh" --client vscode --stack-profile default --yes
+```
+
+Этот path уже live-proved на отдельном ноуте: install дошёл до `Amai готов`, `amai-stack.service` стал `active`, а post-install `./scripts/status.sh` вернул зелёный stack.
+
 Этот wrapper:
 - по умолчанию использует canonical public source `https://github.com/neo-2022/amai.git`;
 - сам клонирует или обновляет repo в `~/.local/share/amai/repo` по умолчанию;

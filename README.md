@@ -54,6 +54,22 @@ bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/i
 - если на машине не хватает `cargo`, `rustc`, `docker` или `docker compose`, shell front-door теперь обязан fail-closed сразу и прямо сказать, чего не хватает, вместо позднего провала глубоко внутри onboarding.
 - если клиент = `vscode`, onboarding теперь ещё и автоматически ставит локальный public bridge `amai.amai-vscode-bridge`, чтобы compact-chat мог честно использовать `vscode://.../open-clean-chat` front-door вместо ожидания скрытого upstream bridge.
 
+Если сеть режет `raw.githubusercontent.com`, truthful fallback теперь такой:
+
+```bash
+clone_dir="${HOME}/.local/share/amai/repo" && \
+if [ -d "${clone_dir}/.git" ]; then
+  git -C "${clone_dir}" fetch --depth 1 origin && \
+  git -C "${clone_dir}" checkout --force main && \
+  git -C "${clone_dir}" reset --hard origin/main
+else
+  git clone --depth 1 https://github.com/neo-2022/amai.git "${clone_dir}"
+fi && \
+"${clone_dir}/scripts/install_amai.sh" --client vscode --stack-profile default --yes
+```
+
+Это тоже одна команда от GitHub, но front-door здесь идёт через обычный `git`, а не через `raw`-download.
+
 Если clone нужно положить не в default path, добавьте:
 
 ```bash
@@ -153,5 +169,4 @@ scripts\install_amai.cmd
   - за всё время.
 
 Если `auto-detect` выбрал не тот клиент, можно указать явно.
-
 
