@@ -2,8 +2,9 @@
   "name": "amai-vscode-bridge",
   "displayName": "Amai VS Code Bridge",
   "description": "Public VS Code URI bridge for opening a clean Codex chat surface and injecting an Amai restore prompt.",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "amai",
+  "icon": "media/amai-extension.svg",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -12,14 +13,47 @@
   ],
   "activationEvents": [
     "onUri",
-    "onCommand:amaiVscodeBridge.openCleanChat"
+    "onCommand:amaiVscodeBridge.openCleanChat",
+    "onCommand:amaiVscodeBridge.openWorkspaceSidebarChat",
+    "onCommand:amaiVscodeBridge.openWorkspacePanelChat",
+    "onView:amai.sidebar"
   ],
   "main": "./extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "amai",
+          "title": "Amai",
+          "icon": "media/amai-activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "amai": [
+        {
+          "id": "amai.sidebar",
+          "name": "Amai",
+          "type": "webview"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "amaiVscodeBridge.openCleanChat",
         "title": "Amai: Open Clean Codex Chat"
+      },
+      {
+        "command": "amaiVscodeBridge.openWorkspaceSidebarChat",
+        "title": "Amai: Open Workspace Chat in Sidebar"
+      },
+      {
+        "command": "amaiVscodeBridge.openWorkspacePanelChat",
+        "title": "Amai: Open Workspace Chat in Panel"
+      },
+      {
+        "command": "amaiVscodeBridge.focusSidebarView",
+        "title": "Amai: Focus Sidebar"
       }
     ]
   }

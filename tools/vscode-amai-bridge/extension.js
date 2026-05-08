@@ -3,6 +3,10 @@ const fs = require("fs/promises");
 const packageJson = require("./package.json");
 
 const COMMAND_ID = "amaiVscodeBridge.openCleanChat";
+const OPEN_SIDEBAR_COMMAND_ID = "amaiVscodeBridge.openWorkspaceSidebarChat";
+const OPEN_PANEL_COMMAND_ID = "amaiVscodeBridge.openWorkspacePanelChat";
+const FOCUS_VIEW_COMMAND_ID = "amaiVscodeBridge.focusSidebarView";
+const VIEW_ID = "amai.sidebar";
 const EXTENSION_URI_AUTHORITY = "amai.amai-vscode-bridge";
 const EXTENSION_VERSION = packageJson.version;
 
@@ -51,6 +55,7 @@ function normalizeBoolean(value, defaultValue) {
 function paramsToPayload(params) {
   return {
     promptFile: normalizeString(params.get("prompt_file")),
+    promptText: normalizeString(params.get("prompt_text")),
     resultFile: normalizeString(params.get("result_file")),
     repoRoot: normalizeString(params.get("repo_root")),
     target: normalizeString(params.get("target")) || "sidebar",
@@ -151,7 +156,7 @@ function collectVisibleSurfaceState(uriText) {
     bridge_tab_count: bridgeTabCount,
     group_count: groups.length,
     non_bridge_tab_count: nonBridgeTabCount,
-    non_bridge_tab_labels,
+    non_bridge_tab_labels: nonBridgeTabLabels,
     tab_groups: groups,
     total_tab_count: totalTabs,
   };
@@ -317,19 +322,22 @@ async function executeBridgeLaunch({ target, promptText, autoSubmit }) {
 async function openCleanChat(input, sourceUriText = null) {
   const startedAt = new Date().toISOString();
   const promptFile = normalizeString(input?.promptFile);
+  const inlinePromptText = normalizeString(input?.promptText);
   const resultFile = normalizeString(input?.resultFile);
   const repoRoot = normalizeString(input?.repoRoot);
   const target = normalizeString(input?.target) || "sidebar";
   const autoSubmit = input?.autoSubmit !== false;
 
   try {
-    if (!promptFile) {
-      throw new Error("prompt_file is required");
-    }
-
-    const promptText = (await fs.readFile(promptFile, "utf8")).trim();
+    let promptText = inlinePromptText;
     if (!promptText) {
-      throw new Error(`prompt_file is blank: ${promptFile}`);
+      if (!promptFile) {
+        throw new Error("prompt_file or promptText is required");
+      }
+      promptText = (await fs.readFile(promptFile, "utf8")).trim();
+    }
+    if (!promptText) {
+      throw new Error(promptFile ? `prompt_file is blank: ${promptFile}` : "promptText is blank");
     }
 
     const visibleSurfaceBeforeLaunch = collectVisibleSurfaceState(sourceUriText);
@@ -337,6 +345,7 @@ async function openCleanChat(input, sourceUriText = null) {
       status: "launch_started",
       started_at: startedAt,
       prompt_file: promptFile,
+      prompt_text_inline: Boolean(inlinePromptText),
       repo_root: repoRoot,
       target,
       auto_submit: autoSubmit,
@@ -360,6 +369,7 @@ async function openCleanChat(input, sourceUriText = null) {
       started_at: startedAt,
       completed_at: new Date().toISOString(),
       prompt_file: promptFile,
+      prompt_text_inline: Boolean(inlinePromptText),
       repo_root: repoRoot,
       target,
       auto_submit: autoSubmit,
@@ -385,6 +395,7 @@ async function openCleanChat(input, sourceUriText = null) {
       started_at: startedAt,
       completed_at: new Date().toISOString(),
       prompt_file: promptFile,
+      prompt_text_inline: Boolean(inlinePromptText),
       repo_root: repoRoot,
       target,
       auto_submit: autoSubmit,
@@ -395,10 +406,161 @@ async function openCleanChat(input, sourceUriText = null) {
   }
 }
 
+function currentWorkspaceRepoRoot() {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  return normalizeString(folder?.uri?.fsPath) ?? null;
+}
+
+function currentWorkspacePrompt(target) {
+  const repoRoot = currentWorkspaceRepoRoot();
+  const repoLine = repoRoot
+    ? `Workspace repo root: ${repoRoot}`
+    : "Workspace repo root is unavailable.";
+  const targetLine =
+    target === "panel"
+      ? "Open the clean Amai session in a separate panel."
+      : "Open the clean Amai session in the sidebar.";
+  return [
+    "Amai clean session bootstrap.",
+    repoLine,
+    targetLine,
+    "If this workspace contains startup instructions or AGENTS.md, follow them before tool use.",
+  ].join("\n");
+}
+
+async function launchWorkspaceChat(target) {
+  await openCleanChat({
+    promptText: currentWorkspacePrompt(target),
+    repoRoot: currentWorkspaceRepoRoot(),
+    target,
+    autoSubmit: false,
+  });
+}
+
+async function runWorkspaceLaunch(target) {
+  try {
+    await launchWorkspaceChat(target);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await vscode.window.showErrorMessage(`Amai launch failed: ${message}`);
+    throw error;
+  }
+}
+
+class AmaiSidebarViewProvider {
+  constructor(extensionUri) {
+    this.extensionUri = extensionUri;
+    this.view = null;
+  }
+
+  resolveWebviewView(webviewView) {
+    this.view = webviewView;
+    webviewView.webview.options = {
+      enableCommandUris: true,
+    };
+    webviewView.webview.html = this.renderHtml(webviewView.webview);
+  }
+
+  renderHtml(webview) {
+    const repoRoot = currentWorkspaceRepoRoot() ?? "not detected";
+    const identity = publicBridgeIdentity();
+    const sidebarCommandUri = `command:${OPEN_SIDEBAR_COMMAND_ID}`;
+    const panelCommandUri = `command:${OPEN_PANEL_COMMAND_ID}`;
+    return `<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      body {
+        font-family: var(--vscode-font-family);
+        color: var(--vscode-foreground);
+        padding: 12px;
+      }
+      .card {
+        border: 1px solid var(--vscode-panel-border);
+        border-radius: 10px;
+        padding: 12px;
+        background: var(--vscode-sideBar-background);
+      }
+      h2 {
+        margin: 0 0 8px;
+        font-size: 16px;
+      }
+      p, li {
+        line-height: 1.4;
+      }
+      .meta {
+        color: var(--vscode-descriptionForeground);
+        font-size: 12px;
+        word-break: break-word;
+      }
+      .actions {
+        display: grid;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      .action-button {
+        display: block;
+        text-align: center;
+        text-decoration: none;
+        border: 0;
+        border-radius: 8px;
+        padding: 10px 12px;
+        cursor: pointer;
+        color: var(--vscode-button-foreground);
+        background: var(--vscode-button-background);
+      }
+      .action-button.secondary {
+        color: var(--vscode-button-secondaryForeground);
+        background: var(--vscode-button-secondaryBackground);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h2>Amai</h2>
+      <p>Открой чистую рабочую поверхность Amai прямо из боковой панели.</p>
+      <div class="meta">Bridge: ${identity.authority}@${identity.version}</div>
+      <div class="meta">Workspace: ${repoRoot}</div>
+      <div class="actions">
+        <a class="action-button" href="${sidebarCommandUri}">Открыть в Sidebar</a>
+        <a class="action-button secondary" href="${panelCommandUri}">Открыть в Panel</a>
+      </div>
+    </div>
+  </body>
+</html>`;
+  }
+}
+
 function activate(context) {
+  const viewProvider = new AmaiSidebarViewProvider(context.extensionUri);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(VIEW_ID, viewProvider)
+  );
+
   context.subscriptions.push(
     vscode.commands.registerCommand(COMMAND_ID, async (input) => {
       await openCleanChat(input ?? {});
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(OPEN_SIDEBAR_COMMAND_ID, async () => {
+      await runWorkspaceLaunch("sidebar");
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(OPEN_PANEL_COMMAND_ID, async () => {
+      await runWorkspaceLaunch("panel");
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(FOCUS_VIEW_COMMAND_ID, async () => {
+      await vscode.commands.executeCommand(`${VIEW_ID}.focus`);
     })
   );
 

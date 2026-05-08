@@ -271,6 +271,19 @@ cd <amai-repo-root>
 ./scripts/remove_amai.sh --client codex
 ```
 
+Для стандартного managed clone в `~/.local/share/amai/repo` этот path теперь truthfully делает полный uninstall одной командой:
+- снимает client config;
+- отключает `systemd --user` unit `amai-stack.service`;
+- делает `docker compose down --remove-orphans --volumes`;
+- удаляет runtime tree и сам managed clone.
+
+Если нужно убрать только client-side startup/MCP integration, а сам install/runtime оставить на месте, используйте:
+
+```bash
+./scripts/disconnect_local.sh --client vscode
+./scripts/disconnect_local.sh --client codex
+```
+
 Если `Amai` уже живёт на удалённом Linux/VPS-host, а локально нужен только клиентский config:
 
 ```bash

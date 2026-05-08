@@ -108,6 +108,31 @@ struct InstallMetricsSummary {
     latest_retrieval_excluded_reasons: Option<String>,
 }
 
+struct DisconnectSummary {
+    repo_root: PathBuf,
+    install_state_before: Option<InstallState>,
+    client_key: String,
+    client_display_name: String,
+    client_resolution_mode: String,
+    client_detection_reason: String,
+    client_config: PathBuf,
+    backup_file: Option<PathBuf>,
+    startup_instructions_removed: Option<StartupInstructionsInstallSummary>,
+    client_runtime_removed: Option<ClientRuntimeInstallSummary>,
+    config_remove_result: mcp::RemoveConfigResult,
+}
+
+#[derive(Default)]
+struct FullRemoveSummary {
+    systemd_user_unit_removed: bool,
+    stack_down_succeeded: bool,
+    state_tree_removed: bool,
+    install_state_removed: bool,
+    repo_root_removed: bool,
+    support_root_removed: bool,
+    vscode_bridge_removed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StartupArtifactAudit {
     pub status: String,
@@ -1742,6 +1767,48 @@ fn confirm_local_installation(
 }
 
 pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
+    let summary = disconnect_summary(args).await?;
+    print_disconnect_summary(&summary)?;
+    Ok(())
+}
+
+pub async fn remove(args: &BootstrapDisconnectArgs) -> Result<()> {
+    let summary = disconnect_summary(args).await?;
+    print_disconnect_summary(&summary)?;
+    if !full_remove_mode_enabled() {
+        return Ok(());
+    }
+    let full_remove = full_remove_runtime(&summary).await?;
+    println!("full_remove: true");
+    println!(
+        "systemd_user_unit_removed: {}",
+        full_remove.systemd_user_unit_removed
+    );
+    println!("stack_down_succeeded: {}", full_remove.stack_down_succeeded);
+    println!("state_tree_removed: {}", full_remove.state_tree_removed);
+    println!(
+        "install_state_removed: {}",
+        full_remove.install_state_removed
+    );
+    println!("repo_root_removed: {}", full_remove.repo_root_removed);
+    println!("support_root_removed: {}", full_remove.support_root_removed);
+    println!(
+        "vscode_bridge_removed: {}",
+        full_remove.vscode_bridge_removed
+    );
+    println!("next_step_1: verify that Amai is no longer installed on this host");
+    println!("next_step_2: reinstall from GitHub only if you intentionally want Amai back");
+    Ok(())
+}
+
+fn full_remove_mode_enabled() -> bool {
+    matches!(
+        env::var("AMAI_BOOTSTRAP_REMOVE_MODE").ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "full" | "FULL")
+    )
+}
+
+async fn disconnect_summary(args: &BootstrapDisconnectArgs) -> Result<DisconnectSummary> {
     let repo_root = discover_repo_root(args.cwd.as_deref())?;
     best_effort_cleanup_mcp_orphans(&repo_root).await;
     let install_state_before = load_install_state(&repo_root)?;
@@ -1768,39 +1835,58 @@ pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
         args.purge_empty_file,
     )?;
 
-    println!("disconnect completed");
-    println!("client: {}", client_resolution.client_key);
-    println!("client_display_name: {}", target.display_name);
-    println!(
-        "client_resolution_mode: {}",
-        if client_resolution.auto_selected {
-            "auto_detected"
+    Ok(DisconnectSummary {
+        repo_root,
+        install_state_before,
+        client_key: client_resolution.client_key,
+        client_display_name: target.display_name,
+        client_resolution_mode: if client_resolution.auto_selected {
+            "auto_detected".to_string()
         } else {
-            "explicit"
-        }
+            "explicit".to_string()
+        },
+        client_detection_reason: client_resolution.reason,
+        client_config: output,
+        backup_file: backup,
+        startup_instructions_removed,
+        client_runtime_removed,
+        config_remove_result: result,
+    })
+}
+
+fn print_disconnect_summary(summary: &DisconnectSummary) -> Result<()> {
+    println!("disconnect completed");
+    println!("client: {}", summary.client_key);
+    println!("client_display_name: {}", summary.client_display_name);
+    println!("client_resolution_mode: {}", summary.client_resolution_mode);
+    println!(
+        "client_detection_reason: {}",
+        summary.client_detection_reason
     );
-    println!("client_detection_reason: {}", client_resolution.reason);
-    println!("client_config: {}", output.display());
-    println!("server_removed: {}", result.removed);
-    println!("file_purged: {}", result.purged_file);
-    if let Some(summary) = startup_instructions_removed {
+    println!("client_config: {}", summary.client_config.display());
+    println!("server_removed: {}", summary.config_remove_result.removed);
+    println!("file_purged: {}", summary.config_remove_result.purged_file);
+    if let Some(startup_summary) = &summary.startup_instructions_removed {
         println!("startup_instruction_removed: true");
         println!(
             "startup_instruction_path: {}",
-            summary.output_path.display()
+            startup_summary.output_path.display()
         );
-        println!("startup_instruction_status: {}", summary.status);
+        println!("startup_instruction_status: {}", startup_summary.status);
     } else {
         println!("startup_instruction_removed: false");
     }
-    if let Some(summary) = client_runtime_removed {
+    if let Some(client_runtime_summary) = &summary.client_runtime_removed {
         println!("client_runtime_removed: true");
-        println!("client_runtime_path: {}", summary.output_path.display());
-        println!("client_runtime_status: {}", summary.status);
+        println!(
+            "client_runtime_path: {}",
+            client_runtime_summary.output_path.display()
+        );
+        println!("client_runtime_status: {}", client_runtime_summary.status);
     } else {
         println!("client_runtime_removed: false");
     }
-    if let Some(state) = &install_state_before {
+    if let Some(state) = &summary.install_state_before {
         if let Some(startup_contract_path) = &state.startup_contract_path {
             println!("startup_contract_path: {}", startup_contract_path);
         }
@@ -1810,8 +1896,6 @@ pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
         if let Some(startup_contract_sha256) = &state.startup_contract_sha256 {
             println!("startup_contract_sha256: {}", startup_contract_sha256);
         }
-    }
-    if let Some(state) = &install_state_before {
         if let Some(memory_bridge_path) = &state.memory_bridge_path {
             println!("memory_bridge: {}", memory_bridge_path);
         }
@@ -1819,17 +1903,259 @@ pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
             println!("memory_bridge_backup: {}", memory_bridge_backup_path);
         }
     }
-    if let Some(summary) =
-        restore_memory_bridge(repo_root.as_path(), install_state_before.as_ref())?
-    {
-        println!("memory_bridge_restore: {}", summary);
-    }
-    if let Some(backup) = backup {
+    if let Some(backup) = &summary.backup_file {
         println!("backup_file: {}", backup.display());
+    }
+    if let Some(memory_bridge_summary) = restore_memory_bridge(
+        summary.repo_root.as_path(),
+        summary.install_state_before.as_ref(),
+    )? {
+        println!("memory_bridge_restore: {}", memory_bridge_summary);
     }
     println!("next_step_1: reload the client window or restart the client");
     println!("next_step_2: verify that Amai is no longer listed as an MCP server");
     Ok(())
+}
+
+async fn full_remove_runtime(summary: &DisconnectSummary) -> Result<FullRemoveSummary> {
+    let repo_root = &summary.repo_root;
+    let managed_clone_root = managed_clone_root()?;
+    let mut full_remove = FullRemoveSummary::default();
+    let install_state_path = install_state_path(repo_root);
+    let install_state_present_before = install_state_path.exists();
+
+    if summary.client_key == "vscode" {
+        full_remove.vscode_bridge_removed = remove_vscode_bridge_install().await?;
+    }
+
+    full_remove.systemd_user_unit_removed = remove_stack_autostart_unit().await?;
+    full_remove.stack_down_succeeded = compose_down_stack(repo_root).await?;
+
+    let state_dir = repo_root.join("state");
+    let tmp_dir = repo_root.join("tmp");
+    let mut state_tree_removed = false;
+    state_tree_removed |= remove_tree_forcefully(&state_dir).await?;
+    state_tree_removed |= remove_tree_forcefully(&tmp_dir).await?;
+    full_remove.state_tree_removed = state_tree_removed;
+
+    if install_state_path.exists() {
+        fs::remove_file(&install_state_path)
+            .with_context(|| format!("failed to remove {}", install_state_path.display()))?;
+        full_remove.install_state_removed = true;
+    } else if install_state_present_before {
+        full_remove.install_state_removed = true;
+    }
+
+    if repo_root == &managed_clone_root {
+        let fallback_cwd = managed_clone_root
+            .parent()
+            .map(Path::to_path_buf)
+            .or_else(home_dir)
+            .unwrap_or_else(std::env::temp_dir);
+        env::set_current_dir(&fallback_cwd).with_context(|| {
+            format!(
+                "failed to leave managed clone root before removal: {}",
+                fallback_cwd.display()
+            )
+        })?;
+        if remove_tree_forcefully(repo_root).await? {
+            full_remove.repo_root_removed = true;
+        }
+        if let Some(parent) = managed_clone_root.parent()
+            && parent.exists()
+            && is_directory_empty(parent)?
+        {
+            fs::remove_dir(parent)
+                .with_context(|| format!("failed to remove empty {}", parent.display()))?;
+            full_remove.support_root_removed = true;
+        }
+    }
+
+    Ok(full_remove)
+}
+
+async fn remove_stack_autostart_unit() -> Result<bool> {
+    let home = home_dir().ok_or_else(|| anyhow!("failed to resolve home directory"))?;
+    let unit_path = home.join(".config/systemd/user/amai-stack.service");
+    if command_exists("systemctl").await {
+        let _ = Command::new("systemctl")
+            .arg("--user")
+            .arg("disable")
+            .arg("--now")
+            .arg("amai-stack.service")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        let _ = Command::new("systemctl")
+            .arg("--user")
+            .arg("daemon-reload")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
+    if unit_path.exists() {
+        fs::remove_file(&unit_path)
+            .with_context(|| format!("failed to remove {}", unit_path.display()))?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+async fn compose_down_stack(repo_root: &Path) -> Result<bool> {
+    if !repo_root.join("compose.yaml").is_file() {
+        return Ok(false);
+    }
+    let status = Command::new("docker")
+        .arg("compose")
+        .arg("--profile")
+        .arg("monitoring")
+        .arg("down")
+        .arg("--remove-orphans")
+        .arg("--volumes")
+        .current_dir(repo_root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+    match status {
+        Ok(result) if result.success() => Ok(true),
+        Ok(_) | Err(_) => Ok(false),
+    }
+}
+
+async fn remove_vscode_bridge_install() -> Result<bool> {
+    let home = home_dir().ok_or_else(|| anyhow!("failed to resolve home directory"))?;
+    let extensions_root = home.join(".vscode/extensions");
+    let registry_path = extensions_root.join("extensions.json");
+    let mut removed_any = false;
+
+    if extensions_root.is_dir() {
+        for entry in fs::read_dir(&extensions_root)
+            .with_context(|| format!("failed to read {}", extensions_root.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !(name.starts_with("amai.amai-vscode-bridge-")
+                || name.starts_with("art-local.amai-vscode-bridge-"))
+            {
+                continue;
+            }
+            if path.is_dir() {
+                fs::remove_dir_all(&path)
+                    .with_context(|| format!("failed to remove {}", path.display()))?;
+            } else {
+                fs::remove_file(&path)
+                    .with_context(|| format!("failed to remove {}", path.display()))?;
+            }
+            removed_any = true;
+        }
+    }
+
+    if registry_path.is_file() {
+        let raw = fs::read_to_string(&registry_path)
+            .with_context(|| format!("failed to read {}", registry_path.display()))?;
+        let mut entries: Vec<Value> =
+            serde_json::from_str(&raw).context("failed to parse VS Code extensions registry")?;
+        let before_len = entries.len();
+        entries.retain(|entry| {
+            let Some(identifier) = entry.get("identifier") else {
+                return true;
+            };
+            let Some(id) = identifier.get("id").and_then(Value::as_str) else {
+                return true;
+            };
+            id != "amai.amai-vscode-bridge" && id != "art-local.amai-vscode-bridge"
+        });
+        if entries.len() != before_len {
+            fs::write(
+                &registry_path,
+                serde_json::to_string_pretty(&entries)? + "\n",
+            )
+            .with_context(|| format!("failed to write {}", registry_path.display()))?;
+            removed_any = true;
+        }
+    }
+
+    Ok(removed_any)
+}
+
+fn managed_clone_root() -> Result<PathBuf> {
+    if let Some(explicit) = env::var_os("AMAI_GITHUB_CLONE_DIR") {
+        return Ok(PathBuf::from(explicit));
+    }
+    let home = home_dir().ok_or_else(|| anyhow!("failed to resolve home directory"))?;
+    Ok(home.join(".local/share/amai/repo"))
+}
+
+fn is_directory_empty(path: &Path) -> Result<bool> {
+    Ok(fs::read_dir(path)
+        .with_context(|| format!("failed to read {}", path.display()))?
+        .next()
+        .is_none())
+}
+
+async fn remove_tree_forcefully(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    match fs::remove_dir_all(path) {
+        Ok(_) => return Ok(true),
+        Err(error) if error.kind() != io::ErrorKind::PermissionDenied => {
+            return Err(error).with_context(|| format!("failed to remove {}", path.display()));
+        }
+        Err(_) => {}
+    }
+
+    if command_exists("podman").await {
+        let status = Command::new("podman")
+            .arg("unshare")
+            .arg("rm")
+            .arg("-rf")
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .with_context(|| {
+                format!("failed to execute podman unshare rm for {}", path.display())
+            })?;
+        if status.success() {
+            return Ok(true);
+        }
+    }
+
+    fs::remove_dir_all(path).with_context(|| format!("failed to remove {}", path.display()))?;
+    Ok(true)
+}
+
+async fn command_exists(command: &str) -> bool {
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "command -v {} >/dev/null 2>&1",
+            shell_escape(command)
+        ))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn shell_escape(input: &str) -> String {
+    if input
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"._-/".contains(&byte))
+    {
+        input.to_string()
+    } else {
+        format!("'{}'", input.replace('\'', "'\"'\"'"))
+    }
 }
 
 fn restore_memory_bridge(repo_root: &Path, state: Option<&InstallState>) -> Result<Option<String>> {
@@ -6492,6 +6818,67 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
 
         fs::remove_dir_all(&helper_repo).expect("cleanup helper repo");
         fs::remove_dir_all(&workspace).expect("cleanup workspace");
+    }
+
+    #[tokio::test]
+    async fn remove_vscode_bridge_install_removes_bundle_and_registry_entries() {
+        let unique = format!(
+            "amai-vscode-bridge-remove-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("epoch")
+                .as_nanos()
+        );
+        let home = std::env::temp_dir().join(unique);
+        let extensions_root = home.join(".vscode/extensions");
+        fs::create_dir_all(&extensions_root).expect("extensions root");
+        let current_bundle = extensions_root.join("amai.amai-vscode-bridge-0.0.3");
+        let legacy_bundle = extensions_root.join("art-local.amai-vscode-bridge-0.0.2");
+        fs::create_dir_all(&current_bundle).expect("current bundle");
+        fs::create_dir_all(&legacy_bundle).expect("legacy bundle");
+        fs::write(current_bundle.join("package.json"), "{}").expect("current package");
+        fs::write(legacy_bundle.join("package.json"), "{}").expect("legacy package");
+        fs::write(
+            extensions_root.join("extensions.json"),
+            r#"[
+  {"identifier":{"id":"amai.amai-vscode-bridge"},"version":"0.0.3"},
+  {"identifier":{"id":"art-local.amai-vscode-bridge"},"version":"0.0.2"},
+  {"identifier":{"id":"other.extension"},"version":"1.0.0"}
+]"#,
+        )
+        .expect("registry");
+
+        let previous_home = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", &home) };
+        let removed = super::remove_vscode_bridge_install()
+            .await
+            .expect("remove vscode bridge install");
+
+        assert!(removed);
+        assert!(!current_bundle.exists());
+        assert!(!legacy_bundle.exists());
+        let registry: Value = serde_json::from_str(
+            &fs::read_to_string(extensions_root.join("extensions.json")).expect("read registry"),
+        )
+        .expect("parse registry");
+        let ids: Vec<String> = registry
+            .as_array()
+            .expect("registry array")
+            .iter()
+            .filter_map(|entry| {
+                entry["identifier"]["id"]
+                    .as_str()
+                    .map(|value| value.to_string())
+            })
+            .collect();
+        assert_eq!(ids, vec!["other.extension".to_string()]);
+
+        if let Some(previous_home) = previous_home {
+            unsafe { std::env::set_var("HOME", previous_home) };
+        } else {
+            unsafe { std::env::remove_var("HOME") };
+        }
+        fs::remove_dir_all(&home).expect("cleanup temp home");
     }
 
     #[test]
