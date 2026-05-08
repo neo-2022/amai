@@ -5,12 +5,13 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unit_name="${AMAI_STACK_AUTOSTART_UNIT_NAME:-amai-stack.service}"
 unit_dir="${AMAI_STACK_AUTOSTART_UNIT_DIR:-${HOME}/.config/systemd/user}"
 unit_path="${unit_dir}/${unit_name}"
+unit_tmp_path="${unit_path}.tmp.$$"
 launcher_script="${repo_root}/scripts/run_stack_service.sh"
 path_env="${HOME}/.local/bin:${HOME}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 mkdir -p "${unit_dir}"
 
-cat >"${unit_path}" <<EOF
+cat >"${unit_tmp_path}" <<EOF
 [Unit]
 Description=Amai local stack bootstrap
 
@@ -24,6 +25,8 @@ ExecStart=${launcher_script}
 [Install]
 WantedBy=default.target
 EOF
+
+mv "${unit_tmp_path}" "${unit_path}"
 
 if [[ "${AMAI_STACK_AUTOSTART_SKIP_SYSTEMCTL:-0}" == "1" ]]; then
   echo "Amai stack autostart unit rendered at ${unit_path}"

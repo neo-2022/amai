@@ -2454,6 +2454,8 @@ Stage status после fresh proof-refresh 2026-04-24:
   - `cargo test --quiet remove_vscode_bridge_install_removes_bundle_and_registry_entries`
   - `./scripts/proof_remove_amai_full.sh`
 - Live laptop verification for this contour closed the old truth gap: раньше one-command uninstall был ложным claim, потому что `remove_amai.sh` снимал только client config; теперь full remove materialized, а cleanup verified по unit/service/container/volume/extension/runtime слоям.
+- закрыт ещё один install/autostart defect под laptop lifecycle contour: `scripts/install_stack_autostart.sh` больше не пишет `amai-stack.service` прямо в финальный путь, из-за чего прерванный install мог оставить обрезанный user-unit без `ExecStart` и ломать следующий one-command install через `Loaded: bad-setting`;
+- unit render теперь идёт через temporary file + atomic `mv`, а `scripts/proof_stack_autostart.sh` дополнительно стартует из уже повреждённого preexisting `amai-stack.service` и проверяет, что rerender восстанавливает полный unit contract вместо silent reuse битого файла.
 
 ## Что агент должен делать прямо сейчас
 
