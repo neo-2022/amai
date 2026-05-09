@@ -7,14 +7,18 @@ It keeps project context, working state, and restore logic outside a single chat
 
 Amai is still in development.
 
-At the current stage, the most worked-through and verified client contour is `VS Code`:
-- GitHub install is available;
-- the `VS Code` install/publish contour has been worked through and verified;
-- the `Amai VS Code Bridge` extension is published through `OpenVSX`.
+At the current stage, the verified contour is strictly limited to:
+- `Linux` / `Ubuntu`-style install and run;
+- `VS Code` / `Codium` client usage on that Linux contour;
+- the `Amai VS Code Bridge` extension published through `OpenVSX`.
 
-Other clients and applications will be added as the project continues to develop.
+Other operating systems, clients, and applications will be added and verified as the project continues to develop.
 
 ## Install
+
+Verified install contour right now: `Linux` / `Ubuntu`-style shell environment with `VS Code` or `Codium`.
+
+This does not currently claim verified support for `macOS`, `Windows`, or other client/runtime combinations.
 
 Normal network:
 
