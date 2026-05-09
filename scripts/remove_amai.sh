@@ -9,4 +9,27 @@ if [[ "${repo_root}" == "${managed_clone_root}" ]]; then
   export AMAI_BOOTSTRAP_REMOVE_MODE=full
 fi
 
+debug_binary_is_fresh() {
+  local binary="./target/debug/amai"
+  [[ -x "${binary}" ]] || return 1
+  local candidate
+  for candidate in Cargo.toml Cargo.lock; do
+    if [[ -f "${candidate}" && "${candidate}" -nt "${binary}" ]]; then
+      return 1
+    fi
+  done
+  local path
+  for path in src sql; do
+    [[ -e "${path}" ]] || continue
+    if find "${path}" -type f -newer "${binary}" -print -quit 2>/dev/null | grep -q .; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+if [[ "${AMAI_BOOTSTRAP_REMOVE_MODE:-}" == "full" ]] && [[ ! -x ./target/release/amai ]] && debug_binary_is_fresh; then
+  exec ./target/debug/amai bootstrap remove "$@"
+fi
+
 exec ./scripts/amai_exec.sh bootstrap remove "$@"
