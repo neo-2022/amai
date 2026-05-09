@@ -2067,6 +2067,9 @@ async fn remove_vscode_bridge_install() -> Result<bool> {
         if registry_path.is_file() {
             let raw = fs::read_to_string(&registry_path)
                 .with_context(|| format!("failed to read {}", registry_path.display()))?;
+            if raw.trim().is_empty() {
+                continue;
+            }
             let mut entries: Vec<Value> =
                 serde_json::from_str(&raw).context("failed to parse VS Code extensions registry")?;
             let before_len = entries.len();
@@ -6907,6 +6910,44 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             })
             .collect();
         assert_eq!(vscodium_ids, vec!["other.vscodium".to_string()]);
+
+        if let Some(previous_home) = previous_home {
+            unsafe { std::env::set_var("HOME", previous_home) };
+        } else {
+            unsafe { std::env::remove_var("HOME") };
+        }
+        fs::remove_dir_all(&home).expect("cleanup temp home");
+    }
+
+    #[tokio::test]
+    async fn remove_vscode_bridge_install_tolerates_empty_registry_file() {
+        let unique = format!(
+            "amai-vscode-bridge-remove-empty-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("epoch")
+                .as_nanos()
+        );
+        let home = std::env::temp_dir().join(unique);
+        let vscode_root = home.join(".vscode/extensions");
+        fs::create_dir_all(&vscode_root).expect("vscode extensions root");
+        let current_bundle = vscode_root.join("amai.amai-vscode-bridge-0.0.3");
+        fs::create_dir_all(&current_bundle).expect("current bundle");
+        fs::write(current_bundle.join("package.json"), "{}").expect("current package");
+        fs::write(vscode_root.join("extensions.json"), "").expect("empty registry");
+
+        let previous_home = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", &home) };
+        let removed = super::remove_vscode_bridge_install()
+            .await
+            .expect("remove vscode bridge install with empty registry");
+
+        assert!(removed);
+        assert!(!current_bundle.exists());
+        assert_eq!(
+            fs::read_to_string(vscode_root.join("extensions.json")).expect("read empty registry"),
+            ""
+        );
 
         if let Some(previous_home) = previous_home {
             unsafe { std::env::set_var("HOME", previous_home) };
