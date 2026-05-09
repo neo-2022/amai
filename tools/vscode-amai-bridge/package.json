@@ -4,12 +4,36 @@
   "description": "Public VS Code URI bridge for opening a clean Codex chat surface and injecting an Amai restore prompt.",
   "version": "0.0.3",
   "publisher": "amai",
-  "icon": "media/amai-extension.svg",
+  "icon": "media/amai-extension.png",
   "engines": {
     "vscode": "^1.85.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/neo-2022/amai.git",
+    "directory": "tools/vscode-amai-bridge"
+  },
+  "homepage": "https://github.com/neo-2022/amai/tree/main/tools/vscode-amai-bridge",
+  "bugs": {
+    "url": "https://github.com/neo-2022/amai/issues"
+  },
+  "files": [
+    "extension.js",
+    "media/**",
+    "README.md",
+    "package.json"
+  ],
   "categories": [
+    "Chat",
     "Other"
+  ],
+  "keywords": [
+    "amai",
+    "codex",
+    "chat",
+    "mcp",
+    "continuity",
+    "restore"
   ],
   "activationEvents": [
     "onUri",

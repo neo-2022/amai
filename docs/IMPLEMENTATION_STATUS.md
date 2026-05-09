@@ -2462,6 +2462,21 @@ Stage status после fresh proof-refresh 2026-04-24:
   - `./scripts/proof_vscode_amai_bridge_codium_root.sh`
   - `cargo test --quiet remove_vscode_bridge_install_removes_bundle_and_registry_entries`
   - `./scripts/proof_remove_amai_full.sh`
+- fresh live laptop rerun against public GitHub `main` now closed the exact one-command lifecycle claim on AltLinux/VSCodium host:
+  - `./scripts/install_amai.sh --client vscode --stack-profile default --yes` reached `Amai готов` on revision `91ad1814`;
+  - `./scripts/status.sh` on the laptop was green for `postgres/qdrant/s3/nats/compatibility`;
+  - follow-up `./scripts/remove_amai.sh --client vscode` removed clone/state/unit/runtime tree and cleaned bridge traces from both `~/.vscode/extensions` and `~/.vscode-oss/extensions`.
+- remaining user-facing gap for the broader laptop story is now narrower and explicit:
+  - GitHub one-command install/remove is proof-backed;
+  - but `find Amai in VS Code Extensions search and install it as a published marketplace extension` is still not materialized, because marketplace/OpenVSX publishing contour has not been closed yet.
+- packaging/publish contour is now materially closer to that target:
+  - `tools/vscode-amai-bridge/package.json` now uses a publish-safe PNG marketplace icon, public repository/homepage/bugs metadata and an explicit `files` allowlist;
+  - new wrappers `./scripts/package_vscode_amai_bridge.sh` and `./scripts/publish_vscode_amai_bridge.sh` materialize a VSIX build path plus fail-closed target-specific publish path for `marketplace` and `openvsx`;
+  - new proofs `./scripts/proof_vscode_amai_bridge_package.sh` and `./scripts/proof_vscode_amai_bridge_publish_fail_closed.sh` prove successful VSIX packaging and explicit token-required failure instead of silent publish drift.
+- exact remaining blocker for searchable Extensions install is now narrower than before:
+  - code/package contour is materialized;
+  - but actual remote publish still needs registry credentials (`VSCE_PAT` / `MARKETPLACE_TOKEN` or `OVSX_PAT` / `OPENVSX_TOKEN`);
+  - packaging still warns about missing `LICENSE` file, so legal/distribution hygiene is not fully closed yet even though VSIX build already succeeds.
 
 ## Что агент должен делать прямо сейчас
 
