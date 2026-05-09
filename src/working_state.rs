@@ -180,8 +180,7 @@ async fn insert_restore_snapshot_and_materialize_pack(
     {
         Ok(snapshot_id) => snapshot_id,
         Err(error)
-            if error.phase
-                == postgres::ObservabilityInsertErrorPhase::OutcomeUnknownAfterWrite =>
+            if error.phase == postgres::ObservabilityInsertErrorPhase::OutcomeUnknownAfterWrite =>
         {
             let recovered_snapshot_id = postgres::lookup_observability_snapshot_id_for_payload(
                 db,
@@ -935,7 +934,11 @@ async fn record_handoff_event_with_refresh(
             );
             if refresh_restore_snapshot_after_write {
                 let refresh_started = Instant::now();
-                if let (Some(previous_restore_value), Some(restore_node), Some(source_snapshot_id)) = (
+                if let (
+                    Some(previous_restore_value),
+                    Some(restore_node),
+                    Some(source_snapshot_id),
+                ) = (
                     previous_restore.as_ref(),
                     previous_restore
                         .as_ref()
@@ -1376,15 +1379,13 @@ pub async fn record_host_current_thread_control_feedback_with_thread_hint(
         }
     });
     let _ = postgres::insert_observability_snapshot(db, WORKING_STATE_EVENT_KIND, &payload).await?;
-    Ok(
-        refresh_restore_snapshot_after_primary_write(
-            db,
-            project,
-            namespace,
-            "host_current_thread_control_feedback.refresh_restore_snapshot",
-        )
-        .await,
+    Ok(refresh_restore_snapshot_after_primary_write(
+        db,
+        project,
+        namespace,
+        "host_current_thread_control_feedback.refresh_restore_snapshot",
     )
+    .await)
 }
 
 pub async fn record_context_pack_event(
@@ -1550,15 +1551,13 @@ pub async fn record_context_pack_event(
         display_name: namespace.display_name,
         retrieval_mode: persisted_namespace.retrieval_mode,
     };
-    Ok(
-        refresh_restore_snapshot_after_primary_write(
-            db,
-            &project_record,
-            &namespace_record,
-            "context_pack.refresh_restore_snapshot",
-        )
-        .await,
+    Ok(refresh_restore_snapshot_after_primary_write(
+        db,
+        &project_record,
+        &namespace_record,
+        "context_pack.refresh_restore_snapshot",
     )
+    .await)
 }
 
 async fn build_restore_bundle_without_live_guard(
@@ -2447,7 +2446,10 @@ async fn refresh_restore_snapshot(
     continuity_profile_log(
         "refresh_restore_snapshot.materialize_restore_pack",
         insert_snapshot_started.elapsed().as_millis(),
-        &format!("project={} namespace={} snapshot_id={snapshot_id}", project.code, namespace.code),
+        &format!(
+            "project={} namespace={} snapshot_id={snapshot_id}",
+            project.code, namespace.code
+        ),
     );
     continuity_profile_log(
         "refresh_restore_snapshot.total",
@@ -2923,7 +2925,10 @@ async fn force_refresh_restore_snapshot_from_previous_handoff(
     continuity_profile_log(
         "force_refresh_restore_snapshot_from_previous_handoff.materialize_restore_pack",
         insert_snapshot_started.elapsed().as_millis(),
-        &format!("project={} namespace={} snapshot_id={snapshot_id}", project.code, namespace.code),
+        &format!(
+            "project={} namespace={} snapshot_id={snapshot_id}",
+            project.code, namespace.code
+        ),
     );
     Ok(Some(bundle))
 }
@@ -4694,7 +4699,8 @@ pub(crate) fn handoff_semantic_replay_matches_previous_restore(
         );
         return false;
     }
-    let Some(restore) = previous_restore.and_then(|value| value.get("working_state_restore")) else {
+    let Some(restore) = previous_restore.and_then(|value| value.get("working_state_restore"))
+    else {
         continuity_profile_log(
             "handoff.semantic_replay.reject",
             0,
@@ -9592,9 +9598,14 @@ mod tests {
         let repo_root = format!("/tmp/{project_code}");
         std::fs::create_dir_all(&repo_root).expect("repo root");
 
-        postgres::ensure_workspace(&client, &workspace_code, "Working State Test Workspace", "active")
-            .await
-            .expect("workspace");
+        postgres::ensure_workspace(
+            &client,
+            &workspace_code,
+            "Working State Test Workspace",
+            "active",
+        )
+        .await
+        .expect("workspace");
         let project = postgres::upsert_project(
             &client,
             &project_code,
@@ -9726,8 +9737,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn force_refresh_restore_snapshot_outcome_unknown_after_write_still_materializes_restore_pack(
-    ) {
+    async fn force_refresh_restore_snapshot_outcome_unknown_after_write_still_materializes_restore_pack()
+     {
         load_working_state_test_env();
 
         let cfg = AppConfig::from_env().expect("config");
@@ -9972,7 +9983,10 @@ mod tests {
             setup_working_state_test_scope("client_budget_target_degraded_refresh").await;
 
         unsafe {
-            std::env::set_var("AMAI_TEST_FORCE_RESTORE_PACK_CREATE_FAILURE", "before_write");
+            std::env::set_var(
+                "AMAI_TEST_FORCE_RESTORE_PACK_CREATE_FAILURE",
+                "before_write",
+            );
         }
         let write_status =
             super::record_client_budget_target_event(&client, &project, &namespace, 80)
@@ -9985,10 +9999,11 @@ mod tests {
         assert!(write_status.is_degraded());
         assert_eq!(write_status.primary_write_persisted, true);
         assert_eq!(write_status.restore_refresh_status, "degraded");
-        assert!(write_status
-            .warning
-            .as_deref()
-            .is_some_and(|value| value.contains("client_budget_target.refresh_restore_snapshot")));
+        assert!(
+            write_status.warning.as_deref().is_some_and(
+                |value| value.contains("client_budget_target.refresh_restore_snapshot")
+            )
+        );
 
         let row = client
             .query_one(
@@ -10044,7 +10059,10 @@ mod tests {
         });
 
         unsafe {
-            std::env::set_var("AMAI_TEST_FORCE_RESTORE_PACK_CREATE_FAILURE", "before_write");
+            std::env::set_var(
+                "AMAI_TEST_FORCE_RESTORE_PACK_CREATE_FAILURE",
+                "before_write",
+            );
         }
         let write_status =
             super::record_context_pack_event(&client, &payload, "verify_context_pack")
@@ -10055,10 +10073,12 @@ mod tests {
         }
 
         assert!(write_status.is_degraded());
-        assert!(write_status
-            .warning
-            .as_deref()
-            .is_some_and(|value| value.contains("context_pack.refresh_restore_snapshot")));
+        assert!(
+            write_status
+                .warning
+                .as_deref()
+                .is_some_and(|value| value.contains("context_pack.refresh_restore_snapshot"))
+        );
 
         let row = client
             .query_one(
@@ -10671,7 +10691,7 @@ mod tests {
 
     #[test]
     fn persisted_restore_snapshot_payload_compacts_project_task_ledger_and_strips_runtime_derived_fields()
-    {
+     {
         let mut entries = vec![
             json!({
                 "task_role": "active",
@@ -10753,7 +10773,8 @@ mod tests {
     }
 
     #[test]
-    fn persisted_restore_snapshot_payload_skips_observability_source_event_without_authoritative_id() {
+    fn persisted_restore_snapshot_payload_skips_observability_source_event_without_authoritative_id()
+     {
         let bundle = json!({
             "working_state_restore": {
                 "state_lineage": {},

@@ -51,19 +51,7 @@ bootstrap_main() {
     RUSTC="${rustc_bin}" "${cargo_bin}" run -- bootstrap preflight --stack-profile "${stack_profile}"
   fi
 
-  # Compose bind mounts fail closed if the host-side state tree is absent.
-  # Clean installs and freshly synced remote repos must not depend on preexisting
-  # runtime directories from an older workspace.
-  mkdir -p \
-    state/postgres \
-    state/qdrant \
-    state/minio \
-    state/nats \
-    tmp/postgres \
-    tmp/nats
-
-  ./scripts/render_nats_config.sh >/dev/null
-  ./scripts/render_postgres_config.sh >/dev/null
+  ./scripts/prepare_stack_runtime.sh
   docker compose up -d --remove-orphans
   if release_binary_is_fresh; then
     ./target/release/amai bootstrap stack

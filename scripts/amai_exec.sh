@@ -14,7 +14,7 @@ release_binary_is_fresh() {
     fi
   done
   local path
-  for path in src sql scripts; do
+  for path in src sql; do
     [[ -e "$path" ]] || continue
     if find "$path" -type f -newer "$binary" -print -quit 2>/dev/null | grep -q .; then
       return 1
@@ -61,7 +61,9 @@ if [[ "${AMAI_EXEC_FORCE_CARGO:-0}" != "1" ]] && release_binary_is_fresh; then
 fi
 
 if command -v cargo >/dev/null 2>&1; then
-  build_release_binary
+  if ! release_binary_is_fresh; then
+    build_release_binary
+  fi
   exec ./target/release/amai "$@"
 fi
 

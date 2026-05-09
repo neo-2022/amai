@@ -2,28 +2,31 @@ use super::{
     ArtifactRefInsert, ChunkRecord, ContextPackInsert, DocumentRecord, ImportPacketUpdate,
     MemoryCardVerificationConflictCheck, MemoryConflictInsert, MemoryEdgeInsert, MemoryItemInsert,
     MemoryItemRecord, MemoryLinkDecisionInsert, MemoryProvenanceInsert, NamespaceRecord,
-    ObservabilityInsertMeta, PendingLinkProposalInsert, PolicyRuleInsert, ProjectRecord,
-    QuarantineItemInsert, RelationUpdate, RestorePackInsert, RestorePackSourceSnapshotHint,
+    ObservabilityInsertErrorPhase, ObservabilityInsertMeta, PendingLinkProposalInsert,
+    PolicyRuleInsert, ProjectRecord, QuarantineItemInsert, RelationUpdate,
+    RestorePackCreateErrorPhase, RestorePackInsert, RestorePackSourceSnapshotHint,
     RetrievalTraceInsert, SkillCardRecord, SkillCardVerificationConflictCheck, SymbolRecord,
-    TaskEventInsert, TaskNodeCandidateExtraction,
-    TaskNodeInsert, TaskNodeVerificationConflictCheck, add_relation, apply_memory_card_update,
+    TaskEventInsert, TaskNodeCandidateExtraction, TaskNodeInsert,
+    TaskNodeVerificationConflictCheck, add_relation, apply_memory_card_update,
     augment_memory_item_metadata_with_stage2_runtime, bind_shared_asset_to_project,
-    build_memory_write_pipeline, build_skill_execution_cards, canonical_repo_root_string,
-    bootstrap_schema, connect_admin, count_documents_for_project_namespace_codes, create_artifact_ref,
-    create_import_packet, create_memory_card, create_memory_conflict, create_memory_edge,
-    create_memory_item, create_memory_link_decision, create_memory_provenance,
+    bootstrap_schema, build_memory_write_pipeline, build_skill_execution_cards,
+    canonical_repo_root_string, connect_admin, count_documents_for_project_namespace_codes,
+    create_artifact_ref, create_import_packet, create_memory_card, create_memory_conflict,
+    create_memory_edge, create_memory_item, create_memory_link_decision, create_memory_provenance,
     create_memory_relation_edge, create_pending_link_proposal, create_policy_rule,
-    create_quarantine_item, create_restore_pack, create_restore_pack_detailed, create_retrieval_trace,
-    create_skill_card_candidate, create_skill_evidence_bundle, create_task_event, create_task_node,
-    derive_memory_item_source_kind, ensure_access_policy, ensure_namespace, ensure_shared_asset,
-    ensure_transfer_policy, ensure_workspace, evidence_span_marks_skill_card_poisoned,
-    exact_match_basename, exact_match_basename_stem, extract_memory_card_candidate,
-    extract_memory_item_candidate, extract_skill_card_candidate, extract_task_node_candidate,
-    get_document_id_for_namespace_relative_path, get_import_packet, get_namespace_by_code,
-    get_project_by_code, get_restore_pack, get_stack_meta, get_task_node, insert_artifact_ref, insert_context_pack,
-    insert_observability_snapshot, list_skill_cards, memory_item_has_recorded_basis,
+    create_quarantine_item, create_restore_pack, create_restore_pack_detailed,
+    create_retrieval_trace, create_skill_card_candidate, create_skill_evidence_bundle,
+    create_task_event, create_task_node, derive_memory_item_source_kind, ensure_access_policy,
+    ensure_namespace, ensure_shared_asset, ensure_transfer_policy, ensure_workspace,
+    evidence_span_marks_skill_card_poisoned, exact_match_basename, exact_match_basename_stem,
+    extract_memory_card_candidate, extract_memory_item_candidate, extract_skill_card_candidate,
+    extract_task_node_candidate, get_document_id_for_namespace_relative_path, get_import_packet,
+    get_namespace_by_code, get_project_by_code, get_restore_pack, get_stack_meta, get_task_node,
+    insert_artifact_ref, insert_context_pack, insert_observability_snapshot,
+    insert_observability_snapshot_detailed, list_skill_cards,
+    lookup_restore_pack_by_source_snapshot_id, memory_item_has_recorded_basis,
     memory_write_async_index_subjects, memory_write_fan_out_subjects,
-    lookup_restore_pack_by_source_snapshot_id, metadata_marks_memory_item_poisoned, observability_conflict_error, observability_source_class,
+    metadata_marks_memory_item_poisoned, observability_conflict_error, observability_source_class,
     prepare_observability_payload, provenance_marks_memory_card_poisoned,
     reconcile_import_packet_quarantines, record_skill_eval, record_skill_reuse_log,
     record_skill_trial_run, record_skill_trigger_match, replace_document_index,
@@ -31,20 +34,18 @@ use super::{
     run_memory_item_policy_scope_filter, run_skill_card_policy_scope_filter,
     run_task_node_policy_scope_filter, safe_postgres_descriptor, search_memory_cards_for_namespace,
     task_node_marks_poisoned, update_import_packet, update_memory_card_truth_state,
-    update_observability_snapshot_payload, update_relation, upsert_project, upsert_stack_meta, validate_artifact_ref_basis,
-    validate_memory_card_candidate, validate_memory_card_policy_scope_filter,
-    validate_memory_card_runtime_states, validate_memory_card_verification_conflict_check,
-    validate_memory_item_candidate, validate_memory_item_policy_scope_filter,
-    validate_memory_item_verification_conflict_check, validate_memory_link_decision_basis,
-    validate_memory_relation_edge_basis, validate_observability_update,
-    validate_pending_link_proposal_basis, validate_skill_activity_basis,
-    validate_skill_card_candidate, validate_skill_card_policy_scope_filter,
-    validate_skill_card_verification_conflict_check, validate_skill_evidence_bundle_basis,
-    validate_stage2_basis, validate_task_event_basis, validate_task_node_candidate,
-    validate_task_node_policy_scope_filter, validate_task_node_verification_conflict_check,
-    insert_observability_snapshot_detailed, with_postgres_advisory_lock,
-    ObservabilityInsertErrorPhase,
-    RestorePackCreateErrorPhase,
+    update_observability_snapshot_payload, update_relation, upsert_project, upsert_stack_meta,
+    validate_artifact_ref_basis, validate_memory_card_candidate,
+    validate_memory_card_policy_scope_filter, validate_memory_card_runtime_states,
+    validate_memory_card_verification_conflict_check, validate_memory_item_candidate,
+    validate_memory_item_policy_scope_filter, validate_memory_item_verification_conflict_check,
+    validate_memory_link_decision_basis, validate_memory_relation_edge_basis,
+    validate_observability_update, validate_pending_link_proposal_basis,
+    validate_skill_activity_basis, validate_skill_card_candidate,
+    validate_skill_card_policy_scope_filter, validate_skill_card_verification_conflict_check,
+    validate_skill_evidence_bundle_basis, validate_stage2_basis, validate_task_event_basis,
+    validate_task_node_candidate, validate_task_node_policy_scope_filter,
+    validate_task_node_verification_conflict_check, with_postgres_advisory_lock,
 };
 use crate::config::AppConfig;
 use crate::nats;
@@ -11034,9 +11035,11 @@ async fn create_restore_pack_same_source_snapshot_conflicting_payload_is_rejecte
     )
     .await
     .expect_err("conflicting payload rejected");
-    assert!(error
-        .to_string()
-        .contains("restore pack canonical content conflict"));
+    assert!(
+        error
+            .to_string()
+            .contains("restore pack canonical content conflict")
+    );
 
     let row = client
         .query_one(
@@ -11055,7 +11058,7 @@ async fn create_restore_pack_same_source_snapshot_conflicting_payload_is_rejecte
 
 #[tokio::test]
 async fn create_restore_pack_concurrent_same_source_snapshot_conflicting_payload_preserves_first_row()
-{
+ {
     if let Ok(env_text) =
         std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
     {
@@ -11097,12 +11100,11 @@ async fn create_restore_pack_concurrent_same_source_snapshot_conflicting_payload
         insert_observability_snapshot(&client_a, "working_state_restore", &snapshot_payload)
             .await
             .expect("restore snapshot");
-    let source_event_ids =
-        json!([format!("event:restore-pack-race-conflict:{suffix}")]);
-    let artifact_refs =
-        json!([format!("artifact://proof/restore-pack-race-conflict/{suffix}")]);
-    let message_refs =
-        json!([format!("thread:restore-pack-race-conflict:{suffix}")]);
+    let source_event_ids = json!([format!("event:restore-pack-race-conflict:{suffix}")]);
+    let artifact_refs = json!([format!(
+        "artifact://proof/restore-pack-race-conflict/{suffix}"
+    )]);
+    let message_refs = json!([format!("thread:restore-pack-race-conflict:{suffix}")]);
     let evidence_span = json!({
         "kind": "working_state_restore",
         "authoritative_event_id": format!("event:restore-pack-race-conflict:{suffix}"),
@@ -11178,9 +11180,11 @@ async fn create_restore_pack_concurrent_same_source_snapshot_conflicting_payload
 
     let created = result_a.expect("first canonical restore pack");
     let error = result_b.expect_err("second conflicting restore pack rejected");
-    assert!(error
-        .to_string()
-        .contains("restore pack canonical content conflict"));
+    assert!(
+        error
+            .to_string()
+            .contains("restore pack canonical content conflict")
+    );
 
     let row = client_a
         .query_one(
@@ -11290,8 +11294,7 @@ async fn create_restore_pack_missing_snapshot_behind_verified_hint_fails_before_
     assert_eq!(error.source_snapshot_id, Some(fake_snapshot_id));
     let error_text = format!("{:#}", error.error);
     assert!(
-        error_text.contains("failed to create restore pack")
-            || error_text.contains("restore pack")
+        error_text.contains("failed to create restore pack") || error_text.contains("restore pack")
     );
 
     let count: i64 = client
@@ -11360,7 +11363,9 @@ async fn create_restore_pack_invalid_pack_kind_fails_before_write() {
             .await
             .expect("restore snapshot");
     let source_event_ids = json!([format!("event:restore-pack-invalid-kind:{suffix}")]);
-    let artifact_refs = json!([format!("artifact://proof/restore-pack-invalid-kind/{suffix}")]);
+    let artifact_refs = json!([format!(
+        "artifact://proof/restore-pack-invalid-kind/{suffix}"
+    )]);
     let message_refs = json!([format!("thread:restore-pack-invalid-kind:{suffix}")]);
     let evidence_span = json!({
         "kind": "working_state_restore",
@@ -11470,12 +11475,11 @@ async fn create_restore_pack_invalid_derivation_kind_fails_before_write() {
         insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
             .await
             .expect("restore snapshot");
-    let source_event_ids =
-        json!([format!("event:restore-pack-invalid-derivation:{suffix}")]);
-    let artifact_refs =
-        json!([format!("artifact://proof/restore-pack-invalid-derivation/{suffix}")]);
-    let message_refs =
-        json!([format!("thread:restore-pack-invalid-derivation:{suffix}")]);
+    let source_event_ids = json!([format!("event:restore-pack-invalid-derivation:{suffix}")]);
+    let artifact_refs = json!([format!(
+        "artifact://proof/restore-pack-invalid-derivation/{suffix}"
+    )]);
+    let message_refs = json!([format!("thread:restore-pack-invalid-derivation:{suffix}")]);
     let evidence_span = json!({
         "kind": "working_state_restore",
         "authoritative_event_id": format!("event:restore-pack-invalid-derivation:{suffix}"),
@@ -11696,104 +11700,104 @@ async fn restore_pack_schema_rejects_source_snapshot_delete_while_restore_pack_d
         create_stage2_import_shared_context(&client, suffix).await;
     let namespace_code = "default";
     with_restore_pack_source_identity_schema_test_lock(&client, || async {
-    let snapshot_payload = json!({
-        "working_state_restore": {
-            "project": {"code": target_project_code},
-            "namespace": {"code": namespace_code},
-            "captured_at_epoch_ms": 1_234_567,
-            "state_lineage": {
-                "authoritative_event_id": format!("event:restore-pack-fk-protect:{suffix}"),
-                "authoritative_event_kind": "continuity_handoff"
-            }
-        }
-    });
-    let source_snapshot_id =
-        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
-            .await
-            .expect("restore snapshot");
-    let source_event_ids = json!([format!("event:restore-pack-fk-protect:{suffix}")]);
-    let artifact_refs = json!([format!("artifact://proof/restore-pack-fk-protect/{suffix}")]);
-    let message_refs = json!([format!("thread:restore-pack-fk-protect:{suffix}")]);
-    let evidence_span = json!({
-        "kind": "working_state_restore",
-        "authoritative_event_id": format!("event:restore-pack-fk-protect:{suffix}"),
-        "restore_confidence": "durable"
-    });
-    let restore_pack = create_restore_pack(
-        &client,
-        &target_project_code,
-        namespace_code,
-        &RestorePackInsert {
-            agent_scope: Some("proof::restore-pack-fk-protect"),
-            session_id: Some("session-restore-pack-fk-protect"),
-            thread_id: Some("thread-restore-pack-fk-protect"),
-            source_snapshot_id: Some(source_snapshot_id),
-            source_snapshot_hint: None,
-            pack_kind: "workspace_restore_pack",
-            source_kind: Some("working_state_restore_runtime"),
-            source_event_ids: Some(&source_event_ids),
-            artifact_refs: Some(&artifact_refs),
-            message_refs: Some(&message_refs),
-            evidence_span: Some(&evidence_span),
-            derivation_kind: Some("summary"),
-            schema_version: Some("restore-pack-envelope-v1"),
-            headline: Some("restore pack fk protect headline"),
-            summary: Some("restore pack fk protect summary"),
-            payload: &json!({
+        let snapshot_payload = json!({
+            "working_state_restore": {
                 "project": {"code": target_project_code},
                 "namespace": {"code": namespace_code},
-                "current_goal": "protect source snapshot from delete"
-            }),
-            captured_at_epoch_ms: Some(1_234_567),
-        },
-    )
-    .await
-    .expect("restore pack");
+                "captured_at_epoch_ms": 1_234_567,
+                "state_lineage": {
+                    "authoritative_event_id": format!("event:restore-pack-fk-protect:{suffix}"),
+                    "authoritative_event_kind": "continuity_handoff"
+                }
+            }
+        });
+        let source_snapshot_id =
+            insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+                .await
+                .expect("restore snapshot");
+        let source_event_ids = json!([format!("event:restore-pack-fk-protect:{suffix}")]);
+        let artifact_refs = json!([format!("artifact://proof/restore-pack-fk-protect/{suffix}")]);
+        let message_refs = json!([format!("thread:restore-pack-fk-protect:{suffix}")]);
+        let evidence_span = json!({
+            "kind": "working_state_restore",
+            "authoritative_event_id": format!("event:restore-pack-fk-protect:{suffix}"),
+            "restore_confidence": "durable"
+        });
+        let restore_pack = create_restore_pack(
+            &client,
+            &target_project_code,
+            namespace_code,
+            &RestorePackInsert {
+                agent_scope: Some("proof::restore-pack-fk-protect"),
+                session_id: Some("session-restore-pack-fk-protect"),
+                thread_id: Some("thread-restore-pack-fk-protect"),
+                source_snapshot_id: Some(source_snapshot_id),
+                source_snapshot_hint: None,
+                pack_kind: "workspace_restore_pack",
+                source_kind: Some("working_state_restore_runtime"),
+                source_event_ids: Some(&source_event_ids),
+                artifact_refs: Some(&artifact_refs),
+                message_refs: Some(&message_refs),
+                evidence_span: Some(&evidence_span),
+                derivation_kind: Some("summary"),
+                schema_version: Some("restore-pack-envelope-v1"),
+                headline: Some("restore pack fk protect headline"),
+                summary: Some("restore pack fk protect summary"),
+                payload: &json!({
+                    "project": {"code": target_project_code},
+                    "namespace": {"code": namespace_code},
+                    "current_goal": "protect source snapshot from delete"
+                }),
+                captured_at_epoch_ms: Some(1_234_567),
+            },
+        )
+        .await
+        .expect("restore pack");
 
-    batch_execute_restore_pack_source_identity_schema_mutation(
-        &client,
-        RESTORE_PACK_SOURCE_SNAPSHOT_FK_RESTRICT_SQL,
-    )
+        batch_execute_restore_pack_source_identity_schema_mutation(
+            &client,
+            RESTORE_PACK_SOURCE_SNAPSHOT_FK_RESTRICT_SQL,
+        )
         .await
         .expect("apply restore_pack source_snapshot FK restrict migration");
 
-    let error = client
-        .execute(
-            "DELETE FROM ami.observability_snapshots WHERE snapshot_id = $1",
-            &[&source_snapshot_id],
-        )
-        .await
-        .expect_err("source snapshot delete must be blocked by restore_pack FK");
-    let db_error = error.as_db_error().expect("db error");
-    assert_eq!(
-        db_error.code(),
-        &tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION
-    );
+        let error = client
+            .execute(
+                "DELETE FROM ami.observability_snapshots WHERE snapshot_id = $1",
+                &[&source_snapshot_id],
+            )
+            .await
+            .expect_err("source snapshot delete must be blocked by restore_pack FK");
+        let db_error = error.as_db_error().expect("db error");
+        assert_eq!(
+            db_error.code(),
+            &tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION
+        );
 
-    let row = client
-        .query_one(
-            r#"
+        let row = client
+            .query_one(
+                r#"
             SELECT source_snapshot_id
             FROM ami.restore_packs
             WHERE restore_pack_id = $1
             "#,
-            &[&restore_pack.restore_pack_id],
-        )
-        .await
-        .expect("restore pack still present");
-    let kept_source_snapshot_id: Option<Uuid> = row.get(0);
-    assert_eq!(kept_source_snapshot_id, Some(source_snapshot_id));
+                &[&restore_pack.restore_pack_id],
+            )
+            .await
+            .expect("restore pack still present");
+        let kept_source_snapshot_id: Option<Uuid> = row.get(0);
+        assert_eq!(kept_source_snapshot_id, Some(source_snapshot_id));
 
-    let snapshot_count: i64 = client
-        .query_one(
-            "SELECT COUNT(*) FROM ami.observability_snapshots WHERE snapshot_id = $1",
-            &[&source_snapshot_id],
-        )
-        .await
-        .expect("snapshot count")
-        .get(0);
-    assert_eq!(snapshot_count, 1);
-    Ok(())
+        let snapshot_count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM ami.observability_snapshots WHERE snapshot_id = $1",
+                &[&source_snapshot_id],
+            )
+            .await
+            .expect("snapshot count")
+            .get(0);
+        assert_eq!(snapshot_count, 1);
+        Ok(())
     })
     .await
     .expect("run restore_pack source snapshot delete protection test");
@@ -11827,17 +11831,16 @@ async fn restore_pack_schema_rejects_raw_workspace_restore_pack_without_source_s
         create_stage2_import_shared_context(&client, suffix).await;
     let namespace_code = "default";
     with_restore_pack_source_identity_schema_test_lock(&client, || async {
-
-    batch_execute_restore_pack_source_identity_schema_mutation(
-        &client,
-        RESTORE_PACK_WORKSPACE_SOURCE_SNAPSHOT_REQUIRED_SQL,
-    )
+        batch_execute_restore_pack_source_identity_schema_mutation(
+            &client,
+            RESTORE_PACK_WORKSPACE_SOURCE_SNAPSHOT_REQUIRED_SQL,
+        )
         .await
         .expect("apply workspace_restore_pack source_snapshot check migration");
 
-    let error = client
-        .execute(
-            r#"
+        let error = client
+            .execute(
+                r#"
             INSERT INTO ami.restore_packs(
                 workspace_id,
                 project_id,
@@ -11886,24 +11889,27 @@ async fn restore_pack_schema_rejects_raw_workspace_restore_pack_without_source_s
                 1234567
             )
             "#,
-            &[
-                &target_project_code,
-                &namespace_code,
-                &json!({
-                    "project": {"code": target_project_code},
-                    "namespace": {"code": namespace_code},
-                    "current_goal": "raw null source snapshot must fail"
-                }),
-            ],
-        )
-        .await
-        .expect_err("raw workspace_restore_pack without source_snapshot must be rejected");
-    let db_error = error.as_db_error().expect("db error");
-    assert_eq!(db_error.code(), &tokio_postgres::error::SqlState::CHECK_VIOLATION);
+                &[
+                    &target_project_code,
+                    &namespace_code,
+                    &json!({
+                        "project": {"code": target_project_code},
+                        "namespace": {"code": namespace_code},
+                        "current_goal": "raw null source snapshot must fail"
+                    }),
+                ],
+            )
+            .await
+            .expect_err("raw workspace_restore_pack without source_snapshot must be rejected");
+        let db_error = error.as_db_error().expect("db error");
+        assert_eq!(
+            db_error.code(),
+            &tokio_postgres::error::SqlState::CHECK_VIOLATION
+        );
 
-    let count: i64 = client
-        .query_one(
-            r#"
+        let count: i64 = client
+            .query_one(
+                r#"
             SELECT COUNT(*)
             FROM ami.restore_packs
             WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
@@ -11916,13 +11922,13 @@ async fn restore_pack_schema_rejects_raw_workspace_restore_pack_without_source_s
               AND pack_kind = 'workspace_restore_pack'
               AND headline = 'restore pack null source snapshot headline'
             "#,
-            &[&target_project_code, &namespace_code],
-        )
-        .await
-        .expect("restore pack count")
-        .get(0);
-    assert_eq!(count, 0);
-    Ok(())
+                &[&target_project_code, &namespace_code],
+            )
+            .await
+            .expect("restore pack count")
+            .get(0);
+        assert_eq!(count, 0);
+        Ok(())
     })
     .await
     .expect("run raw workspace_restore_pack source identity rejection test");
@@ -12042,7 +12048,7 @@ async fn get_restore_pack_rejects_dirty_workspace_restore_pack_without_source_sn
 
 #[tokio::test]
 async fn restore_pack_workspace_source_snapshot_check_migration_deletes_dirty_orphans_and_is_idempotent()
-{
+ {
     if let Ok(env_text) =
         std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
     {
@@ -12670,7 +12676,8 @@ async fn restore_packs_schema_rejects_raw_duplicate_same_source_snapshot() {
 }
 
 #[tokio::test]
-async fn restore_packs_bootstrap_dedupe_prefers_newer_source_time_over_later_insert_and_is_idempotent() {
+async fn restore_packs_bootstrap_dedupe_prefers_newer_source_time_over_later_insert_and_is_idempotent()
+ {
     if let Ok(env_text) =
         std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
     {
@@ -12711,15 +12718,11 @@ async fn restore_packs_bootstrap_dedupe_prefers_newer_source_time_over_later_ins
         insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
             .await
             .expect("restore snapshot");
-    let source_event_ids = json!([format!(
-        "event:restore-pack-bootstrap-dedupe:{suffix}"
-    )]);
+    let source_event_ids = json!([format!("event:restore-pack-bootstrap-dedupe:{suffix}")]);
     let artifact_refs = json!([format!(
         "artifact://proof/restore-pack-bootstrap-dedupe/{suffix}"
     )]);
-    let message_refs = json!([format!(
-        "thread:restore-pack-bootstrap-dedupe:{suffix}"
-    )]);
+    let message_refs = json!([format!("thread:restore-pack-bootstrap-dedupe:{suffix}")]);
     let evidence_span = json!({
         "kind": "working_state_restore",
         "authoritative_event_id": format!("event:restore-pack-bootstrap-dedupe:{suffix}"),
@@ -12874,7 +12877,7 @@ async fn restore_packs_bootstrap_dedupe_prefers_newer_source_time_over_later_ins
 
 #[tokio::test]
 async fn lookup_restore_pack_by_source_snapshot_id_prefers_canonical_newer_source_time_for_dirty_duplicates()
-{
+ {
     if let Ok(env_text) =
         std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
     {
@@ -13049,7 +13052,7 @@ async fn lookup_restore_pack_by_source_snapshot_id_prefers_canonical_newer_sourc
 
 #[tokio::test]
 async fn lookup_restore_pack_by_source_snapshot_id_prefers_non_null_source_time_for_dirty_duplicates()
-{
+ {
     if let Ok(env_text) =
         std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
     {
@@ -13268,15 +13271,11 @@ async fn restore_packs_bootstrap_dedupe_prefers_higher_source_time_even_if_inser
         insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
             .await
             .expect("restore snapshot");
-    let source_event_ids = json!([format!(
-        "event:restore-pack-bootstrap-delayed:{suffix}"
-    )]);
+    let source_event_ids = json!([format!("event:restore-pack-bootstrap-delayed:{suffix}")]);
     let artifact_refs = json!([format!(
         "artifact://proof/restore-pack-bootstrap-delayed/{suffix}"
     )]);
-    let message_refs = json!([format!(
-        "thread:restore-pack-bootstrap-delayed:{suffix}"
-    )]);
+    let message_refs = json!([format!("thread:restore-pack-bootstrap-delayed:{suffix}")]);
     let evidence_span = json!({
         "kind": "working_state_restore",
         "authoritative_event_id": format!("event:restore-pack-bootstrap-delayed:{suffix}"),
@@ -13471,15 +13470,11 @@ async fn restore_packs_bootstrap_dedupe_uses_created_at_when_source_time_ties() 
         insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
             .await
             .expect("restore snapshot");
-    let source_event_ids = json!([format!(
-        "event:restore-pack-bootstrap-created-at:{suffix}"
-    )]);
+    let source_event_ids = json!([format!("event:restore-pack-bootstrap-created-at:{suffix}")]);
     let artifact_refs = json!([format!(
         "artifact://proof/restore-pack-bootstrap-created-at/{suffix}"
     )]);
-    let message_refs = json!([format!(
-        "thread:restore-pack-bootstrap-created-at:{suffix}"
-    )]);
+    let message_refs = json!([format!("thread:restore-pack-bootstrap-created-at:{suffix}")]);
     let evidence_span = json!({
         "kind": "working_state_restore",
         "authoritative_event_id": format!("event:restore-pack-bootstrap-created-at:{suffix}"),
@@ -13672,15 +13667,11 @@ async fn restore_packs_bootstrap_dedupe_prefers_higher_captured_at_when_created_
         insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
             .await
             .expect("restore snapshot");
-    let source_event_ids = json!([format!(
-        "event:restore-pack-bootstrap-tie:{suffix}"
-    )]);
+    let source_event_ids = json!([format!("event:restore-pack-bootstrap-tie:{suffix}")]);
     let artifact_refs = json!([format!(
         "artifact://proof/restore-pack-bootstrap-tie/{suffix}"
     )]);
-    let message_refs = json!([format!(
-        "thread:restore-pack-bootstrap-tie:{suffix}"
-    )]);
+    let message_refs = json!([format!("thread:restore-pack-bootstrap-tie:{suffix}")]);
     let evidence_span = json!({
         "kind": "working_state_restore",
         "authoritative_event_id": format!("event:restore-pack-bootstrap-tie:{suffix}"),
@@ -14036,7 +14027,7 @@ async fn restore_packs_bootstrap_dedupe_prefers_non_null_captured_at_when_create
 
 #[tokio::test]
 async fn restore_packs_bootstrap_dedupe_prefers_non_null_source_time_over_later_created_at_with_null_source_time()
-{
+ {
     if let Ok(env_text) =
         std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
     {
@@ -14238,7 +14229,7 @@ async fn restore_packs_bootstrap_dedupe_prefers_non_null_source_time_over_later_
 
 #[tokio::test]
 async fn restore_packs_bootstrap_dedupe_uses_restore_pack_id_as_last_tiebreak_when_source_time_missing()
-{
+ {
     if let Ok(env_text) =
         std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
     {
@@ -14278,15 +14269,11 @@ async fn restore_packs_bootstrap_dedupe_uses_restore_pack_id_as_last_tiebreak_wh
         insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
             .await
             .expect("restore snapshot");
-    let source_event_ids = json!([format!(
-        "event:restore-pack-bootstrap-null-tie:{suffix}"
-    )]);
+    let source_event_ids = json!([format!("event:restore-pack-bootstrap-null-tie:{suffix}")]);
     let artifact_refs = json!([format!(
         "artifact://proof/restore-pack-bootstrap-null-tie/{suffix}"
     )]);
-    let message_refs = json!([format!(
-        "thread:restore-pack-bootstrap-null-tie:{suffix}"
-    )]);
+    let message_refs = json!([format!("thread:restore-pack-bootstrap-null-tie:{suffix}")]);
     let evidence_span = json!({
         "kind": "working_state_restore",
         "authoritative_event_id": format!("event:restore-pack-bootstrap-null-tie:{suffix}"),
@@ -14395,7 +14382,11 @@ async fn restore_packs_bootstrap_dedupe_uses_restore_pack_id_as_last_tiebreak_wh
             FROM ami.restore_packs
             WHERE restore_pack_id = $1
             "#,
-            &[&original.restore_pack_id, &later_restore_pack_id, &later_payload],
+            &[
+                &original.restore_pack_id,
+                &later_restore_pack_id,
+                &later_payload,
+            ],
         )
         .await
         .expect("insert equal-created-at equal-captured duplicate restore pack row");
@@ -18393,7 +18384,10 @@ async fn working_state_restore_snapshot_ignores_older_replay_for_same_authoritat
         payload["working_state_restore"]["captured_at_epoch_ms"],
         json!(200)
     );
-    assert_eq!(payload["working_state_restore"]["current_goal"], json!("Same line"));
+    assert_eq!(
+        payload["working_state_restore"]["current_goal"],
+        json!("Same line")
+    );
 }
 
 #[tokio::test]
@@ -18585,11 +18579,7 @@ async fn working_state_restore_snapshot_rejects_missing_namespace_code() {
     });
     let error = prepare_observability_payload("working_state_restore", &payload)
         .expect_err("missing namespace.code must fail closed");
-    assert!(
-        error
-            .to_string()
-            .contains("must include namespace.code")
-    );
+    assert!(error.to_string().contains("must include namespace.code"));
 }
 
 #[tokio::test]
@@ -18618,7 +18608,8 @@ async fn working_state_restore_snapshot_rejects_combined_namespace_and_source_id
 }
 
 #[tokio::test]
-async fn working_state_restore_snapshot_concurrent_newer_and_older_replays_keep_single_newest_row() {
+async fn working_state_restore_snapshot_concurrent_newer_and_older_replays_keep_single_newest_row()
+{
     if let Ok(env_text) =
         std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
     {
@@ -18739,7 +18730,8 @@ async fn working_state_restore_snapshot_concurrent_newer_and_older_replays_keep_
 }
 
 #[tokio::test]
-async fn working_state_restore_snapshot_concurrent_valid_and_malformed_replays_preserve_valid_row() {
+async fn working_state_restore_snapshot_concurrent_valid_and_malformed_replays_preserve_valid_row()
+{
     if let Ok(env_text) =
         std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
     {
@@ -18862,7 +18854,8 @@ async fn working_state_restore_snapshot_concurrent_valid_and_malformed_replays_p
 }
 
 #[tokio::test]
-async fn working_state_restore_snapshot_same_timestamp_valid_and_malformed_replays_preserve_valid_row() {
+async fn working_state_restore_snapshot_same_timestamp_valid_and_malformed_replays_preserve_valid_row()
+ {
     if let Ok(env_text) =
         std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
     {
@@ -19163,7 +19156,9 @@ async fn working_state_restore_snapshot_insert_connection_loss_leaves_no_row() {
         .await
         .expect_err("insert after connection loss must fail");
     assert!(
-        error.to_string().contains("failed to insert observability snapshot")
+        error
+            .to_string()
+            .contains("failed to insert observability snapshot")
             || error.to_string().contains("closed")
     );
 
@@ -19184,7 +19179,8 @@ async fn working_state_restore_snapshot_insert_connection_loss_leaves_no_row() {
 }
 
 #[tokio::test]
-async fn working_state_restore_snapshot_forced_outcome_unknown_after_write_keeps_row_materialized() {
+async fn working_state_restore_snapshot_forced_outcome_unknown_after_write_keeps_row_materialized()
+{
     if let Ok(env_text) =
         std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
     {
@@ -19238,7 +19234,10 @@ async fn working_state_restore_snapshot_forced_outcome_unknown_after_write_keeps
     unsafe {
         std::env::remove_var("AMAI_TEST_FORCE_OBSERVABILITY_INSERT_FAILURE");
     }
-    assert_eq!(error.phase, ObservabilityInsertErrorPhase::OutcomeUnknownAfterWrite);
+    assert_eq!(
+        error.phase,
+        ObservabilityInsertErrorPhase::OutcomeUnknownAfterWrite
+    );
     assert_eq!(error.snapshot_kind, "working_state_restore");
     assert_eq!(error.event_key, event_id);
     assert_eq!(error.sqlstate_code.as_deref(), Some("08006"));

@@ -277,7 +277,7 @@ async fn main() -> Result<()> {
             BootstrapCommand::Install(args) => onboarding::run(&args).await?,
             BootstrapCommand::Onboarding(args) => onboarding::run(&args).await?,
             BootstrapCommand::Reconnect(args) => onboarding::reconnect(&args).await?,
-            BootstrapCommand::Remove(args) => onboarding::disconnect(&args).await?,
+            BootstrapCommand::Remove(args) => onboarding::remove(&args).await?,
             BootstrapCommand::Disconnect(args) => onboarding::disconnect(&args).await?,
         },
         Command::Compat { command } => match command {

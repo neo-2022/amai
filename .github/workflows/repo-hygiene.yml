@@ -11,6 +11,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install repo hygiene prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

@@ -120,7 +120,11 @@ mod tests {
     #[test]
     fn dashboard_html_uses_source_notice_fallback_helper_for_enriched_write_status_surfaces() {
         let html = render_html(1000, None);
-        assert!(html.contains("function sourceNoticeMessageOrWarningFallback(baseMessage, writeStatus) {"));
+        assert!(
+            html.contains(
+                "function sourceNoticeMessageOrWarningFallback(baseMessage, writeStatus) {"
+            )
+        );
         assert!(html.contains("function payloadMessageOrWarningFallback(payloadMessage, fallbackBaseMessage, writeStatus) {"));
         assert!(html.contains(
             "const noticeMessage = sourceNoticeMessageOrWarningFallback(\n        notice && notice.message_text,"
@@ -167,7 +171,9 @@ mod tests {
         assert!(html.contains(
             "function emitClientBudgetChatNotice(notice, source = \"dashboard_notice\") {"
         ));
-        assert!(html.contains("emitClientBudgetChatNotice(notice, \"dashboard_agent_display_name\");"));
+        assert!(
+            html.contains("emitClientBudgetChatNotice(notice, \"dashboard_agent_display_name\");")
+        );
         assert!(html.contains("\"dashboard_client_budget_target\""));
         assert!(html.contains("\"dashboard_compact_chat\""));
         assert!(html.contains("\"dashboard_host_current_thread_control_feedback\""));

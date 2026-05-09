@@ -879,8 +879,7 @@ pub(super) fn persist_startup_runtime_state_artifact(
 fn build_startup_execution_gate(payload: &Value) -> Value {
     let contract = mcp::project_chat_startup_contract();
     let resume_enforcement = &contract["resume_enforcement"];
-    let action_kind = payload["chat_start_restore"]["startup_next_action"]["action_kind"]
-        .as_str();
+    let action_kind = payload["chat_start_restore"]["startup_next_action"]["action_kind"].as_str();
     let lease_owner_state =
         payload["chat_start_restore"]["execctl_active_lease"]["lease_owner_state"].as_str();
     let previous_session_owner_value = resume_enforcement["previous_session_owner_value"]
@@ -893,8 +892,7 @@ fn build_startup_execution_gate(payload: &Value) -> Value {
     let required_action_kind = resume_enforcement["required_action_kind_when_resume_required"]
         .as_str()
         .unwrap_or("resume_required_return_task");
-    let blocking = payload["chat_start_restore"]["startup_next_action"]["blocking"]
-        .as_bool();
+    let blocking = payload["chat_start_restore"]["startup_next_action"]["blocking"].as_bool();
     let required_task_set_count = payload["chat_start_restore"]["required_task_set"]
         .as_array()
         .map(|items| items.len());
@@ -953,7 +951,10 @@ mod tests {
 
     #[test]
     fn format_text_for_human_preserves_missing_state_for_runtime_audit() {
-        assert_eq!(format_text_for_human("resume_required_return_task"), "resume_required_return_task");
+        assert_eq!(
+            format_text_for_human("resume_required_return_task"),
+            "resume_required_return_task"
+        );
         assert_eq!(format_text_for_human("   "), "ещё нет данных");
     }
 }

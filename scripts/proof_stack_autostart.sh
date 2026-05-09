@@ -50,6 +50,9 @@ cleanup() {
 
 trap cleanup EXIT
 
+mkdir -p "${AMAI_STACK_AUTOSTART_UNIT_DIR}"
+printf '[Unit]\nDescription=Amai\n' > "${AMAI_STACK_AUTOSTART_UNIT_DIR}/amai-stack.service"
+
 HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/onboard_local.sh --client hermes --yes --skip-stack --skip-release-build >/dev/null
 
 unit_path="${AMAI_STACK_AUTOSTART_UNIT_DIR}/amai-stack.service"

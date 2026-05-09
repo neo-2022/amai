@@ -2342,6 +2342,18 @@ Stage status после fresh proof-refresh 2026-04-24:
 - [scripts/proof_vscode_compact_chat_public_bridge.sh](../scripts/proof_vscode_compact_chat_public_bridge.sh) теперь доказывает не только file presence, но и install/registration truth: после isolated install сам `code --extensions-dir ... --list-extensions --show-versions` обязан видеть точный `amai.amai-vscode-bridge@0.0.2`;
 - это не закрывает live UX beta-gap целиком: на уже открытом локальном VS Code окне всё ещё подтверждён отдельный stale running-profile blocker, где старый loaded bridge runtime может не отдать новый `ui_cleanup` result contract без reload/restart.
 
+### 2026-05-08 — VS Code bridge install now rewrites stale registration and exposes a first-class sidebar UI
+
+- закрыт ещё один реальный UI/install defect: bridge больше не зависит от stale `art-local.amai-vscode-bridge-*` registration в `~/.vscode/extensions/extensions.json`, из-за которой уже установленный новый bundle мог не показывать fresh activity-bar/sidebar contributions в живом VS Code окне;
+- [tools/vscode-amai-bridge/package.json](../tools/vscode-amai-bridge/package.json) теперь version-bumped до `0.0.3`, а сам bridge materialize-ит полноценный UI-contour: activity-bar container `Amai`, sidebar view `amai.sidebar` и workspace launch commands для sidebar/panel;
+- [scripts/install_vscode_amai_bridge.sh](../scripts/install_vscode_amai_bridge.sh) теперь не только sync-ит current bundle в `~/.vscode/extensions/amai.amai-vscode-bridge-<version>`, но и rewrite-ит matching entry в `extensions.json` на exact current path/version и удаляет stale `art-local.amai-vscode-bridge-*` aliases вместо silent compatibility-shim dependence;
+- новый bounded proof [scripts/proof_vscode_amai_bridge_registry_sync.sh](../scripts/proof_vscode_amai_bridge_registry_sync.sh) fail-close доказывает этот exact contour: после install `extensions.json` обязан ссылаться на current `amai.amai-vscode-bridge-0.0.3`, а stale `art-local` alias обязан исчезнуть;
+- companion UI proof [scripts/proof_vscode_amai_bridge_ui_surface.sh](../scripts/proof_vscode_amai_bridge_ui_surface.sh) доказывает, что source/install bundle реально содержит activity-bar container, sidebar view, icon asset и workspace chat commands, а не только старый `onUri` bridge.
+- поверх этого закрыт ещё один user-facing UI defect: activity-bar icon теперь больше не временный bridge glyph, а родной Amai mark, а extension details теперь используют тот же brand mark вместо generic package icon;
+- в том же contour закрыт sibling view-contract defect: `amai.sidebar` теперь явно materialize-ится как `type = webview`, так что opened sidebar больше не должен падать в VS Code placeholder `Отсутствует зарегистрированный поставщик данных...`, который относится к tree/data-provider view без registered provider.
+- закрыт ещё один direct UX defect в том же sidebar contour: launch buttons больше не зависят от fragile `acquireVsCodeApi()/postMessage/onDidReceiveMessage` chain, а используют direct `command:` URIs under `enableCommandUris`, поэтому клик либо реально запускает `amaiVscodeBridge.openWorkspaceSidebarChat` / `amaiVscodeBridge.openWorkspacePanelChat`, либо fail-close показывает `Amai launch failed: ...` вместо silent no-op.
+- после live click probe закрыт и следующий companion runtime defect: sidebar launch path реально падал на прямом `ReferenceError` из-за typo в `collectVisibleSurfaceState`, где result payload ожидал `non_bridge_tab_labels`, а код собирал `nonBridgeTabLabels`; [tools/vscode-amai-bridge/extension.js](../tools/vscode-amai-bridge/extension.js) теперь materialize-ит exact field `non_bridge_tab_labels: nonBridgeTabLabels`, а [scripts/proof_vscode_amai_bridge_ui_surface.sh](../scripts/proof_vscode_amai_bridge_ui_surface.sh) держит structural guard на этот contour, чтобы silent regression не вернулся.
+
 ### 2026-05-07 — Stale running-profile bridge runtime now fails closed by explicit version mismatch
 
 - закрыт ещё один truth-sensitive defect: stale уже загруженный VS Code bridge runtime больше не маскируется под generic `ui_cleanup` failure и не требует догадок по косвенному поведению;
@@ -2426,6 +2438,57 @@ Stage status после fresh proof-refresh 2026-04-24:
 
 Это не должно забываться.
 Это один из главных итоговых outcomes всей реализации.
+
+## Fresh update 2026-05-08
+
+- `scripts/remove_amai.sh` больше не является misleading alias к client-only disconnect на Linux managed install path.
+- Теперь `remove_amai.sh` автоматически переключает `bootstrap remove` в full uninstall mode, если команда запущена из стандартного GitHub clone `~/.local/share/amai/repo`.
+- Full uninstall contour теперь:
+  - снимает client config и startup instructions;
+  - удаляет локальный `amai.amai-vscode-bridge` bundle для `VS Code`;
+  - отключает `systemd --user` unit `amai-stack.service`;
+  - делает `docker compose --profile monitoring down --remove-orphans --volumes`;
+  - удаляет runtime tree и managed clone root.
+- `bootstrap disconnect` при этом сохранён как узкий client-only path и остаётся каноническим выбором для случаев, где install/runtime нужно оставить живыми.
+- Новые proofs:
+  - `cargo test --quiet remove_vscode_bridge_install_removes_bundle_and_registry_entries`
+  - `./scripts/proof_remove_amai_full.sh`
+- Live laptop verification for this contour closed the old truth gap: раньше one-command uninstall был ложным claim, потому что `remove_amai.sh` снимал только client config; теперь full remove materialized, а cleanup verified по unit/service/container/volume/extension/runtime слоям.
+- закрыт ещё один install/autostart defect под laptop lifecycle contour: `scripts/install_stack_autostart.sh` больше не пишет `amai-stack.service` прямо в финальный путь, из-за чего прерванный install мог оставить обрезанный user-unit без `ExecStart` и ломать следующий one-command install через `Loaded: bad-setting`;
+- unit render теперь идёт через temporary file + atomic `mv`, а `scripts/proof_stack_autostart.sh` дополнительно стартует из уже повреждённого preexisting `amai-stack.service` и проверяет, что rerender восстанавливает полный unit contract вместо silent reuse битого файла.
+- закрыт ещё один client-install truth gap под laptop lifecycle contour: `scripts/install_vscode_amai_bridge.sh` больше не assume-ит только `~/.vscode/extensions`, а truthful-detect-ит `code -> codium/VSCodium` и кладёт `amai.amai-vscode-bridge` в `~/.vscode-oss/extensions`, если живой `code` реально смотрит туда;
+- companion cleanup contour materialized симметрично: `remove_vscode_bridge_install()` и `./scripts/proof_remove_amai_full.sh` теперь чистят и `~/.vscode/extensions`, и `~/.vscode-oss/extensions`, чтобы one-command uninstall не оставлял bridge bundle/registry хвосты у `codium`;
+- новые proofs:
+  - `./scripts/proof_vscode_amai_bridge_codium_root.sh`
+  - `cargo test --quiet remove_vscode_bridge_install_removes_bundle_and_registry_entries`
+  - `./scripts/proof_remove_amai_full.sh`
+- fresh live laptop rerun against public GitHub `main` now closed the exact one-command lifecycle claim on AltLinux/VSCodium host:
+  - `./scripts/install_amai.sh --client vscode --stack-profile default --yes` reached `Amai готов` on revision `91ad1814`;
+  - `./scripts/status.sh` on the laptop was green for `postgres/qdrant/s3/nats/compatibility`;
+  - follow-up `./scripts/remove_amai.sh --client vscode` removed clone/state/unit/runtime tree and cleaned bridge traces from both `~/.vscode/extensions` and `~/.vscode-oss/extensions`.
+- remaining user-facing gap for the broader laptop story is now narrower and explicit:
+  - GitHub one-command install/remove is proof-backed;
+  - but `find Amai in VS Code Extensions search and install it as a published marketplace extension` is still not materialized, because marketplace/OpenVSX publishing contour has not been closed yet.
+- packaging/publish contour is now materially closer to that target:
+  - `tools/vscode-amai-bridge/package.json` now uses a publish-safe PNG marketplace icon, public repository/homepage/bugs metadata and an explicit `files` allowlist;
+  - new wrappers `./scripts/package_vscode_amai_bridge.sh` and `./scripts/publish_vscode_amai_bridge.sh` materialize a VSIX build path plus fail-closed target-specific publish path for `marketplace` and `openvsx`;
+  - new proofs `./scripts/proof_vscode_amai_bridge_package.sh` and `./scripts/proof_vscode_amai_bridge_publish_fail_closed.sh` prove successful VSIX packaging and explicit token-required failure instead of silent publish drift.
+- exact remaining blocker for searchable Extensions install is now narrower than before:
+  - code/package contour is materialized;
+  - but actual remote publish still needs registry credentials (`VSCE_PAT` / `MARKETPLACE_TOKEN` or `OVSX_PAT` / `OPENVSX_TOKEN`);
+  - packaging still warns about missing `LICENSE` file, so legal/distribution hygiene is not fully closed yet even though VSIX build already succeeds.
+- fresh OpenVSX publication probe 2026-05-09 narrowed the blocker further:
+  - one-time `OVSX_PAT` was sufficient to create namespace `amai`;
+  - repeat `openvsx` publish now no longer fails on token or unknown publisher;
+  - the exact remaining OpenVSX blocker is now only `This extension cannot be accepted because it has no license.`
+- user licensing decision is now explicit and materialized:
+  - project/public extension contour selects `PolyForm Noncommercial 1.0.0`, so Amai stays source-available but forbidden for commercial use;
+  - root [LICENSE](../LICENSE) now contains the full `PolyForm Noncommercial 1.0.0` text with project notice, and [tools/vscode-amai-bridge/package.json](../tools/vscode-amai-bridge/package.json) now publishes `license = SEE LICENSE IN LICENSE` plus includes `LICENSE` in the VSIX allowlist;
+  - next truthful gate is no longer `which license?`, but whether `vsce/ovsx` accept this materialized non-commercial license and whether searchable `OpenVSX` publish now passes.
+- truthful state after this probe:
+  - GitHub/public package contour is no longer the blocker;
+  - OpenVSX namespace provisioning is no longer the blocker;
+  - searchable install through extension registries is now blocked only by missing project license selection/materialization, and Marketplace still remains a separate registry contour.
 
 ## Что агент должен делать прямо сейчас
 

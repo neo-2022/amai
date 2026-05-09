@@ -2509,7 +2509,10 @@ fn context_pack_tool_result_payload(
         "stats": stats_block,
     });
     let summary = context_pack_tool_summary(stats, model_visible_payload);
-    ContextPackToolResultPayload { summary, structured }
+    ContextPackToolResultPayload {
+        summary,
+        structured,
+    }
 }
 
 async fn tool_observe_whole_cycle(
@@ -6007,21 +6010,19 @@ fn validate_tool_request_arguments(
 #[cfg(test)]
 mod tests {
     use super::{
-        ContextPackToolArgs, ContinuityStartupToolArgs, McpConfigArgs, McpError,
-        ContextPackSummary, append_working_state_warning_to_compact_summary,
-        benchmark_coverage_summary, context_pack_contains_primary_project,
-        context_pack_input_schema, context_pack_summary, context_pack_tool_result_payload,
-        context_pack_tool_stats_block, context_pack_tool_summary,
-        continuity_handoff_input_schema,
-        continuity_startup_input_schema, continuity_startup_summary, inject_proof_tool_arguments,
-        mcp_tool_error_result, memory_matrix_summary, new_mcp_proof_thread_id,
-        normalized_server_name, observe_snapshot_matrix_summary, observe_snapshot_summary,
+        ContextPackSummary, ContextPackToolArgs, ContinuityStartupToolArgs, McpConfigArgs,
+        McpError, append_working_state_warning_to_compact_summary, benchmark_coverage_summary,
+        context_pack_contains_primary_project, context_pack_input_schema, context_pack_summary,
+        context_pack_tool_result_payload, context_pack_tool_stats_block, context_pack_tool_summary,
+        continuity_handoff_input_schema, continuity_startup_input_schema,
+        continuity_startup_summary, inject_proof_tool_arguments, mcp_tool_error_result,
+        memory_matrix_summary, new_mcp_proof_thread_id, normalized_server_name,
+        observe_snapshot_matrix_summary, observe_snapshot_summary,
         observe_whole_cycle_input_schema, observe_whole_cycle_turn_input_schema, prompt_result,
         protocol_manifest, render_client_config, snapshot_has_only_ignored_critical_metrics,
         stack_preflight_summary, summarize_codes, summarize_namespace_modes,
         token_benchmark_summary, token_report_summary, tool_requires_live_client_budget_preflight,
-        tool_result,
-        validate_initialize_protocol_version, validate_tool_request_arguments,
+        tool_result, validate_initialize_protocol_version, validate_tool_request_arguments,
         verify_mcp_scope_label, verify_mcp_scope_requires_memory_matrix,
         verify_mcp_scope_requires_warm_cache, warm_cache_summary,
     };
@@ -7111,7 +7112,9 @@ mod tests {
 
         assert_eq!(
             result["content"][0]["text"],
-            json!("benchmark coverage :: total=19 materialized=0 partial=2 mapped=12 next_priority=1 future=4 next=SWE-bench Verified (swe_bench_verified), τ-bench (tau_bench)")
+            json!(
+                "benchmark coverage :: total=19 materialized=0 partial=2 mapped=12 next_priority=1 future=4 next=SWE-bench Verified (swe_bench_verified), τ-bench (tau_bench)"
+            )
         );
         assert_eq!(
             result["structuredContent"]["benchmark_coverage_summary"]["total_benchmarks"],
@@ -7422,8 +7425,10 @@ mod tests {
 
     #[test]
     fn append_working_state_warning_to_compact_summary_keeps_compact_summary_without_warning() {
-        let summary =
-            append_working_state_warning_to_compact_summary("ctx d=1 s=0 l=0 m=0".to_string(), &json!({}));
+        let summary = append_working_state_warning_to_compact_summary(
+            "ctx d=1 s=0 l=0 m=0".to_string(),
+            &json!({}),
+        );
         assert_eq!(summary, "ctx d=1 s=0 l=0 m=0");
     }
 
@@ -7443,8 +7448,7 @@ mod tests {
     #[test]
     fn context_pack_tool_result_payload_preserves_write_status_in_structured_and_summary() {
         let stats = ContextPackStats {
-            context_pack_id: Uuid::parse_str("12345678-1234-5678-9abc-123456789abc")
-                .expect("uuid"),
+            context_pack_id: Uuid::parse_str("12345678-1234-5678-9abc-123456789abc").expect("uuid"),
             exact_documents: 2,
             symbol_hits: 1,
             lexical_chunks: 3,
@@ -7655,7 +7659,9 @@ mod tests {
 
         assert_eq!(
             result["content"][0]["text"],
-            json!("stack preflight :: profile=default verdict=pass cpu=16 memory=31.50GiB disk=420.00GiB peak_benchmarks=true monitoring_default=false remote_recommended=false")
+            json!(
+                "stack preflight :: profile=default verdict=pass cpu=16 memory=31.50GiB disk=420.00GiB peak_benchmarks=true monitoring_default=false remote_recommended=false"
+            )
         );
         assert_eq!(
             result["structuredContent"]["preflight_summary"]["profile_code"],
@@ -7715,13 +7721,18 @@ mod tests {
             result["structuredContent"]["projects_summary"]["compact_codes"],
             json!("amai, bug_bounty")
         );
-        assert_eq!(result["structuredContent"]["projects"][0]["code"], json!("amai"));
+        assert_eq!(
+            result["structuredContent"]["projects"][0]["code"],
+            json!("amai")
+        );
     }
 
     #[test]
     fn list_namespaces_tool_result_keeps_summary_and_compact_text_aligned() {
-        let namespace_summary =
-            summarize_namespace_modes(&[("continuity", "local_strict"), ("artifacts", "local_strict")]);
+        let namespace_summary = summarize_namespace_modes(&[
+            ("continuity", "local_strict"),
+            ("artifacts", "local_strict"),
+        ]);
         let structured = json!({
             "project": {
                 "code": "amai",
@@ -7761,7 +7772,13 @@ mod tests {
 
         assert_eq!(
             result["content"][0]["text"],
-            json!(format!("namespaces for amai: 2 [{}]", summarize_namespace_modes(&[("continuity", "local_strict"), ("artifacts", "local_strict")])))
+            json!(format!(
+                "namespaces for amai: 2 [{}]",
+                summarize_namespace_modes(&[
+                    ("continuity", "local_strict"),
+                    ("artifacts", "local_strict")
+                ])
+            ))
         );
         assert_eq!(
             result["structuredContent"]["project"]["code"],
@@ -8889,7 +8906,9 @@ mod tests {
 
         assert_eq!(
             result["content"][0]["text"],
-            json!("token report :: metric=verified_effective_savings_pct scope=окно Обычная рабочая машина status=pass value_percent=99.480 saved_tokens=6923645 counted=75/120 agent_cycle_scope=окно Обычная рабочая машина agent_cycle_verified_percent=96.110 contractual_scope=окно Обычная рабочая машина contractual_state=report_only_preview_open coverage=partially_confirmed freshness=provisional_open_window lag=awaiting_late_events reconciliation=awaiting_provider_usage_source margin=awaiting_rate_card blockers=provider_usage_source_missing, provider_rate_card_unpriced note=Это главный честный KPI: live-only, quality-gated и с учётом recovery.")
+            json!(
+                "token report :: metric=verified_effective_savings_pct scope=окно Обычная рабочая машина status=pass value_percent=99.480 saved_tokens=6923645 counted=75/120 agent_cycle_scope=окно Обычная рабочая машина agent_cycle_verified_percent=96.110 contractual_scope=окно Обычная рабочая машина contractual_state=report_only_preview_open coverage=partially_confirmed freshness=provisional_open_window lag=awaiting_late_events reconciliation=awaiting_provider_usage_source margin=awaiting_rate_card blockers=provider_usage_source_missing, provider_rate_card_unpriced note=Это главный честный KPI: live-only, quality-gated и с учётом recovery."
+            )
         );
         assert_eq!(
             result["structuredContent"]["token_report_summary"]["metric_code"],
@@ -8977,7 +8996,9 @@ mod tests {
 
         assert_eq!(
             result["content"][0]["text"],
-            json!("memory matrix :: matrix=letta_memory_local tasks=8/8 failed=0 success_rate=1.000 mean_score=1.000 p95_ms=418.778 gate_failures=0 verdicts=hit_correct_target=4, recovered_useful=4 compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review")
+            json!(
+                "memory matrix :: matrix=letta_memory_local tasks=8/8 failed=0 success_rate=1.000 mean_score=1.000 p95_ms=418.778 gate_failures=0 verdicts=hit_correct_target=4, recovered_useful=4 compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review"
+            )
         );
         assert_eq!(
             result["structuredContent"]["memory_matrix_summary"]["matrix"],
@@ -9076,7 +9097,9 @@ mod tests {
 
         assert_eq!(
             result["content"][0]["text"],
-            json!("observe snapshot :: pass=7 alert=1 critical=0 unknown=2 compatibility=vscode:ok continuity=4/4:pass included=exact_documents (1) — Exact layer matched. excluded=semantic_chunks — Semantic layer abstained. memory_matrix=compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review mcp_matrix=compare=measured promotion=blocked_benchmark_gates approval=not_applicable lifecycle_risk=scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00%")
+            json!(
+                "observe snapshot :: pass=7 alert=1 critical=0 unknown=2 compatibility=vscode:ok continuity=4/4:pass included=exact_documents (1) — Exact layer matched. excluded=semantic_chunks — Semantic layer abstained. memory_matrix=compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review mcp_matrix=compare=measured promotion=blocked_benchmark_gates approval=not_applicable lifecycle_risk=scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00%"
+            )
         );
         assert_eq!(
             result["structuredContent"]["observe_snapshot_summary"]["compatibility_profile"],
@@ -9084,11 +9107,15 @@ mod tests {
         );
         assert_eq!(
             result["structuredContent"]["observe_snapshot_summary"]["latest_memory_task_matrix_summary"],
-            json!("compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review")
+            json!(
+                "compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review"
+            )
         );
         assert_eq!(
             result["structuredContent"]["observe_snapshot_summary"]["lifecycle_risk_summary"],
-            json!("scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00%")
+            json!(
+                "scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00%"
+            )
         );
     }
 

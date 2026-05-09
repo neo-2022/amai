@@ -42,6 +42,9 @@ output/
 # Local agent/dev artifacts (must not be committed).
 .codex
 .playwright-cli/
+.playwright-mcp/
+dist/
+*.vsix
 
 # Vendor must stay self-contained in git even if nested files match generic ignore
 # patterns such as target/, output/ or .vscode/.
