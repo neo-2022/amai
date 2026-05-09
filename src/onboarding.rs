@@ -2027,56 +2027,66 @@ async fn compose_down_stack(repo_root: &Path) -> Result<bool> {
 
 async fn remove_vscode_bridge_install() -> Result<bool> {
     let home = home_dir().ok_or_else(|| anyhow!("failed to resolve home directory"))?;
-    let extensions_root = home.join(".vscode/extensions");
-    let registry_path = extensions_root.join("extensions.json");
     let mut removed_any = false;
+    let mut seen_roots = std::collections::BTreeSet::new();
+    let extension_roots = [
+        home.join(".vscode/extensions"),
+        home.join(".vscode-oss/extensions"),
+    ];
 
-    if extensions_root.is_dir() {
-        for entry in fs::read_dir(&extensions_root)
-            .with_context(|| format!("failed to read {}", extensions_root.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if !(name.starts_with("amai.amai-vscode-bridge-")
-                || name.starts_with("art-local.amai-vscode-bridge-"))
-            {
-                continue;
-            }
-            if path.is_dir() {
-                fs::remove_dir_all(&path)
-                    .with_context(|| format!("failed to remove {}", path.display()))?;
-            } else {
-                fs::remove_file(&path)
-                    .with_context(|| format!("failed to remove {}", path.display()))?;
-            }
-            removed_any = true;
+    for extensions_root in extension_roots {
+        if !seen_roots.insert(extensions_root.clone()) {
+            continue;
         }
-    }
+        let registry_path = extensions_root.join("extensions.json");
 
-    if registry_path.is_file() {
-        let raw = fs::read_to_string(&registry_path)
-            .with_context(|| format!("failed to read {}", registry_path.display()))?;
-        let mut entries: Vec<Value> =
-            serde_json::from_str(&raw).context("failed to parse VS Code extensions registry")?;
-        let before_len = entries.len();
-        entries.retain(|entry| {
-            let Some(identifier) = entry.get("identifier") else {
-                return true;
-            };
-            let Some(id) = identifier.get("id").and_then(Value::as_str) else {
-                return true;
-            };
-            id != "amai.amai-vscode-bridge" && id != "art-local.amai-vscode-bridge"
-        });
-        if entries.len() != before_len {
-            fs::write(
-                &registry_path,
-                serde_json::to_string_pretty(&entries)? + "\n",
-            )
-            .with_context(|| format!("failed to write {}", registry_path.display()))?;
-            removed_any = true;
+        if extensions_root.is_dir() {
+            for entry in fs::read_dir(&extensions_root)
+                .with_context(|| format!("failed to read {}", extensions_root.display()))?
+            {
+                let entry = entry?;
+                let path = entry.path();
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !(name.starts_with("amai.amai-vscode-bridge-")
+                    || name.starts_with("art-local.amai-vscode-bridge-"))
+                {
+                    continue;
+                }
+                if path.is_dir() {
+                    fs::remove_dir_all(&path)
+                        .with_context(|| format!("failed to remove {}", path.display()))?;
+                } else {
+                    fs::remove_file(&path)
+                        .with_context(|| format!("failed to remove {}", path.display()))?;
+                }
+                removed_any = true;
+            }
+        }
+
+        if registry_path.is_file() {
+            let raw = fs::read_to_string(&registry_path)
+                .with_context(|| format!("failed to read {}", registry_path.display()))?;
+            let mut entries: Vec<Value> =
+                serde_json::from_str(&raw).context("failed to parse VS Code extensions registry")?;
+            let before_len = entries.len();
+            entries.retain(|entry| {
+                let Some(identifier) = entry.get("identifier") else {
+                    return true;
+                };
+                let Some(id) = identifier.get("id").and_then(Value::as_str) else {
+                    return true;
+                };
+                id != "amai.amai-vscode-bridge" && id != "art-local.amai-vscode-bridge"
+            });
+            if entries.len() != before_len {
+                fs::write(
+                    &registry_path,
+                    serde_json::to_string_pretty(&entries)? + "\n",
+                )
+                .with_context(|| format!("failed to write {}", registry_path.display()))?;
+                removed_any = true;
+            }
         }
     }
 
@@ -6830,20 +6840,29 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
                 .as_nanos()
         );
         let home = std::env::temp_dir().join(unique);
-        let extensions_root = home.join(".vscode/extensions");
-        fs::create_dir_all(&extensions_root).expect("extensions root");
-        let current_bundle = extensions_root.join("amai.amai-vscode-bridge-0.0.3");
-        let legacy_bundle = extensions_root.join("art-local.amai-vscode-bridge-0.0.2");
+        let vscode_root = home.join(".vscode/extensions");
+        let vscodium_root = home.join(".vscode-oss/extensions");
+        fs::create_dir_all(&vscode_root).expect("vscode extensions root");
+        fs::create_dir_all(&vscodium_root).expect("vscodium extensions root");
+        let current_bundle = vscode_root.join("amai.amai-vscode-bridge-0.0.3");
+        let legacy_bundle = vscodium_root.join("art-local.amai-vscode-bridge-0.0.2");
         fs::create_dir_all(&current_bundle).expect("current bundle");
         fs::create_dir_all(&legacy_bundle).expect("legacy bundle");
         fs::write(current_bundle.join("package.json"), "{}").expect("current package");
         fs::write(legacy_bundle.join("package.json"), "{}").expect("legacy package");
         fs::write(
-            extensions_root.join("extensions.json"),
+            vscode_root.join("extensions.json"),
             r#"[
   {"identifier":{"id":"amai.amai-vscode-bridge"},"version":"0.0.3"},
+  {"identifier":{"id":"other.vscode"},"version":"1.0.0"}
+]"#,
+        )
+        .expect("vscode registry");
+        fs::write(
+            vscodium_root.join("extensions.json"),
+            r#"[
   {"identifier":{"id":"art-local.amai-vscode-bridge"},"version":"0.0.2"},
-  {"identifier":{"id":"other.extension"},"version":"1.0.0"}
+  {"identifier":{"id":"other.vscodium"},"version":"1.0.0"}
 ]"#,
         )
         .expect("registry");
@@ -6857,13 +6876,13 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(removed);
         assert!(!current_bundle.exists());
         assert!(!legacy_bundle.exists());
-        let registry: Value = serde_json::from_str(
-            &fs::read_to_string(extensions_root.join("extensions.json")).expect("read registry"),
+        let vscode_registry: Value = serde_json::from_str(
+            &fs::read_to_string(vscode_root.join("extensions.json")).expect("read vscode registry"),
         )
-        .expect("parse registry");
-        let ids: Vec<String> = registry
+        .expect("parse vscode registry");
+        let vscode_ids: Vec<String> = vscode_registry
             .as_array()
-            .expect("registry array")
+            .expect("vscode registry array")
             .iter()
             .filter_map(|entry| {
                 entry["identifier"]["id"]
@@ -6871,7 +6890,23 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
                     .map(|value| value.to_string())
             })
             .collect();
-        assert_eq!(ids, vec!["other.extension".to_string()]);
+        assert_eq!(vscode_ids, vec!["other.vscode".to_string()]);
+        let vscodium_registry: Value = serde_json::from_str(
+            &fs::read_to_string(vscodium_root.join("extensions.json"))
+                .expect("read vscodium registry"),
+        )
+        .expect("parse vscodium registry");
+        let vscodium_ids: Vec<String> = vscodium_registry
+            .as_array()
+            .expect("vscodium registry array")
+            .iter()
+            .filter_map(|entry| {
+                entry["identifier"]["id"]
+                    .as_str()
+                    .map(|value| value.to_string())
+            })
+            .collect();
+        assert_eq!(vscodium_ids, vec!["other.vscodium".to_string()]);
 
         if let Some(previous_home) = previous_home {
             unsafe { std::env::set_var("HOME", previous_home) };

@@ -160,16 +160,17 @@ fn detect_installed_vscode_amai_bridge() -> bool {
         Some(value) => PathBuf::from(value),
         None => return false,
     };
-    let extensions_root = home.join(".vscode/extensions");
-    let Ok(entries) = fs::read_dir(extensions_root) else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with("amai.amai-vscode-bridge-"))
-    })
+    [home.join(".vscode/extensions"), home.join(".vscode-oss/extensions")]
+        .into_iter()
+        .filter_map(|extensions_root| fs::read_dir(extensions_root).ok())
+        .any(|entries| {
+            entries.flatten().any(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("amai.amai-vscode-bridge-"))
+            })
+        })
 }
 
 pub(super) fn workspace_bound_vscode_chat_profile_name(repo_root: &Path) -> String {

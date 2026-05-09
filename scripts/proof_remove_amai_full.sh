@@ -68,12 +68,14 @@ cat >"${temp_output}" <<'EOF'
 }
 EOF
 
-mkdir -p "${temp_home}/.config/systemd/user" "${temp_home}/.vscode/extensions"
+mkdir -p "${temp_home}/.config/systemd/user" "${temp_home}/.vscode/extensions" "${temp_home}/.vscode-oss/extensions"
 printf '[Unit]\nDescription=Amai\n' > "${temp_home}/.config/systemd/user/amai-stack.service"
 mkdir -p "${temp_home}/.vscode/extensions/amai.amai-vscode-bridge-0.0.3"
 printf '{}' > "${temp_home}/.vscode/extensions/amai.amai-vscode-bridge-0.0.3/package.json"
 mkdir -p "${temp_home}/.vscode/extensions/art-local.amai-vscode-bridge-0.0.2"
 printf '{}' > "${temp_home}/.vscode/extensions/art-local.amai-vscode-bridge-0.0.2/package.json"
+mkdir -p "${temp_home}/.vscode-oss/extensions/amai.amai-vscode-bridge-0.0.3"
+printf '{}' > "${temp_home}/.vscode-oss/extensions/amai.amai-vscode-bridge-0.0.3/package.json"
 cat >"${temp_home}/.vscode/extensions/extensions.json" <<'EOF'
 [
   {
@@ -95,6 +97,22 @@ cat >"${temp_home}/.vscode/extensions/extensions.json" <<'EOF'
       "path": "/tmp/placeholder-old",
       "fsPath": "/tmp/placeholder-old",
       "external": "file:///tmp/placeholder-old",
+      "scheme": "file"
+    }
+  }
+]
+EOF
+cat >"${temp_home}/.vscode-oss/extensions/extensions.json" <<'EOF'
+[
+  {
+    "identifier": { "id": "amai.amai-vscode-bridge" },
+    "version": "0.0.3",
+    "relativeLocation": "amai.amai-vscode-bridge-0.0.3",
+    "location": {
+      "$mid": 1,
+      "fsPath": "/tmp/fake-vscode-oss/amai.amai-vscode-bridge-0.0.3",
+      "external": "file:///tmp/fake-vscode-oss/amai.amai-vscode-bridge-0.0.3",
+      "path": "/tmp/fake-vscode-oss/amai.amai-vscode-bridge-0.0.3",
       "scheme": "file"
     }
   }
@@ -163,8 +181,11 @@ test ! -e "${temp_repo}"
 test ! -e "${temp_home}/.config/systemd/user/amai-stack.service"
 test ! -e "${temp_home}/.vscode/extensions/amai.amai-vscode-bridge-0.0.3"
 test ! -e "${temp_home}/.vscode/extensions/art-local.amai-vscode-bridge-0.0.2"
+test ! -e "${temp_home}/.vscode-oss/extensions/amai.amai-vscode-bridge-0.0.3"
 jq -e 'map(.identifier.id) | index("amai.amai-vscode-bridge") == null and index("art-local.amai-vscode-bridge") == null' \
   "${temp_home}/.vscode/extensions/extensions.json" >/dev/null
+jq -e 'map(.identifier.id) | index("amai.amai-vscode-bridge") == null and index("art-local.amai-vscode-bridge") == null' \
+  "${temp_home}/.vscode-oss/extensions/extensions.json" >/dev/null
 
 rg '^docker compose --profile monitoring down --remove-orphans --volumes$' "${proof_log}" >/dev/null
 rg '^systemctl --user disable --now amai-stack.service$' "${proof_log}" >/dev/null

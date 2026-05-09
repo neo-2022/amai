@@ -9,7 +9,25 @@ if [[ ! -f "${source_dir}/package.json" || ! -f "${source_dir}/extension.js" ]];
   exit 1
 fi
 
-extensions_root="${AMAI_VSCODE_EXTENSIONS_ROOT:-${HOME}/.vscode/extensions}"
+detect_vscode_extensions_root() {
+  if [[ -n "${AMAI_VSCODE_EXTENSIONS_ROOT:-}" ]]; then
+    printf '%s\n' "${AMAI_VSCODE_EXTENSIONS_ROOT}"
+    return 0
+  fi
+  local code_path code_realpath
+  code_path="$(command -v code 2>/dev/null || true)"
+  code_realpath=""
+  if [[ -n "${code_path}" ]]; then
+    code_realpath="$(readlink -f "${code_path}" 2>/dev/null || printf '%s' "${code_path}")"
+  fi
+  if [[ "${code_realpath}" == *codium* || "${code_realpath}" == *VSCodium* || -d "${HOME}/.config/VSCodium" || -d "${HOME}/.vscode-oss" ]]; then
+    printf '%s\n' "${HOME}/.vscode-oss/extensions"
+    return 0
+  fi
+  printf '%s\n' "${HOME}/.vscode/extensions"
+}
+
+extensions_root="$(detect_vscode_extensions_root)"
 package_json="${source_dir}/package.json"
 publisher="$(jq -r '.publisher' "${package_json}")"
 name="$(jq -r '.name' "${package_json}")"

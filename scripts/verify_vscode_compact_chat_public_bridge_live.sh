@@ -27,13 +27,31 @@ done
 command -v jq >/dev/null || { echo "verify_vscode_compact_chat_public_bridge_live: missing jq" >&2; exit 1; }
 command -v code >/dev/null || { echo "verify_vscode_compact_chat_public_bridge_live: missing code" >&2; exit 1; }
 
+detect_vscode_extensions_root() {
+  if [[ -n "${AMAI_VSCODE_EXTENSIONS_ROOT:-}" ]]; then
+    printf '%s\n' "${AMAI_VSCODE_EXTENSIONS_ROOT}"
+    return 0
+  fi
+  local code_path code_realpath
+  code_path="$(command -v code 2>/dev/null || true)"
+  code_realpath=""
+  if [[ -n "${code_path}" ]]; then
+    code_realpath="$(readlink -f "${code_path}" 2>/dev/null || printf '%s' "${code_path}")"
+  fi
+  if [[ "${code_realpath}" == *codium* || "${code_realpath}" == *VSCodium* || -d "${HOME}/.config/VSCodium" || -d "${HOME}/.vscode-oss" ]]; then
+    printf '%s\n' "${HOME}/.vscode-oss/extensions"
+    return 0
+  fi
+  printf '%s\n' "${HOME}/.vscode/extensions"
+}
+
 expected_bridge_version="$(jq -r '.version // empty' "${repo_root}/tools/vscode-amai-bridge/package.json")"
 if [[ -z "${expected_bridge_version}" ]]; then
   echo "verify_vscode_compact_chat_public_bridge_live: failed to read expected bridge version" >&2
   exit 1
 fi
 
-extensions_root="${AMAI_VSCODE_EXTENSIONS_ROOT:-${HOME}/.vscode/extensions}"
+extensions_root="$(detect_vscode_extensions_root)"
 
 find_installed_extension_dir() {
   local extension_id="$1"
