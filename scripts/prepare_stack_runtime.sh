@@ -38,6 +38,29 @@ cleanup_conflicting_named_container() {
   "${docker_bin}" rm -f "${name}" >/dev/null
 }
 
+cleanup_same_repo_minio_credential_drift() {
+  local inspect_env=""
+  inspect_env="$("${docker_bin}" inspect ami-minio --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null || true)"
+  [[ -n "${inspect_env}" ]] || return 0
+
+  local current_user="${AMI_S3_ACCESS_KEY:-}"
+  local current_pass="${AMI_S3_SECRET_KEY:-}"
+  [[ -n "${current_user}" && -n "${current_pass}" ]] || return 0
+
+  local container_user=""
+  local container_pass=""
+  container_user="$(printf '%s\n' "${inspect_env}" | sed -n 's/^MINIO_ROOT_USER=//p' | head -n1)"
+  container_pass="$(printf '%s\n' "${inspect_env}" | sed -n 's/^MINIO_ROOT_PASSWORD=//p' | head -n1)"
+
+  [[ -n "${container_user}" && -n "${container_pass}" ]] || return 0
+  if [[ "${container_user}" == "${current_user}" && "${container_pass}" == "${current_pass}" ]]; then
+    return 0
+  fi
+
+  echo "prepare_stack_runtime.sh: reclaiming ami-minio because live container credentials drift from current .env." >&2
+  "${docker_bin}" rm -f ami-minio >/dev/null
+}
+
 stack_profile="${AMI_STACK_PROFILE:-default}"
 
 # Compose bind mounts fail closed if the host-side state tree is absent.
@@ -55,6 +78,7 @@ cleanup_conflicting_named_container "ami-postgres"
 cleanup_conflicting_named_container "ami-qdrant"
 cleanup_conflicting_named_container "ami-minio"
 cleanup_conflicting_named_container "ami-nats"
+cleanup_same_repo_minio_credential_drift
 if [[ "${stack_profile}" == "default" ]]; then
   cleanup_conflicting_named_container "ami-prometheus"
   cleanup_conflicting_named_container "ami-grafana"

@@ -19,6 +19,7 @@ copy_into_sandbox() {
 copy_into_sandbox ".env.example"
 copy_into_sandbox "compose.yaml"
 copy_into_sandbox "scripts/bootstrap_stack.sh"
+copy_into_sandbox "scripts/docker_wrapper.sh"
 copy_into_sandbox "scripts/run_stack_service.sh"
 copy_into_sandbox "scripts/prepare_stack_runtime.sh"
 copy_into_sandbox "scripts/load_env.sh"
@@ -64,7 +65,16 @@ cat >"${fake_bin}/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 log_file="${FAKE_DOCKER_LOG:?}"
+if [[ "${1:-}" == "info" ]]; then
+  exit 0
+fi
 if [[ "${1:-}" == "inspect" ]]; then
+  format_arg="${4:-}"
+  if [[ "${2:-}" == "ami-minio" && "${format_arg}" == *".Config.Env"* ]]; then
+    printf 'MINIO_ROOT_USER=%s\n' "${FAKE_MINIO_ROOT_USER:-ami_minio_admin}"
+    printf 'MINIO_ROOT_PASSWORD=%s\n' "${FAKE_MINIO_ROOT_PASSWORD:-ami_minio_change_me}"
+    exit 0
+  fi
   case "${2:-}" in
     ami-postgres)
       printf 'false bind|/tmp/missing-foreign-postgres;\n'
@@ -121,6 +131,7 @@ printf 'unexpected fake amai_exec invocation: %s\n' "$*" >&2
 exit 1
 EOF
 chmod +x "${sandbox_repo}/scripts/amai_exec.sh"
+chmod +x "${sandbox_repo}/scripts/docker_wrapper.sh"
 
 fake_log="${temp_root}/fake-docker.log"
 (
@@ -148,6 +159,23 @@ rm -f "${fake_log}"
   ./scripts/run_stack_service.sh
 )
 grep -Fx 'rm ami-postgres' "${fake_log}" >/dev/null
+grep -Fx 'rm ami-minio' "${fake_log}" >/dev/null
+grep -Fx 'compose up' "${fake_log}" >/dev/null
+
+rm -f "${fake_log}"
+(
+  cd "${sandbox_repo}"
+  HOME="${fake_home}" \
+  PATH="${fake_bin}:${PATH}" \
+  FAKE_DOCKER_LOG="${fake_log}" \
+  FAKE_MINIO_ROOT_USER="old-minio-user" \
+  FAKE_MINIO_ROOT_PASSWORD="old-minio-pass" \
+  FAKE_FOREIGN_MINIO_PATH="${sandbox_repo}/state/minio" \
+  AMAI_SKIP_STACK_PREFLIGHT=1 \
+  AMAI_CARGO_BIN="${fake_bin}/cargo" \
+  AMAI_RUSTC_BIN="${fake_bin}/rustc" \
+  ./scripts/bootstrap_stack.sh
+)
 grep -Fx 'rm ami-minio' "${fake_log}" >/dev/null
 grep -Fx 'compose up' "${fake_log}" >/dev/null
 
