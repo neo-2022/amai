@@ -6835,6 +6835,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
 
     #[tokio::test]
     async fn remove_vscode_bridge_install_removes_bundle_and_registry_entries() {
+        let _guard = hermes_env_lock().lock().expect("home env lock");
         let unique = format!(
             "amai-vscode-bridge-remove-{}",
             std::time::SystemTime::now()
@@ -6921,6 +6922,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
 
     #[tokio::test]
     async fn remove_vscode_bridge_install_tolerates_empty_registry_file() {
+        let _guard = hermes_env_lock().lock().expect("home env lock");
         let unique = format!(
             "amai-vscode-bridge-remove-empty-{}",
             std::time::SystemTime::now()
