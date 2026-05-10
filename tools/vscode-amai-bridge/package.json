@@ -2,7 +2,7 @@
   "name": "amai-vscode-bridge",
   "displayName": "Amai VS Code Bridge",
   "description": "VS Code bridge for Amai. Requires the OpenAI/Codex chat surface and a separate Amai install.",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "publisher": "amai",
   "icon": "media/amai-extension.png",
   "license": "SEE LICENSE IN LICENSE",

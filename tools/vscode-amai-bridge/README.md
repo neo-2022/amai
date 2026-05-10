@@ -27,7 +27,7 @@ This extension is the `VS Code` surface for `Amai`, not the whole product.
 
 The currently verified contour is:
 
-- `Linux`
+- `Ubuntu` / `Debian`
 - `VS Code` or `Codium`
 - local GitHub install of `Amai`
 
@@ -37,20 +37,19 @@ Other operating systems and client contours are still in development.
 
 Before using this extension, the currently verified contour expects:
 
-- `Linux`
+- `Ubuntu` or `Debian`
 - `bash`
-- `git`
-- `curl` for the primary GitHub bootstrap path
-- `rustup` / `cargo` / `rustc`
-- `Docker` and `Docker Compose v2`
+- `sudo` / administrator access for a clean-machine bootstrap
+- network access to GitHub and the system package repositories
 - `code` CLI from `VS Code` or `Codium`
 - `systemd --user` for the managed local `amai-stack.service`
 - an installed and enabled `OpenAI` extension surface that exposes the required `Codex/ChatGPT` commands inside `VS Code` / `Codium`
 
 Important:
 
-- the current GitHub install contour bootstraps `Amai` in one command only after these prerequisites already exist on the machine;
-- it does not yet provision `git`, the Rust toolchain, or `Docker Compose` for you on a clean operating system.
+- on the currently verified `Ubuntu` / `Debian` contour, the GitHub install path can now bootstrap missing local prerequisites for you;
+- that includes `git`, base build dependencies, `rustup` / `cargo` / `rustc`, and `Docker` / compose support;
+- the extension still does not replace the separate `Amai` application install.
 
 ## Before You Install The Extension
 
@@ -75,6 +74,21 @@ That install materializes the local Amai repo, the stack bootstrap contour, the 
 
 Then make sure your editor also has the `OpenAI` / `Codex` chat surface available.
 Without it, the `Amai` sidebar buttons cannot open the target chat workspace and the bridge will fail with a readiness error.
+
+## Fastest Agent-Assisted Path
+
+If you already use an AI coding agent in `VS Code` / `Codium`, the fastest path is:
+
+1. install `Amai` with one of the commands above;
+2. open `~/.local/share/amai/repo`;
+3. ask the agent to verify:
+   - `.vscode/mcp.json` exists;
+   - `systemctl --user is-active amai-stack.service` returns `active`;
+   - `Amai VS Code Bridge` is installed;
+   - the `OpenAI` / `Codex` chat surface is present for sidebar launch.
+
+This does not replace the normal install.
+It is only the quickest way to let an agent finish the editor-side checks and obvious post-install fixes.
 
 ## Install The Extension
 
