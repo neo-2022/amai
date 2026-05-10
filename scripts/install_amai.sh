@@ -46,4 +46,8 @@ if [[ $has_stack_profile -eq 0 && "${AMAI_NO_INSTALL_PROMPT:-0}" != "1" ]]; then
   fi
 fi
 
-exec env RUSTC="${rustc_bin}" "${cargo_bin}" run --quiet -- bootstrap install --skip-release-build "$@"
+exec env \
+  RUSTC="${rustc_bin}" \
+  CARGO_PROFILE_DEV_DEBUG=0 \
+  CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=off \
+  "${cargo_bin}" run --quiet -- bootstrap install --skip-release-build "$@"

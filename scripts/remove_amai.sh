@@ -35,7 +35,11 @@ fi
 if [[ "${AMAI_BOOTSTRAP_REMOVE_MODE:-}" == "full" ]] && [[ ! -x ./target/release/amai ]]; then
   cargo_bin="$(./scripts/resolve_cargo.sh)"
   rustc_bin="$(./scripts/resolve_rustc.sh)"
-  exec env RUSTC="${rustc_bin}" "${cargo_bin}" run --quiet -- bootstrap remove "$@"
+  exec env \
+    RUSTC="${rustc_bin}" \
+    CARGO_PROFILE_DEV_DEBUG=0 \
+    CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=off \
+    "${cargo_bin}" run --quiet -- bootstrap remove "$@"
 fi
 
 exec ./scripts/amai_exec.sh bootstrap remove "$@"
