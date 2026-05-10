@@ -541,7 +541,10 @@ async fn remove_tree_forcefully(path: &Path) -> Result<bool> {
     }
     match fs::remove_dir_all(path) {
         Ok(_) => return Ok(true),
-        Err(error) if error.kind() != io::ErrorKind::PermissionDenied => {
+        Err(error)
+            if error.kind() != io::ErrorKind::PermissionDenied
+                && error.kind() != io::ErrorKind::DirectoryNotEmpty =>
+        {
             return Err(error).with_context(|| format!("failed to remove {}", path.display()));
         }
         Err(_) => {}
@@ -561,6 +564,20 @@ async fn remove_tree_forcefully(path: &Path) -> Result<bool> {
                 format!("failed to execute podman unshare rm for {}", path.display())
             })?;
         if status.success() {
+            return Ok(true);
+        }
+    }
+
+    if command_exists("rm").await {
+        let status = Command::new("rm")
+            .arg("-rf")
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .with_context(|| format!("failed to execute rm -rf for {}", path.display()))?;
+        if status.success() && !path.exists() {
             return Ok(true);
         }
     }
