@@ -26,6 +26,14 @@ binary_is_fresh() {
   return 0
 }
 
+compact_release_binary_is_fresh() {
+  binary_is_fresh "./target/release/amai-bootstrap"
+}
+
+compact_debug_binary_is_fresh() {
+  binary_is_fresh "./target/debug/amai-bootstrap"
+}
+
 release_binary_is_fresh() {
   binary_is_fresh "./target/release/amai"
 }
@@ -37,12 +45,24 @@ debug_binary_is_fresh() {
 run_bootstrap_command() {
   local command_name="$1"
   shift
+  if compact_release_binary_is_fresh; then
+    ./target/release/amai-bootstrap "${command_name}" "$@"
+    return 0
+  fi
+  if compact_debug_binary_is_fresh; then
+    ./target/debug/amai-bootstrap "${command_name}" "$@"
+    return 0
+  fi
   if release_binary_is_fresh; then
     ./target/release/amai bootstrap "${command_name}" "$@"
     return 0
   fi
   if debug_binary_is_fresh; then
     ./target/debug/amai bootstrap "${command_name}" "$@"
+    return 0
+  fi
+  if [[ "${command_name}" == "stack" || "${command_name}" == "preflight" ]]; then
+    RUSTC="${rustc_bin}" "${cargo_bin}" run --quiet --bin amai-bootstrap -- "${command_name}" "$@"
     return 0
   fi
   RUSTC="${rustc_bin}" "${cargo_bin}" run -- bootstrap "${command_name}" "$@"
@@ -86,6 +106,8 @@ bootstrap_main() {
 # open file descriptors. Use `flock --close` so the bootstrap lock never leaks into
 # conmon/rootlessport and future bootstrap runs do not deadlock on a stale holder.
 export cargo_bin rustc_bin stack_profile
+export -f compact_release_binary_is_fresh
+export -f compact_debug_binary_is_fresh
 export -f release_binary_is_fresh
 export -f debug_binary_is_fresh
 export -f binary_is_fresh
