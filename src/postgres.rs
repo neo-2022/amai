@@ -23,27 +23,49 @@ static BOOTSTRAP_SCHEMA_CACHE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new(
 #[cfg(test)]
 static OBSERVABILITY_PROFILE_TEST_LOGS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
+#[path = "postgres/postgres_bootstrap_runtime.rs"]
 mod postgres_bootstrap_runtime;
+#[path = "postgres/postgres_context_provenance.rs"]
 mod postgres_context_provenance;
+#[path = "postgres/postgres_core_records.rs"]
 mod postgres_core_records;
+#[path = "postgres/postgres_import_packets.rs"]
 mod postgres_import_packets;
+#[path = "postgres/postgres_index_maintenance.rs"]
 mod postgres_index_maintenance;
+#[path = "postgres/postgres_inserts.rs"]
 mod postgres_inserts;
+#[path = "postgres/postgres_internal_structs.rs"]
 mod postgres_internal_structs;
+#[path = "postgres/postgres_link_inserts.rs"]
 mod postgres_link_inserts;
+#[path = "postgres/postgres_memory_edges_conflicts.rs"]
 mod postgres_memory_edges_conflicts;
+#[path = "postgres/postgres_memory_relation_edges.rs"]
 mod postgres_memory_relation_edges;
+#[path = "postgres/postgres_memory_runtime.rs"]
 mod postgres_memory_runtime;
+#[path = "postgres/postgres_observability.rs"]
 mod postgres_observability;
+#[path = "postgres/postgres_policy_rules.rs"]
 mod postgres_policy_rules;
+#[path = "postgres/postgres_project_namespace.rs"]
 mod postgres_project_namespace;
+#[path = "postgres/postgres_project_support.rs"]
 mod postgres_project_support;
+#[path = "postgres/postgres_quarantine.rs"]
 mod postgres_quarantine;
+#[path = "postgres/postgres_records.rs"]
 mod postgres_records;
+#[path = "postgres/postgres_row_mapping.rs"]
 mod postgres_row_mapping;
+#[path = "postgres/postgres_search_runtime.rs"]
 mod postgres_search_runtime;
+#[path = "postgres/postgres_shared_assets.rs"]
 mod postgres_shared_assets;
+#[path = "postgres/postgres_skills.rs"]
 mod postgres_skills;
+#[path = "postgres/postgres_workspace_access.rs"]
 mod postgres_workspace_access;
 
 pub use self::postgres_bootstrap_runtime::*;

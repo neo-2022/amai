@@ -190,6 +190,7 @@ pub(crate) struct StartupArtifactAudit {
 
 #[derive(Debug, Clone)]
 struct MemoryBridgeInstallSummary {
+    installed: bool,
     bridge_path: PathBuf,
     backup_path: Option<PathBuf>,
     status: String,
@@ -310,9 +311,11 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
             installed_at_epoch_seconds: current_epoch_seconds(),
             memory_bridge_path: local_memory_bridge_summary
                 .as_ref()
+                .filter(|summary| summary.installed)
                 .map(|summary| summary.bridge_path.display().to_string()),
             memory_bridge_backup_path: local_memory_bridge_summary
                 .as_ref()
+                .filter(|summary| summary.installed)
                 .and_then(|summary| summary.backup_path.as_ref())
                 .map(|path| path.display().to_string()),
             startup_instruction_path: startup_instructions_summary
@@ -1322,10 +1325,15 @@ fn install_memory_bridge(repo_root: &Path) -> Result<MemoryBridgeInstallSummary>
         let bridge_path = bin_dir.join("memory");
         let target = compiled_binary_path(repo_root, "target/release", "memory");
         if !target.is_file() {
-            bail!(
-                "Amai memory bridge requires built release binary: {}; run cargo build --release first",
-                target.display()
-            );
+            return Ok(MemoryBridgeInstallSummary {
+                installed: false,
+                bridge_path,
+                backup_path: None,
+                status: format!(
+                    "Пропущен: release-only memory bridge {} ещё не собран в этом install contour; VS Code onboarding остаётся рабочим.",
+                    target.display()
+                ),
+            });
         }
 
         let mut backup_path = None;
@@ -1391,6 +1399,7 @@ fn install_memory_bridge(repo_root: &Path) -> Result<MemoryBridgeInstallSummary>
         };
 
         Ok(MemoryBridgeInstallSummary {
+            installed: true,
             bridge_path,
             backup_path,
             status,
@@ -2007,7 +2016,8 @@ async fn compose_down_stack(repo_root: &Path) -> Result<bool> {
     if !repo_root.join("compose.yaml").is_file() {
         return Ok(false);
     }
-    let status = Command::new("docker")
+    let mut command = docker_command(repo_root);
+    let status = command
         .arg("compose")
         .arg("--profile")
         .arg("monitoring")
@@ -2023,6 +2033,14 @@ async fn compose_down_stack(repo_root: &Path) -> Result<bool> {
         Ok(result) if result.success() => Ok(true),
         Ok(_) | Err(_) => Ok(false),
     }
+}
+
+fn docker_command(repo_root: &Path) -> Command {
+    let wrapper = repo_root.join("scripts/docker_wrapper.sh");
+    if wrapper.is_file() {
+        return Command::new(wrapper);
+    }
+    Command::new("docker")
 }
 
 async fn remove_vscode_bridge_install() -> Result<bool> {
@@ -2067,8 +2085,11 @@ async fn remove_vscode_bridge_install() -> Result<bool> {
         if registry_path.is_file() {
             let raw = fs::read_to_string(&registry_path)
                 .with_context(|| format!("failed to read {}", registry_path.display()))?;
-            let mut entries: Vec<Value> =
-                serde_json::from_str(&raw).context("failed to parse VS Code extensions registry")?;
+            if raw.trim().is_empty() {
+                continue;
+            }
+            let mut entries: Vec<Value> = serde_json::from_str(&raw)
+                .context("failed to parse VS Code extensions registry")?;
             let before_len = entries.len();
             entries.retain(|entry| {
                 let Some(identifier) = entry.get("identifier") else {
@@ -4532,6 +4553,28 @@ fn render_startup_instruction_body(
         } else {
             "false"
         };
+    let client_budget_prefix_preflight_clause = if client_budget_required_reply_prefix_non_empty
+        || client_budget_reply_prefix_preflight_blocks_substantive_reply
+    {
+        format!(
+            "Prefix preflight: `{client_budget_reply_prefix_enforcement_flag}` (`required_reply_prefix_source = {client_budget_required_reply_prefix_source}`, `required_reply_prefix_non_empty = {client_budget_required_reply_prefix_non_empty_text}`, `reply_prefix_preflight_blocks_substantive_reply = {client_budget_reply_prefix_preflight_blocks_substantive_reply_text}`, `output_prefix_enforcement_mode = {client_budget_output_prefix_enforcement_mode}`, `output_prefix_host_enforced = {client_budget_output_prefix_host_enforced_text}`)."
+        )
+    } else {
+        format!(
+            "KPI/reply prefix сейчас отключён как обязательный startup-law (`required_reply_prefix_source = {client_budget_required_reply_prefix_source}`, `required_reply_prefix_non_empty = {client_budget_required_reply_prefix_non_empty_text}`, `reply_prefix_preflight_blocks_substantive_reply = {client_budget_reply_prefix_preflight_blocks_substantive_reply_text}`, `output_prefix_enforcement_mode = {client_budget_output_prefix_enforcement_mode}`, `output_prefix_host_enforced = {client_budget_output_prefix_host_enforced_text}`)."
+        )
+    };
+    let client_budget_reply_opening_rule_clause = if client_budget_required_reply_prefix_non_empty
+        || client_budget_reply_prefix_preflight_blocks_substantive_reply
+    {
+        format!(
+            "Начинать user-visible reply можно только если `{client_budget_reply_execution_gate_field}.{client_budget_reply_prefix_field}` не пустой и источник равен `{client_budget_required_reply_prefix_source}`; иначе substantive reply запрещён и сначала нужен новый guard-check через `{client_budget_reply_prefix_enforcement_flag}`. Если prefix готов, начинай reply с этой exact строки."
+        )
+    } else {
+        format!(
+            "Поле `{client_budget_reply_execution_gate_field}.{client_budget_reply_prefix_field}` может по-прежнему materialize-иться для диагностики, но начинать user-visible reply с KPI-prefix больше не требуется и fail-closed preflight по нему отключён."
+        )
+    };
 
     let instructions = [
         "Перед первым содержательным ответом в новом или resumed чате и дальше перед каждым следующим содержательным ответом:".to_string(),
@@ -4551,10 +4594,10 @@ fn render_startup_instruction_body(
             "5. Resume law: если `{startup_execution_gate_field}.{gate_required_action_kind_field} == \"{required_action_kind}\"`, `{startup_next_action_field}.action_kind == \"{required_action_kind}\"` (`must_resume_required_return_task_before_unrelated_work = {must_resume_before_unrelated_text}`) или `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"` (`previous_session_owner_must_follow_startup_next_action = {previous_session_owner_must_follow_startup_next_action_text}`), follow startup_next_action first. `no_silent_drop = {no_silent_drop_text}`. Для resume смотри `execctl_active_lease_summary`, `required_return_task`, `required_task_set`, `required_task_set_summary`, `project_task_tree`, `project_task_tree_summary`, `project_task_ledger`, `project_task_ledger_summary`."
         ),
         format!(
-            "6. Перед каждым содержательным ответом обновляй guard `{client_budget_guard_shell_command}` и работай только по `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}`. `must_check_before_each_substantive_reply = {client_budget_must_check_before_each_reply_text}`; stale старше `{client_budget_max_guard_age_seconds_text}` секунд запрещён (`stale_guard_requires_refresh = {client_budget_stale_guard_requires_refresh_text}`). Hard gate automation: `{client_budget_guard_enforcement_flag}` (`guard_enforcement_exit_on_blocking = {client_budget_guard_enforcement_exit_on_blocking_text}`). Prefix preflight: `{client_budget_reply_prefix_enforcement_flag}` (`required_reply_prefix_source = {client_budget_required_reply_prefix_source}`, `required_reply_prefix_non_empty = {client_budget_required_reply_prefix_non_empty_text}`, `reply_prefix_preflight_blocks_substantive_reply = {client_budget_reply_prefix_preflight_blocks_substantive_reply_text}`, `output_prefix_enforcement_mode = {client_budget_output_prefix_enforcement_mode}`, `output_prefix_host_enforced = {client_budget_output_prefix_host_enforced_text}`). Continuity write-side maintenance в Amai ({client_budget_continuity_write_operations}) не блокируется reply guard (`continuity_write_exempt_from_reply_guard = {client_budget_continuity_write_exempt_from_reply_guard_text}`) и при rotate/advisory pressure остаётся обязательным перед уходом (`continuity_write_required_before_rotate = {client_budget_continuity_write_required_before_rotate_text}`). Для KPI/guard/exact-pair root-cause сначала используй `{client_budget_compact_diagnostics_shell_command}`; `must_prefer_compact_diagnostics_over_full_snapshot = {client_budget_prefer_compact_diagnostics_text}`."
+            "6. Перед каждым содержательным ответом обновляй guard `{client_budget_guard_shell_command}` и работай только по `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}`. `must_check_before_each_substantive_reply = {client_budget_must_check_before_each_reply_text}`; stale старше `{client_budget_max_guard_age_seconds_text}` секунд запрещён (`stale_guard_requires_refresh = {client_budget_stale_guard_requires_refresh_text}`). Hard gate automation: `{client_budget_guard_enforcement_flag}` (`guard_enforcement_exit_on_blocking = {client_budget_guard_enforcement_exit_on_blocking_text}`). {client_budget_prefix_preflight_clause} Continuity write-side maintenance в Amai ({client_budget_continuity_write_operations}) не блокируется reply guard (`continuity_write_exempt_from_reply_guard = {client_budget_continuity_write_exempt_from_reply_guard_text}`) и при rotate/advisory pressure остаётся обязательным перед уходом (`continuity_write_required_before_rotate = {client_budget_continuity_write_required_before_rotate_text}`). Для KPI/guard/exact-pair root-cause сначала используй `{client_budget_compact_diagnostics_shell_command}`; `must_prefer_compact_diagnostics_over_full_snapshot = {client_budget_prefer_compact_diagnostics_text}`."
         ),
         format!(
-            "7. Gate version pinned: `{client_budget_reply_execution_gate_version}`. Начинать user-visible reply можно только если `{client_budget_reply_execution_gate_field}.{client_budget_reply_prefix_field}` не пустой и источник равен `{client_budget_required_reply_prefix_source}`; иначе substantive reply запрещён и сначала нужен новый guard-check через `{client_budget_reply_prefix_enforcement_flag}`. Если prefix готов, начинай reply с этой exact строки. Если `{client_budget_reply_budget_mode_field} == \"{client_budget_compact_reply_mode_value}\"`, substantive reply разрешён только по `{client_budget_reply_budget_contract_field}` с `contract_version = \"{client_budget_compact_reply_contract_version}\"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing. Exact operator-switch для target режима: matching `{client_budget_target_command_pattern}` -> `{client_budget_target_shell_command} --repo-root \"{repo_root_display}\" {client_budget_target_namespace_argument} \"{namespace}\" {client_budget_target_percent_argument} N` (`repo_root_argument_required = {client_budget_target_repo_root_argument_required_text}`, `switch_immediately_on_exact_chat_command = {client_budget_target_switch_immediately_text}`, `reply_with_confirmation_after_switch = {client_budget_target_reply_with_confirmation_text}`). Пример exact chat-команды: `{client_budget_target_example_command}`. Exact operator-switch для huge-chat rebase: точную команду `{client_budget_compact_chat_exact_command}` обработай через `{client_budget_compact_chat_shell_command} --repo-root \"{repo_root_display}\" {client_budget_compact_chat_namespace_argument} \"{namespace}\" --json` (`repo_root_argument_required = {client_budget_compact_chat_repo_root_argument_required}`, `switch_immediately_on_exact_chat_command = {client_budget_compact_chat_switch_immediately}`, `reply_with_confirmation_after_prepare = {client_budget_compact_chat_reply_with_confirmation}`, `prompt_text_required_for_rebase = {client_budget_compact_chat_prompt_text_required}`), верни `prompt_text` и `operator_notice`, и требуй host action `{client_budget_compact_chat_required_host_action}`."
+            "7. Gate version pinned: `{client_budget_reply_execution_gate_version}`. {client_budget_reply_opening_rule_clause} Если `{client_budget_reply_budget_mode_field} == \"{client_budget_compact_reply_mode_value}\"`, substantive reply разрешён только по `{client_budget_reply_budget_contract_field}` с `contract_version = \"{client_budget_compact_reply_contract_version}\"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing. Exact operator-switch для target режима: matching `{client_budget_target_command_pattern}` -> `{client_budget_target_shell_command} --repo-root \"{repo_root_display}\" {client_budget_target_namespace_argument} \"{namespace}\" {client_budget_target_percent_argument} N` (`repo_root_argument_required = {client_budget_target_repo_root_argument_required_text}`, `switch_immediately_on_exact_chat_command = {client_budget_target_switch_immediately_text}`, `reply_with_confirmation_after_switch = {client_budget_target_reply_with_confirmation_text}`). Пример exact chat-команды: `{client_budget_target_example_command}`. Exact operator-switch для huge-chat rebase: точную команду `{client_budget_compact_chat_exact_command}` обработай через `{client_budget_compact_chat_shell_command} --repo-root \"{repo_root_display}\" {client_budget_compact_chat_namespace_argument} \"{namespace}\" --json` (`repo_root_argument_required = {client_budget_compact_chat_repo_root_argument_required}`, `switch_immediately_on_exact_chat_command = {client_budget_compact_chat_switch_immediately}`, `reply_with_confirmation_after_prepare = {client_budget_compact_chat_reply_with_confirmation}`, `prompt_text_required_for_rebase = {client_budget_compact_chat_prompt_text_required}`), верни `prompt_text` и `operator_notice`, и требуй host action `{client_budget_compact_chat_required_host_action}`."
         ),
         format!(
             "8. Client-budget blocked reply mechanism removed: `reply_blocking_removed = {client_budget_reply_blocking_removed_text}`. Tool-turn blocked mechanism removed too: `tool_turn_blocking_removed = {client_budget_tool_turn_blocking_removed_text}`. Если `{client_budget_reply_execution_gate_field}.must_rotate_before_reply = true`, `{client_budget_reply_execution_gate_field}.must_wait_for_budget_recovery_before_reply = true`, `{client_budget_rotate_now_field} = true`, `{client_budget_status_label_field}` равен одному из current normalized same-thread advisory labels [{client_budget_rotate_status_labels}], `same_meter_pure_burn_turn_active = true`, `must_avoid_new_tool_turn_without_specific_delta_goal = true` или `max_tool_roundtrips_soft = 0`, считай это только advisory/compact pressure signal. Этот список в startup instructions является non-binding human-readable snapshot канонического shared advisory source, а не отдельным policy-list. User-visible blocked wait template использовать запрещено; `amai_context_pack`, continuity write и другие Amai tools не блокируй только из-за этих полей. `save_handoff_before_rotate = {client_budget_save_handoff_before_rotate_text}` и `fresh_chat_requires_continuity_startup = {client_budget_fresh_chat_requires_startup_text}` остаются operator guidance."
@@ -5327,12 +5370,13 @@ mod tests {
     use super::{
         InstallState, describe_client_surface, detection_score, ensure_hermes_project_profile,
         env_keys, expand_target_template, hermes_profile_id, inspect_startup_artifacts,
-        install_scope_status, merge_managed_startup_block, remove_hermes_project_profile,
-        render_agent_preflight_contract_artifact, render_agent_preflight_state_artifact,
-        render_startup_agent_contract_artifact, render_startup_contract_artifact,
-        render_startup_instructions, resolve_client_target, resolve_output_path,
-        save_install_state, startup_agent_contract_artifact_path, startup_contract_artifact_path,
-        startup_contract_sha256, strip_managed_startup_block, working_state_reason_summary,
+        install_memory_bridge, install_scope_status, merge_managed_startup_block,
+        remove_hermes_project_profile, render_agent_preflight_contract_artifact,
+        render_agent_preflight_state_artifact, render_startup_agent_contract_artifact,
+        render_startup_contract_artifact, render_startup_instructions, resolve_client_target,
+        resolve_output_path, save_install_state, startup_agent_contract_artifact_path,
+        startup_contract_artifact_path, startup_contract_sha256, strip_managed_startup_block,
+        working_state_reason_summary,
     };
     use crate::continuity;
     use crate::mcp;
@@ -5369,6 +5413,35 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(keys.contains("AMI_STACK_NAME"));
         assert!(keys.contains("AMI_DEFAULT_RETRIEVAL_MODE"));
         assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn install_memory_bridge_skips_when_release_binary_is_absent() {
+        let _guard = hermes_env_lock()
+            .lock()
+            .expect("home env lock must be available");
+        let repo_root = unique_test_dir("memory-bridge-skip-repo");
+        let home_root = unique_test_dir("memory-bridge-skip-home");
+        fs::create_dir_all(repo_root.join("target")).expect("repo target dir");
+        fs::create_dir_all(home_root.join(".local/bin")).expect("home local bin dir");
+        let previous_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &home_root);
+        }
+
+        let summary = install_memory_bridge(&repo_root).expect("skip summary");
+        assert!(!summary.installed);
+        assert!(summary.status.contains("Пропущен"));
+        assert!(!summary.bridge_path.exists());
+
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        fs::remove_dir_all(repo_root).ok();
+        fs::remove_dir_all(home_root).ok();
     }
 
     #[test]
@@ -5783,23 +5856,19 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             text.contains("continuity import, continuity handoff, observe /api/continuity-handoff")
         );
         assert!(text.contains("--enforce-reply-gate"));
-        assert!(text.contains("--enforce-online-reply-prefix"));
         assert!(text.contains("guard_enforcement_exit_on_blocking = true"));
-        assert!(
-            text.contains("required_reply_prefix_source = personal_agent_online_limit_contour")
-        );
-        assert!(text.contains("required_reply_prefix_non_empty = true"));
-        assert!(text.contains("reply_prefix_preflight_blocks_substantive_reply = true"));
-        assert!(
-            text.contains("output_prefix_enforcement_mode = instruction_preflight_fail_closed")
-        );
+        assert!(text.contains("required_reply_prefix_source = disabled_by_project_policy"));
+        assert!(text.contains("required_reply_prefix_non_empty = false"));
+        assert!(text.contains("reply_prefix_preflight_blocks_substantive_reply = false"));
+        assert!(text.contains("output_prefix_enforcement_mode = disabled_by_project_policy"));
         assert!(text.contains("output_prefix_host_enforced = false"));
         assert!(text.contains("./scripts/client_budget_root_cause.sh"));
         assert!(text.contains("must_prefer_compact_diagnostics_over_full_snapshot = true"));
         assert!(text.contains("client_budget_reply_gate.reply_execution_gate"));
         assert!(text.contains("Gate version pinned: `client-reply-budget-gate-v1`"));
         assert!(text.contains("reply_execution_gate.reply_prefix"));
-        assert!(text.contains("Начинать user-visible reply можно только если"));
+        assert!(text.contains("KPI/reply prefix сейчас отключён как обязательный startup-law"));
+        assert!(text.contains("fail-closed preflight по нему отключён"));
         assert!(text.contains("matching `^экономия_(0|10|20|30|40|50|60|70|80|90)%$`"));
         assert!(text.contains("./scripts/continuity_client_budget_target.sh --repo-root"));
         assert!(text.contains("Пример exact chat-команды: `экономия_50%`"));
@@ -5964,7 +6033,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             payload["startup_contract"]["contract_version"],
-            json!("continuity-startup-contract-v19")
+            json!("continuity-startup-contract-v20")
         );
         assert_eq!(
             payload["startup_contract"]["tool_runtime_reconcile"]["error_class"],
@@ -6030,23 +6099,23 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["reply_prefix_enforcement_flag"],
-            json!("--enforce-online-reply-prefix")
+            json!("disabled")
         );
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["required_reply_prefix_source"],
-            json!("personal_agent_online_limit_contour")
+            json!("disabled_by_project_policy")
         );
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["required_reply_prefix_non_empty"],
-            json!(true)
+            json!(false)
         );
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["reply_prefix_preflight_blocks_substantive_reply"],
-            json!(true)
+            json!(false)
         );
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["output_prefix_enforcement_mode"],
-            json!("instruction_preflight_fail_closed")
+            json!("disabled_by_project_policy")
         );
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["output_prefix_host_enforced"],
@@ -6198,11 +6267,11 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             payload["compact_runtime_pointers"]["reply_prefix_enforcement_flag"],
-            json!("--enforce-online-reply-prefix")
+            json!("disabled")
         );
         assert_eq!(
             payload["compact_runtime_pointers"]["required_reply_prefix_source"],
-            json!("personal_agent_online_limit_contour")
+            json!("disabled_by_project_policy")
         );
         assert_eq!(
             payload["compact_runtime_pointers"]["client_budget_target_exact_chat_command_pattern"],
@@ -6832,6 +6901,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
 
     #[tokio::test]
     async fn remove_vscode_bridge_install_removes_bundle_and_registry_entries() {
+        let _guard = hermes_env_lock().lock().expect("home env lock");
         let unique = format!(
             "amai-vscode-bridge-remove-{}",
             std::time::SystemTime::now()
@@ -6907,6 +6977,45 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             })
             .collect();
         assert_eq!(vscodium_ids, vec!["other.vscodium".to_string()]);
+
+        if let Some(previous_home) = previous_home {
+            unsafe { std::env::set_var("HOME", previous_home) };
+        } else {
+            unsafe { std::env::remove_var("HOME") };
+        }
+        fs::remove_dir_all(&home).expect("cleanup temp home");
+    }
+
+    #[tokio::test]
+    async fn remove_vscode_bridge_install_tolerates_empty_registry_file() {
+        let _guard = hermes_env_lock().lock().expect("home env lock");
+        let unique = format!(
+            "amai-vscode-bridge-remove-empty-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("epoch")
+                .as_nanos()
+        );
+        let home = std::env::temp_dir().join(unique);
+        let vscode_root = home.join(".vscode/extensions");
+        fs::create_dir_all(&vscode_root).expect("vscode extensions root");
+        let current_bundle = vscode_root.join("amai.amai-vscode-bridge-0.0.3");
+        fs::create_dir_all(&current_bundle).expect("current bundle");
+        fs::write(current_bundle.join("package.json"), "{}").expect("current package");
+        fs::write(vscode_root.join("extensions.json"), "").expect("empty registry");
+
+        let previous_home = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", &home) };
+        let removed = super::remove_vscode_bridge_install()
+            .await
+            .expect("remove vscode bridge install with empty registry");
+
+        assert!(removed);
+        assert!(!current_bundle.exists());
+        assert_eq!(
+            fs::read_to_string(vscode_root.join("extensions.json")).expect("read empty registry"),
+            ""
+        );
 
         if let Some(previous_home) = previous_home {
             unsafe { std::env::set_var("HOME", previous_home) };

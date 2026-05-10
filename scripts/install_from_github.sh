@@ -85,10 +85,53 @@ fi
 repair_local_source_checkout() {
   local source_root="$1"
   local clone_root="$2"
-  local source_vendor="${source_root}/vendor"
-  [[ -d "${source_vendor}" ]] || return
-  mkdir -p "${clone_root}/vendor"
-  cp -a "${source_vendor}/." "${clone_root}/vendor/"
+  local entry=""
+  shopt -s dotglob nullglob
+  for entry in "${source_root}"/*; do
+    local base
+    base="$(basename "${entry}")"
+    case "${base}" in
+      .git|target|state|tmp)
+        continue
+        ;;
+    esac
+    rm -rf "${clone_root:?}/${base}"
+    cp -a "${entry}" "${clone_root}/${base}"
+  done
+  shopt -u dotglob nullglob
+}
+
+load_os_release() {
+  [[ -f /etc/os-release ]] || return 1
+  # shellcheck disable=SC1091
+  source /etc/os-release
+}
+
+verified_auto_prereq_host() {
+  load_os_release || return 1
+  [[ "${AMAI_AUTO_INSTALL_PREREQS:-1}" != "0" ]] || return 1
+  [[ "${ID:-}" == "ubuntu" || "${ID:-}" == "debian" || " ${ID_LIKE:-} " == *" debian "* ]]
+}
+
+run_as_root() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    "$@"
+    return
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+    return
+  fi
+  echo "install_from_github.sh automatic prerequisite bootstrap requires root or sudo on verified Ubuntu/Debian hosts." >&2
+  return 1
+}
+
+ensure_git_for_verified_host() {
+  verified_auto_prereq_host || return 0
+  command -v git >/dev/null 2>&1 && return 0
+  export DEBIAN_FRONTEND=noninteractive
+  run_as_root apt-get update
+  run_as_root apt-get install -y git curl ca-certificates
 }
 
 assert_checkout_complete() {
@@ -128,6 +171,8 @@ assert_checkout_complete() {
   sed -n '1,40p' "${metadata_stderr}" >&2
   exit 68
 }
+
+ensure_git_for_verified_host
 
 if ! command -v git >/dev/null 2>&1; then
   echo "install_from_github.sh requires git in PATH" >&2
@@ -172,6 +217,12 @@ fi
 
 if [[ -n "${local_source_path}" ]]; then
   repair_local_source_checkout "${local_source_path}" "${clone_dir}"
+fi
+
+if [[ -f "${clone_dir}/scripts/ensure_verified_linux_prereqs.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "${clone_dir}/scripts/ensure_verified_linux_prereqs.sh"
+  ensure_verified_linux_prereqs 0
 fi
 
 assert_checkout_complete "${clone_dir}"

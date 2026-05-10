@@ -16,15 +16,16 @@ mkdir -p "${stub_bin}"
 ln -s /bin/bash "${stub_bin}/bash"
 ln -s /usr/bin/env "${stub_bin}/env"
 ln -s /usr/bin/dirname "${stub_bin}/dirname"
+ln -s /usr/bin/tr "${stub_bin}/tr"
 
-if PATH="/usr/bin:/bin" ./scripts/install_amai.sh --client vscode --skip-stack --stack-profile default --yes >"${missing_cargo_out}" 2>&1; then
+if AMAI_AUTO_INSTALL_PREREQS=0 PATH="/usr/bin:/bin" ./scripts/install_amai.sh --client vscode --skip-stack --stack-profile default --yes >"${missing_cargo_out}" 2>&1; then
   echo "proof_install_prereq_frontdoor: missing cargo unexpectedly succeeded" >&2
   exit 1
 fi
 rg '^Amai runner requires a working cargo binary\. Install rust/cargo or set AMAI_CARGO_BIN\.$' "${missing_cargo_out}" >/dev/null
 
 ln -s "$(command -v cargo)" "${stub_bin}/cargo"
-if PATH="${stub_bin}:/usr/bin:/bin" ./scripts/install_amai.sh --client vscode --skip-stack --stack-profile default --yes >"${missing_rustc_out}" 2>&1; then
+if AMAI_AUTO_INSTALL_PREREQS=0 PATH="${stub_bin}:/usr/bin:/bin" ./scripts/install_amai.sh --client vscode --skip-stack --stack-profile default --yes >"${missing_rustc_out}" 2>&1; then
   echo "proof_install_prereq_frontdoor: missing rustc unexpectedly succeeded" >&2
   exit 1
 fi
@@ -58,7 +59,7 @@ exit 1
 EOF
 chmod +x "${stub_bin}/rustc-stub"
 
-if PATH="${stub_bin}" AMAI_CARGO_BIN="${stub_bin}/cargo-stub" AMAI_RUSTC_BIN="${stub_bin}/rustc-stub" \
+if AMAI_AUTO_INSTALL_PREREQS=0 PATH="${stub_bin}" AMAI_CARGO_BIN="${stub_bin}/cargo-stub" AMAI_RUSTC_BIN="${stub_bin}/rustc-stub" \
   bash ./scripts/install_amai.sh --client vscode --stack-profile default --yes >"${missing_docker_out}" 2>&1; then
   echo "proof_install_prereq_frontdoor: missing docker unexpectedly succeeded" >&2
   exit 1
@@ -81,14 +82,14 @@ exit 1
 EOF
 chmod +x "${stub_bin}/docker"
 
-if PATH="${stub_bin}" AMAI_CARGO_BIN="${stub_bin}/cargo-stub" AMAI_RUSTC_BIN="${stub_bin}/rustc-stub" \
+if AMAI_AUTO_INSTALL_PREREQS=0 PATH="${stub_bin}" AMAI_CARGO_BIN="${stub_bin}/cargo-stub" AMAI_RUSTC_BIN="${stub_bin}/rustc-stub" \
   bash ./scripts/install_amai.sh --client vscode --stack-profile default --yes >"${missing_compose_out}" 2>&1; then
   echo "proof_install_prereq_frontdoor: missing docker compose unexpectedly succeeded" >&2
   exit 1
 fi
 rg '^Amai install requires docker compose v2 for local stack bootstrap\. Install the docker compose plugin or rerun with --skip-stack / --ssh-destination\.$' "${missing_compose_out}" >/dev/null
 
-PATH="${stub_bin}" AMAI_CARGO_BIN="${stub_bin}/cargo-stub" AMAI_RUSTC_BIN="${stub_bin}/rustc-stub" \
+AMAI_AUTO_INSTALL_PREREQS=0 PATH="${stub_bin}" AMAI_CARGO_BIN="${stub_bin}/cargo-stub" AMAI_RUSTC_BIN="${stub_bin}/rustc-stub" \
   bash ./scripts/install_amai.sh --client vscode --skip-stack --stack-profile default --yes >"${skip_stack_out}" 2>&1
 rg '^stub cargo run reached$' "${skip_stack_out}" >/dev/null
 

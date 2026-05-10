@@ -11,7 +11,7 @@ state_file="${tmp_dir}/install-state.json"
 target_file="${tmp_dir}/mcp.json"
 install_out="${tmp_dir}/install.out"
 
-AMAI_INSTALL_STATE_PATH="${state_file}" ./scripts/install_from_github.sh \
+CARGO_TARGET_DIR="$(pwd)/target" AMAI_INSTALL_STATE_PATH="${state_file}" ./scripts/install_from_github.sh \
   --clone-dir "${clone_dir}" \
   --client vscode \
   --stack-profile default \
@@ -25,8 +25,8 @@ test -f "${clone_dir}/scripts/install_amai.sh"
 test -f "${target_file}"
 test -f "${state_file}"
 rg '^Amai готов$' "${install_out}" >/dev/null
-rg '^Результат: Amai установлен впервые\.$' "${install_out}" >/dev/null
-rg '^Клиент: VS Code$' "${install_out}" >/dev/null
-rg '^Machine-readable startup contract:' "${install_out}" >/dev/null
+rg '^Клиент: VS Code / Codium$' "${install_out}" >/dev/null
+rg '^Startup contract для клиента: пропущен в compact install contour$' "${install_out}" >/dev/null
+rg '^Client runtime artifact: VS Code bridge установлен$' "${install_out}" >/dev/null
 
 echo "proof_install_from_github_public_default_source: ok"

@@ -30,7 +30,7 @@ It keeps project context, working state, restore prompts, and installable client
 Amai is still in development.
 
 At the current stage, the verified contour is strictly limited to:
-- `Linux` / `Ubuntu`-style install and run;
+- `Ubuntu` / `Debian` install and run;
 - `VS Code` / `Codium` client usage on that Linux contour;
 - the `Amai VS Code Bridge` extension published through `OpenVSX`.
 
@@ -38,7 +38,7 @@ Other operating systems, clients, and applications will be added and verified as
 
 ## Install
 
-Verified install contour right now: `Linux` shell environment, verified on an `Ubuntu`-style machine, with `VS Code` or `Codium`.
+Verified install contour right now: `Ubuntu` / `Debian` shell environment, with `VS Code` or `Codium`.
 
 This does not currently claim verified support for `macOS`, `Windows`, or other client/runtime combinations.
 
@@ -51,11 +51,17 @@ There are currently two verified GitHub install front doors for this Linux conto
 ### System requirements
 
 Current verified baseline:
-- `Linux` shell environment, with the current live proof performed on an `Ubuntu`-style machine;
-- `bash`, `git`, and either `curl` or direct `git` access to GitHub;
-- `rustup` / `cargo` / `rustc`;
-- `Docker` and `Docker Compose v2` for local stack bootstrap;
+- `Ubuntu` or `Debian`;
+- `bash`;
+- `sudo` / administrator access for first install on a clean machine;
+- network access to GitHub and the system package repositories;
 - `VS Code` or `Codium` for the verified client contour.
+
+On this verified `Ubuntu` / `Debian` contour, the one-command installer can now bootstrap the missing local prerequisites for you, including:
+- `git`;
+- base build dependencies;
+- `rustup` / `cargo` / `rustc`;
+- `Docker` and compose support for the local stack.
 
 Machine capacity is checked by the built-in preflight selector:
 
@@ -75,6 +81,9 @@ Normal network:
 bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client vscode --stack-profile default --yes
 ```
 
+On the verified `Ubuntu` / `Debian` contour, this command can bootstrap the missing local prerequisites automatically.
+Expect to grant `sudo` privileges on a clean machine during the first install.
+
 If `raw.githubusercontent.com` is blocked or unstable, use the git-based one-liner:
 
 ```bash
@@ -83,6 +92,21 @@ cd ~/.local/share/amai/repo && \
 ./scripts/install_amai.sh --client vscode --stack-profile default --yes
 ```
 
+### Fastest Agent-Assisted Setup
+
+If you already use an AI coding agent inside `VS Code` / `Codium`, the fastest path is:
+
+1. run one of the install commands above;
+2. open `~/.local/share/amai/repo` in the editor;
+3. ask the agent to verify the local contour end to end:
+   - `.vscode/mcp.json` exists;
+   - `systemctl --user is-active amai-stack.service` is `active`;
+   - `Amai VS Code Bridge` is installed;
+   - the `OpenAI` / `Codex` chat surface is available if you want to launch `Amai` from the sidebar.
+
+This does not replace the normal Amai install.
+It is simply the quickest way to let an agent verify and finish the editor-side contour without manual spot checks.
+
 ## VS Code Bridge
 
 The current public client contour is `Amai VS Code Bridge`:
@@ -90,7 +114,8 @@ The current public client contour is `Amai VS Code Bridge`:
 - published via `OpenVSX`;
 - usable from `VS Code` / `Codium`;
 - installs an `Amai` activity-bar entry and clean-chat launch surface;
-- designed to carry restore prompts into a fresh chat surface.
+- designed to carry restore prompts into a fresh chat surface;
+- depends on a separate `OpenAI` / `Codex` chat surface inside the editor.
 
 Published extension:
 
