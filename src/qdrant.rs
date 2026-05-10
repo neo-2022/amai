@@ -2,9 +2,9 @@ use crate::config::AppConfig;
 use anyhow::{Context, Result};
 use qdrant_client::qdrant::{
     Condition, CreateAliasBuilder, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder,
-    DeletePointsBuilder, Distance, FieldType, Filter, PointStruct, RetrievedPoint, ScoredPoint,
-    ScrollPointsBuilder, SearchPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
-    WriteOrdering, WriteOrderingType, point_id::PointIdOptions,
+    DeletePointsBuilder, Distance, FieldType, Filter, PayloadSchemaType, PointStruct,
+    RetrievedPoint, ScoredPoint, ScrollPointsBuilder, SearchPointsBuilder, UpsertPointsBuilder,
+    VectorParamsBuilder, WriteOrdering, WriteOrderingType, point_id::PointIdOptions,
     vector_output::Vector as VectorOutputKind,
 };
 use qdrant_client::{Payload, Qdrant};
@@ -128,15 +128,47 @@ async fn ensure_keyword_field_index(
     collection: &str,
     field_name: &str,
 ) -> Result<()> {
-    client
+    match client
         .create_field_index(CreateFieldIndexCollectionBuilder::new(
             collection,
             field_name,
             FieldType::Keyword,
         ))
         .await
-        .with_context(|| format!("failed to ensure payload index {field_name} in {collection}"))?;
+    {
+        Ok(_) => {}
+        Err(error) => {
+            if collection_has_keyword_payload_index(client, collection, field_name).await? {
+                tracing::warn!(
+                    collection,
+                    field_name,
+                    error = %error,
+                    "qdrant returned an index creation error after the keyword payload index was already observable; accepting verified state"
+                );
+                return Ok(());
+            }
+            return Err(error).with_context(|| {
+                format!("failed to ensure payload index {field_name} in {collection}")
+            });
+        }
+    }
     Ok(())
+}
+
+async fn collection_has_keyword_payload_index(
+    client: &Qdrant,
+    collection: &str,
+    field_name: &str,
+) -> Result<bool> {
+    let info = client.collection_info(collection).await.with_context(|| {
+        format!("failed to inspect collection {collection} after payload index create error")
+    })?;
+    Ok(info
+        .result
+        .as_ref()
+        .and_then(|result| result.payload_schema.get(field_name))
+        .map(|schema| schema.data_type == PayloadSchemaType::Keyword as i32)
+        .unwrap_or(false))
 }
 
 pub async fn replace_document_points(
@@ -393,8 +425,8 @@ pub async fn search_namespace_points(
 mod tests {
     use super::*;
     use qdrant_client::qdrant::{
-        DenseVector, PointId, RetrievedPoint, Value as QdrantValue, VectorsOutput,
-        point_id::PointIdOptions, vectors_output,
+        DenseVector, PayloadSchemaInfo, PointId, RetrievedPoint, Value as QdrantValue,
+        VectorsOutput, point_id::PointIdOptions, vectors_output,
     };
     use std::collections::HashMap;
 
@@ -482,5 +514,45 @@ mod tests {
 
         let error = vector_point_from_retrieved_point(point).expect_err("must reject");
         assert!(format!("{error:#}").contains("unsupported non-dense vectors"));
+    }
+
+    #[test]
+    fn keyword_payload_index_detection_is_exact() {
+        let mut payload_schema = HashMap::new();
+        payload_schema.insert(
+            "project_code".to_string(),
+            PayloadSchemaInfo {
+                data_type: PayloadSchemaType::Keyword as i32,
+                params: None,
+                points: Some(0),
+            },
+        );
+        payload_schema.insert(
+            "document_id".to_string(),
+            PayloadSchemaInfo {
+                data_type: PayloadSchemaType::Integer as i32,
+                params: None,
+                points: Some(0),
+            },
+        );
+
+        assert!(
+            payload_schema
+                .get("project_code")
+                .map(|schema| schema.data_type == PayloadSchemaType::Keyword as i32)
+                .unwrap_or(false)
+        );
+        assert!(
+            !payload_schema
+                .get("document_id")
+                .map(|schema| schema.data_type == PayloadSchemaType::Keyword as i32)
+                .unwrap_or(false)
+        );
+        assert!(
+            !payload_schema
+                .get("missing")
+                .map(|schema| schema.data_type == PayloadSchemaType::Keyword as i32)
+                .unwrap_or(false)
+        );
     }
 }

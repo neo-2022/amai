@@ -190,6 +190,7 @@ pub(crate) struct StartupArtifactAudit {
 
 #[derive(Debug, Clone)]
 struct MemoryBridgeInstallSummary {
+    installed: bool,
     bridge_path: PathBuf,
     backup_path: Option<PathBuf>,
     status: String,
@@ -310,9 +311,11 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
             installed_at_epoch_seconds: current_epoch_seconds(),
             memory_bridge_path: local_memory_bridge_summary
                 .as_ref()
+                .filter(|summary| summary.installed)
                 .map(|summary| summary.bridge_path.display().to_string()),
             memory_bridge_backup_path: local_memory_bridge_summary
                 .as_ref()
+                .filter(|summary| summary.installed)
                 .and_then(|summary| summary.backup_path.as_ref())
                 .map(|path| path.display().to_string()),
             startup_instruction_path: startup_instructions_summary
@@ -1322,10 +1325,15 @@ fn install_memory_bridge(repo_root: &Path) -> Result<MemoryBridgeInstallSummary>
         let bridge_path = bin_dir.join("memory");
         let target = compiled_binary_path(repo_root, "target/release", "memory");
         if !target.is_file() {
-            bail!(
-                "Amai memory bridge requires built release binary: {}; run cargo build --release first",
-                target.display()
-            );
+            return Ok(MemoryBridgeInstallSummary {
+                installed: false,
+                bridge_path,
+                backup_path: None,
+                status: format!(
+                    "Пропущен: release-only memory bridge {} ещё не собран в этом install contour; VS Code onboarding остаётся рабочим.",
+                    target.display()
+                ),
+            });
         }
 
         let mut backup_path = None;
@@ -1391,6 +1399,7 @@ fn install_memory_bridge(repo_root: &Path) -> Result<MemoryBridgeInstallSummary>
         };
 
         Ok(MemoryBridgeInstallSummary {
+            installed: true,
             bridge_path,
             backup_path,
             status,
@@ -2070,8 +2079,8 @@ async fn remove_vscode_bridge_install() -> Result<bool> {
             if raw.trim().is_empty() {
                 continue;
             }
-            let mut entries: Vec<Value> =
-                serde_json::from_str(&raw).context("failed to parse VS Code extensions registry")?;
+            let mut entries: Vec<Value> = serde_json::from_str(&raw)
+                .context("failed to parse VS Code extensions registry")?;
             let before_len = entries.len();
             entries.retain(|entry| {
                 let Some(identifier) = entry.get("identifier") else {
@@ -5330,12 +5339,13 @@ mod tests {
     use super::{
         InstallState, describe_client_surface, detection_score, ensure_hermes_project_profile,
         env_keys, expand_target_template, hermes_profile_id, inspect_startup_artifacts,
-        install_scope_status, merge_managed_startup_block, remove_hermes_project_profile,
-        render_agent_preflight_contract_artifact, render_agent_preflight_state_artifact,
-        render_startup_agent_contract_artifact, render_startup_contract_artifact,
-        render_startup_instructions, resolve_client_target, resolve_output_path,
-        save_install_state, startup_agent_contract_artifact_path, startup_contract_artifact_path,
-        startup_contract_sha256, strip_managed_startup_block, working_state_reason_summary,
+        install_memory_bridge, install_scope_status, merge_managed_startup_block,
+        remove_hermes_project_profile, render_agent_preflight_contract_artifact,
+        render_agent_preflight_state_artifact, render_startup_agent_contract_artifact,
+        render_startup_contract_artifact, render_startup_instructions, resolve_client_target,
+        resolve_output_path, save_install_state, startup_agent_contract_artifact_path,
+        startup_contract_artifact_path, startup_contract_sha256, strip_managed_startup_block,
+        working_state_reason_summary,
     };
     use crate::continuity;
     use crate::mcp;
@@ -5372,6 +5382,35 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(keys.contains("AMI_STACK_NAME"));
         assert!(keys.contains("AMI_DEFAULT_RETRIEVAL_MODE"));
         assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn install_memory_bridge_skips_when_release_binary_is_absent() {
+        let _guard = hermes_env_lock()
+            .lock()
+            .expect("home env lock must be available");
+        let repo_root = unique_test_dir("memory-bridge-skip-repo");
+        let home_root = unique_test_dir("memory-bridge-skip-home");
+        fs::create_dir_all(repo_root.join("target")).expect("repo target dir");
+        fs::create_dir_all(home_root.join(".local/bin")).expect("home local bin dir");
+        let previous_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &home_root);
+        }
+
+        let summary = install_memory_bridge(&repo_root).expect("skip summary");
+        assert!(!summary.installed);
+        assert!(summary.status.contains("Пропущен"));
+        assert!(!summary.bridge_path.exists());
+
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        fs::remove_dir_all(repo_root).ok();
+        fs::remove_dir_all(home_root).ok();
     }
 
     #[test]
