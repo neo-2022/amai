@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
+source ./scripts/ensure_verified_linux_prereqs.sh
+
 has_stack_profile=0
 skip_stack=0
 remote_mode=0
@@ -39,12 +41,18 @@ require_local_stack_bootstrap_prereqs() {
       'Amai install requires docker for local stack bootstrap. Install Docker or rerun with --skip-stack / --ssh-destination.' >&2
     exit 127
   fi
-  if ! docker compose version >/dev/null 2>&1; then
+  if ! ./scripts/docker_wrapper.sh compose version >/dev/null 2>&1; then
     printf '%s\n' \
       'Amai install requires docker compose v2 for local stack bootstrap. Install the docker compose plugin or rerun with --skip-stack / --ssh-destination.' >&2
     exit 127
   fi
 }
+
+if [[ "${remote_mode}" -eq 0 && "${skip_stack}" -eq 0 ]]; then
+  ensure_verified_linux_prereqs 1
+else
+  ensure_verified_linux_prereqs 0
+fi
 
 cargo_bin="$(./scripts/resolve_cargo.sh)"
 rustc_bin="$(./scripts/resolve_rustc.sh)"
@@ -65,7 +73,7 @@ if [[ "${remote_mode}" -eq 0 ]]; then
       RUSTC="${rustc_bin}" \
       CARGO_PROFILE_DEV_DEBUG=0 \
       CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=off \
-      "${cargo_bin}" run --quiet --bin amai-bootstrap -- install "$@"
+      "${cargo_bin}" run --quiet --release --bin amai-bootstrap -- install "$@"
   fi
 fi
 

@@ -32,8 +32,15 @@ Before using this extension, the currently verified contour expects:
 - `bash`
 - `git`
 - `curl` for the primary GitHub bootstrap path
+- `rustup` / `cargo` / `rustc`
+- `Docker` and `Docker Compose v2`
 - `code` CLI from `VS Code` or `Codium`
 - `systemd --user` for the managed local `amai-stack.service`
+
+Important:
+
+- the current GitHub install contour bootstraps `Amai` in one command only after these prerequisites already exist on the machine;
+- it does not yet provision `git`, the Rust toolchain, or `Docker Compose` for you on a clean operating system.
 
 ## Before You Install The Extension
 

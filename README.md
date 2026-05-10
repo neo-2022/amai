@@ -57,6 +57,10 @@ Current verified baseline:
 - `Docker` and `Docker Compose v2` for local stack bootstrap;
 - `VS Code` or `Codium` for the verified client contour.
 
+Important:
+- the current GitHub front door is a one-command `Amai` bootstrap only after these prerequisites already exist on the machine;
+- it does not yet provision `git`, the Rust toolchain, or `Docker Compose` for you on a clean operating system.
+
 Machine capacity is checked by the built-in preflight selector:
 
 ```bash
@@ -74,6 +78,8 @@ Normal network:
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client vscode --stack-profile default --yes
 ```
+
+This command currently assumes the system requirements above are already installed.
 
 If `raw.githubusercontent.com` is blocked or unstable, use the git-based one-liner:
 

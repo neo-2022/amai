@@ -619,7 +619,8 @@ async fn compose_down_stack(repo_root: &Path) -> Result<bool> {
     if !repo_root.join("compose.yaml").is_file() {
         return Ok(false);
     }
-    let status = Command::new("docker")
+    let mut command = docker_command(repo_root);
+    let status = command
         .arg("compose")
         .arg("--profile")
         .arg("monitoring")
@@ -635,6 +636,14 @@ async fn compose_down_stack(repo_root: &Path) -> Result<bool> {
         Ok(result) if result.success() => Ok(true),
         Ok(_) | Err(_) => Ok(false),
     }
+}
+
+fn docker_command(repo_root: &Path) -> Command {
+    let wrapper = repo_root.join("scripts/docker_wrapper.sh");
+    if wrapper.is_file() {
+        return Command::new(wrapper);
+    }
+    Command::new("docker")
 }
 
 async fn command_exists(command: &str) -> bool {

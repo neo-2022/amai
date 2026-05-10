@@ -3,6 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 source ./scripts/load_env.sh
+docker_bin="./scripts/docker_wrapper.sh"
 
 cargo_bin="$(./scripts/resolve_cargo.sh)"
 rustc_bin="$(./scripts/resolve_rustc.sh)"
@@ -94,7 +95,7 @@ bootstrap_main() {
   fi
 
   ./scripts/prepare_stack_runtime.sh
-  docker compose up -d --remove-orphans
+  "${docker_bin}" compose up -d --remove-orphans
   run_bootstrap_command stack
 
   if [[ -n "${AMI_WARMUP_PROJECTS:-}" ]]; then
@@ -106,6 +107,7 @@ bootstrap_main() {
 # open file descriptors. Use `flock --close` so the bootstrap lock never leaks into
 # conmon/rootlessport and future bootstrap runs do not deadlock on a stale holder.
 export cargo_bin rustc_bin stack_profile
+export docker_bin
 export -f compact_release_binary_is_fresh
 export -f compact_debug_binary_is_fresh
 export -f release_binary_is_fresh

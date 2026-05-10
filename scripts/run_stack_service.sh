@@ -3,6 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 source ./scripts/load_env.sh
+docker_bin="./scripts/docker_wrapper.sh"
 
 export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
@@ -80,5 +81,5 @@ run_bootstrap_stack() {
 }
 
 ./scripts/prepare_stack_runtime.sh
-docker compose up -d --remove-orphans
+"${docker_bin}" compose up -d --remove-orphans
 run_bootstrap_stack

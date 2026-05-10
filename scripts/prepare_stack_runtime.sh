@@ -3,11 +3,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 source ./scripts/load_env.sh
+docker_bin="./scripts/docker_wrapper.sh"
 
 cleanup_conflicting_named_container() {
   local name="$1"
   local inspect_line=""
-  inspect_line="$(docker inspect "${name}" --format '{{.State.Running}} {{range .Mounts}}{{.Type}}|{{.Source}};{{end}}' 2>/dev/null || true)"
+  inspect_line="$("${docker_bin}" inspect "${name}" --format '{{.State.Running}} {{range .Mounts}}{{.Type}}|{{.Source}};{{end}}' 2>/dev/null || true)"
   [[ -n "${inspect_line}" ]] || return 0
 
   local running="${inspect_line%% *}"
@@ -34,7 +35,7 @@ cleanup_conflicting_named_container() {
     echo "prepare_stack_runtime.sh: reclaiming conflicting live container ${name} from another repo root." >&2
   fi
 
-  docker rm -f "${name}" >/dev/null
+  "${docker_bin}" rm -f "${name}" >/dev/null
 }
 
 stack_profile="${AMI_STACK_PROFILE:-default}"

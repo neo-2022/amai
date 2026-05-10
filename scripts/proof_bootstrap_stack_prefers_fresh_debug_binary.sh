@@ -6,7 +6,7 @@ temp_root="$(mktemp -d)"
 trap 'rm -rf "${temp_root}"' EXIT
 
 sandbox_repo="${temp_root}/repo"
-fake_bin="${temp_root}/home/.local/bin"
+fake_bin="${temp_root}/fake-bin"
 mkdir -p "${sandbox_repo}/scripts" "${sandbox_repo}/target/debug" "${sandbox_repo}/state/locks" "${fake_bin}"
 
 copy_into_sandbox() {
@@ -15,9 +15,9 @@ copy_into_sandbox() {
   cp "${repo_root}/${rel}" "${sandbox_repo}/${rel}"
 }
 
-copy_into_sandbox "scripts/run_stack_service.sh"
+copy_into_sandbox "scripts/bootstrap_stack.sh"
 copy_into_sandbox "scripts/docker_wrapper.sh"
-chmod +x "${sandbox_repo}/scripts/run_stack_service.sh"
+chmod +x "${sandbox_repo}/scripts/bootstrap_stack.sh"
 chmod +x "${sandbox_repo}/scripts/docker_wrapper.sh"
 
 cat >"${sandbox_repo}/scripts/load_env.sh" <<'EOF'
@@ -25,6 +25,20 @@ cat >"${sandbox_repo}/scripts/load_env.sh" <<'EOF'
 set -euo pipefail
 EOF
 chmod +x "${sandbox_repo}/scripts/load_env.sh"
+
+cat >"${sandbox_repo}/scripts/prepare_stack_runtime.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'prepare stack runtime\n' >>"${AMAI_TRACE_PATH}"
+EOF
+chmod +x "${sandbox_repo}/scripts/prepare_stack_runtime.sh"
+
+cat >"${sandbox_repo}/scripts/warmup_cache.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'warmup cache\n' >>"${AMAI_TRACE_PATH}"
+EOF
+chmod +x "${sandbox_repo}/scripts/warmup_cache.sh"
 
 cat >"${sandbox_repo}/scripts/resolve_cargo.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -38,22 +52,15 @@ printf '%s\n' rustc
 EOF
 chmod +x "${sandbox_repo}/scripts/resolve_rustc.sh"
 
-cat >"${sandbox_repo}/scripts/prepare_stack_runtime.sh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-printf 'prepare stack runtime\n' >>"${AMAI_TRACE_PATH}"
-EOF
-chmod +x "${sandbox_repo}/scripts/prepare_stack_runtime.sh"
-
-cat >"${sandbox_repo}/target/debug/amai-bootstrap" <<'EOF'
+cat >"${sandbox_repo}/target/debug/amai" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${AMAI_TRACE_PATH}"
 EOF
-chmod +x "${sandbox_repo}/target/debug/amai-bootstrap"
+chmod +x "${sandbox_repo}/target/debug/amai"
 
 sleep 1
-touch "${sandbox_repo}/target/debug/amai-bootstrap"
+touch "${sandbox_repo}/target/debug/amai"
 
 cat >"${fake_bin}/cargo" <<'EOF'
 #!/usr/bin/env bash
@@ -70,23 +77,30 @@ printf 'docker %s\n' "$*" >>"${AMAI_TRACE_PATH}"
 EOF
 chmod +x "${fake_bin}/docker"
 
+cat >"${fake_bin}/flock" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+shift 3
+"$@"
+EOF
+chmod +x "${fake_bin}/flock"
+
 trace_path="${temp_root}/trace.txt"
 
 (
   cd "${sandbox_repo}"
-  HOME="${temp_root}/home" \
   PATH="${fake_bin}:${PATH}" \
   AMAI_TRACE_PATH="${trace_path}" \
-  ./scripts/run_stack_service.sh
+  ./scripts/bootstrap_stack.sh --stack-profile default
 )
 
-grep -Fq 'prepare stack runtime' "${trace_path}"
+grep -Fxq 'bootstrap preflight --stack-profile default' "${trace_path}"
+grep -Fxq 'bootstrap stack' "${trace_path}"
 grep -Fq 'docker compose up -d --remove-orphans' "${trace_path}"
-grep -Fxq 'stack' "${trace_path}"
 
 if grep -Fq 'cargo unexpectedly ran' "${trace_path}"; then
-  printf 'proof_run_stack_service_prefers_compact_debug_binary: cargo unexpectedly ran\n' >&2
+  printf 'proof_bootstrap_stack_prefers_fresh_debug_binary: cargo unexpectedly ran\n' >&2
   exit 1
 fi
 
-printf 'proof_run_stack_service_prefers_compact_debug_binary: PASS\n'
+printf 'proof_bootstrap_stack_prefers_fresh_debug_binary: PASS\n'
