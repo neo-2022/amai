@@ -120,12 +120,21 @@ If the `OpenAI` / `Codex` commands are missing, the sidebar will now show that r
 
 ## How To Open Amai In VS Code
 
-1. Open the Amai workspace in `VS Code` / `Codium`.
+1. Open `~/.local/share/amai/repo` in `VS Code` / `Codium`.
 2. Reload the window once after install.
-3. Click the `Amai` icon in the activity bar.
-4. Use one of these actions:
+3. Make sure the `OpenAI` extension is installed and enabled in the same editor profile.
+4. Click the `Amai` icon in the activity bar.
+5. Use one of these actions:
    - `Open in Sidebar`
    - `Open in Panel`
+
+The sidebar now also exposes helper actions for the exact next steps:
+
+- `Open Amai Workspace`
+- `Reload Window`
+- `Open OpenAI Extension`
+
+If one of the required parts is still missing, the sidebar should show the missing step directly instead of pretending the launch buttons are ready.
 
 Available commands:
 
