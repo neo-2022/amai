@@ -7,8 +7,8 @@ source ./scripts/load_env.sh
 cargo_bin="$(./scripts/resolve_cargo.sh)"
 rustc_bin="$(./scripts/resolve_rustc.sh)"
 
-release_binary_is_fresh() {
-  local binary="./target/release/amai"
+binary_is_fresh() {
+  local binary="$1"
   [[ -x "$binary" ]] || return 1
   local candidate
   for candidate in Cargo.toml Cargo.lock; do
@@ -24,6 +24,28 @@ release_binary_is_fresh() {
     fi
   done
   return 0
+}
+
+release_binary_is_fresh() {
+  binary_is_fresh "./target/release/amai"
+}
+
+debug_binary_is_fresh() {
+  binary_is_fresh "./target/debug/amai"
+}
+
+run_bootstrap_command() {
+  local command_name="$1"
+  shift
+  if release_binary_is_fresh; then
+    ./target/release/amai bootstrap "${command_name}" "$@"
+    return 0
+  fi
+  if debug_binary_is_fresh; then
+    ./target/debug/amai bootstrap "${command_name}" "$@"
+    return 0
+  fi
+  RUSTC="${rustc_bin}" "${cargo_bin}" run -- bootstrap "${command_name}" "$@"
 }
 
 bootstrap_lock_dir="state/locks"
@@ -48,16 +70,12 @@ bootstrap_main() {
   export AMI_STACK_PROFILE="${stack_profile}"
 
   if [[ "${AMAI_SKIP_STACK_PREFLIGHT:-0}" != "1" ]]; then
-    RUSTC="${rustc_bin}" "${cargo_bin}" run -- bootstrap preflight --stack-profile "${stack_profile}"
+    run_bootstrap_command preflight --stack-profile "${stack_profile}"
   fi
 
   ./scripts/prepare_stack_runtime.sh
   docker compose up -d --remove-orphans
-  if release_binary_is_fresh; then
-    ./target/release/amai bootstrap stack
-  else
-    RUSTC="${rustc_bin}" "${cargo_bin}" run -- bootstrap stack
-  fi
+  run_bootstrap_command stack
 
   if [[ -n "${AMI_WARMUP_PROJECTS:-}" ]]; then
     ./scripts/warmup_cache.sh
@@ -69,5 +87,8 @@ bootstrap_main() {
 # conmon/rootlessport and future bootstrap runs do not deadlock on a stale holder.
 export cargo_bin rustc_bin stack_profile
 export -f release_binary_is_fresh
+export -f debug_binary_is_fresh
+export -f binary_is_fresh
+export -f run_bootstrap_command
 export -f bootstrap_main
 flock --exclusive --close "${bootstrap_lock_file}" bash -lc 'bootstrap_main'
