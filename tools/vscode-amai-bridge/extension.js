@@ -1,5 +1,6 @@
 const vscode = require("vscode");
 const fs = require("fs/promises");
+const path = require("path");
 const packageJson = require("./package.json");
 
 const COMMAND_ID = "amaiVscodeBridge.openCleanChat";
@@ -9,6 +10,11 @@ const FOCUS_VIEW_COMMAND_ID = "amaiVscodeBridge.focusSidebarView";
 const VIEW_ID = "amai.sidebar";
 const EXTENSION_URI_AUTHORITY = "amai.amai-vscode-bridge";
 const EXTENSION_VERSION = packageJson.version;
+const REQUIRED_CODEX_COMMANDS = [
+  "chatgpt.openSidebar",
+  "chatgpt.newChat",
+  "chatgpt.newCodexPanel",
+];
 
 function publicBridgeIdentity() {
   return {
@@ -213,13 +219,74 @@ async function writeResultFile(resultFile, payload) {
   await fs.writeFile(resultFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
-async function ensureCodexCommandsAvailable() {
+async function getCodexSurfaceState() {
   const commands = await vscode.commands.getCommands(true);
-  for (const command of ["chatgpt.openSidebar", "chatgpt.newChat", "chatgpt.newCodexPanel"]) {
-    if (!commands.includes(command)) {
-      throw new Error(`Missing required Codex command: ${command}`);
-    }
+  const missingCommands = REQUIRED_CODEX_COMMANDS.filter(
+    (command) => !commands.includes(command)
+  );
+  return {
+    available: missingCommands.length === 0,
+    missingCommands,
+  };
+}
+
+function formatCodexSurfaceError(surfaceState) {
+  const missingCommand = surfaceState?.missingCommands?.[0] ?? "chatgpt.openSidebar";
+  return [
+    "Amai bridge не нашёл готовую рабочую поверхность Codex/OpenAI в VS Code.",
+    `Не хватает команды: ${missingCommand}.`,
+    "Что сделать:",
+    "1. Установите и включите OpenAI extension с поверхностью Codex/ChatGPT.",
+    "2. Перезапустите или Reload Window в VS Code / Codium.",
+    "3. Затем снова откройте Amai sidebar.",
+  ].join(" ");
+}
+
+async function ensureCodexCommandsAvailable() {
+  const surfaceState = await getCodexSurfaceState();
+  if (!surfaceState.available) {
+    throw new Error(formatCodexSurfaceError(surfaceState));
   }
+}
+
+async function pathExists(targetPath) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function collectInstallReadiness() {
+  const repoRoot = currentWorkspaceRepoRoot();
+  const codexSurface = await getCodexSurfaceState();
+  const managedRepoRoot = path.join(
+    process.env.HOME || "",
+    ".local",
+    "share",
+    "amai",
+    "repo"
+  );
+  const managedRepoInstalled = await pathExists(managedRepoRoot);
+  const workspaceMcpConfig =
+    repoRoot !== null ? path.join(repoRoot, ".vscode", "mcp.json") : null;
+  const workspaceMcpConfigured = workspaceMcpConfig
+    ? await pathExists(workspaceMcpConfig)
+    : false;
+  return {
+    codexSurface,
+    managedRepoInstalled,
+    managedRepoRoot,
+    repoRoot,
+    workspaceMcpConfig,
+    workspaceMcpConfigured,
+  };
+}
+
+function renderStatusBadge(ok, text) {
+  const tone = ok ? "ok" : "warn";
+  return `<div class="status-row ${tone}">${ok ? "OK" : "!"} ${text}</div>`;
 }
 
 async function closeTransientUriEditors(uriText) {
@@ -453,19 +520,39 @@ class AmaiSidebarViewProvider {
     this.view = null;
   }
 
-  resolveWebviewView(webviewView) {
+  async resolveWebviewView(webviewView) {
     this.view = webviewView;
     webviewView.webview.options = {
       enableCommandUris: true,
     };
-    webviewView.webview.html = this.renderHtml(webviewView.webview);
+    const readiness = await collectInstallReadiness();
+    webviewView.webview.html = this.renderHtml(webviewView.webview, readiness);
   }
 
-  renderHtml(webview) {
-    const repoRoot = currentWorkspaceRepoRoot() ?? "not detected";
+  renderHtml(webview, readiness) {
+    const repoRoot = readiness?.repoRoot ?? "not detected";
     const identity = publicBridgeIdentity();
-    const sidebarCommandUri = `command:${OPEN_SIDEBAR_COMMAND_ID}`;
-    const panelCommandUri = `command:${OPEN_PANEL_COMMAND_ID}`;
+    const codexReady = readiness?.codexSurface?.available === true;
+    const sidebarCommandUri = codexReady ? `command:${OPEN_SIDEBAR_COMMAND_ID}` : null;
+    const panelCommandUri = codexReady ? `command:${OPEN_PANEL_COMMAND_ID}` : null;
+    const mcpStatus = readiness?.workspaceMcpConfigured === true
+      ? "Amai workspace config найден"
+      : "Сначала установите само приложение Amai и откройте workspace с .vscode/mcp.json";
+    const codexStatus = codexReady
+      ? "Codex/OpenAI поверхность в VS Code доступна"
+      : "Сначала установите и включите OpenAI extension с поверхностью Codex/ChatGPT";
+    const codexHint = codexReady
+      ? ""
+      : `<p class="hint">Без этого bridge-кнопки не смогут открыть рабочую поверхность Amai.</p>`;
+    const installHint = readiness?.managedRepoInstalled === true
+      ? ""
+      : `<p class="hint">Похоже, локальная установка Amai ещё не найдена по пути <code>${readiness?.managedRepoRoot ?? "~/.local/share/amai/repo"}</code>.</p>`;
+    const actionPrimary = codexReady
+      ? `<a class="action-button" href="${sidebarCommandUri}">Открыть в Sidebar</a>`
+      : `<span class="action-button disabled">Сначала подключите Codex/OpenAI</span>`;
+    const actionSecondary = codexReady
+      ? `<a class="action-button secondary" href="${panelCommandUri}">Открыть в Panel</a>`
+      : `<span class="action-button secondary disabled">Панель недоступна</span>`;
     return `<!DOCTYPE html>
 <html lang="ru">
   <head>
@@ -516,17 +603,52 @@ class AmaiSidebarViewProvider {
         color: var(--vscode-button-secondaryForeground);
         background: var(--vscode-button-secondaryBackground);
       }
+      .action-button.disabled {
+        cursor: default;
+        opacity: 0.65;
+        pointer-events: none;
+      }
+      .status-list {
+        display: grid;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      .status-row {
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 12px;
+      }
+      .status-row.ok {
+        background: color-mix(in srgb, var(--vscode-testing-iconPassed) 16%, transparent);
+      }
+      .status-row.warn {
+        background: color-mix(in srgb, var(--vscode-list-warningForeground) 14%, transparent);
+      }
+      .hint {
+        color: var(--vscode-descriptionForeground);
+        font-size: 12px;
+        margin-top: 8px;
+      }
+      code {
+        font-family: var(--vscode-editor-font-family);
+      }
     </style>
   </head>
   <body>
     <div class="card">
       <h2>Amai</h2>
-      <p>Открой чистую рабочую поверхность Amai прямо из боковой панели.</p>
+      <p>Этот extension добавляет bridge и кнопки Amai в VS Code, но сам по себе не заменяет полную установку приложения.</p>
       <div class="meta">Bridge: ${identity.authority}@${identity.version}</div>
       <div class="meta">Workspace: ${repoRoot}</div>
+      <div class="status-list">
+        ${renderStatusBadge(readiness?.workspaceMcpConfigured === true, mcpStatus)}
+        ${renderStatusBadge(codexReady, codexStatus)}
+      </div>
+      ${installHint}
+      ${codexHint}
       <div class="actions">
-        <a class="action-button" href="${sidebarCommandUri}">Открыть в Sidebar</a>
-        <a class="action-button secondary" href="${panelCommandUri}">Открыть в Panel</a>
+        ${actionPrimary}
+        ${actionSecondary}
       </div>
     </div>
   </body>

@@ -4,15 +4,24 @@
 
 # Amai VS Code Bridge
 
-`Amai VS Code Bridge` adds the public `Amai` surface inside `VS Code` / `Codium`:
+`Amai VS Code Bridge` adds the public `Amai` surface inside `VS Code` / `Codium`.
+
+It is only a bridge layer.
+It does **not** install the full `Amai` application and it does **not** provide the `Codex/OpenAI` chat surface by itself.
+
+You need **both**:
+
+- the local `Amai` install
+- the `OpenAI` / `Codex` extension surface inside `VS Code` / `Codium`
+
+After that, this extension adds:
 
 - `Amai` activity-bar icon
 - `Amai` sidebar view
 - workspace chat launch commands
 - public `vscode://amai.amai-vscode-bridge/open-clean-chat` bridge for restore flows
 
-This extension is the `VS Code` surface for `Amai`.
-It is **not** the full Amai install by itself.
+This extension is the `VS Code` surface for `Amai`, not the whole product.
 
 ## Verified Scope
 
@@ -36,6 +45,7 @@ Before using this extension, the currently verified contour expects:
 - `Docker` and `Docker Compose v2`
 - `code` CLI from `VS Code` or `Codium`
 - `systemd --user` for the managed local `amai-stack.service`
+- an installed and enabled `OpenAI` extension surface that exposes the required `Codex/ChatGPT` commands inside `VS Code` / `Codium`
 
 Important:
 
@@ -44,7 +54,7 @@ Important:
 
 ## Before You Install The Extension
 
-Install `Amai` first.
+Install the `Amai` application first.
 
 Normal network:
 
@@ -63,6 +73,9 @@ cd ~/.local/share/amai/repo && \
 
 That install materializes the local Amai repo, the stack bootstrap contour, the MCP config surface, and the `VS Code` bridge bundle.
 
+Then make sure your editor also has the `OpenAI` / `Codex` chat surface available.
+Without it, the `Amai` sidebar buttons cannot open the target chat workspace and the bridge will fail with a readiness error.
+
 ## Install The Extension
 
 You can install it from the `Extensions` view in `VS Code` / `Codium` by searching for:
@@ -78,6 +91,18 @@ If you prefer CLI install:
 ```bash
 code --install-extension amai.amai-vscode-bridge --force
 ```
+
+## Required Chat Surface
+
+The bridge currently launches the target workspace through the `OpenAI` / `Codex` extension commands inside `VS Code` / `Codium`.
+
+That means:
+
+- installing `Amai VS Code Bridge` alone is not enough
+- installing the `Amai` application alone is not enough
+- both the `Amai` application and the `OpenAI` / `Codex` chat surface must be present
+
+If the `OpenAI` / `Codex` commands are missing, the sidebar will now show that readiness state directly instead of exposing a blind launch button.
 
 ## How To Open Amai In VS Code
 
@@ -137,6 +162,18 @@ Check:
 - `~/.local/share/amai/repo` exists
 - `.vscode/mcp.json` exists in the workspace
 - `systemctl --user is-active amai-stack.service` returns `active`
+
+### The button says Codex/OpenAI is missing
+
+The current bridge launch path depends on the `OpenAI` / `Codex` chat commands inside `VS Code` / `Codium`.
+
+Do this:
+
+- install or enable the `OpenAI` extension in the editor
+- reload the window
+- open the `Amai` sidebar again
+
+If those commands are still unavailable, the bridge should not be treated as ready on that editor profile yet.
 
 ### Install fails with stale `ami-*` container conflicts
 
