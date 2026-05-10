@@ -31,8 +31,7 @@ cleanup_conflicting_named_container() {
   [[ "${has_foreign_bind}" -eq 1 ]] || return 0
 
   if [[ "${running}" == "true" && "${has_missing_foreign_bind}" -ne 1 ]]; then
-    echo "prepare_stack_runtime.sh: conflicting live container ${name} belongs to another repo root; stop it before installing Amai here." >&2
-    exit 125
+    echo "prepare_stack_runtime.sh: reclaiming conflicting live container ${name} from another repo root." >&2
   fi
 
   docker rm -f "${name}" >/dev/null
@@ -40,6 +39,9 @@ cleanup_conflicting_named_container() {
 
 stack_profile="${AMI_STACK_PROFILE:-default}"
 
+# Compose bind mounts fail closed if the host-side state tree is absent.
+# Clean installs and freshly synced remote repos must not depend on preexisting
+# runtime directories from an older workspace.
 mkdir -p \
   state/postgres \
   state/qdrant \
