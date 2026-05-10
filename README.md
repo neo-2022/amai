@@ -117,6 +117,14 @@ The current public client contour is `Amai VS Code Bridge`:
 - designed to carry restore prompts into a fresh chat surface;
 - depends on a separate `OpenAI` / `Codex` chat surface inside the editor.
 
+After install, the intended first-run path is simple:
+
+1. open `~/.local/share/amai/repo` in `VS Code` / `Codium`;
+2. do `Reload Window`;
+3. install or enable the `OpenAI` extension if the editor does not already expose the `Codex` / `ChatGPT` surface;
+4. click the `Amai` icon in the activity bar;
+5. use the sidebar helper actions if the workspace or OpenAI surface is still missing.
+
 Published extension:
 
 - https://open-vsx.org/extension/amai/amai-vscode-bridge

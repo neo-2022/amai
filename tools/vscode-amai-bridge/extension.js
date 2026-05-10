@@ -7,6 +7,9 @@ const COMMAND_ID = "amaiVscodeBridge.openCleanChat";
 const OPEN_SIDEBAR_COMMAND_ID = "amaiVscodeBridge.openWorkspaceSidebarChat";
 const OPEN_PANEL_COMMAND_ID = "amaiVscodeBridge.openWorkspacePanelChat";
 const FOCUS_VIEW_COMMAND_ID = "amaiVscodeBridge.focusSidebarView";
+const OPEN_MANAGED_REPO_COMMAND_ID = "amaiVscodeBridge.openManagedRepoWorkspace";
+const OPEN_OPENAI_EXTENSION_COMMAND_ID = "amaiVscodeBridge.openOpenAiExtension";
+const RELOAD_WINDOW_COMMAND_ID = "amaiVscodeBridge.reloadWindow";
 const VIEW_ID = "amai.sidebar";
 const EXTENSION_URI_AUTHORITY = "amai.amai-vscode-bridge";
 const EXTENSION_VERSION = packageJson.version;
@@ -274,6 +277,8 @@ async function collectInstallReadiness() {
   const workspaceMcpConfigured = workspaceMcpConfig
     ? await pathExists(workspaceMcpConfig)
     : false;
+  const workspaceMatchesManagedRepo =
+    repoRoot !== null && managedRepoInstalled && repoRoot === managedRepoRoot;
   return {
     codexSurface,
     managedRepoInstalled,
@@ -281,6 +286,7 @@ async function collectInstallReadiness() {
     repoRoot,
     workspaceMcpConfig,
     workspaceMcpConfigured,
+    workspaceMatchesManagedRepo,
   };
 }
 
@@ -504,6 +510,33 @@ async function launchWorkspaceChat(target) {
   });
 }
 
+async function openManagedRepoWorkspace() {
+  const readiness = await collectInstallReadiness();
+  if (readiness.managedRepoInstalled !== true || !readiness.managedRepoRoot) {
+    await vscode.window.showErrorMessage(
+      "Amai install не найден. Сначала установите Amai, затем откройте workspace."
+    );
+    return;
+  }
+  await vscode.commands.executeCommand(
+    "vscode.openFolder",
+    vscode.Uri.file(readiness.managedRepoRoot),
+    {
+      forceNewWindow: false,
+    }
+  );
+}
+
+async function openOpenAiExtension() {
+  await vscode.commands.executeCommand(
+    "workbench.extensions.search",
+    "@id:openai.chatgpt"
+  );
+  await vscode.commands.executeCommand(
+    "workbench.view.extensions"
+  );
+}
+
 async function runWorkspaceLaunch(target) {
   try {
     await launchWorkspaceChat(target);
@@ -533,26 +566,47 @@ class AmaiSidebarViewProvider {
     const repoRoot = readiness?.repoRoot ?? "not detected";
     const identity = publicBridgeIdentity();
     const codexReady = readiness?.codexSurface?.available === true;
+    const installReady = readiness?.managedRepoInstalled === true;
+    const workspaceReady = readiness?.workspaceMcpConfigured === true;
+    const workspaceMatchesManagedRepo = readiness?.workspaceMatchesManagedRepo === true;
     const sidebarCommandUri = codexReady ? `command:${OPEN_SIDEBAR_COMMAND_ID}` : null;
     const panelCommandUri = codexReady ? `command:${OPEN_PANEL_COMMAND_ID}` : null;
-    const mcpStatus = readiness?.workspaceMcpConfigured === true
+    const managedRepoCommandUri = `command:${OPEN_MANAGED_REPO_COMMAND_ID}`;
+    const openAiExtensionCommandUri = `command:${OPEN_OPENAI_EXTENSION_COMMAND_ID}`;
+    const reloadWindowCommandUri = `command:${RELOAD_WINDOW_COMMAND_ID}`;
+    const mcpStatus = workspaceReady
       ? "Amai workspace config найден"
-      : "Сначала установите само приложение Amai и откройте workspace с .vscode/mcp.json";
+      : "Откройте именно Amai workspace, чтобы VS Code увидел .vscode/mcp.json";
+    const installStatus = installReady
+      ? "Локальная установка Amai найдена"
+      : "Сначала установите само приложение Amai";
     const codexStatus = codexReady
       ? "Codex/OpenAI поверхность в VS Code доступна"
       : "Сначала установите и включите OpenAI extension с поверхностью Codex/ChatGPT";
+    const installHint = installReady
+      ? `<p class="hint">Amai repo: <code>${readiness?.managedRepoRoot ?? "~/.local/share/amai/repo"}</code>.</p>`
+      : `<p class="hint">Похоже, локальная установка Amai ещё не найдена по пути <code>${readiness?.managedRepoRoot ?? "~/.local/share/amai/repo"}</code>.</p>`;
+    const workspaceHint = workspaceReady
+      ? (workspaceMatchesManagedRepo
+          ? `<p class="hint">Текущий workspace уже привязан к локальной установке Amai.</p>`
+          : `<p class="hint">.vscode/mcp.json найден, но сейчас открыт не managed repo Amai. Для самого простого сценария откройте <code>${readiness?.managedRepoRoot ?? "~/.local/share/amai/repo"}</code>.</p>`)
+      : `<p class="hint">После install откройте <code>${readiness?.managedRepoRoot ?? "~/.local/share/amai/repo"}</code> в VS Code и сделайте Reload Window.</p>`;
     const codexHint = codexReady
       ? ""
-      : `<p class="hint">Без этого bridge-кнопки не смогут открыть рабочую поверхность Amai.</p>`;
-    const installHint = readiness?.managedRepoInstalled === true
-      ? ""
-      : `<p class="hint">Похоже, локальная установка Amai ещё не найдена по пути <code>${readiness?.managedRepoRoot ?? "~/.local/share/amai/repo"}</code>.</p>`;
-    const actionPrimary = codexReady
+      : `<p class="hint">Без OpenAI/Codex surface bridge-кнопки не смогут открыть рабочую поверхность Amai.</p>`;
+    const actionPrimary = codexReady && workspaceReady
       ? `<a class="action-button" href="${sidebarCommandUri}">Открыть в Sidebar</a>`
-      : `<span class="action-button disabled">Сначала подключите Codex/OpenAI</span>`;
-    const actionSecondary = codexReady
+      : `<span class="action-button disabled">Сначала закройте шаги установки ниже</span>`;
+    const actionSecondary = codexReady && workspaceReady
       ? `<a class="action-button secondary" href="${panelCommandUri}">Открыть в Panel</a>`
       : `<span class="action-button secondary disabled">Панель недоступна</span>`;
+    const nextSteps = [
+      `<li><strong>1.</strong> Установите Amai одной командой из README.</li>`,
+      `<li><strong>2.</strong> Откройте <code>${readiness?.managedRepoRoot ?? "~/.local/share/amai/repo"}</code> в VS Code.</li>`,
+      `<li><strong>3.</strong> Сделайте Reload Window.</li>`,
+      `<li><strong>4.</strong> Убедитесь, что OpenAI extension даёт Codex/ChatGPT surface.</li>`,
+      `<li><strong>5.</strong> Затем нажмите кнопку открытия Amai.</li>`,
+    ].join("");
     return `<!DOCTYPE html>
 <html lang="ru">
   <head>
@@ -629,6 +683,22 @@ class AmaiSidebarViewProvider {
         font-size: 12px;
         margin-top: 8px;
       }
+      .steps {
+        margin: 12px 0 0;
+        padding-left: 18px;
+      }
+      .steps li {
+        margin: 6px 0;
+      }
+      .helper-actions {
+        display: grid;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      .helper-link {
+        color: var(--vscode-textLink-foreground);
+        text-decoration: none;
+      }
       code {
         font-family: var(--vscode-editor-font-family);
       }
@@ -641,11 +711,21 @@ class AmaiSidebarViewProvider {
       <div class="meta">Bridge: ${identity.authority}@${identity.version}</div>
       <div class="meta">Workspace: ${repoRoot}</div>
       <div class="status-list">
-        ${renderStatusBadge(readiness?.workspaceMcpConfigured === true, mcpStatus)}
+        ${renderStatusBadge(installReady, installStatus)}
+        ${renderStatusBadge(workspaceReady, mcpStatus)}
         ${renderStatusBadge(codexReady, codexStatus)}
       </div>
       ${installHint}
+      ${workspaceHint}
       ${codexHint}
+      <ol class="steps">
+        ${nextSteps}
+      </ol>
+      <div class="helper-actions">
+        <a class="helper-link" href="${managedRepoCommandUri}">Открыть Amai workspace</a>
+        <a class="helper-link" href="${reloadWindowCommandUri}">Reload Window</a>
+        <a class="helper-link" href="${openAiExtensionCommandUri}">Открыть OpenAI extension</a>
+      </div>
       <div class="actions">
         ${actionPrimary}
         ${actionSecondary}
@@ -683,6 +763,24 @@ function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand(FOCUS_VIEW_COMMAND_ID, async () => {
       await vscode.commands.executeCommand(`${VIEW_ID}.focus`);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(OPEN_MANAGED_REPO_COMMAND_ID, async () => {
+      await openManagedRepoWorkspace();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(OPEN_OPENAI_EXTENSION_COMMAND_ID, async () => {
+      await openOpenAiExtension();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(RELOAD_WINDOW_COMMAND_ID, async () => {
+      await vscode.commands.executeCommand("workbench.action.reloadWindow");
     })
   );
 

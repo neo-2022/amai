@@ -16,8 +16,14 @@ jq -e '.icon == "media/amai-extension.png"' "${package_json}" >/dev/null
 jq -e '.contributes.views.amai[] | select(.id == "amai.sidebar" and .type == "webview")' "${package_json}" >/dev/null
 jq -e '.contributes.commands[] | select(.command == "amaiVscodeBridge.openWorkspaceSidebarChat")' "${package_json}" >/dev/null
 jq -e '.contributes.commands[] | select(.command == "amaiVscodeBridge.openWorkspacePanelChat")' "${package_json}" >/dev/null
+jq -e '.contributes.commands[] | select(.command == "amaiVscodeBridge.openManagedRepoWorkspace")' "${package_json}" >/dev/null
+jq -e '.contributes.commands[] | select(.command == "amaiVscodeBridge.openOpenAiExtension")' "${package_json}" >/dev/null
+jq -e '.contributes.commands[] | select(.command == "amaiVscodeBridge.reloadWindow")' "${package_json}" >/dev/null
 grep -Fq 'enableCommandUris: true' "${extension_js}"
-grep -Fq 'Сначала подключите Codex/OpenAI' "${extension_js}"
+grep -Fq 'Откройте именно Amai workspace' "${extension_js}"
+grep -Fq 'Открыть Amai workspace' "${extension_js}"
+grep -Fq 'Открыть OpenAI extension' "${extension_js}"
+grep -Fq 'Сначала закройте шаги установки ниже' "${extension_js}"
 grep -Fq 'OpenAI extension с поверхностью Codex/ChatGPT' "${extension_js}"
 grep -Fq 'renderStatusBadge' "${extension_js}"
 grep -Fq 'showErrorMessage(`Amai launch failed:' "${extension_js}"

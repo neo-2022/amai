@@ -2,7 +2,7 @@
   "name": "amai-vscode-bridge",
   "displayName": "Amai VS Code Bridge",
   "description": "VS Code bridge for Amai. Requires the OpenAI/Codex chat surface and a separate Amai install.",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "amai",
   "icon": "media/amai-extension.png",
   "license": "SEE LICENSE IN LICENSE",
@@ -42,6 +42,9 @@
     "onCommand:amaiVscodeBridge.openCleanChat",
     "onCommand:amaiVscodeBridge.openWorkspaceSidebarChat",
     "onCommand:amaiVscodeBridge.openWorkspacePanelChat",
+    "onCommand:amaiVscodeBridge.openManagedRepoWorkspace",
+    "onCommand:amaiVscodeBridge.openOpenAiExtension",
+    "onCommand:amaiVscodeBridge.reloadWindow",
     "onView:amai.sidebar"
   ],
   "main": "./extension.js",
@@ -80,6 +83,18 @@
       {
         "command": "amaiVscodeBridge.focusSidebarView",
         "title": "Amai: Focus Sidebar"
+      },
+      {
+        "command": "amaiVscodeBridge.openManagedRepoWorkspace",
+        "title": "Amai: Open Managed Repo Workspace"
+      },
+      {
+        "command": "amaiVscodeBridge.openOpenAiExtension",
+        "title": "Amai: Open OpenAI Extension"
+      },
+      {
+        "command": "amaiVscodeBridge.reloadWindow",
+        "title": "Amai: Reload Window"
       }
     ]
   }
