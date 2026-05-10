@@ -19,29 +19,51 @@ startup_contract_reply_blocking_removed() {
   ' "$startup_contract_path" >/dev/null 2>&1
 }
 
+startup_contract_reply_prefix_disabled() {
+  local startup_contract_path="${REPO_ROOT}/.amai/onboarding/project-chat-startup-contract.json"
+  [[ -f "$startup_contract_path" ]] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -e '
+    .startup_contract.live_client_budget_enforcement.reply_prefix_enforcement_flag == "disabled"
+    and .startup_contract.live_client_budget_enforcement.required_reply_prefix_source == "disabled_by_project_policy"
+  ' "$startup_contract_path" >/dev/null 2>&1
+}
+
 sanitize_gate_payload_for_removed_reply_blocking() {
   local payload="${1:-}"
   [[ -n "$payload" ]] || return 1
-  if ! startup_contract_reply_blocking_removed; then
-    printf '%s' "$payload"
-    return 0
+  local jq_filter='.'
+  if startup_contract_reply_blocking_removed; then
+    jq_filter+='
+      | .client_budget_reply_gate.reply_execution_gate.blocking = false
+      | .client_budget_reply_gate.reply_execution_gate.must_rotate_before_reply = false
+      | .client_budget_reply_gate.reply_execution_gate.must_wait_for_budget_recovery_before_reply = false
+      | if (.client_budget_reply_gate.reply_execution_gate.blocking_reply_contract | type) == "object"
+        then .client_budget_reply_gate.reply_execution_gate.blocking_reply_contract.active = false
+        else .
+        end
+    '
   fi
-  printf '%s' "$payload" | jq -c '
-    .client_budget_reply_gate.reply_execution_gate.blocking = false
-    | .client_budget_reply_gate.reply_execution_gate.must_rotate_before_reply = false
-    | .client_budget_reply_gate.reply_execution_gate.must_wait_for_budget_recovery_before_reply = false
-    | if (.client_budget_reply_gate.reply_execution_gate.blocking_reply_contract | type) == "object"
-      then .client_budget_reply_gate.reply_execution_gate.blocking_reply_contract.active = false
-      else .
-      end
-  ' 2>/dev/null || printf '%s' "$payload"
+  if startup_contract_reply_prefix_disabled; then
+    jq_filter+='
+      | .reply_prefix = null
+      | .global_reply_prefix = null
+      | .reply_prefix_source = "disabled_by_project_policy"
+      | .client_budget_reply_gate.reply_prefix = null
+      | .client_budget_reply_gate.global_reply_prefix = null
+      | .client_budget_reply_gate.reply_prefix_source = "disabled_by_project_policy"
+      | .client_budget_reply_gate.reply_execution_gate.reply_prefix = null
+      | .client_budget_reply_gate.reply_execution_gate.reply_prefix_source = "disabled_by_project_policy"
+    '
+  fi
+  printf '%s' "$payload" | jq -c "$jq_filter" 2>/dev/null || printf '%s' "$payload"
 }
 
 normalize_front_door_gate_payload_shape() {
   local payload="${1:-}"
   [[ -n "$payload" ]] || return 1
   printf '%s' "$payload" | jq -c '
-    if (.reply_prefix // null) != null then
+    if has("reply_prefix") then
       .
     else
       .reply_prefix = (.client_budget_reply_gate.reply_execution_gate.reply_prefix // null)
