@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 auto_prereqs_enabled() {
   [[ "${AMAI_AUTO_INSTALL_PREREQS:-1}" != "0" ]]
 }
@@ -75,12 +77,33 @@ ensure_rust_toolchain() {
   }
 }
 
+docker_stack_already_usable() {
+  command -v docker >/dev/null 2>&1 || return 1
+  "${SCRIPT_DIR}/docker_wrapper.sh" info >/dev/null 2>&1 || return 1
+  "${SCRIPT_DIR}/docker_wrapper.sh" compose version >/dev/null 2>&1
+}
+
+docker_engine_already_usable() {
+  command -v docker >/dev/null 2>&1 || return 1
+  "${SCRIPT_DIR}/docker_wrapper.sh" info >/dev/null 2>&1
+}
+
 ensure_docker_stack_packages() {
+  if docker_stack_already_usable; then
+    return 0
+  fi
+
   local compose_package="docker-compose-v2"
   if ! apt_package_available "${compose_package}"; then
     compose_package="docker-compose-plugin"
   fi
-  apt_install_missing docker.io "${compose_package}"
+
+  if docker_engine_already_usable; then
+    apt_install_missing "${compose_package}"
+  else
+    apt_install_missing docker.io "${compose_package}"
+  fi
+
   if command -v systemctl >/dev/null 2>&1; then
     run_as_root systemctl enable --now docker >/dev/null 2>&1 || true
   fi
