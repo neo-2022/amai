@@ -18,6 +18,11 @@ for binary in bash env grep cut cat mkdir chmod printf true uname rm; do
   link_real "${binary}"
 done
 
+mkdir -p "${temp_root}/repo/scripts"
+cp "${repo_root}/scripts/ensure_verified_linux_prereqs.sh" "${temp_root}/repo/scripts/ensure_verified_linux_prereqs.sh"
+cp "${repo_root}/scripts/docker_wrapper.sh" "${temp_root}/repo/scripts/docker_wrapper.sh"
+chmod +x "${temp_root}/repo/scripts/docker_wrapper.sh"
+
 cat >"${fake_bin}/dpkg" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -110,14 +115,36 @@ exit 0
 EOF
 chmod +x "${fake_bin}/usermod"
 
+cat >"${fake_bin}/docker" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'docker %s\n' "\$*" >>"${proof_log}"
+if [[ "\${1:-}" == "info" ]]; then
+  exit 0
+fi
+if [[ "\${1:-}" == "compose" && "\${2:-}" == "version" ]]; then
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "${fake_bin}/docker"
+
 HOME="${fake_home}" USER="proof" PATH="${fake_bin}:/usr/bin:/bin" \
-  bash -c "source '${repo_root}/scripts/ensure_verified_linux_prereqs.sh'; ensure_verified_linux_prereqs 1"
+  bash -c "cd '${temp_root}/repo' && source './scripts/ensure_verified_linux_prereqs.sh'; ensure_verified_linux_prereqs 1"
 
 test -x "${fake_home}/.cargo/bin/cargo"
 test -x "${fake_home}/.cargo/bin/rustc"
 rg '^sudo apt-get update$' "${proof_log}" >/dev/null
 rg '^sudo apt-get install -y git curl ca-certificates build-essential pkg-config libssl-dev$' "${proof_log}" >/dev/null
-rg '^sudo apt-get install -y docker.io docker-compose-v2$' "${proof_log}" >/dev/null
-rg '^usermod -aG docker proof$' "${proof_log}" >/dev/null
+if rg '^sudo apt-get install -y docker.io docker-compose-v2$' "${proof_log}" >/dev/null; then
+  echo "proof expected Docker package bootstrap to be skipped when docker/compose already work" >&2
+  exit 1
+fi
+rg '^docker info$' "${proof_log}" >/dev/null
+rg '^docker compose version$' "${proof_log}" >/dev/null
+if rg '^usermod -aG docker proof$' "${proof_log}" >/dev/null; then
+  echo "proof expected docker group mutation to be skipped when docker/compose already work" >&2
+  exit 1
+fi
 
 printf 'proof_verified_linux_prereq_bootstrap: PASS\n'
