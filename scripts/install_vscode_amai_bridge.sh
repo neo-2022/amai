@@ -10,8 +10,10 @@ if [[ ! -f "${source_dir}/package.json" || ! -f "${source_dir}/extension.js" ]];
 fi
 
 detect_vscode_extensions_root() {
+  local reason="default"
   if [[ -n "${AMAI_VSCODE_EXTENSIONS_ROOT:-}" ]]; then
-    printf '%s\n' "${AMAI_VSCODE_EXTENSIONS_ROOT}"
+    reason="override_env"
+    printf '%s\t%s\n' "${AMAI_VSCODE_EXTENSIONS_ROOT}" "${reason}"
     return 0
   fi
   local code_path code_realpath
@@ -20,14 +22,41 @@ detect_vscode_extensions_root() {
   if [[ -n "${code_path}" ]]; then
     code_realpath="$(readlink -f "${code_path}" 2>/dev/null || printf '%s' "${code_path}")"
   fi
-  if [[ "${code_realpath}" == *codium* || "${code_realpath}" == *VSCodium* || -d "${HOME}/.config/VSCodium" || -d "${HOME}/.vscode-oss" ]]; then
-    printf '%s\n' "${HOME}/.vscode-oss/extensions"
+
+  # VS Code snap stores extensions under ~/snap/code/(common|current)/.vscode/extensions.
+  # The directory may not exist until the first VS Code launch; still use the canonical snap target.
+  if [[ "${code_realpath}" == *"/snap/"* ]] || ( [[ -x /usr/bin/snap ]] && snap list code >/dev/null 2>&1 ); then
+    reason="vscode_snap"
+    if [[ -d "${HOME}/snap/code/common/.vscode" || -d "${HOME}/snap/code/common" ]]; then
+      printf '%s\t%s\n' "${HOME}/snap/code/common/.vscode/extensions" "${reason}"
+      return 0
+    fi
+    if [[ -d "${HOME}/snap/code/current/.vscode" || -d "${HOME}/snap/code/current" ]]; then
+      printf '%s\t%s\n' "${HOME}/snap/code/current/.vscode/extensions" "${reason}"
+      return 0
+    fi
+    printf '%s\t%s\n' "${HOME}/snap/code/common/.vscode/extensions" "${reason}"
     return 0
   fi
-  printf '%s\n' "${HOME}/.vscode/extensions"
+
+  if [[ "${code_realpath}" == *codium* || "${code_realpath}" == *VSCodium* || -d "${HOME}/.config/VSCodium" || -d "${HOME}/.vscode-oss" ]]; then
+    reason="codium_or_oss"
+    printf '%s\t%s\n' "${HOME}/.vscode-oss/extensions" "${reason}"
+    return 0
+  fi
+  printf '%s\t%s\n' "${HOME}/.vscode/extensions" "${reason}"
 }
 
-extensions_root="$(detect_vscode_extensions_root)"
+extensions_root_with_reason="$(detect_vscode_extensions_root)"
+extensions_root="${extensions_root_with_reason%%$'\t'*}"
+extensions_root_reason="${extensions_root_with_reason#*$'\t'}"
+if [[ -n "${extensions_root_reason}" && "${extensions_root_reason}" != "${extensions_root_with_reason}" ]]; then
+  printf 'install_vscode_amai_bridge: detected extensions root: %s (reason=%s, code=%s)\n' \
+    "${extensions_root}" "${extensions_root_reason}" "$(command -v code 2>/dev/null || true)" >&2
+else
+  printf 'install_vscode_amai_bridge: detected extensions root: %s (reason=unknown, code=%s)\n' \
+    "${extensions_root}" "$(command -v code 2>/dev/null || true)" >&2
+fi
 package_json="${source_dir}/package.json"
 publisher="$(jq -r '.publisher' "${package_json}")"
 name="$(jq -r '.name' "${package_json}")"
