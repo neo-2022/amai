@@ -42,13 +42,77 @@ Verified install contour right now: `Ubuntu` / `Debian` shell environment, with 
 
 This does not currently claim verified support for `macOS`, `Windows`, or other client/runtime combinations.
 
-## MCP Integration (Other Apps)
+## MCP: подключение к любому приложению
 
-`Amai` can be used as a standard `MCP` tool, not only from `VS Code`.
+`Amai` — это обычный `MCP` `stdio` server. Смысл подключения всегда один:
+ваш клиент/приложение должно запустить команду `scripts/run_mcp_stdio.sh` в каталоге установленного `Amai`.
 
-Supported/maintained client targets are listed in `config/client_targets.toml` (for example: `vscode`, `cursor`, `codex`, `claude-code`, `hermes`, `openclaw`, plus `generic`).
+### 1) Установить Amai и сгенерировать MCP-snippet (одной командой)
 
-For a detailed, client-by-client guide (including `Generic`), see `docs/MCP_INTEGRATION.md`.
+Если ваш MCP‑клиент не поддержан “из коробки”, используйте `generic`:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client generic --stack-profile default --yes
+```
+
+После установки snippet будет лежать здесь:
+
+`~/.local/share/amai/repo/tmp/onboarding/generic-mcp.json`
+
+Этот файл содержит три ключевых поля:
+- `command` — что запускать (MCP server runner);
+- `cwd` — где запускать (корень repo Amai);
+- `args` — аргументы (обычно пусто).
+
+### 2) Вставить snippet в конфиг вашего приложения
+
+У разных приложений разная “обёртка” вокруг MCP‑сервера. Чаще всего встречаются два формата.
+
+**Формат `mcpServers`:**
+
+```json
+{
+  "mcpServers": {
+    "amai": {
+      "command": "/abs/path/to/amai/scripts/run_mcp_stdio.sh",
+      "cwd": "/abs/path/to/amai",
+      "args": []
+    }
+  }
+}
+```
+
+**Формат `mcp.servers`:**
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "amai": {
+        "command": "/abs/path/to/amai/scripts/run_mcp_stdio.sh",
+        "cwd": "/abs/path/to/amai",
+        "args": []
+      }
+    }
+  }
+}
+```
+
+Если ваш клиент умеет “import server config” без обёртки — используйте содержимое `generic-mcp.json` как есть.
+
+### 3) Что учитывать (чтобы работало без ручных допиливаний)
+
+- `command` должен указывать на `scripts/run_mcp_stdio.sh` из установленного `Amai` (а не на случайный путь с другого ПК).
+- `cwd` должен быть корнем установленного repo (обычно `~/.local/share/amai/repo`).
+- На Linux для локального стека нужен `docker`/`compose` (или ставьте `--skip-stack`, если вам нужен только MCP без локального stack).
+
+### 4) Быстрая проверка (что MCP реально поднимается)
+
+```bash
+cd ~/.local/share/amai/repo && ./scripts/run_mcp_stdio.sh </dev/null >/dev/null 2>&1 || true
+```
+
+Если клиент “видит” сервер `amai` и может вызвать tools — интеграция готова.
 
 ### Install variants
 
