@@ -11,6 +11,7 @@ Options:
   --repo-url <git-url>     Git URL to clone from. Default: https://github.com/neo-2022/amai.git
   --clone-dir <path>       Where to place the clone. Default: $HOME/.local/share/amai/repo
   --repo-ref <ref>         Optional branch/tag/commit to check out before install.
+  --download-mode <mode>   Checkout mode: auto|git|tarball. Default: auto.
   --help                   Show this help.
 
 All remaining arguments are passed through to scripts/install_amai.sh inside the cloned repo.
@@ -21,8 +22,10 @@ default_public_repo_url="https://github.com/neo-2022/amai.git"
 repo_url="${AMAI_GIT_REPO_URL:-${default_public_repo_url}}"
 clone_dir="${AMAI_GITHUB_CLONE_DIR:-${HOME}/.local/share/amai/repo}"
 repo_ref=""
+download_mode="${AMAI_DOWNLOAD_MODE:-auto}"
 install_args=()
 local_source_path=""
+is_git_checkout=0
 
 normalize_repo_url() {
   local value="$1"
@@ -59,6 +62,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --repo-ref=*)
       repo_ref="${1#*=}"
+      shift
+      ;;
+    --download-mode)
+      download_mode="${2:?missing value for --download-mode}"
+      shift 2
+      ;;
+    --download-mode=*)
+      download_mode="${1#*=}"
       shift
       ;;
     --help|-h)
@@ -134,6 +145,94 @@ ensure_git_for_verified_host() {
   run_as_root apt-get install -y git curl ca-certificates
 }
 
+ensure_tarball_tools_for_verified_host() {
+  verified_auto_prereq_host || return 0
+  local missing=()
+  command -v curl >/dev/null 2>&1 || missing+=(curl)
+  command -v tar >/dev/null 2>&1 || missing+=(tar)
+  command -v ca-certificates >/dev/null 2>&1 || true
+  if [[ "${#missing[@]}" -eq 0 ]]; then
+    return 0
+  fi
+  export DEBIAN_FRONTEND=noninteractive
+  run_as_root apt-get update
+  run_as_root apt-get install -y curl ca-certificates tar
+}
+
+github_tarball_url() {
+  local url="$1"
+  local ref="$2"
+  local normalized="${url%.git}"
+  if [[ "${normalized}" != https://github.com/*/* ]]; then
+    return 1
+  fi
+  local path="${normalized#https://github.com/}"
+  local owner="${path%%/*}"
+  local repo="${path#*/}"
+  [[ -n "${owner}" && -n "${repo}" ]] || return 1
+  local tar_ref="${ref}"
+  tar_ref="${tar_ref#refs/heads/}"
+  tar_ref="${tar_ref#refs/tags/}"
+  if [[ -z "${tar_ref}" ]]; then
+    printf 'https://codeload.github.com/%s/%s/tar.gz/refs/heads/main\n' "${owner}" "${repo}"
+    printf 'https://codeload.github.com/%s/%s/tar.gz/refs/heads/master\n' "${owner}" "${repo}"
+    return 0
+  fi
+  printf 'https://codeload.github.com/%s/%s/tar.gz/%s\n' "${owner}" "${repo}" "${tar_ref}"
+}
+
+checkout_from_github_tarball() {
+  local url="$1"
+  local ref="$2"
+  local out_dir="$3"
+
+  local tar_urls=()
+  local line=""
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] && tar_urls+=("${line}")
+  done < <(github_tarball_url "${url}" "${ref}") || return 1
+
+  ensure_tarball_tools_for_verified_host || true
+  command -v curl >/dev/null 2>&1 || {
+    echo "install_from_github.sh: curl is required for tarball checkout (missing curl in PATH)." >&2
+    return 127
+  }
+  command -v tar >/dev/null 2>&1 || {
+    echo "install_from_github.sh: tar is required for tarball checkout (missing tar in PATH)." >&2
+    return 127
+  }
+
+  local tmp
+  tmp="$(mktemp -d)"
+  trap "rm -rf '${tmp}'" RETURN
+
+  local tar_url=""
+  local ok=0
+  for tar_url in "${tar_urls[@]}"; do
+    echo "install_from_github.sh: downloading tarball from ${tar_url}" >&2
+    if curl -fL --retry 3 --retry-delay 1 --retry-all-errors -o "${tmp}/repo.tar.gz" "${tar_url}"; then
+      ok=1
+      break
+    fi
+  done
+  if [[ "${ok}" -ne 1 ]]; then
+    echo "install_from_github.sh: failed to download a GitHub tarball from any candidate URL." >&2
+    return 69
+  fi
+  tar -xzf "${tmp}/repo.tar.gz" -C "${tmp}"
+
+  local root
+  root="$(find "${tmp}" -mindepth 1 -maxdepth 1 -type d -printf '%p\n' | head -n 1)"
+  if [[ -z "${root}" || ! -d "${root}" ]]; then
+    echo "install_from_github.sh: failed to locate extracted tarball directory under ${tmp}" >&2
+    return 65
+  fi
+
+  rm -rf "${out_dir}"
+  mkdir -p "$(dirname "${out_dir}")"
+  mv "${root}" "${out_dir}"
+}
+
 assert_checkout_complete() {
   local clone_root="$1"
   local cargo_bin=""
@@ -172,44 +271,85 @@ assert_checkout_complete() {
   exit 68
 }
 
-ensure_git_for_verified_host
-
-if ! command -v git >/dev/null 2>&1; then
-  echo "install_from_github.sh requires git in PATH" >&2
-  exit 127
-fi
+case "${download_mode}" in
+  auto|git|tarball) ;;
+  *)
+    echo "install_from_github.sh: unknown --download-mode value: ${download_mode} (expected: auto|git|tarball)" >&2
+    exit 64
+    ;;
+esac
 
 mkdir -p "$(dirname "${clone_dir}")"
 
 if [[ ! -d "${clone_dir}" ]]; then
-  if [[ -n "${repo_ref}" ]]; then
-    git clone --depth 1 --branch "${repo_ref}" "${repo_url}" "${clone_dir}"
+  if [[ "${download_mode}" == "tarball" ]]; then
+    checkout_from_github_tarball "${repo_url}" "${repo_ref}" "${clone_dir}"
+    is_git_checkout=0
   else
-    git clone --depth 1 "${repo_url}" "${clone_dir}"
+    ensure_git_for_verified_host
+    if ! command -v git >/dev/null 2>&1; then
+      if [[ "${download_mode}" == "git" ]]; then
+        echo "install_from_github.sh requires git in PATH" >&2
+        exit 127
+      fi
+      checkout_from_github_tarball "${repo_url}" "${repo_ref}" "${clone_dir}"
+      is_git_checkout=0
+    else
+      if [[ -n "${repo_ref}" ]]; then
+        git clone --depth 1 --branch "${repo_ref}" "${repo_url}" "${clone_dir}" || {
+          [[ "${download_mode}" == "git" ]] && exit 69
+          checkout_from_github_tarball "${repo_url}" "${repo_ref}" "${clone_dir}"
+        }
+      else
+        git clone --depth 1 "${repo_url}" "${clone_dir}" || {
+          [[ "${download_mode}" == "git" ]] && exit 69
+          checkout_from_github_tarball "${repo_url}" "${repo_ref}" "${clone_dir}"
+        }
+      fi
+      is_git_checkout=1
+    fi
   fi
 elif [[ ! -d "${clone_dir}/.git" ]]; then
-  echo "install_from_github.sh expected ${clone_dir} to be a git checkout" >&2
-  exit 65
+  if [[ "${download_mode}" == "git" ]]; then
+    echo "install_from_github.sh expected ${clone_dir} to be a git checkout" >&2
+    exit 65
+  fi
+  checkout_from_github_tarball "${repo_url}" "${repo_ref}" "${clone_dir}"
+  is_git_checkout=0
 else
   git -C "${clone_dir}" remote set-url origin "${repo_url}"
-  git -C "${clone_dir}" fetch --depth 1 origin
-  if [[ -n "${repo_ref}" ]]; then
-    git -C "${clone_dir}" checkout --force "${repo_ref}"
-    git -C "${clone_dir}" reset --hard "origin/${repo_ref}" >/dev/null 2>&1 || true
+  if [[ "${download_mode}" == "tarball" ]]; then
+    checkout_from_github_tarball "${repo_url}" "${repo_ref}" "${clone_dir}"
+    is_git_checkout=0
   else
-    current_branch="$(git -C "${clone_dir}" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
-    if [[ -n "${current_branch}" ]]; then
-      git -C "${clone_dir}" checkout --force "${current_branch}"
-      git -C "${clone_dir}" reset --hard "origin/${current_branch}"
+    ensure_git_for_verified_host
+    if ! git -C "${clone_dir}" fetch --depth 1 origin; then
+      [[ "${download_mode}" == "git" ]] && exit 69
+      checkout_from_github_tarball "${repo_url}" "${repo_ref}" "${clone_dir}"
+      is_git_checkout=0
     else
-      default_ref="$(git -C "${clone_dir}" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
-      default_branch="${default_ref#refs/remotes/origin/}"
-      if [[ -n "${default_branch}" ]]; then
-        git -C "${clone_dir}" checkout --force "${default_branch}"
-        git -C "${clone_dir}" reset --hard "origin/${default_branch}"
+      is_git_checkout=1
+    fi
+  fi
+  if [[ "${is_git_checkout}" -eq 1 ]]; then
+    if [[ -n "${repo_ref}" ]]; then
+      git -C "${clone_dir}" checkout --force "${repo_ref}"
+      git -C "${clone_dir}" reset --hard "origin/${repo_ref}" >/dev/null 2>&1 || true
+    else
+      current_branch="$(git -C "${clone_dir}" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+      if [[ -n "${current_branch}" ]]; then
+        git -C "${clone_dir}" checkout --force "${current_branch}"
+        git -C "${clone_dir}" reset --hard "origin/${current_branch}"
       else
-        echo "install_from_github.sh could not determine the default branch for ${clone_dir}" >&2
-        exit 66
+        default_ref="$(git -C "${clone_dir}" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
+        default_branch="${default_ref#refs/remotes/origin/}"
+        if [[ -n "${default_branch}" ]]; then
+          git -C "${clone_dir}" checkout --force "${default_branch}"
+          git -C "${clone_dir}" reset --hard "origin/${default_branch}"
+        else
+          echo "install_from_github.sh could not determine the default branch for ${clone_dir}" >&2
+          exit 66
+        fi
       fi
     fi
   fi

@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 state_path="${repo_root}/.amai/onboarding/vscode-public-bridge-live-state.json"
 timeout_seconds="${AMAI_VSCODE_BRIDGE_LIVE_TIMEOUT_SECONDS:-30}"
 record=0
-dirty_surface_pattern='untitled:/home/art/agent-memory-index/vscode%3A/amai\.amai-vscode-bridge/open-clean-chat'
+dirty_surface_pattern="untitled:${repo_root}/vscode%3A/amai\\.amai-vscode-bridge/open-clean-chat"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -28,8 +28,10 @@ command -v jq >/dev/null || { echo "verify_vscode_compact_chat_public_bridge_liv
 command -v code >/dev/null || { echo "verify_vscode_compact_chat_public_bridge_live: missing code" >&2; exit 1; }
 
 detect_vscode_extensions_root() {
+  local reason="default"
   if [[ -n "${AMAI_VSCODE_EXTENSIONS_ROOT:-}" ]]; then
-    printf '%s\n' "${AMAI_VSCODE_EXTENSIONS_ROOT}"
+    reason="override_env"
+    printf '%s\t%s\n' "${AMAI_VSCODE_EXTENSIONS_ROOT}" "${reason}"
     return 0
   fi
   local code_path code_realpath
@@ -38,11 +40,27 @@ detect_vscode_extensions_root() {
   if [[ -n "${code_path}" ]]; then
     code_realpath="$(readlink -f "${code_path}" 2>/dev/null || printf '%s' "${code_path}")"
   fi
-  if [[ "${code_realpath}" == *codium* || "${code_realpath}" == *VSCodium* || -d "${HOME}/.config/VSCodium" || -d "${HOME}/.vscode-oss" ]]; then
-    printf '%s\n' "${HOME}/.vscode-oss/extensions"
+
+  if [[ "${code_realpath}" == *"/snap/"* ]] || ( [[ -x /usr/bin/snap ]] && snap list code >/dev/null 2>&1 ); then
+    reason="vscode_snap"
+    if [[ -d "${HOME}/snap/code/common/.vscode" || -d "${HOME}/snap/code/common" ]]; then
+      printf '%s\t%s\n' "${HOME}/snap/code/common/.vscode/extensions" "${reason}"
+      return 0
+    fi
+    if [[ -d "${HOME}/snap/code/current/.vscode" || -d "${HOME}/snap/code/current" ]]; then
+      printf '%s\t%s\n' "${HOME}/snap/code/current/.vscode/extensions" "${reason}"
+      return 0
+    fi
+    printf '%s\t%s\n' "${HOME}/snap/code/common/.vscode/extensions" "${reason}"
     return 0
   fi
-  printf '%s\n' "${HOME}/.vscode/extensions"
+
+  if [[ "${code_realpath}" == *codium* || "${code_realpath}" == *VSCodium* || -d "${HOME}/.config/VSCodium" || -d "${HOME}/.vscode-oss" ]]; then
+    reason="codium_or_oss"
+    printf '%s\t%s\n' "${HOME}/.vscode-oss/extensions" "${reason}"
+    return 0
+  fi
+  printf '%s\t%s\n' "${HOME}/.vscode/extensions" "${reason}"
 }
 
 expected_bridge_version="$(jq -r '.version // empty' "${repo_root}/tools/vscode-amai-bridge/package.json")"
@@ -51,7 +69,11 @@ if [[ -z "${expected_bridge_version}" ]]; then
   exit 1
 fi
 
-extensions_root="$(detect_vscode_extensions_root)"
+extensions_root_with_reason="$(detect_vscode_extensions_root)"
+extensions_root="${extensions_root_with_reason%%$'\t'*}"
+extensions_root_reason="${extensions_root_with_reason#*$'\t'}"
+printf 'verify_vscode_compact_chat_public_bridge_live: extensions root: %s (reason=%s, code=%s)\n' \
+  "${extensions_root}" "${extensions_root_reason}" "$(command -v code 2>/dev/null || true)" >&2
 
 find_installed_extension_dir() {
   local extension_id="$1"
