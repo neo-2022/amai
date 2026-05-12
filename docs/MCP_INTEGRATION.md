@@ -5,6 +5,57 @@ modified_at: 2026-03-26 06:30 MSK
 
 Этот документ объясняет подключение `Amai` простыми словами.
 
+## Быстрый старт: любой MCP-клиент (Generic)
+
+Если ваше приложение поддерживает `MCP`, но его нет в списке “из коробки” (`vscode`, `cursor`, `codex`, `claude-code`, `hermes`, `openclaw`), используйте `generic`:
+
+1) Установить `Amai` (одной командой):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client generic --stack-profile default --yes
+```
+
+2) В установленном repo взять готовый snippet:
+
+- файл: `~/.local/share/amai/repo/tmp/onboarding/generic-mcp.json`
+- он содержит параметры для `stdio` MCP server (`command`, `cwd`, `args`).
+
+3) Вставить snippet в конфиг вашего приложения в том формате, который оно ожидает.
+
+Самые частые форматы MCP-конфигов:
+
+- формат вида `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "amai": {
+      "command": "/abs/path/to/amai/scripts/run_mcp_stdio.sh",
+      "cwd": "/abs/path/to/amai",
+      "args": []
+    }
+  }
+}
+```
+
+- формат вида `mcp.servers`:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "amai": {
+        "command": "/abs/path/to/amai/scripts/run_mcp_stdio.sh",
+        "cwd": "/abs/path/to/amai",
+        "args": []
+      }
+    }
+  }
+}
+```
+
+Если ваш клиент умеет импортировать “один сервер” без обёртки — используйте содержимое `generic-mcp.json` как есть.
+
 ## Что это даёт
 
 Через `MCP` клиент подключается не к целому репозиторию напрямую, а к уже подготовленному внешнему инструменту.
