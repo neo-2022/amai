@@ -44,9 +44,10 @@ This does not currently claim verified support for `macOS`, `Windows`, or other 
 
 ### Install variants
 
-There are currently two verified GitHub install front doors for this Linux contour:
+There are currently three verified GitHub install front doors for this Linux contour:
 - `curl` bootstrap for normal network conditions;
 - `git clone` bootstrap if `raw.githubusercontent.com` is blocked or unstable.
+- a `tarball` bootstrap (`codeload.github.com`) if `github.com:443` is blocked or unstable for `git clone`.
 
 ### System requirements
 
@@ -84,6 +85,11 @@ bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/i
 On the verified `Ubuntu` / `Debian` contour, this command can bootstrap the missing local prerequisites automatically.
 Expect to grant `sudo` privileges on a clean machine during the first install.
 
+If the install fails on a fresh machine with errors that mention missing build tooling (for example `cmake`, `jq`, or `rsync`), rerun the installer with working `sudo`, or install the missing packages first.
+
+If you use the `VS Code` **snap** build, its extension root lives under `~/snap/code/(common|current)/.vscode/extensions` (not `~/.vscode/extensions`).
+You can always override the detected extensions root via `AMAI_VSCODE_EXTENSIONS_ROOT=/absolute/path`.
+
 If `raw.githubusercontent.com` is blocked or unstable, use the git-based one-liner:
 
 ```bash
@@ -91,6 +97,17 @@ git clone --depth 1 https://github.com/neo-2022/amai.git ~/.local/share/amai/rep
 cd ~/.local/share/amai/repo && \
 ./scripts/install_amai.sh --client vscode --stack-profile default --yes
 ```
+
+If `git clone` fails because `github.com:443` is blocked or unstable, use the tarball-based one-liner:
+
+```bash
+tmp="$(mktemp -d)" && \
+curl -fL --retry 5 --retry-delay 1 --retry-all-errors -o "$tmp/amai.tgz" https://codeload.github.com/neo-2022/amai/tar.gz/refs/heads/main && \
+tar -xzf "$tmp/amai.tgz" -C "$tmp" && \
+bash "$tmp/amai-main/scripts/install_amai.sh" --client vscode --stack-profile default --yes
+```
+
+`scripts/install_from_github.sh` also supports `--download-mode tarball` (and `--download-mode auto` falls back to tarball when `git` checkout fails).
 
 ### Fastest Agent-Assisted Setup
 

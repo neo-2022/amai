@@ -48,7 +48,7 @@ apt_install_missing() {
 }
 
 ensure_basic_packages() {
-  apt_install_missing git curl ca-certificates build-essential pkg-config libssl-dev
+  apt_install_missing git curl ca-certificates build-essential pkg-config libssl-dev jq rsync python3 cmake
 }
 
 ensure_rust_toolchain() {
