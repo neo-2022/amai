@@ -42,6 +42,14 @@ Verified install contour right now: `Ubuntu` / `Debian` shell environment, with 
 
 This does not currently claim verified support for `macOS`, `Windows`, or other client/runtime combinations.
 
+## MCP Integration (Other Apps)
+
+`Amai` can be used as a standard `MCP` tool, not only from `VS Code`.
+
+Supported/maintained client targets are listed in `config/client_targets.toml` (for example: `vscode`, `cursor`, `codex`, `claude-code`, `hermes`, `openclaw`, plus `generic`).
+
+For a detailed, client-by-client guide (including `Generic`), see `docs/MCP_INTEGRATION.md`.
+
 ### Install variants
 
 There are currently three verified GitHub install front doors for this Linux contour:
@@ -81,6 +89,17 @@ Normal network:
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client vscode --stack-profile default --yes
 ```
+
+If you want `Amai` for a different MCP client (for example `cursor`, `codex`, `claude-code`, `hermes`), pass it via `--client`.
+
+If your MCP client is not on the list yet, use `--client generic` and import the generated snippet:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client generic --stack-profile default --yes
+```
+
+It generates `tmp/onboarding/generic-mcp.json` inside the installed repo.
+See `docs/MCP_INTEGRATION.md` for how to embed that snippet into your application's config format.
 
 On the verified `Ubuntu` / `Debian` contour, this command can bootstrap the missing local prerequisites automatically.
 Expect to grant `sudo` privileges on a clean machine during the first install.
