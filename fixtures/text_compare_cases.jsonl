@@ -1,4 +1,0 @@
-# Fixture cases for comparative retrieval quality and token contour.
-{"query":"shared_runtime_marker","description":"Shared runtime token should be visible in both related projects.","expected_projects":["project_alpha","project_beta"],"expected_paths":["src/lib.rs"],"expected_terms":["shared_runtime_marker"]}
-{"query":"alpha_runtime_summary","description":"Alpha symbol and source file should resolve inside the local project.","expected_projects":["project_alpha"],"expected_paths":["src/lib.rs"],"expected_symbols":["alpha_runtime_summary"]}
-{"query":"beta_only_token","description":"Related project token should be retrievable only from the related project path.","expected_projects":["project_beta"],"expected_paths":["src/lib.rs"],"expected_terms":["beta_only_token"]}

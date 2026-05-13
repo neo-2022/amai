@@ -52,7 +52,6 @@ tree-sitter-rust = "0.24.1"
 tree-sitter-toml-ng = "0.7.0"
 tree-sitter-typescript = "0.23.2"
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
-ksni = "0.2.2"
 
 [dev-dependencies]
 proptest = "1.9.0"

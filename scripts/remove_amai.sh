@@ -9,22 +9,6 @@ if [[ "${repo_root}" == "${managed_clone_root}" ]]; then
   export AMAI_BOOTSTRAP_REMOVE_MODE=full
 fi
 
-filter_compact_remove_args() {
-  local arg
-  local filtered=()
-  for arg in "$@"; do
-    case "$arg" in
-      --yes)
-        continue
-        ;;
-    esac
-    filtered+=("$arg")
-  done
-  printf '%s\0' "${filtered[@]}"
-}
-
-readarray -d '' REMOVE_ARGS < <(filter_compact_remove_args "$@")
-
 compact_debug_binary_is_fresh() {
   local binary="./target/debug/amai-bootstrap"
   [[ -x "${binary}" ]] || return 1
@@ -64,11 +48,7 @@ debug_binary_is_fresh() {
 }
 
 if [[ "${AMAI_BOOTSTRAP_REMOVE_MODE:-}" == "full" ]] && [[ ! -x ./target/release/amai-bootstrap ]] && compact_debug_binary_is_fresh; then
-  exec ./target/debug/amai-bootstrap remove "${REMOVE_ARGS[@]}"
-fi
-
-if [[ "${AMAI_BOOTSTRAP_REMOVE_MODE:-}" == "full" ]] && [[ -x ./target/release/amai-bootstrap ]]; then
-  exec ./target/release/amai-bootstrap remove "${REMOVE_ARGS[@]}"
+  exec ./target/debug/amai-bootstrap remove "$@"
 fi
 
 if [[ "${AMAI_BOOTSTRAP_REMOVE_MODE:-}" == "full" ]] && [[ ! -x ./target/release/amai-bootstrap ]]; then
@@ -78,7 +58,7 @@ if [[ "${AMAI_BOOTSTRAP_REMOVE_MODE:-}" == "full" ]] && [[ ! -x ./target/release
     RUSTC="${rustc_bin}" \
     CARGO_PROFILE_DEV_DEBUG=0 \
     CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=off \
-    "${cargo_bin}" run --quiet --bin amai-bootstrap -- remove "${REMOVE_ARGS[@]}"
+    "${cargo_bin}" run --quiet --bin amai-bootstrap -- remove "$@"
 fi
 
 if [[ "${AMAI_BOOTSTRAP_REMOVE_MODE:-}" == "full" ]] && [[ ! -x ./target/release/amai ]] && debug_binary_is_fresh; then
