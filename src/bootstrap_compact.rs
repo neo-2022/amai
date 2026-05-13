@@ -4,7 +4,6 @@ use crate::profiles;
 use anyhow::{Context, Result, anyhow, bail};
 use dirs::home_dir;
 use serde::Serialize;
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
@@ -50,20 +49,6 @@ struct CompactInstallState {
     client_config: String,
     stack_profile: String,
     installed_at_epoch_seconds: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct VscodeMcpServerConfig {
-    args: Vec<String>,
-    command: String,
-    cwd: String,
-    #[serde(rename = "type")]
-    server_type: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct VscodeMcpConfig {
-    servers: BTreeMap<String, VscodeMcpServerConfig>,
 }
 
 pub async fn run(args: CompactBootstrapArgs) -> Result<()> {
@@ -170,6 +155,7 @@ async fn install(
 
     let client_config_path = resolve_vscode_output_path(&repo_root, output);
     write_vscode_mcp_config(&repo_root, &client_config_path)?;
+    write_vscode_user_mcp_configs(&repo_root)?;
     write_compact_vscode_onboarding_artifacts(&repo_root)?;
 
     let install_state = CompactInstallState {
@@ -330,22 +316,43 @@ fn write_vscode_mcp_config(repo_root: &Path, output: &Path) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let mut servers = BTreeMap::new();
-    servers.insert(
-        "amai".to_string(),
-        VscodeMcpServerConfig {
-            args: Vec::new(),
-            command: repo_root
-                .join("scripts/run_mcp_stdio.sh")
-                .display()
-                .to_string(),
-            cwd: repo_root.display().to_string(),
-            server_type: "stdio".to_string(),
-        },
-    );
-    let payload = VscodeMcpConfig { servers };
+    let mut payload = if output.is_file() {
+        let existing = fs::read_to_string(output)
+            .with_context(|| format!("failed to read {}", output.display()))?;
+        serde_json::from_str::<serde_json::Value>(&existing)
+            .unwrap_or_else(|_| serde_json::json!({ "servers": {} }))
+    } else {
+        serde_json::json!({ "servers": {} })
+    };
+    if !payload.is_object() {
+        payload = serde_json::json!({ "servers": {} });
+    }
+    if payload.get("servers").and_then(|value| value.as_object()).is_none() {
+        payload["servers"] = serde_json::json!({});
+    }
+    payload["servers"]["amai"] = serde_json::json!({
+        "args": [],
+        "command": repo_root.join("scripts/run_mcp_stdio.sh").display().to_string(),
+        "cwd": repo_root.display().to_string(),
+        "type": "stdio"
+    });
     fs::write(output, serde_json::to_string_pretty(&payload)? + "\n")
         .with_context(|| format!("failed to write {}", output.display()))?;
+    Ok(())
+}
+
+fn write_vscode_user_mcp_configs(repo_root: &Path) -> Result<()> {
+    let Some(home) = home_dir() else {
+        return Ok(());
+    };
+    let outputs = [
+        home.join(".config/Code/User/mcp.json"),
+        home.join(".config/VSCodium/User/mcp.json"),
+        home.join(".vscode-oss/User/mcp.json"),
+    ];
+    for output in outputs {
+        write_vscode_mcp_config(repo_root, &output)?;
+    }
     Ok(())
 }
 
@@ -361,7 +368,7 @@ fn write_compact_vscode_onboarding_artifacts(repo_root: &Path) -> Result<()> {
     let startup_text = [
         "# Amai startup (VS Code / Codium)",
         "",
-        "1. Откройте рабочую папку с `Amai`.",
+        "1. Откройте любой рабочий проект в VS Code / Codium.",
         "2. Выполните `Reload Window` в клиенте.",
         "3. Убедитесь, что MCP-сервер `amai` активен.",
     ]

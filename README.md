@@ -138,7 +138,8 @@ bash "$tmp/amai-main/scripts/install_amai.sh" --client vscode --stack-profile de
 ## VS Code Bridge
 
 - OpenVSX: https://open-vsx.org/extension/amai/amai-vscode-bridge
-- После установки: открыть `~/.local/share/amai/repo` в `VS Code` / `Codium` и сделать `Reload Window`.
+- После установки: bridge и MCP-конфиг добавляются автоматически.
+- Откройте любой рабочий проект в `VS Code` / `Codium` и сделайте `Reload Window`.
 
 ## Remove
 
