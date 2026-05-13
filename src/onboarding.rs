@@ -3536,6 +3536,7 @@ fn remove_startup_instructions(
 
     let existing = fs::read_to_string(&output_path)
         .with_context(|| format!("failed to read {}", output_path.display()))?;
+
     match startup.mode.as_str() {
         "managed_workspace_file" | "manual_snippet_only" => {
             let removable = startup.mode == "manual_snippet_only"

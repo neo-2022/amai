@@ -55,6 +55,18 @@ This does not currently claim verified support for `macOS`, `Windows`, or other 
 bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client generic --stack-profile default --yes
 ```
 
+Если `raw.githubusercontent.com` заблокирован/таймаутит — используйте one‑liner без raw:
+
+```bash
+clone_dir="${HOME}/.local/share/amai/repo" && \
+if [ -d "${clone_dir}/.git" ]; then
+  git -C "${clone_dir}" fetch --depth 1 origin && git -C "${clone_dir}" checkout --force main && git -C "${clone_dir}" reset --hard origin/main
+else
+  git clone --depth 1 https://github.com/neo-2022/amai.git "${clone_dir}"
+fi && \
+"${clone_dir}/scripts/install_amai.sh" --client generic --stack-profile default --yes
+```
+
 После установки snippet будет лежать здесь:
 
 `~/.local/share/amai/repo/tmp/onboarding/generic-mcp.json`
@@ -114,74 +126,29 @@ cd ~/.local/share/amai/repo && ./scripts/run_mcp_stdio.sh </dev/null >/dev/null 
 
 Если клиент “видит” сервер `amai` и может вызвать tools — интеграция готова.
 
-### Install variants
+## Установка (коротко)
 
-There are currently three verified GitHub install front doors for this Linux contour:
-- `curl` bootstrap for normal network conditions;
-- `git clone` bootstrap if `raw.githubusercontent.com` is blocked or unstable.
-- a `tarball` bootstrap (`codeload.github.com`) if `github.com:443` is blocked or unstable for `git clone`.
-
-### System requirements
-
-Current verified baseline:
-- `Ubuntu` or `Debian`;
-- `bash`;
-- `sudo` / administrator access for first install on a clean machine;
-- network access to GitHub and the system package repositories;
-- `VS Code` or `Codium` for the verified client contour.
-
-On this verified `Ubuntu` / `Debian` contour, the one-command installer can now bootstrap the missing local prerequisites for you, including:
-- `git`;
-- base build dependencies;
-- `rustup` / `cargo` / `rustc`;
-- `Docker` and compose support for the local stack.
-
-Machine capacity is checked by the built-in preflight selector:
-
-```bash
-./scripts/preflight.sh
-```
-
-It evaluates the machine against the currently supported install profiles and shows whether `default` or `lite_vps` is a realistic fit before installation.
-
-### Quick Start
-
-Install from GitHub, then use the `Amai` bridge inside `VS Code` / `Codium`.
-
-Normal network:
+### VS Code / Codium
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client vscode --stack-profile default --yes
 ```
 
-If you want `Amai` for a different MCP client (for example `cursor`, `codex`, `claude-code`, `hermes`), pass it via `--client`.
+### Если `raw.githubusercontent.com` недоступен
 
-If your MCP client is not on the list yet, use `--client generic` and import the generated snippet:
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client generic --stack-profile default --yes
-```
-
-It generates `tmp/onboarding/generic-mcp.json` inside the installed repo.
-See `docs/MCP_INTEGRATION.md` for how to embed that snippet into your application's config format.
-
-On the verified `Ubuntu` / `Debian` contour, this command can bootstrap the missing local prerequisites automatically.
-Expect to grant `sudo` privileges on a clean machine during the first install.
-
-If the install fails on a fresh machine with errors that mention missing build tooling (for example `cmake`, `jq`, or `rsync`), rerun the installer with working `sudo`, or install the missing packages first.
-
-If you use the `VS Code` **snap** build, its extension root lives under `~/snap/code/(common|current)/.vscode/extensions` (not `~/.vscode/extensions`).
-You can always override the detected extensions root via `AMAI_VSCODE_EXTENSIONS_ROOT=/absolute/path`.
-
-If `raw.githubusercontent.com` is blocked or unstable, use the git-based one-liner:
+**Через `git clone`:**
 
 ```bash
-git clone --depth 1 https://github.com/neo-2022/amai.git ~/.local/share/amai/repo && \
-cd ~/.local/share/amai/repo && \
-./scripts/install_amai.sh --client vscode --stack-profile default --yes
+clone_dir="${HOME}/.local/share/amai/repo" && \
+if [ -d "${clone_dir}/.git" ]; then
+  git -C "${clone_dir}" fetch --depth 1 origin && git -C "${clone_dir}" checkout --force main && git -C "${clone_dir}" reset --hard origin/main
+else
+  git clone --depth 1 https://github.com/neo-2022/amai.git "${clone_dir}"
+fi && \
+"${clone_dir}/scripts/install_amai.sh" --client vscode --stack-profile default --yes
 ```
 
-If `git clone` fails because `github.com:443` is blocked or unstable, use the tarball-based one-liner:
+**Если нет `git` или `git clone` не работает — через tarball (`codeload.github.com`):**
 
 ```bash
 tmp="$(mktemp -d)" && \
@@ -189,23 +156,6 @@ curl -fL --retry 5 --retry-delay 1 --retry-all-errors -o "$tmp/amai.tgz" https:/
 tar -xzf "$tmp/amai.tgz" -C "$tmp" && \
 bash "$tmp/amai-main/scripts/install_amai.sh" --client vscode --stack-profile default --yes
 ```
-
-`scripts/install_from_github.sh` also supports `--download-mode tarball` (and `--download-mode auto` falls back to tarball when `git` checkout fails).
-
-### Fastest Agent-Assisted Setup
-
-If you already use an AI coding agent inside `VS Code` / `Codium`, the fastest path is:
-
-1. run one of the install commands above;
-2. open `~/.local/share/amai/repo` in the editor;
-3. ask the agent to verify the local contour end to end:
-   - `.vscode/mcp.json` exists;
-   - `systemctl --user is-active amai-stack.service` is `active`;
-   - `Amai VS Code Bridge` is installed;
-   - the `OpenAI` / `Codex` chat surface is available if you want to launch `Amai` from the sidebar.
-
-This does not replace the normal Amai install.
-It is simply the quickest way to let an agent verify and finish the editor-side contour without manual spot checks.
 
 ## VS Code Bridge
 
