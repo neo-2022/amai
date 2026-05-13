@@ -134,7 +134,6 @@ scripts\install_amai.cmd
 - но не для наших рекордных benchmark-цифр.
 
 После этого обычно остаётся:
-- открыть repo в VS Code;
 - сделать `Reload Window`;
 - проверить, что MCP server виден клиенту.
 - после локальной установки stack поднимается через managed `systemd --user` unit `amai-stack.service`, поэтому ручной `./scripts/bootstrap_stack.sh` не нужен при старте user manager;
@@ -167,7 +166,7 @@ scripts\install_amai.cmd
 - MCP при этом остаётся каналом, через который IDE и ИИ-клиент реально обращаются к инструменту.
 - launcher `scripts/run_mcp_stdio.sh` и `scripts/run_mcp_stdio.ps1` теперь correctness-first:
   если на машине есть `cargo`, MCP server поднимается через `cargo run --release --quiet -- mcp serve`,
-  чтобы новая чистая рабочая поверхность не цепляла устаревший `target/release/amai` после свежих code changes.
+  чтобы новая чистая рабочая сессия не цепляла устаревший `target/release/amai` после свежих code changes.
 - launcher stdout до первого JSON-RPC ответа обязан оставаться чистым; startup diagnostics пишутся в log/stderr,
   иначе MCP клиент может принять debug строку за protocol payload.
 
@@ -189,7 +188,7 @@ scripts\install_amai.cmd
   - onboarding по умолчанию пишет config в `~/.openclaw/openclaw.json`;
   - MCP server materialize-ится в секции `mcp.servers`;
   - startup теперь materialize-ится в repo-local `.openclaw/AGENTS.md`;
-  - onboarding дополнительно регистрирует отдельный OpenClaw agent, который указывает именно на этот repo-local workspace, не трогая shared global workspace;
+  - onboarding дополнительно регистрирует отдельный OpenClaw agent, который указывает именно на этот repo-local project scope, не трогая shared global scope;
 - `Claude Code`
   - onboarding пишет workspace-local `.mcp.json`;
   - startup теперь materialize-ится как bounded managed block внутри project `CLAUDE.md`;
@@ -210,13 +209,13 @@ scripts\install_amai.cmd
   - где автоматический runtime contour ещё не materialized.
 
 То есть truthful правило теперь такое:
-- `VS Code` получает managed workspace instruction file
+- `VS Code` получает managed project instruction file
   `.github/instructions/amai-continuity-startup.instructions.md`;
 - `Cursor` получает managed project rule file
   `.cursor/rules/amai-continuity-startup.mdc`;
 - `Codex` получает instruction-backed startup через managed append-block в `AGENTS.md`;
 - `Hermes` получает auto-written MCP config в `~/.hermes/config.yaml`, compact managed startup через `.hermes.md` и sticky project-bound profile, который тянет тот же startup path по умолчанию;
-- `OpenClaw` получает auto-written MCP config в `~/.openclaw/openclaw.json`, managed startup в `.openclaw/AGENTS.md` и отдельный project-bound agent/workspace registration;
+- `OpenClaw` получает auto-written MCP config в `~/.openclaw/openclaw.json`, managed startup в `.openclaw/AGENTS.md` и отдельный project-bound agent/project registration;
 - `Claude Code` получает instruction-backed startup через managed append-block в `CLAUDE.md`;
 - `Claude Desktop` и `Generic` пока получают только сгенерированный snippet.
 
