@@ -190,7 +190,7 @@ scripts\install_amai.cmd
   - startup теперь materialize-ится в repo-local `.openclaw/AGENTS.md`;
   - onboarding дополнительно регистрирует отдельный OpenClaw agent, который указывает именно на этот repo-local project scope, не трогая shared global scope;
 - `Claude Code`
-  - onboarding пишет workspace-local `.mcp.json`;
+  - onboarding пишет project-local `.mcp.json`;
   - startup теперь materialize-ится как bounded managed block внутри project `CLAUDE.md`;
 - `Claude Desktop`
   - пока получает generated file для ручного импорта.
@@ -280,6 +280,7 @@ cargo build --release
 4. Если onboarding уже запускался, часть этой работы уже сделана автоматически.
 
 После этого для новой чистой рабочей поверхности правильная логика такая:
+После этого для новой чистой рабочей сессии правильная логика такая:
 - сначала вызвать `amai_continuity_startup` для текущего проекта;
 - только потом, если нужен дополнительный retrieval, вызывать `amai_context_pack`;
 - не перескакивать сразу к retrieval, если continuity ещё не поднята.
