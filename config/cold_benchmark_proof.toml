@@ -1,0 +1,158 @@
+[profile]
+display_name = "Local Proof Cold Contour"
+summary = "Компактный proof-run на реальных локальных репозиториях этой машины. Нужен для smoke/proof runner-а, а не для финального target verdict."
+target_p50_ms = 2.0
+target_p95_ms = 5.0
+target_p99_ms = 10.0
+target_max_ms = 15.0
+min_precision = 0.997
+min_target_hit_rate = 0.997
+min_recall = 0.997
+min_sample_count = 1000
+min_repo_count = 75
+min_query_slice_count = 200
+max_duration_seconds = 10.0
+max_leakage = 0
+max_error_rate = 0.0
+
+[[repos]]
+code = "art"
+display_name = "Art"
+repo_root = "../Art"
+namespace = "cold_benchmark"
+repo_type = "docs_heavy"
+size_class = "large_monorepo"
+limit_files = 240
+skip_embeddings = true
+default_retrieval_mode = "local_strict"
+
+[[repos]]
+code = "amai"
+display_name = "Amai"
+repo_root = "."
+namespace = "cold_benchmark"
+repo_type = "code_heavy"
+size_class = "medium_production"
+limit_files = 200
+skip_embeddings = true
+default_retrieval_mode = "local_strict"
+
+[[repos]]
+code = "langgraph_local"
+display_name = "my_langgraph_agent"
+repo_root = "../my_langgraph_agent"
+namespace = "cold_benchmark"
+repo_type = "mixed"
+size_class = "medium_repo"
+limit_files = 160
+skip_embeddings = true
+default_retrieval_mode = "local_strict"
+
+[[repos]]
+code = "agent_regart"
+display_name = "agent-RegArt"
+repo_root = "../agent-RegArt"
+namespace = "cold_benchmark"
+repo_type = "mixed"
+size_class = "small_repo"
+limit_files = 160
+skip_embeddings = true
+default_retrieval_mode = "local_strict"
+
+[[cases]]
+repo_code = "art"
+query_slice = "code_lookup"
+query = "scripts/tools/amai_art_continuity_startup.sh"
+expected_projects = ["art"]
+expected_paths = ["scripts/tools/amai_art_continuity_startup.sh"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0
+
+[[cases]]
+repo_code = "amai"
+query_slice = "symbol_lookup"
+query = "run_text_compare"
+expected_projects = ["amai"]
+expected_paths = ["src/verify.rs"]
+expected_symbols = ["run_text_compare"]
+limit_documents = 0
+limit_symbols = 1
+limit_chunks = 0
+limit_semantic_chunks = 0
+
+[[cases]]
+repo_code = "amai"
+query_slice = "docs_lookup"
+query = "README.md"
+expected_projects = ["amai"]
+expected_paths = ["README.md"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0
+
+[[cases]]
+repo_code = "amai"
+query_slice = "architecture_question"
+query = "docs/OPERATIONS.md"
+expected_projects = ["amai"]
+expected_paths = ["docs/OPERATIONS.md"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0
+
+[[cases]]
+repo_code = "amai"
+query_slice = "config_lookup"
+query = "src/config.rs"
+expected_projects = ["amai"]
+expected_paths = ["src/config.rs"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0
+
+[[cases]]
+repo_code = "amai"
+query_slice = "cross_file_trace"
+query = "scripts/human_dashboard.sh"
+expected_paths = ["scripts/human_dashboard.sh"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0
+
+[[cases]]
+repo_code = "amai"
+query_slice = "onboarding_query"
+query = "scripts/install_amai.sh"
+expected_paths = ["scripts/install_amai.sh"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0
+
+[[cases]]
+repo_code = "langgraph_local"
+query_slice = "docs_lookup"
+query = "docs/integration/art_bridge.md"
+expected_projects = ["langgraph_local"]
+expected_paths = ["docs/integration/art_bridge.md"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0
+
+[[cases]]
+repo_code = "agent_regart"
+query_slice = "architecture_question"
+query = "docs/vector-store-module.md"
+expected_projects = ["agent_regart"]
+expected_paths = ["docs/vector-store-module.md"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0

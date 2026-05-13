@@ -1,0 +1,184 @@
+modified_at = "2026-03-21 22:39 MSK"
+"Ручная сверка guide/docs" = "2026-03-21 22:39 MSK"
+
+[source]
+display_name = "Amai external benchmark dataset catalog"
+summary = "Это канонический machine-readable набор внешних benchmark-датасетов для retrieval/vector comparative contour. Каталог нужен, чтобы adapter path жил не на устных командах из чата, а на фиксированном manifest."
+
+[storage]
+relative_root = "state/external-benchmarks/datasets"
+
+[datasets.dbpedia_openai_1000k_angular]
+order = 1
+display_name = "dbpedia-openai-1000k-angular"
+aliases = ["dbpedia", "dbpedia-openai"]
+family = "hdf5"
+distance = "cosine"
+dimensions = 1536
+local_filename = "dbpedia-openai-1000k-angular.hdf5"
+download_url = "https://storage.googleapis.com/ann-datasets/ann-benchmarks/dbpedia-openai-1000k-angular.hdf5"
+usage_scope = ["vectordbbench", "ann_benchmarks"]
+why_useful = [
+  "Хороший общий HDF5 baseline для apples-to-apples retrieval compare.",
+  "Подходит как стартовый dataset для adapter-пути и ANN-style external check."
+]
+
+[datasets.snowflake_msmarco_arctic_embed_m_v1_5_angular]
+order = 2
+display_name = "snowflake-msmarco-arctic-embed-m-v1.5-angular"
+aliases = ["snowflake-msmarco", "arctic-embed"]
+family = "hdf5"
+distance = "cosine"
+dimensions = 768
+local_filename = "snowflake-msmarco-arctic-embed-m-v1.5-angular.hdf5"
+download_url = "https://storage.googleapis.com/ann-datasets/custom/snowflake-msmarco-arctic-embed-m-v1.5-angular.hdf5"
+usage_scope = ["vectordbbench"]
+why_useful = [
+  "Даёт второй semantic/text retrieval профиль, а не один-единственный dataset.",
+  "Полезен для richer recall/latency comparison на text-heavy embeddings."
+]
+
+[datasets.sift_128_euclidean]
+order = 3
+display_name = "sift-128-euclidean"
+aliases = ["sift"]
+family = "hdf5"
+distance = "euclidean"
+dimensions = 128
+local_filename = "sift-128-euclidean.hdf5"
+download_url = "http://ann-benchmarks.com/sift-128-euclidean.hdf5"
+usage_scope = ["ann_benchmarks"]
+why_useful = [
+  "Классический ANN-core ceiling dataset.",
+  "Нужен, чтобы retrieval-core ceiling не зависел только от text embeddings."
+]
+
+[datasets.sphere_10m_meta_dpr]
+order = 4
+display_name = "sphere-10M-meta-dpr"
+aliases = ["sphere-10m", "meta-dpr"]
+family = "hdf5"
+distance = "cosine"
+dimensions = 768
+local_filename = "sphere-10M-meta-dpr.hdf5"
+download_url = "https://storage.googleapis.com/ann-datasets/custom/sphere-10M-meta-dpr.hdf5"
+usage_scope = ["vectordbbench", "filtered_ann_datasets"]
+why_useful = [
+  "Даёт более тяжёлый большой dataset для pressure-тестов.",
+  "Полезен как мост между core ANN compare и более тяжёлым filtered/payload слоем."
+]
+
+[datasets.longmemeval_oracle]
+order = 10
+display_name = "longmemeval-oracle"
+aliases = ["longmemeval_oracle"]
+family = "json"
+distance = "n/a"
+dimensions = 0
+local_filename = "longmemeval_oracle.json"
+download_url = "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json"
+usage_scope = ["longmemeval"]
+why_useful = [
+  "Oracle-версия LongMemEval с evidence-only history.",
+  "Удобна для валидации evaluator и базовых sanity-check."
+]
+
+[datasets.longmemeval_s_cleaned]
+order = 11
+display_name = "longmemeval-s-cleaned"
+aliases = ["longmemeval_s", "longmemeval_s_cleaned"]
+family = "json"
+distance = "n/a"
+dimensions = 0
+local_filename = "longmemeval_s_cleaned.json"
+download_url = "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json"
+usage_scope = ["longmemeval"]
+why_useful = [
+  "Основной manageable размер LongMemEval (S) для регулярных прогонов.",
+  "Покрывает temporal reasoning и knowledge updates на полном history."
+]
+
+[datasets.memoryagentbench_accurate_retrieval]
+order = 20
+display_name = "memoryagentbench-accurate-retrieval"
+aliases = ["memoryagentbench_ar", "memoryagentbench_accurate"]
+family = "parquet"
+distance = "n/a"
+dimensions = 0
+local_filename = "MemoryAgentBench/Accurate_Retrieval-00000-of-00001.parquet"
+download_url = "https://huggingface.co/datasets/ai-hyz/MemoryAgentBench/resolve/main/data/Accurate_Retrieval-00000-of-00001.parquet"
+usage_scope = ["memoryagentbench"]
+why_useful = [
+  "Проверяет точность извлечения в memory-agent сценариях."
+]
+
+[datasets.memoryagentbench_conflict_resolution]
+order = 21
+display_name = "memoryagentbench-conflict-resolution"
+aliases = ["memoryagentbench_cr", "memoryagentbench_conflict"]
+family = "parquet"
+distance = "n/a"
+dimensions = 0
+local_filename = "MemoryAgentBench/Conflict_Resolution-00000-of-00001.parquet"
+download_url = "https://huggingface.co/datasets/ai-hyz/MemoryAgentBench/resolve/main/data/Conflict_Resolution-00000-of-00001.parquet"
+usage_scope = ["memoryagentbench"]
+why_useful = [
+  "Тестирует конфликтную память и корректную актуализацию фактов."
+]
+
+[datasets.memoryagentbench_long_range_understanding]
+order = 22
+display_name = "memoryagentbench-long-range-understanding"
+aliases = ["memoryagentbench_lru", "memoryagentbench_long_range"]
+family = "parquet"
+distance = "n/a"
+dimensions = 0
+local_filename = "MemoryAgentBench/Long_Range_Understanding-00000-of-00001.parquet"
+download_url = "https://huggingface.co/datasets/ai-hyz/MemoryAgentBench/resolve/main/data/Long_Range_Understanding-00000-of-00001.parquet"
+usage_scope = ["memoryagentbench"]
+why_useful = [
+  "Проверяет long-range understanding, а не только retrieval."
+]
+
+[datasets.memoryagentbench_test_time_learning]
+order = 23
+display_name = "memoryagentbench-test-time-learning"
+aliases = ["memoryagentbench_ttl", "memoryagentbench_test_time"]
+family = "parquet"
+distance = "n/a"
+dimensions = 0
+local_filename = "MemoryAgentBench/Test_Time_Learning-00000-of-00001.parquet"
+download_url = "https://huggingface.co/datasets/ai-hyz/MemoryAgentBench/resolve/main/data/Test_Time_Learning-00000-of-00001.parquet"
+usage_scope = ["memoryagentbench"]
+why_useful = [
+  "Проверяет test-time learning и адаптацию памяти."
+]
+
+[datasets.locomo10]
+order = 30
+display_name = "locomo10"
+aliases = ["locomo", "locomo10.json"]
+family = "json"
+distance = "n/a"
+dimensions = 0
+local_filename = "locomo10.json"
+download_url = "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json"
+usage_scope = ["locomo"]
+why_useful = [
+  "Длинные диалоги и QA аннотации для long-term conversational memory."
+]
+
+[datasets.ama_bench_manual]
+order = 40
+display_name = "ama-bench"
+aliases = ["ama_bench", "ama-bench"]
+family = "manual"
+distance = "n/a"
+dimensions = 0
+local_filename = "ama-bench.manual"
+download_url = ""
+usage_scope = ["ama_bench"]
+why_useful = [
+  "Требует отдельного официального dataset loader/runner.",
+  "Пока фиксируем как manual install через HF dataset."
+]

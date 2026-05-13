@@ -5,21 +5,33 @@ AMAI_REPO_URL="${AMAI_REPO_URL:-https://github.com/neo-2022/amai.git}"
 AMAI_CLONE_DIR="${AMAI_CLONE_DIR:-$HOME/.local/share/amai/repo}"
 AMAI_STACK_PROFILE="${AMAI_STACK_PROFILE:-default}"
 AMAI_CLIENT="${AMAI_CLIENT:-vscode}"
+AMAI_DIALOG_TIMEOUT_SEC="${AMAI_DIALOG_TIMEOUT_SEC:-25}"
+
+gui_dialog_allowed() {
+  if [[ "${AMAI_FORCE_GUI_DIALOGS:-0}" == "1" ]]; then
+    return 0
+  fi
+  [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]] || return 1
+  [[ -t 1 ]] || return 1
+  return 0
+}
 
 show_info() {
   local title="$1"
   local text="$2"
-  if command -v zenity >/dev/null 2>&1; then
-    zenity --info --title="$title" --text="$text" --ok-label="OK" || true
-    return
-  fi
-  if command -v kdialog >/dev/null 2>&1; then
-    kdialog --title "$title" --msgbox "$text" || true
-    return
-  fi
-  if command -v xmessage >/dev/null 2>&1; then
-    xmessage -center "$text" || true
-    return
+  if gui_dialog_allowed; then
+    if command -v zenity >/dev/null 2>&1; then
+      zenity --info --title="$title" --text="$text" --ok-label="OK" --timeout="$AMAI_DIALOG_TIMEOUT_SEC" || true
+      return
+    fi
+    if command -v kdialog >/dev/null 2>&1; then
+      kdialog --title "$title" --msgbox "$text" || true
+      return
+    fi
+    if command -v xmessage >/dev/null 2>&1; then
+      xmessage -center "$text" || true
+      return
+    fi
   fi
   printf '%s\n' "$text"
 }
@@ -27,17 +39,19 @@ show_info() {
 show_error() {
   local title="$1"
   local text="$2"
-  if command -v zenity >/dev/null 2>&1; then
-    zenity --error --title="$title" --text="$text" --ok-label="OK" || true
-    return
-  fi
-  if command -v kdialog >/dev/null 2>&1; then
-    kdialog --title "$title" --error "$text" || true
-    return
-  fi
-  if command -v xmessage >/dev/null 2>&1; then
-    xmessage -center "$text" || true
-    return
+  if gui_dialog_allowed; then
+    if command -v zenity >/dev/null 2>&1; then
+      zenity --error --title="$title" --text="$text" --ok-label="OK" --timeout="$AMAI_DIALOG_TIMEOUT_SEC" || true
+      return
+    fi
+    if command -v kdialog >/dev/null 2>&1; then
+      kdialog --title "$title" --error "$text" || true
+      return
+    fi
+    if command -v xmessage >/dev/null 2>&1; then
+      xmessage -center "$text" || true
+      return
+    fi
   fi
   printf '%s\n' "$text" >&2
 }
@@ -68,6 +82,36 @@ has_amai_server_in_json() {
   rg -n '"amai"\s*:' "$target_file" >/dev/null 2>&1
 }
 
+client_installed_vscode_like() {
+  command -v code >/dev/null 2>&1 || command -v codium >/dev/null 2>&1
+}
+
+hermes_has_live_amai_binding() {
+  local config="$HOME/.hermes/config.yaml"
+  [[ -f "$config" ]] || return 1
+
+  local command_path
+  command_path="$(
+    awk '
+      $0 ~ /^mcp_servers:[[:space:]]*$/ { in_mcp=1; next }
+      in_mcp && $0 ~ /^[^[:space:]]/ { in_mcp=0 }
+      in_mcp && $0 ~ /^[[:space:]]+amai:[[:space:]]*$/ { in_amai=1; next }
+      in_amai && $0 ~ /^[[:space:]]{2}[^[:space:]]/ { in_amai=0 }
+      in_amai && $0 ~ /^[[:space:]]+command:[[:space:]]*/ {
+        sub(/^[[:space:]]+command:[[:space:]]*/, "", $0)
+        gsub(/^'\''|'\''$/, "", $0)
+        gsub(/^"|"$/, "", $0)
+        print $0
+        exit
+      }
+    ' "$config"
+  )"
+
+  [[ -n "$command_path" ]] || return 1
+  [[ -x "$command_path" ]] || return 1
+  return 0
+}
+
 collect_client_connection_report() {
   local repo="$AMAI_CLONE_DIR"
   local report_file="$HOME/.cache/amai/oneclick-connection-report.txt"
@@ -77,12 +121,16 @@ collect_client_connection_report() {
   local needs_manual=()
 
   # VS Code / Codium
-  if command -v code >/dev/null 2>&1 || command -v codium >/dev/null 2>&1 || [[ -d "$HOME/.config/Code" || -d "$HOME/.config/VSCodium" || -d "$HOME/.vscode-oss" ]]; then
-    if has_amai_server_in_json "$HOME/.config/Code/User/mcp.json" || has_amai_server_in_json "$HOME/.config/VSCodium/User/mcp.json" || has_amai_server_in_json "$repo/.vscode/mcp.json"; then
+  if client_installed_vscode_like; then
+    if has_amai_server_in_json "$HOME/.config/Code/User/mcp.json" || has_amai_server_in_json "$HOME/.config/VSCodium/User/mcp.json"; then
       auto_connected+=("VS Code / Codium — подключено автоматически")
+    elif has_amai_server_in_json "$repo/.vscode/mcp.json"; then
+      needs_manual+=("VS Code / Codium — найден только шаблон MCP в репозитории. Откройте VS Code и выполните: $repo/scripts/install_amai.sh --client vscode --yes")
     else
       needs_manual+=("VS Code / Codium — проверьте MCP: $repo/.vscode/mcp.json или ~/.config/Code/User/mcp.json")
     fi
+  elif has_amai_server_in_json "$repo/.vscode/mcp.json"; then
+    needs_manual+=("VS Code / Codium не обнаружен. После установки редактора выполните: $repo/scripts/install_amai.sh --client vscode --yes")
   fi
 
   # Cursor
@@ -105,7 +153,7 @@ collect_client_connection_report() {
 
   # Hermes
   if [[ -d "$HOME/.hermes" ]] || command -v hermes >/dev/null 2>&1; then
-    if [[ -f "$HOME/.hermes/config.yaml" ]] && rg -n 'amai|run_mcp_stdio\.sh' "$HOME/.hermes/config.yaml" >/dev/null 2>&1; then
+    if hermes_has_live_amai_binding; then
       auto_connected+=("Hermes — подключено автоматически")
     else
       needs_manual+=("Hermes — сгенерируйте: $repo/scripts/install_amai.sh --client hermes --yes")
@@ -189,6 +237,7 @@ main() {
     echo "[2/2] Verifying..."
     verify_install
     install_vscode_offer_hook
+    [[ -x "$AMAI_CLONE_DIR/scripts/dedupe_vscode_mcp.sh" ]] && "$AMAI_CLONE_DIR/scripts/dedupe_vscode_mcp.sh" || true
   } >>"$log_file" 2>&1 || {
     show_error "Amai install failed" "Установка Amai завершилась с ошибкой.\n\nЧто сделать:\n1) Открой лог: $log_file\n2) Проверьте интернет-доступ к github.com и open-vsx.org\n3) Повторите запуск этой же команды.\n\nЕсли ошибка сохраняется — пришлите лог."
     exit 1

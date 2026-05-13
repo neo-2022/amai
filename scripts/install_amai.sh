@@ -85,11 +85,16 @@ if [[ "${remote_mode}" -eq 0 ]]; then
     if [[ -n "${auto_skip_stack_reason}" ]]; then
       echo "install_amai.sh: ${auto_skip_stack_reason}" >&2
     fi
-    exec env \
+    env \
       RUSTC="${rustc_bin}" \
       CARGO_PROFILE_DEV_DEBUG=0 \
       CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=off \
       "${cargo_bin}" run --quiet --release --bin amai-bootstrap -- install "${install_cmd_args[@]}"
+    rc=$?
+    if [[ $rc -eq 0 && -x ./scripts/dedupe_vscode_mcp.sh ]]; then
+      ./scripts/dedupe_vscode_mcp.sh || true
+    fi
+    exit $rc
   fi
 fi
 

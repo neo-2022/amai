@@ -1,0 +1,6 @@
+{"query":"echovault_codex_project_bootstrap.py","expected_projects":["art_real"],"expected_paths":["scripts/tools/echovault_codex_project_bootstrap.py"],"description":"Art bootstrap script should be retrievable by exact filename"}
+{"query":"root_decision_tree_dependencies.yaml","expected_projects":["art_real"],"expected_paths":["formats/root_decision_tree_dependencies.yaml"],"description":"Art root dependency map should be retrievable by exact filename"}
+{"query":"CHECKLIST_00_MASTER_ART_REGART.md","expected_projects":["art_real"],"expected_paths":["docs/source/checklists/CHECKLIST_00_MASTER_ART_REGART.md"],"description":"Art master checklist should be retrievable by exact filename"}
+{"query":"install_amai.sh","expected_projects":["amai_real"],"expected_paths":["scripts/install_amai.sh"],"description":"Amai install path should be retrievable through related-project scope"}
+{"query":"deployment_profiles.toml","expected_projects":["amai_real"],"expected_paths":["config/deployment_profiles.toml"],"description":"Amai deployment profiles should be retrievable through related-project scope"}
+{"query":"proof_install_auto.sh","expected_projects":["amai_real"],"expected_paths":["scripts/proof_install_auto.sh"],"description":"Amai auto-install proof should be retrievable through related-project scope"}

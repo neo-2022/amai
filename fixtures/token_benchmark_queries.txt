@@ -1,0 +1,4 @@
+# Нейтральные fixture-запросы для suite contour.
+shared_runtime_marker
+alpha_runtime_summary
+beta_only_token
