@@ -57,6 +57,11 @@ verify_install() {
   esac
 }
 
+install_vscode_offer_hook() {
+  [[ -x "$AMAI_CLONE_DIR/scripts/install_vscode_connect_offer_autostart.sh" ]] || return 0
+  "$AMAI_CLONE_DIR/scripts/install_vscode_connect_offer_autostart.sh" >/dev/null 2>&1 || true
+}
+
 has_amai_server_in_json() {
   local target_file="$1"
   [[ -f "$target_file" ]] || return 1
@@ -183,6 +188,7 @@ main() {
 
     echo "[2/2] Verifying..."
     verify_install
+    install_vscode_offer_hook
   } >>"$log_file" 2>&1 || {
     show_error "Amai install failed" "Установка Amai завершилась с ошибкой.\n\nЧто сделать:\n1) Открой лог: $log_file\n2) Проверьте интернет-доступ к github.com и open-vsx.org\n3) Повторите запуск этой же команды.\n\nЕсли ошибка сохраняется — пришлите лог."
     exit 1
