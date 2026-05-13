@@ -236,10 +236,10 @@ async function getCodexSurfaceState() {
 function formatCodexSurfaceError(surfaceState) {
   const missingCommand = surfaceState?.missingCommands?.[0] ?? "chatgpt.openSidebar";
   return [
-    "Amai bridge не нашёл готовую рабочую поверхность Codex/OpenAI в VS Code.",
+    "Amai bridge не нашёл готовую чат-интеграцию в VS Code.",
     `Не хватает команды: ${missingCommand}.`,
     "Что сделать:",
-    "1. Установите и включите OpenAI extension с поверхностью Codex/ChatGPT.",
+    "1. Установите и включите совместимое chat-расширение.",
     "2. Перезапустите или Reload Window в VS Code / Codium.",
     "3. Затем снова откройте Amai sidebar.",
   ].join(" ");
@@ -261,6 +261,18 @@ async function pathExists(targetPath) {
   }
 }
 
+async function hasAmaiServerConfig(targetPath) {
+  if (!(await pathExists(targetPath))) {
+    return false;
+  }
+  try {
+    const raw = await fs.readFile(targetPath, "utf8");
+    return /"amai"\s*:/.test(raw);
+  } catch {
+    return false;
+  }
+}
+
 async function collectInstallReadiness() {
   const repoRoot = currentWorkspaceRepoRoot();
   const codexSurface = await getCodexSurfaceState();
@@ -272,11 +284,20 @@ async function collectInstallReadiness() {
     "repo"
   );
   const managedRepoInstalled = await pathExists(managedRepoRoot);
+  const userMcpCandidates = [
+    path.join(process.env.HOME || "", ".config", "Code", "User", "mcp.json"),
+    path.join(process.env.HOME || "", ".config", "VSCodium", "User", "mcp.json"),
+    path.join(process.env.HOME || "", ".vscode-oss", "User", "mcp.json"),
+  ];
+  const userMcpConfigured = (
+    await Promise.all(userMcpCandidates.map((file) => hasAmaiServerConfig(file)))
+  ).some(Boolean);
   const workspaceMcpConfig =
     repoRoot !== null ? path.join(repoRoot, ".vscode", "mcp.json") : null;
   const workspaceMcpConfigured = workspaceMcpConfig
-    ? await pathExists(workspaceMcpConfig)
+    ? await hasAmaiServerConfig(workspaceMcpConfig)
     : false;
+  const mcpConfigured = userMcpConfigured || workspaceMcpConfigured;
   const workspaceMatchesManagedRepo =
     repoRoot !== null && managedRepoInstalled && repoRoot === managedRepoRoot;
   return {
@@ -285,6 +306,9 @@ async function collectInstallReadiness() {
     managedRepoRoot,
     repoRoot,
     workspaceMcpConfig,
+    userMcpCandidates,
+    userMcpConfigured,
+    mcpConfigured,
     workspaceMcpConfigured,
     workspaceMatchesManagedRepo,
   };
@@ -514,7 +538,7 @@ async function openManagedRepoWorkspace() {
   const readiness = await collectInstallReadiness();
   if (readiness.managedRepoInstalled !== true || !readiness.managedRepoRoot) {
     await vscode.window.showErrorMessage(
-      "Amai install не найден. Сначала установите Amai, затем откройте workspace."
+      "Amai install не найден. Сначала установите Amai, затем откройте проект."
     );
     return;
   }
@@ -568,43 +592,46 @@ class AmaiSidebarViewProvider {
     const codexReady = readiness?.codexSurface?.available === true;
     const installReady = readiness?.managedRepoInstalled === true;
     const workspaceReady = readiness?.workspaceMcpConfigured === true;
+    const mcpReady = readiness?.mcpConfigured === true;
     const workspaceMatchesManagedRepo = readiness?.workspaceMatchesManagedRepo === true;
     const sidebarCommandUri = codexReady ? `command:${OPEN_SIDEBAR_COMMAND_ID}` : null;
     const panelCommandUri = codexReady ? `command:${OPEN_PANEL_COMMAND_ID}` : null;
     const managedRepoCommandUri = `command:${OPEN_MANAGED_REPO_COMMAND_ID}`;
     const openAiExtensionCommandUri = `command:${OPEN_OPENAI_EXTENSION_COMMAND_ID}`;
     const reloadWindowCommandUri = `command:${RELOAD_WINDOW_COMMAND_ID}`;
-    const mcpStatus = workspaceReady
-      ? "Amai workspace config найден"
-      : "Откройте именно Amai workspace, чтобы VS Code увидел .vscode/mcp.json";
+    const mcpStatus = mcpReady
+      ? "MCP-конфиг Amai найден"
+      : "Проверьте MCP-конфиг Amai в профиле VS Code/Codium или в .vscode/mcp.json";
     const installStatus = installReady
       ? "Локальная установка Amai найдена"
       : "Сначала установите само приложение Amai";
     const codexStatus = codexReady
-      ? "Codex/OpenAI поверхность в VS Code доступна"
-      : "Сначала установите и включите OpenAI extension с поверхностью Codex/ChatGPT";
+      ? "Чат-интеграция VS Code доступна"
+      : "Сначала установите и включите совместимое chat-расширение";
     const installHint = installReady
       ? `<p class="hint">Amai repo: <code>${readiness?.managedRepoRoot ?? "~/.local/share/amai/repo"}</code>.</p>`
       : `<p class="hint">Похоже, локальная установка Amai ещё не найдена по пути <code>${readiness?.managedRepoRoot ?? "~/.local/share/amai/repo"}</code>.</p>`;
     const workspaceHint = workspaceReady
       ? (workspaceMatchesManagedRepo
-          ? `<p class="hint">Текущий workspace уже привязан к локальной установке Amai.</p>`
-          : `<p class="hint">.vscode/mcp.json найден, но сейчас открыт не managed repo Amai. Для самого простого сценария откройте <code>${readiness?.managedRepoRoot ?? "~/.local/share/amai/repo"}</code>.</p>`)
-      : `<p class="hint">После install откройте <code>${readiness?.managedRepoRoot ?? "~/.local/share/amai/repo"}</code> в VS Code и сделайте Reload Window.</p>`;
+          ? `<p class="hint">Текущий проект уже привязан к локальной установке Amai.</p>`
+          : `<p class="hint">Проектный .vscode/mcp.json найден и готов.</p>`)
+      : (mcpReady
+          ? `<p class="hint">Используется user-level MCP-конфиг, поэтому Amai доступен в любом проекте.</p>`
+          : `<p class="hint">После install проверьте user-level MCP-конфиг или .vscode/mcp.json и сделайте Reload Window.</p>`);
     const codexHint = codexReady
       ? ""
-      : `<p class="hint">Без OpenAI/Codex surface bridge-кнопки не смогут открыть рабочую поверхность Amai.</p>`;
-    const actionPrimary = codexReady && workspaceReady
+      : `<p class="hint">Без совместимой чат-интеграции bridge-кнопки не смогут открыть чат Amai.</p>`;
+    const actionPrimary = codexReady && mcpReady
       ? `<a class="action-button" href="${sidebarCommandUri}">Открыть в Sidebar</a>`
       : `<span class="action-button disabled">Сначала закройте шаги установки ниже</span>`;
-    const actionSecondary = codexReady && workspaceReady
+    const actionSecondary = codexReady && mcpReady
       ? `<a class="action-button secondary" href="${panelCommandUri}">Открыть в Panel</a>`
       : `<span class="action-button secondary disabled">Панель недоступна</span>`;
     const nextSteps = [
       `<li><strong>1.</strong> Установите Amai одной командой из README.</li>`,
-      `<li><strong>2.</strong> Откройте <code>${readiness?.managedRepoRoot ?? "~/.local/share/amai/repo"}</code> в VS Code.</li>`,
+      `<li><strong>2.</strong> Откройте любой рабочий проект в VS Code/Codium.</li>`,
       `<li><strong>3.</strong> Сделайте Reload Window.</li>`,
-      `<li><strong>4.</strong> Убедитесь, что OpenAI extension даёт Codex/ChatGPT surface.</li>`,
+      `<li><strong>4.</strong> Убедитесь, что включено совместимое chat-расширение.</li>`,
       `<li><strong>5.</strong> Затем нажмите кнопку открытия Amai.</li>`,
     ].join("");
     return `<!DOCTYPE html>
@@ -712,7 +739,7 @@ class AmaiSidebarViewProvider {
       <div class="meta">Workspace: ${repoRoot}</div>
       <div class="status-list">
         ${renderStatusBadge(installReady, installStatus)}
-        ${renderStatusBadge(workspaceReady, mcpStatus)}
+        ${renderStatusBadge(mcpReady, mcpStatus)}
         ${renderStatusBadge(codexReady, codexStatus)}
       </div>
       ${installHint}
@@ -722,9 +749,9 @@ class AmaiSidebarViewProvider {
         ${nextSteps}
       </ol>
       <div class="helper-actions">
-        <a class="helper-link" href="${managedRepoCommandUri}">Открыть Amai workspace</a>
+        <a class="helper-link" href="${managedRepoCommandUri}">Открыть Amai Repo</a>
         <a class="helper-link" href="${reloadWindowCommandUri}">Reload Window</a>
-        <a class="helper-link" href="${openAiExtensionCommandUri}">Открыть OpenAI extension</a>
+        <a class="helper-link" href="${openAiExtensionCommandUri}">Открыть chat-расширение</a>
       </div>
       <div class="actions">
         ${actionPrimary}

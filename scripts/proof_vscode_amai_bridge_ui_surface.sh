@@ -20,11 +20,11 @@ jq -e '.contributes.commands[] | select(.command == "amaiVscodeBridge.openManage
 jq -e '.contributes.commands[] | select(.command == "amaiVscodeBridge.openOpenAiExtension")' "${package_json}" >/dev/null
 jq -e '.contributes.commands[] | select(.command == "amaiVscodeBridge.reloadWindow")' "${package_json}" >/dev/null
 grep -Fq 'enableCommandUris: true' "${extension_js}"
-grep -Fq 'Откройте именно Amai workspace' "${extension_js}"
-grep -Fq 'Открыть Amai workspace' "${extension_js}"
-grep -Fq 'Открыть OpenAI extension' "${extension_js}"
+grep -Fq 'user-level MCP-конфиг' "${extension_js}"
+grep -Fq 'Открыть Amai Repo' "${extension_js}"
+grep -Fq 'Открыть chat-расширение' "${extension_js}"
 grep -Fq 'Сначала закройте шаги установки ниже' "${extension_js}"
-grep -Fq 'OpenAI extension с поверхностью Codex/ChatGPT' "${extension_js}"
+grep -Fq 'совместимое chat-расширение' "${extension_js}"
 grep -Fq 'renderStatusBadge' "${extension_js}"
 grep -Fq 'showErrorMessage(`Amai launch failed:' "${extension_js}"
 grep -Fq 'non_bridge_tab_labels: nonBridgeTabLabels' "${extension_js}"
