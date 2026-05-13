@@ -1,0 +1,43 @@
+{
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/.git/index.lock": true,
+    "**/state/**": true,
+    "**/target/**": true,
+    "**/tmp/**": true,
+    "**/output/**": true
+  },
+  "search.exclude": {
+    "**/state/**": true,
+    "**/target/**": true,
+    "**/tmp/**": true,
+    "**/output/**": true
+  },
+  "files.exclude": {
+    "state": true,
+    "target": true,
+    "tmp": true,
+    "output": true
+  },
+  "search.followSymlinks": false,
+  "kilo-code.new.browserAutomation.enabled": false,
+  "git.ignoreLimitWarning": true,
+  "git.autoRepositoryDetection": "openEditors",
+  "git.repositoryScanMaxDepth": 2,
+  "git.repositoryScanIgnoredFolders": [
+    "state",
+    "tmp",
+    "target",
+    "output",
+    "vendor"
+  ],
+  "cmake.sourceDirectory": "/home/art/agent-memory-index/vendor/aws-lc-sys-0.39.0",
+  "chat.mcp.serverSampling": {
+    "agent-memory-index/.vscode/mcp.json: amai": {
+      "allowedModels": [
+        "ollama/Ollama/gemma4:31b-cloud"
+      ]
+    }
+  }
+}
