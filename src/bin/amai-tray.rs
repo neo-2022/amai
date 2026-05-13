@@ -16,6 +16,40 @@ impl AmaiTray {
         let _ = Command::new(script).args(args).status();
     }
 
+    fn spawn_script(&self, rel: &str, args: &[&str]) {
+        let script = self.repo_root.join(rel);
+        let _ = Command::new(script).args(args).spawn();
+    }
+
+    fn status_label(&self) -> String {
+        let script = self.repo_root.join("scripts/amai_tray_menu.sh");
+        let output = Command::new(script).arg("--status").output();
+        if let Ok(result) = output {
+            let raw = String::from_utf8_lossy(&result.stdout);
+            let text = raw.trim();
+            if !text.is_empty() {
+                return format!("Статус: {text}");
+            }
+        }
+        "Статус: неизвестно".to_string()
+    }
+
+    fn notifications_label(&self) -> String {
+        let config_home = std::env::var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let mut base = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+                base.push(".config");
+                base
+            });
+        let disabled = config_home.join("amai/tray_notifications_disabled");
+        if disabled.exists() {
+            "Включить уведомления".to_string()
+        } else {
+            "Не показывать уведомления".to_string()
+        }
+    }
+
     fn notify(&self, text: &str) {
         let _ = Command::new("notify-send").arg("Amai").arg(text).status();
     }
@@ -35,14 +69,20 @@ impl Tray for AmaiTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let repo = self.repo_root.clone();
+        let status = self.status_label();
+        let notifications_label = self.notifications_label();
+
         vec![
             StandardItem {
-                label: "Открыть меню Amai".into(),
-                activate: Box::new(move |_tray: &mut AmaiTray| {
-                    let _ = Command::new(repo.join("scripts/amai_tray_menu.sh"))
-                        .arg("--menu")
-                        .status();
+                label: status,
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Открыть панель Amai".into(),
+                activate: Box::new(|tray: &mut AmaiTray| {
+                    tray.spawn_script("scripts/amai_tray_menu.sh", &["--menu"]);
                 }),
                 ..Default::default()
             }
@@ -76,7 +116,7 @@ impl Tray for AmaiTray {
             }
             .into(),
             StandardItem {
-                label: "Не показывать уведомления".into(),
+                label: notifications_label,
                 activate: Box::new(|tray: &mut AmaiTray| {
                     tray.run_script("scripts/amai_tray_menu.sh", &["--toggle-notifications"]);
                 }),
@@ -104,7 +144,17 @@ impl Tray for AmaiTray {
 }
 
 fn main() {
-    let repo_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let repo_root = std::env::var("AMAI_REPO_ROOT")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(|| {
+            std::env::current_exe().ok().and_then(|exe| {
+                exe.parent()
+                    .and_then(|dir| dir.parent())
+                    .map(PathBuf::from)
+            })
+        })
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let tray = AmaiTray { repo_root };
     let service = ksni::TrayService::new(tray);
     service.spawn();

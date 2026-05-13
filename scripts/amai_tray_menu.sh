@@ -238,7 +238,7 @@ run_tray() {
 case "${1:---menu}" in
   --tray) run_tray ;;
   --menu) show_menu ;;
-  --status) show_info "$(show_status_only)" ;;
+  --status) show_status_only ;;
   --connect) action_connect ;;
   --check) action_check ;;
   --repair) action_repair ;;
