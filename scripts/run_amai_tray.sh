@@ -75,10 +75,11 @@ if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
   exit 0
 fi
 
+appindicator_missing=0
 if [[ "${XDG_CURRENT_DESKTOP:-}" == *GNOME* ]] && ! is_appindicator_enabled; then
   try_enable_appindicator || true
   if ! is_appindicator_enabled; then
-    show_info "Для иконки Amai в трее нужно включить AppIndicator GNOME. Это уже попробовано автоматически. Если значка нет — выполните один раз выход/вход в сессию."
+    appindicator_missing=1
   fi
 fi
 
@@ -91,7 +92,13 @@ if start_rust_tray; then
 fi
 
 if [[ -n "${DISPLAY:-}" ]]; then
+  if [[ "${appindicator_missing}" -eq 1 ]]; then
+    show_info "AppIndicator GNOME пока не активен. Если значок Amai не появился — выполните один раз выход/вход в сессию."
+  fi
   exec "${repo_root}/scripts/amai_tray_menu.sh" --tray
 fi
 
+if [[ "${appindicator_missing}" -eq 1 ]]; then
+  show_info "AppIndicator GNOME пока не активен. Если значок Amai не появился — выполните один раз выход/вход в сессию."
+fi
 show_info "Трей Amai не поддерживается в текущей Wayland-сессии. Используйте приложение Amai из меню приложений."
