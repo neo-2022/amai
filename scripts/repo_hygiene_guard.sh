@@ -78,6 +78,11 @@ security_hardening_output=""
 if ! security_hardening_output="$(./scripts/proof_security_hardening_contract.sh 2>&1)"; then
   security_hardening_status="failed"
 fi
+runtime_personal_path_status="ok"
+runtime_personal_path_output=""
+if ! runtime_personal_path_output="$(./scripts/runtime_personal_path_guard.sh --json 2>&1)"; then
+  runtime_personal_path_status="failed"
+fi
 
 issues=()
 
@@ -125,6 +130,10 @@ if [[ "$security_hardening_status" != "ok" ]]; then
   status_value="drift_detected"
   issues+=("security_hardening_contract_failed")
 fi
+if [[ "$runtime_personal_path_status" != "ok" ]]; then
+  status_value="drift_detected"
+  issues+=("runtime_personal_path_guard_failed")
+fi
 
 portable_absolute_repo_refs_json="$(printf '%s\n' "$portable_absolute_repo_refs" | jq -R -s 'split("\n") | map(select(length > 0))')"
 missing_exec_scripts_json="$(printf '%s\n' "$missing_exec_scripts" | jq -R -s 'split("\n") | map(select(length > 0))')"
@@ -133,6 +142,7 @@ fmt_excerpt_json="$(printf '%s\n' "$fmt_output" | sed -n '1,80p' | jq -R -s '.')
 ops_security_defaults_excerpt_json="$(printf '%s\n' "$ops_security_defaults_output" | sed -n '1,80p' | jq -R -s '.')"
 nats_auth_render_excerpt_json="$(printf '%s\n' "$nats_auth_render_output" | sed -n '1,80p' | jq -R -s '.')"
 security_hardening_excerpt_json="$(printf '%s\n' "$security_hardening_output" | sed -n '1,80p' | jq -R -s '.')"
+runtime_personal_path_excerpt_json="$(printf '%s\n' "$runtime_personal_path_output" | sed -n '1,80p' | jq -R -s '.')"
 
 payload="$(jq -n \
   --arg status "$status_value" \
@@ -144,6 +154,7 @@ payload="$(jq -n \
   --arg ops_security_defaults_status "$ops_security_defaults_status" \
   --arg nats_auth_render_status "$nats_auth_render_status" \
   --arg security_hardening_status "$security_hardening_status" \
+  --arg runtime_personal_path_status "$runtime_personal_path_status" \
   --argjson issues "$issues_json" \
   --argjson portable_absolute_repo_refs "$portable_absolute_repo_refs_json" \
   --argjson missing_exec_scripts "$missing_exec_scripts_json" \
@@ -151,6 +162,7 @@ payload="$(jq -n \
   --argjson ops_security_defaults_excerpt "$ops_security_defaults_excerpt_json" \
   --argjson nats_auth_render_excerpt "$nats_auth_render_excerpt_json" \
   --argjson security_hardening_excerpt "$security_hardening_excerpt_json" \
+  --argjson runtime_personal_path_excerpt "$runtime_personal_path_excerpt_json" \
   '{
     status: $status,
     repo_root: $repo_root,
@@ -161,7 +173,8 @@ payload="$(jq -n \
       cargo_fmt_check: $fmt_status,
       ops_security_defaults: $ops_security_defaults_status,
       nats_auth_render: $nats_auth_render_status,
-      security_hardening_contract: $security_hardening_status
+      security_hardening_contract: $security_hardening_status,
+      runtime_personal_path_guard: $runtime_personal_path_status
     },
     issues: $issues,
     portable_absolute_repo_refs: $portable_absolute_repo_refs,
@@ -169,7 +182,8 @@ payload="$(jq -n \
     cargo_fmt_excerpt: $fmt_excerpt,
     ops_security_defaults_excerpt: $ops_security_defaults_excerpt,
     nats_auth_render_excerpt: $nats_auth_render_excerpt,
-    security_hardening_excerpt: $security_hardening_excerpt
+    security_hardening_excerpt: $security_hardening_excerpt,
+    runtime_personal_path_guard_excerpt: $runtime_personal_path_excerpt
   }')"
 
 if [[ "$json_mode" -eq 1 ]]; then

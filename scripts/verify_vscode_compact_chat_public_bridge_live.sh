@@ -174,6 +174,7 @@ for _ in $(seq 1 "${timeout_seconds}"); do
           --arg status "live_launch_verified" \
           --arg authority "${authority}" \
           --arg repo_root "${repo_root}" \
+          --arg dirty_surface_pattern "untitled:${repo_root}/vscode%3A/amai.amai-vscode-bridge/open-clean-chat" \
           --arg result_file "${result_file}" \
           --arg prompt_file "${prompt_file}" \
           --argjson dirty_surface_before "${dirty_surface_before}" \
@@ -203,7 +204,7 @@ for _ in $(seq 1 "${timeout_seconds}"); do
                     or ($bridge_result[0].visible_surface == null)))
             },
             dirty_surface: {
-              pattern: "untitled:/home/art/agent-memory-index/vscode%3A/amai.amai-vscode-bridge/open-clean-chat",
+              pattern: $dirty_surface_pattern,
               before_count: $dirty_surface_before,
               after_count: $dirty_surface_after
             },
