@@ -1,0 +1,31 @@
+name: OpenVSX Bridge Sync
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - "tools/vscode-amai-bridge/**"
+      - "scripts/openvsx_bridge_sync.sh"
+
+jobs:
+  publish-openvsx:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check OpenVSX drift
+        run: ./scripts/openvsx_bridge_sync.sh check
+        continue-on-error: true
+
+      - name: Publish bridge to OpenVSX
+        if: ${{ secrets.OVSX_TOKEN != '' }}
+        env:
+          OVSX_TOKEN: ${{ secrets.OVSX_TOKEN }}
+        run: ./scripts/openvsx_bridge_sync.sh sync
