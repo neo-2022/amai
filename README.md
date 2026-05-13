@@ -15,41 +15,22 @@
 
 # Amai
 
-`Amai` is a memory and continuity tool for AI agents.
-It keeps project context, working state, restore prompts, and installable client contours outside a single chat or IDE session.
+`Amai` — внешний memory/continuity слой для AI-агентов.
+Он хранит рабочий контекст между сессиями и подключается к клиентам как `MCP stdio server`.
 
-## What It Does
+## Проверенный контур
 
-- keeps project-scoped continuity outside one chat window;
-- restores working context after chat rotation or clean-surface reopen;
-- provides a verified `VS Code` / `Codium` bridge contour through `OpenVSX`;
-- keeps the public repository focused on install and run, not internal governance.
-
-## Status
-
-Amai is still in development.
-
-At the current stage, the verified contour is strictly limited to:
-- `Ubuntu` / `Debian` install and run;
-- `VS Code` / `Codium` client usage on that Linux contour;
-- the `Amai VS Code Bridge` extension published through `OpenVSX`.
-
-Other operating systems, clients, and applications will be added and verified as the project continues to develop.
-
-## Install
-
-Verified install contour right now: `Ubuntu` / `Debian` shell environment, with `VS Code` or `Codium`.
-
-This does not currently claim verified support for `macOS`, `Windows`, or other client/runtime combinations.
+- ОС: `Ubuntu` / `Debian`
+- Клиент: `VS Code` / `Codium`
+- Bridge: `Amai VS Code Bridge` через `OpenVSX`
 
 ## MCP: подключение к любому приложению
 
-`Amai` — это обычный `MCP` `stdio` server. Смысл подключения всегда один:
-ваш клиент/приложение должно запустить команду `scripts/run_mcp_stdio.sh` в каталоге установленного `Amai`.
+Принцип всегда один: клиент должен запускать `scripts/run_mcp_stdio.sh` из установленного репозитория `Amai`.
 
-### 1) Установить Amai и сгенерировать MCP-snippet (одной командой)
+### 1) Установка + генерация snippet (`generic`)
 
-Если ваш MCP‑клиент не поддержан “из коробки”, используйте `generic`:
+Если клиент не поддержан “из коробки”, используйте `generic`:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client generic --stack-profile default --yes
@@ -67,18 +48,11 @@ fi && \
 "${clone_dir}/scripts/install_amai.sh" --client generic --stack-profile default --yes
 ```
 
-После установки snippet будет лежать здесь:
+Snippet после установки: `~/.local/share/amai/repo/tmp/onboarding/generic-mcp.json`
 
-`~/.local/share/amai/repo/tmp/onboarding/generic-mcp.json`
+### 2) Вставить snippet в конфиг клиента
 
-Этот файл содержит три ключевых поля:
-- `command` — что запускать (MCP server runner);
-- `cwd` — где запускать (корень repo Amai);
-- `args` — аргументы (обычно пусто).
-
-### 2) Вставить snippet в конфиг вашего приложения
-
-У разных приложений разная “обёртка” вокруг MCP‑сервера. Чаще всего встречаются два формата.
+Чаще всего встречаются два формата:
 
 **Формат `mcpServers`:**
 
@@ -110,31 +84,31 @@ fi && \
 }
 ```
 
-Если ваш клиент умеет “import server config” без обёртки — используйте содержимое `generic-mcp.json` как есть.
+Если клиент умеет импорт “чистого server config”, используйте `generic-mcp.json` как есть.
 
-### 3) Что учитывать (чтобы работало без ручных допиливаний)
+### 3) Важные условия
 
-- `command` должен указывать на `scripts/run_mcp_stdio.sh` из установленного `Amai` (а не на случайный путь с другого ПК).
+- `command` должен указывать на `scripts/run_mcp_stdio.sh` установленного `Amai`.
 - `cwd` должен быть корнем установленного repo (обычно `~/.local/share/amai/repo`).
-- На Linux для локального стека нужен `docker`/`compose` (или ставьте `--skip-stack`, если вам нужен только MCP без локального stack).
+- Для локального stack нужен `docker`/`compose` (или используйте `--skip-stack`, если нужен только MCP).
 
-### 4) Быстрая проверка (что MCP реально поднимается)
+### 4) Быстрая проверка MCP
 
 ```bash
 cd ~/.local/share/amai/repo && ./scripts/run_mcp_stdio.sh </dev/null >/dev/null 2>&1 || true
 ```
 
-Если клиент “видит” сервер `amai` и может вызвать tools — интеграция готова.
+Если клиент видит сервер `amai` и может вызвать tools — интеграция готова.
 
 ## Установка (коротко)
 
-### VS Code / Codium
+### VS Code / Codium (обычный путь)
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client vscode --stack-profile default --yes
 ```
 
-### Если `raw.githubusercontent.com` недоступен
+### Если `raw.githubusercontent.com` недоступен (fallback)
 
 **Через `git clone`:**
 
@@ -159,34 +133,8 @@ bash "$tmp/amai-main/scripts/install_amai.sh" --client vscode --stack-profile de
 
 ## VS Code Bridge
 
-The current public client contour is `Amai VS Code Bridge`:
-
-- published via `OpenVSX`;
-- usable from `VS Code` / `Codium`;
-- installs an `Amai` activity-bar entry and clean-chat launch surface;
-- designed to carry restore prompts into a fresh chat surface;
-- depends on a separate `OpenAI` / `Codex` chat surface inside the editor.
-
-After install, the intended first-run path is simple:
-
-1. open `~/.local/share/amai/repo` in `VS Code` / `Codium`;
-2. do `Reload Window`;
-3. install or enable the `OpenAI` extension if the editor does not already expose the `Codex` / `ChatGPT` surface;
-4. click the `Amai` icon in the activity bar;
-5. use the sidebar helper actions if the workspace or OpenAI surface is still missing.
-
-Published extension:
-
-- https://open-vsx.org/extension/amai/amai-vscode-bridge
-
-## What Gets Installed
-
-The current GitHub install contour materializes:
-
-- the local Amai repository under `~/.local/share/amai/repo` by default;
-- the `amai` Rust binary build output;
-- the verified `VS Code` / `Codium` bridge bundle;
-- the local runtime/bootstrap surface for the selected stack profile.
+- OpenVSX: https://open-vsx.org/extension/amai/amai-vscode-bridge
+- После установки: открыть `~/.local/share/amai/repo` в `VS Code` / `Codium` и сделать `Reload Window`.
 
 ## Remove
 
@@ -194,22 +142,10 @@ The current GitHub install contour materializes:
 ~/.local/share/amai/repo/scripts/remove_amai.sh --client vscode
 ```
 
-This removes the managed local install contour when Amai was installed through the standard GitHub path.
-
-## Roadmap
-
-Current public truth:
-
-- `Linux` + `VS Code` / `Codium` is the verified contour today;
-- other operating systems and clients are planned, but not claimed as verified yet;
-- public repo content stays minimal and install-oriented by design.
-
 ## License
 
-This project currently uses `PolyForm Noncommercial 1.0.0`.
-
-- commercial use is not permitted under the current license;
-- the exact license text is in [LICENSE](LICENSE).
+`PolyForm Noncommercial 1.0.0`  
+Текст лицензии: [LICENSE](LICENSE)
 
 ## Контакты
 
