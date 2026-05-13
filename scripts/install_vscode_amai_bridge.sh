@@ -9,7 +9,7 @@ if [[ ! -f "${source_dir}/package.json" || ! -f "${source_dir}/extension.js" ]];
   exit 1
 fi
 
-detect_vscode_extensions_root() {
+detect_vscode_extensions_roots() {
   local reason="default"
   if [[ -n "${AMAI_VSCODE_EXTENSIONS_ROOT:-}" ]]; then
     reason="override_env"
@@ -57,22 +57,18 @@ detect_vscode_extensions_root() {
     return 0
   fi
   if [[ -z "${code_realpath}" && ( -d "${HOME}/.config/VSCodium" || -d "${HOME}/.vscode-oss" ) ]]; then
-    reason="codium_or_oss_marker_only"
+    reason="ambiguous_marker_only"
+    printf '%s\t%s\n' "${HOME}/.vscode/extensions" "${reason}"
     printf '%s\t%s\n' "${HOME}/.vscode-oss/extensions" "${reason}"
     return 0
   fi
   printf '%s\t%s\n' "${HOME}/.vscode/extensions" "${reason}"
 }
 
-extensions_root_with_reason="$(detect_vscode_extensions_root)"
-extensions_root="${extensions_root_with_reason%%$'\t'*}"
-extensions_root_reason="${extensions_root_with_reason#*$'\t'}"
-if [[ -n "${extensions_root_reason}" && "${extensions_root_reason}" != "${extensions_root_with_reason}" ]]; then
-  printf 'install_vscode_amai_bridge: detected extensions root: %s (reason=%s, code=%s)\n' \
-    "${extensions_root}" "${extensions_root_reason}" "$(command -v code 2>/dev/null || true)" >&2
-else
-  printf 'install_vscode_amai_bridge: detected extensions root: %s (reason=unknown, code=%s)\n' \
-    "${extensions_root}" "$(command -v code 2>/dev/null || true)" >&2
+mapfile -t detected_roots_with_reason < <(detect_vscode_extensions_roots)
+if [[ "${#detected_roots_with_reason[@]}" -eq 0 ]]; then
+  echo "install_vscode_amai_bridge: failed to detect extensions roots" >&2
+  exit 1
 fi
 package_json="${source_dir}/package.json"
 publisher="$(jq -r '.publisher' "${package_json}")"
@@ -84,26 +80,38 @@ if [[ -z "${publisher}" || -z "${name}" || -z "${version}" || "${publisher}" == 
   exit 1
 fi
 
-target_dir="${extensions_root}/${publisher}.${name}-${version}"
 live_state_path="${repo_root}/.amai/onboarding/vscode-public-bridge-live-state.json"
-extensions_registry_path="${extensions_root}/extensions.json"
-mkdir -p "${extensions_root}"
-lock_path="${extensions_root}/.amai-vscode-bridge.install.lock"
-exec 9>"${lock_path}"
-if command -v flock >/dev/null 2>&1; then
-  flock 9
-fi
-if command -v rsync >/dev/null 2>&1; then
-  mkdir -p "${target_dir}"
-  rsync -a --delete "${source_dir}/" "${target_dir}/"
-else
-  mkdir -p "${target_dir}"
-  cp -R "${source_dir}/." "${target_dir}/"
-fi
-find "${extensions_root}" -maxdepth 1 -type d -name "${publisher}.${name}-*" ! -path "${target_dir}" -exec rm -rf {} +
-find "${extensions_root}" -maxdepth 1 \( -type d -o -type l \) -name "art-local.amai-vscode-bridge-*" -exec rm -rf {} +
-if [[ -f "${extensions_registry_path}" ]]; then
-  python3 - "${extensions_registry_path}" "${target_dir}" "${publisher}.${name}" "${version}" <<'PY'
+install_into_root() {
+  local extensions_root="$1"
+  local extensions_root_reason="$2"
+  local target_dir="${extensions_root}/${publisher}.${name}-${version}"
+  local extensions_registry_path="${extensions_root}/extensions.json"
+
+  if [[ -n "${extensions_root_reason}" ]]; then
+    printf 'install_vscode_amai_bridge: detected extensions root: %s (reason=%s, code=%s)\n' \
+      "${extensions_root}" "${extensions_root_reason}" "$(command -v code 2>/dev/null || true)" >&2
+  else
+    printf 'install_vscode_amai_bridge: detected extensions root: %s (reason=unknown, code=%s)\n' \
+      "${extensions_root}" "$(command -v code 2>/dev/null || true)" >&2
+  fi
+
+  mkdir -p "${extensions_root}"
+  local lock_path="${extensions_root}/.amai-vscode-bridge.install.lock"
+  exec 9>"${lock_path}"
+  if command -v flock >/dev/null 2>&1; then
+    flock 9
+  fi
+  if command -v rsync >/dev/null 2>&1; then
+    mkdir -p "${target_dir}"
+    rsync -a --delete "${source_dir}/" "${target_dir}/"
+  else
+    mkdir -p "${target_dir}"
+    cp -R "${source_dir}/." "${target_dir}/"
+  fi
+  find "${extensions_root}" -maxdepth 1 -type d -name "${publisher}.${name}-*" ! -path "${target_dir}" -exec rm -rf {} +
+  find "${extensions_root}" -maxdepth 1 \( -type d -o -type l \) -name "art-local.amai-vscode-bridge-*" -exec rm -rf {} +
+  if [[ -f "${extensions_registry_path}" ]]; then
+    python3 - "${extensions_registry_path}" "${target_dir}" "${publisher}.${name}" "${version}" <<'PY'
 import json
 import pathlib
 import sys
@@ -138,7 +146,13 @@ for entry in entries:
 if changed:
     registry_path.write_text(json.dumps(entries, ensure_ascii=False, indent=2) + "\n")
 PY
-fi
-rm -f "${live_state_path}"
+  fi
+  printf 'install_vscode_amai_bridge: ok (%s)\n' "${target_dir}"
+}
+for entry in "${detected_roots_with_reason[@]}"; do
+  root="${entry%%$'\t'*}"
+  reason="${entry#*$'\t'}"
+  install_into_root "${root}" "${reason}"
+done
 
-printf 'install_vscode_amai_bridge: ok (%s)\n' "${target_dir}"
+rm -f "${live_state_path}"
