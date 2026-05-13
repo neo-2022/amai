@@ -3,7 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-KPI_SCRIPT="/home/art/.codex/skills/vscode-5h-kpi-prefix/scripts/read_kpi_prefix.sh"
+KPI_SCRIPT_DEFAULT="${HOME}/.codex/skills/vscode-5h-kpi-prefix/scripts/read_kpi_prefix.sh"
+KPI_SCRIPT="${AMAI_KPI_SCRIPT_PATH:-${KPI_SCRIPT_DEFAULT}}"
 STARTUP_STATE_ARTIFACT="${REPO_ROOT}/.amai/continuity/project-chat-startup-state.json"
 STARTUP_STATE_ARTIFACT_VERSION="workspace-startup-runtime-state-v4"
 PREFIX_DRIFT_TOLERANCE_PERCENT="10"
