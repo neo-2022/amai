@@ -10,6 +10,7 @@ has_stack_profile=0
 skip_stack=0
 remote_mode=0
 client_target="auto"
+install_cmd_args=("$@")
 for arg in "$@"; do
   case "$arg" in
     --stack-profile|--stack-profile=*)
@@ -34,6 +35,18 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+auto_skip_stack_reason=""
+if [[ "${remote_mode}" -eq 0 && "${skip_stack}" -eq 0 ]]; then
+  if command -v systemctl >/dev/null 2>&1; then
+    if ! systemctl --user show-environment >/dev/null 2>&1; then
+      skip_stack=1
+      install_cmd_args+=("--skip-stack")
+      auto_skip_stack_reason="systemctl --user is unavailable for this shell; local stack bootstrap/autostart is skipped automatically"
+      export AMAI_STACK_AUTOSTART_SKIP_SYSTEMCTL=1
+    fi
+  fi
+fi
 
 require_local_stack_bootstrap_prereqs() {
   if ! command -v docker >/dev/null 2>&1; then
@@ -69,16 +82,22 @@ fi
 if [[ "${remote_mode}" -eq 0 ]]; then
   normalized_client="$(printf '%s' "${client_target}" | tr '[:upper:]' '[:lower:]')"
   if [[ -z "${normalized_client}" || "${normalized_client}" == "auto" || "${normalized_client}" == "vscode" ]]; then
+    if [[ -n "${auto_skip_stack_reason}" ]]; then
+      echo "install_amai.sh: ${auto_skip_stack_reason}" >&2
+    fi
     exec env \
       RUSTC="${rustc_bin}" \
       CARGO_PROFILE_DEV_DEBUG=0 \
       CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=off \
-      "${cargo_bin}" run --quiet --release --bin amai-bootstrap -- install "$@"
+      "${cargo_bin}" run --quiet --release --bin amai-bootstrap -- install "${install_cmd_args[@]}"
   fi
 fi
 
+if [[ -n "${auto_skip_stack_reason}" ]]; then
+  echo "install_amai.sh: ${auto_skip_stack_reason}" >&2
+fi
 exec env \
   RUSTC="${rustc_bin}" \
   CARGO_PROFILE_DEV_DEBUG=0 \
   CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=off \
-  "${cargo_bin}" run --quiet -- bootstrap install --skip-release-build "$@"
+  "${cargo_bin}" run --quiet -- bootstrap install --skip-release-build "${install_cmd_args[@]}"
