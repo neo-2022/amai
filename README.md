@@ -210,3 +210,7 @@ This project currently uses `PolyForm Noncommercial 1.0.0`.
 
 - commercial use is not permitted under the current license;
 - the exact license text is in [LICENSE](LICENSE).
+
+## Контакты
+
+Обратная связь: `Art260679@gmail.com`
