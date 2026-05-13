@@ -15,7 +15,7 @@ matrix_target="${run_dir}/matrix-mcp.json"
 tray_home="${run_dir}/tray-home"
 mkdir -p "${tray_home}"
 
-cases=(M1 M2 M3 M4 M6 M8 M13)
+cases=(M1 M2 M3 M4 M6 M8 M13 M14)
 
 case_domain() {
   case "$1" in
@@ -23,7 +23,7 @@ case_domain() {
     M3) echo "remove" ;;
     M4) echo "connect" ;;
     M6) echo "repair" ;;
-    M8|M13) echo "tray" ;;
+    M8|M13|M14) echo "tray" ;;
     *) echo "unknown" ;;
   esac
 }
@@ -88,6 +88,9 @@ run_case() {
         HOME="${tray_home}" XDG_CONFIG_HOME="${tray_home}/.config" XDG_STATE_HOME="${tray_home}/.state" \
           ./scripts/amai_tray_menu.sh --toggle-notifications
         test ! -f "${tray_home}/.config/amai/tray_notifications_disabled"
+        ;;
+      M14)
+        timeout "${case_timeout}" ./scripts/proof_tray_wayland_x11_fallback.sh
         ;;
     esac
     echo "finished=$(date -u +%FT%TZ)"
