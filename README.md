@@ -99,6 +99,14 @@ cd ~/.local/share/amai/repo && ./scripts/run_mcp_stdio.sh </dev/null >/dev/null 
 
 ## Установка (коротко)
 
+### One-click: только Amai
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_amai_oneclick.sh)
+```
+
+Скрипт ставит только `Amai`, проверяет результат и показывает окно успеха/ошибки с подсказкой, что делать дальше.
+
 ### VS Code / Codium (обычный путь)
 
 ```bash
