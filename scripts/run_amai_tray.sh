@@ -16,6 +16,21 @@ show_info() {
   printf '%s\n' "${text}"
 }
 
+is_appindicator_enabled() {
+  if ! command -v gsettings >/dev/null 2>&1; then
+    return 1
+  fi
+  gsettings get org.gnome.shell enabled-extensions 2>/dev/null | rg -q "ubuntu-appindicators@ubuntu.com|appindicatorsupport@rgcjonas.gmail.com"
+}
+
+try_enable_appindicator() {
+  command -v gnome-extensions >/dev/null 2>&1 || return 1
+  gnome-extensions enable ubuntu-appindicators@ubuntu.com >/dev/null 2>&1 || true
+  gnome-extensions enable appindicatorsupport@rgcjonas.gmail.com >/dev/null 2>&1 || true
+  sleep 1
+  is_appindicator_enabled
+}
+
 cleanup_pid() {
   if [[ -f "${tray_pid_file}" ]] && [[ "$(cat "${tray_pid_file}" 2>/dev/null || true)" == "$1" ]]; then
     rm -f "${tray_pid_file}"
@@ -58,6 +73,13 @@ fi
 
 if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
   exit 0
+fi
+
+if [[ "${XDG_CURRENT_DESKTOP:-}" == *GNOME* ]] && ! is_appindicator_enabled; then
+  try_enable_appindicator || true
+  if ! is_appindicator_enabled; then
+    show_info "Для иконки Amai в трее нужно включить AppIndicator GNOME. Это уже попробовано автоматически. Если значка нет — выполните один раз выход/вход в сессию."
+  fi
 fi
 
 if ! ensure_single_instance; then

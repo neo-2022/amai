@@ -29,6 +29,12 @@ EOF
 
 printf 'Amai tray autostart installed: %s\n' "${desktop_file}"
 
+if [[ "${XDG_CURRENT_DESKTOP:-}" == *GNOME* ]]; then
+  if ! gsettings get org.gnome.shell enabled-extensions 2>/dev/null | grep -Eq "ubuntu-appindicators@ubuntu.com|appindicatorsupport@rgcjonas.gmail.com"; then
+    printf '%s\n' "Hint: GNOME AppIndicator extension is not active yet. Amai will try to enable it automatically on launch."
+  fi
+fi
+
 if [[ -x "${repo_root}/scripts/install_amai_app_launcher.sh" ]]; then
   "${repo_root}/scripts/install_amai_app_launcher.sh" >/dev/null 2>&1 || true
 fi
