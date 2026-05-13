@@ -2178,6 +2178,20 @@ async fn command_exists(command: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn command_exists_sync(command: &str) -> bool {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "command -v {} >/dev/null 2>&1",
+            shell_escape(command)
+        ))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 fn shell_escape(input: &str) -> String {
     if input
         .bytes()
@@ -2954,6 +2968,19 @@ fn install_client_runtime_artifacts(
     if startup_summary.status != "managed_workspace_instruction_installed" {
         return Ok(None);
     }
+    if !command_exists_sync("openclaw") {
+        startup_summary.status = "managed_openclaw_agent_workspace_skipped_openclaw_cli_missing"
+            .to_string();
+        startup_summary.auto_start_ready = false;
+        startup_summary.reason = "OpenClaw CLI is not available in PATH; Amai generated the managed workspace, but cannot register the project agent automatically. Install OpenClaw, then rerun onboarding."
+            .to_string();
+        return Ok(Some(ClientRuntimeInstallSummary {
+            status: "managed_openclaw_agent_registration_skipped".to_string(),
+            output_path: repo_root.join(".openclaw"),
+            install_scope: "workspace_local".to_string(),
+            reason: "OpenClaw CLI missing; skipped automatic agent registration".to_string(),
+        }));
+    }
     let workspace_root = startup_summary
         .output_path
         .parent()
@@ -3586,6 +3613,9 @@ fn remove_client_runtime_artifacts(
 ) -> Result<Option<ClientRuntimeInstallSummary>> {
     if client_key == "hermes" {
         return remove_hermes_project_profile(repo_root);
+    }
+    if client_key == "openclaw" && !command_exists_sync("openclaw") {
+        return Ok(None);
     }
     if client_key != "openclaw" {
         return Ok(None);
