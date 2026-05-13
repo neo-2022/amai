@@ -17,7 +17,19 @@ detect_vscode_extensions_root() {
     return 0
   fi
   local code_path code_realpath
-  code_path="$(command -v code 2>/dev/null || true)"
+  code_path="${AMAI_VSCODE_CLI_BIN:-}"
+  if [[ -z "${code_path}" ]]; then
+    for candidate in code codium code-oss; do
+      code_path="$(command -v "${candidate}" 2>/dev/null || true)"
+      [[ -n "${code_path}" ]] && break
+    done
+  fi
+  if [[ -z "${code_path}" && -x "${HOME}/.local/bin/code" ]]; then
+    code_path="${HOME}/.local/bin/code"
+  fi
+  if [[ -z "${code_path}" && -x "${HOME}/.local/bin/codium" ]]; then
+    code_path="${HOME}/.local/bin/codium"
+  fi
   code_realpath=""
   if [[ -n "${code_path}" ]]; then
     code_realpath="$(readlink -f "${code_path}" 2>/dev/null || printf '%s' "${code_path}")"
@@ -39,8 +51,13 @@ detect_vscode_extensions_root() {
     return 0
   fi
 
-  if [[ "${code_realpath}" == *codium* || "${code_realpath}" == *VSCodium* || -d "${HOME}/.config/VSCodium" || -d "${HOME}/.vscode-oss" ]]; then
+  if [[ "${code_realpath}" == *codium* || "${code_realpath}" == *VSCodium* ]]; then
     reason="codium_or_oss"
+    printf '%s\t%s\n' "${HOME}/.vscode-oss/extensions" "${reason}"
+    return 0
+  fi
+  if [[ -z "${code_realpath}" && ( -d "${HOME}/.config/VSCodium" || -d "${HOME}/.vscode-oss" ) ]]; then
+    reason="codium_or_oss_marker_only"
     printf '%s\t%s\n' "${HOME}/.vscode-oss/extensions" "${reason}"
     return 0
   fi

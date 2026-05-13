@@ -104,6 +104,14 @@ cd ~/.local/share/amai/repo && ./scripts/run_mcp_stdio.sh </dev/null >/dev/null 
 bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client vscode --stack-profile default --yes
 ```
 
+CLI клиента ищется автоматически (`code`, `codium`, `code-oss`, включая `~/.local/bin`).
+Если у вас нестандартный путь, задайте его явно:
+
+```bash
+AMAI_VSCODE_CLI_BIN="/абсолютный/путь/к/code-или-codium" \
+bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client vscode --stack-profile default --yes
+```
+
 ### Если `raw.githubusercontent.com` недоступен
 
 **Через `git clone`:**

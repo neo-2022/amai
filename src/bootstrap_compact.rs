@@ -141,7 +141,10 @@ async fn install(
         .context("failed to load generated .env for compact bootstrap install")?;
 
     check_dependency("docker", &["--version"]).await?;
-    check_dependency("code", &["--version"]).await?;
+    let vscode_cli = resolve_vscode_cli_binary();
+    if let Some(cli_path) = &vscode_cli {
+        check_dependency_path(cli_path, &["--version"]).await?;
+    }
 
     if !skip_stack {
         let mut bootstrap_stack = script_command(
@@ -159,14 +162,15 @@ async fn install(
     )
     .await?;
 
-    run_command(
-        "install vscode bridge",
-        script_command(&repo_root, "scripts/install_vscode_amai_bridge.sh", []),
-    )
-    .await?;
+    let mut install_bridge = script_command(&repo_root, "scripts/install_vscode_amai_bridge.sh", []);
+    if let Some(cli_path) = &vscode_cli {
+        install_bridge.env("AMAI_VSCODE_CLI_BIN", cli_path);
+    }
+    run_command("install vscode bridge", install_bridge).await?;
 
     let client_config_path = resolve_vscode_output_path(&repo_root, output);
     write_vscode_mcp_config(&repo_root, &client_config_path)?;
+    write_compact_vscode_onboarding_artifacts(&repo_root)?;
 
     let install_state = CompactInstallState {
         package_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -342,6 +346,28 @@ fn write_vscode_mcp_config(repo_root: &Path, output: &Path) -> Result<()> {
     let payload = VscodeMcpConfig { servers };
     fs::write(output, serde_json::to_string_pretty(&payload)? + "\n")
         .with_context(|| format!("failed to write {}", output.display()))?;
+    Ok(())
+}
+
+fn write_compact_vscode_onboarding_artifacts(repo_root: &Path) -> Result<()> {
+    let onboarding_dir = repo_root.join("tmp/onboarding");
+    fs::create_dir_all(&onboarding_dir)
+        .with_context(|| format!("failed to create {}", onboarding_dir.display()))?;
+
+    let mcp_output = onboarding_dir.join("vscode-mcp.json");
+    write_vscode_mcp_config(repo_root, &mcp_output)?;
+
+    let startup_output = onboarding_dir.join("vscode-amai-startup.md");
+    let startup_text = [
+        "# Amai startup (VS Code / Codium)",
+        "",
+        "1. Откройте рабочую папку с `Amai`.",
+        "2. Выполните `Reload Window` в клиенте.",
+        "3. Убедитесь, что MCP-сервер `amai` активен.",
+    ]
+    .join("\n");
+    fs::write(&startup_output, startup_text + "\n")
+        .with_context(|| format!("failed to write {}", startup_output.display()))?;
     Ok(())
 }
 
@@ -742,6 +768,81 @@ async fn check_dependency(program: &str, args: &[&str]) -> Result<()> {
         bail!("{program} is required for compact bootstrap but is not available");
     }
     Ok(())
+}
+
+async fn check_dependency_path(program: &Path, args: &[&str]) -> Result<()> {
+    let status = Command::new(program)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .with_context(|| {
+            format!(
+                "failed to start dependency check for {}",
+                program.display()
+            )
+        })?;
+    if !status.success() {
+        bail!(
+            "{} is required for compact bootstrap but is not available",
+            program.display()
+        );
+    }
+    Ok(())
+}
+
+fn resolve_vscode_cli_binary() -> Option<PathBuf> {
+    if let Some(explicit) = env::var_os("AMAI_VSCODE_CLI_BIN") {
+        let path = PathBuf::from(explicit);
+        if is_executable_file(&path) {
+            return Some(path);
+        }
+    }
+
+    for candidate in ["code", "codium", "code-oss"] {
+        if let Some(path) = resolve_in_path(candidate) {
+            return Some(path);
+        }
+    }
+
+    let home = home_dir()?;
+    for candidate in ["code", "codium", "code-oss"] {
+        let path = home.join(".local/bin").join(candidate);
+        if is_executable_file(&path) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn resolve_in_path(program: &str) -> Option<PathBuf> {
+    let paths = env::var_os("PATH")?;
+    for path in env::split_paths(&paths) {
+        let candidate = path.join(program);
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path) {
+            return meta.permissions().mode() & 0o111 != 0;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        return true;
+    }
+    false
 }
 
 async fn best_effort_cleanup_mcp_orphans(repo_root: &Path) {
