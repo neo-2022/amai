@@ -181,7 +181,7 @@ async fn install(
     println!("Client runtime artifact: VS Code bridge установлен");
     println!("Release binary готов: нет");
     println!("Что делать дальше:");
-    println!("- откройте VS Code или Codium в каталоге репозитория");
+    println!("- откройте любой рабочий проект в VS Code или Codium");
     println!("- сделайте Reload Window");
     println!("- убедитесь, что MCP server `amai` виден клиенту");
     Ok(())
