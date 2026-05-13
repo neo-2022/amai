@@ -352,34 +352,38 @@ cat > "${temp_home}/.openclaw/openclaw.json" <<'EOF'
 }
 EOF
 
-HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/onboard_local.sh --client openclaw --yes --skip-stack --skip-release-build
-test -f "${temp_home}/.openclaw/openclaw.json"
-grep -q '"gateway"' "${temp_home}/.openclaw/openclaw.json"
-HOME="${temp_home}" openclaw mcp list | grep -q 'amai'
-HOME="${temp_home}" openclaw mcp show amai --json | grep -q 'run_mcp_stdio'
-test -f .amai/onboarding/project-chat-startup-contract.json
-assert_startup_contract .amai/onboarding/project-chat-startup-contract.json
-test -f .openclaw/AGENTS.md
-assert_startup_surface_sha .openclaw/AGENTS.md
-assert_contains_all .openclaw/AGENTS.md \
-  'AMAI MANAGED STARTUP INSTRUCTIONS v1' \
-  'amai_continuity_startup' \
-  './scripts/reconnect_local.sh --client openclaw' \
-  './scripts/amai_exec.sh bootstrap reconnect --client openclaw --yes'
-HOME="${temp_home}" openclaw agents list --json | jq -e --arg workspace "$(pwd)/.openclaw" '.[] | select(.workspace == $workspace)' >/dev/null
+if command -v openclaw >/dev/null 2>&1; then
+  HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/onboard_local.sh --client openclaw --yes --skip-stack --skip-release-build
+  test -f "${temp_home}/.openclaw/openclaw.json"
+  grep -q '"gateway"' "${temp_home}/.openclaw/openclaw.json"
+  HOME="${temp_home}" openclaw mcp list | grep -q 'amai'
+  HOME="${temp_home}" openclaw mcp show amai --json | grep -q 'run_mcp_stdio'
+  test -f .amai/onboarding/project-chat-startup-contract.json
+  assert_startup_contract .amai/onboarding/project-chat-startup-contract.json
+  test -f .openclaw/AGENTS.md
+  assert_startup_surface_sha .openclaw/AGENTS.md
+  assert_contains_all .openclaw/AGENTS.md \
+    'AMAI MANAGED STARTUP INSTRUCTIONS v1' \
+    'amai_continuity_startup' \
+    './scripts/reconnect_local.sh --client openclaw' \
+    './scripts/amai_exec.sh bootstrap reconnect --client openclaw --yes'
+  HOME="${temp_home}" openclaw agents list --json | jq -e --arg workspace "$(pwd)/.openclaw" '.[] | select(.workspace == $workspace)' >/dev/null
 
-HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/disconnect_local.sh --client openclaw
-if HOME="${temp_home}" openclaw mcp show amai --json >/dev/null 2>&1; then
-  echo "proof_client_lifecycle: openclaw server entry still present after disconnect"
-  exit 1
-fi
-if HOME="${temp_home}" openclaw agents list --json | jq -e --arg workspace "$(pwd)/.openclaw" '.[] | select(.workspace == $workspace)' >/dev/null; then
-  echo "proof_client_lifecycle: openclaw project agent still present after disconnect"
-  exit 1
-fi
-if [[ -f .openclaw/AGENTS.md ]]; then
-  echo "proof_client_lifecycle: openclaw startup workspace still present after disconnect"
-  exit 1
+  HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/disconnect_local.sh --client openclaw
+  if HOME="${temp_home}" openclaw mcp show amai --json >/dev/null 2>&1; then
+    echo "proof_client_lifecycle: openclaw server entry still present after disconnect"
+    exit 1
+  fi
+  if HOME="${temp_home}" openclaw agents list --json | jq -e --arg workspace "$(pwd)/.openclaw" '.[] | select(.workspace == $workspace)' >/dev/null; then
+    echo "proof_client_lifecycle: openclaw project agent still present after disconnect"
+    exit 1
+  fi
+  if [[ -f .openclaw/AGENTS.md ]]; then
+    echo "proof_client_lifecycle: openclaw startup workspace still present after disconnect"
+    exit 1
+  fi
+else
+  echo "proof_client_lifecycle: skipping openclaw lifecycle (openclaw CLI not found)"
 fi
 
 echo "proof_client_lifecycle: ok"
