@@ -14,6 +14,20 @@ is_gui_available() {
   [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]
 }
 
+is_status_icons_enabled() {
+  if ! command -v gsettings >/dev/null 2>&1; then
+    return 1
+  fi
+  gsettings get org.gnome.shell enabled-extensions 2>/dev/null | rg -q "status-icons@gnome-shell-extensions.gcampax.github.com"
+}
+
+try_enable_status_icons() {
+  command -v gnome-extensions >/dev/null 2>&1 || return 1
+  gnome-extensions enable status-icons@gnome-shell-extensions.gcampax.github.com >/dev/null 2>&1 || true
+  sleep 1
+  is_status_icons_enabled
+}
+
 resolve_tray_icon() {
   local candidate
   for candidate in \
@@ -189,8 +203,8 @@ run_tray() {
     exit 0
   fi
 
-  if [[ -n "${WAYLAND_DISPLAY:-}" && "${AMAI_ENABLE_EXPERIMENTAL_TRAY:-0}" != "1" ]]; then
-    exit 0
+  if [[ "${XDG_CURRENT_DESKTOP:-}" == *GNOME* ]] && ! is_status_icons_enabled; then
+    try_enable_status_icons || true
   fi
 
   if [[ -f "${tray_pid_file}" ]] && kill -0 "$(cat "${tray_pid_file}" 2>/dev/null)" 2>/dev/null; then
@@ -204,9 +218,9 @@ run_tray() {
     exit 0
   fi
 
-  local -a yad_cmd=("env" "GDK_BACKEND=x11" "yad")
-  if [[ "${AMAI_TRAY_BACKEND:-}" == "yad-native" ]]; then
-    yad_cmd=("yad")
+  local -a yad_cmd=("yad")
+  if [[ -z "${WAYLAND_DISPLAY:-}" && "${AMAI_TRAY_BACKEND:-}" != "yad-native" ]]; then
+    yad_cmd=("env" "GDK_BACKEND=x11" "yad")
   fi
 
   local warned_fallback=0
@@ -229,7 +243,8 @@ run_tray() {
       --command="${repo_root}/scripts/amai_tray_menu.sh --menu" 2>&1 || true)"
     if [[ "${warned_fallback}" -eq 0 ]] && [[ "${notify_out}" == *"not supported outside X11"* ]]; then
       warned_fallback=1
-      show_info "Трей в этом режиме ограничен. Используйте запуск Amai из меню приложений."
+      show_info "Трей в этом режиме ограничен. Открываю меню Amai."
+      show_menu
     fi
     sleep 2
   done

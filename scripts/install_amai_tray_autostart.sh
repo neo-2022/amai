@@ -20,10 +20,10 @@ cat > "${desktop_file}" <<EOF
 Type=Application
 Name=Amai
 Comment=Amai tray menu and quick actions
-Exec=${repo_root}/scripts/run_amai_tray.sh
+Exec=${repo_root}/scripts/amai_tray_menu.sh --tray
 Icon=amai
 Terminal=false
-TryExec=${repo_root}/scripts/run_amai_tray.sh
+TryExec=${repo_root}/scripts/amai_tray_menu.sh
 X-GNOME-Autostart-enabled=true
 EOF
 

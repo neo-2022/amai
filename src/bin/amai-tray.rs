@@ -68,6 +68,16 @@ impl Tray for AmaiTray {
         "amai".to_string()
     }
 
+    fn icon_theme_path(&self) -> String {
+        if let Ok(xdg_data_home) = std::env::var("XDG_DATA_HOME") {
+            return format!("{xdg_data_home}/icons");
+        }
+        if let Some(home) = dirs::home_dir() {
+            return home.join(".local/share/icons").display().to_string();
+        }
+        String::new()
+    }
+
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let status = self.status_label();
         let notifications_label = self.notifications_label();

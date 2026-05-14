@@ -7,6 +7,11 @@ export AMAI_REPO_ROOT="${repo_root}"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/amai"
 mkdir -p "${state_dir}"
 tray_pid_file="${state_dir}/rust_tray.pid"
+tray_log_file="${state_dir}/tray_launcher.log"
+
+log_line() {
+  printf '%s %s\n' "$(date '+%F %T')" "$*" >> "${tray_log_file}"
+}
 
 show_info() {
   local text="$1"
@@ -50,16 +55,29 @@ ensure_single_instance() {
 }
 
 start_rust_tray() {
-  if [[ -x ./target/release/amai-tray ]]; then
-    ./target/release/amai-tray &
-  else
-    cargo run --quiet --release --bin amai-tray &
+  if [[ ! -x ./target/release/amai-tray ]]; then
+    log_line "rust tray binary missing: ${repo_root}/target/release/amai-tray"
+    return 1
   fi
+  ./target/release/amai-tray &
   local tray_pid="$!"
+  local started_at
+  started_at="$(date +%s)"
   echo "${tray_pid}" > "${tray_pid_file}"
   sleep 3
   if kill -0 "${tray_pid}" 2>/dev/null; then
-    wait "${tray_pid}"
+    if ! wait "${tray_pid}"; then
+      cleanup_pid "${tray_pid}"
+      return 1
+    fi
+    local finished_at runtime_sec
+    finished_at="$(date +%s)"
+    runtime_sec="$((finished_at - started_at))"
+    if [[ "${runtime_sec}" -lt 10 ]]; then
+      log_line "rust tray exited too fast (${runtime_sec}s)"
+      cleanup_pid "${tray_pid}"
+      return 1
+    fi
     cleanup_pid "${tray_pid}"
     return 0
   fi
@@ -68,10 +86,12 @@ start_rust_tray() {
 }
 
 if [[ "${1:-}" == "--menu" ]]; then
+  log_line "launcher mode=menu"
   exec "${repo_root}/scripts/amai_tray_menu.sh" --menu
 fi
 
 if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+  log_line "exit no-gui DISPLAY='${DISPLAY:-}' WAYLAND_DISPLAY='${WAYLAND_DISPLAY:-}'"
   exit 0
 fi
 
@@ -84,16 +104,24 @@ if [[ "${XDG_CURRENT_DESKTOP:-}" == *GNOME* ]] && ! is_appindicator_enabled; the
 fi
 
 if ! ensure_single_instance; then
+  log_line "skip existing rust tray pid"
   exit 0
 fi
 
+log_line "start DISPLAY='${DISPLAY:-}' WAYLAND='${WAYLAND_DISPLAY:-}' XDG_SESSION_TYPE='${XDG_SESSION_TYPE:-}'"
 if start_rust_tray; then
+  log_line "rust tray exit normal"
   exit 0
 fi
 
 if [[ -n "${DISPLAY:-}" ]]; then
   if [[ "${appindicator_missing}" -eq 1 ]]; then
     show_info "AppIndicator GNOME пока не активен. Если значок Amai не появился — выполните один раз выход/вход в сессию."
+  fi
+  if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+    log_line "fallback wayland -> yad tray"
+  else
+    log_line "fallback x11 -> yad tray"
   fi
   exec "${repo_root}/scripts/amai_tray_menu.sh" --tray
 fi
