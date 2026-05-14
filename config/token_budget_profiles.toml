@@ -1,0 +1,82 @@
+modified_at = "2026-03-26 16:31 MSK"
+"Ручная сверка guide/docs" = "2026-03-26 16:31 MSK"
+
+default_profile = "local_default"
+
+[measurement]
+tokenizer = "o200k_base"
+naive_limit_files = 200
+naive_max_bytes_per_file = 32768
+include_verify_events_by_default = false
+metering_ingest_warning_seconds = 60
+metering_ingest_slo_seconds = 300
+late_arrival_grace_minutes = 60
+
+[contract]
+usage_event_schema_version = "billing-usage-event-v2"
+settlement_statement_version = "settlement-preview-v6"
+metering_event_schema_version = "token-budget-event-v3"
+usage_lifecycle_model_version = "usage-lifecycle-v1"
+baseline_method_version = "retrieval-baseline-v1"
+quality_method_version = "quality-gate-v1"
+coverage_model_version = "token-coverage-v1"
+metering_freshness_model_version = "metering-freshness-v1"
+agent_cycle_model_version = "agent-cycle-lower-bound-v4"
+client_limit_meter_alignment_version = "client-limit-meter-alignment-v12"
+client_limit_baseline_equivalence_version = "client-limit-baseline-equivalence-v4"
+client_limit_strict_meter_slice_version = "client-limit-strict-meter-slice-v1"
+client_limit_explicit_boundary_surface_version = "client-limit-explicit-boundary-surface-v2"
+client_limit_continuity_boundary_rollup_version = "client-limit-continuity-boundary-rollup-v2"
+client_limit_pre_amai_baseline_source_version = "client-limit-pre-amai-baseline-source-v2"
+client_limit_frozen_gap_review_surface_version = "client-limit-frozen-gap-review-surface-v1"
+client_limit_reviewed_frozen_debt_export_surface_version = "client-limit-reviewed-frozen-debt-export-surface-v1"
+excluded_taxonomy_version = "token-excluded-usage-v1"
+dedup_contract_version = "event-id-source-kind-v1"
+backfill_policy_version = "report-only-backfill-v1"
+correction_policy_version = "report-only-correction-v1"
+freeze_close_policy_version = "freeze-close-v2"
+late_arrival_policy_version = "late-arrival-v2"
+dispute_policy_version = "report-only-dispute-v1"
+settlement_lifecycle_model_version = "settlement-lifecycle-v4"
+statement_period_governance_version = "statement-period-governance-v2"
+adjustment_preview_model_version = "adjustment-preview-v1"
+adjustment_request_schema_version = "adjustment-request-v1"
+adjustment_registry_version = "adjustment-registry-v2"
+infra_cost_binding_model_version = "infra-cost-binding-v3"
+telemetry_surface_split_version = "tokenonomics-surface-split-v1"
+event_time_policy_version = "client-visible-ingest-v1"
+billing_policy_version = "report-only-v1"
+suitability_model_version = "token-suitability-v1"
+contractual_readiness_model_version = "contractual-readiness-v1"
+customer_contractual_boundary_version = "customer-contractual-boundary-v1"
+settlement_activation_governance_version = "settlement-activation-governance-v1"
+adjustment_activation_governance_version = "adjustment-activation-governance-v1"
+billing_mode = "report_only"
+reconciliation_contract_version = "provider-reconciliation-v10"
+margin_model_version = "margin-view-v9"
+infra_cost_profile_version = "unpriced-infra-v1"
+rate_card_binding_model_version = "rate-card-binding-v3"
+rate_card_version = "unpriced-v1"
+currency_profile = "unpriced"
+settlement_status = "unsettled_report_only"
+contractual_statement_export_version = "contractual-statement-export-v21"
+settlement_report_preview_version = "settlement-report-preview-v12"
+contractual_evidence_pack_version = "contractual-evidence-pack-v21"
+
+[profiles.local_default]
+display_name = "Обычная рабочая машина"
+description = "Подходит, когда внешний клиент сам не публикует жёсткое окно лимита. Показывает текущую рабочую сессию, последние 24 часа и накопительный итог."
+session_gap_minutes = 30
+rolling_window_hours = 24
+
+[profiles.codex_5h]
+display_name = "Codex 5 часов"
+description = "Показывает токены за текущую рабочую сессию, за текущее 5-часовое окно и за всё время. Полезно, когда вы смотрите именно на лимитное окно Codex."
+session_gap_minutes = 30
+rolling_window_hours = 5
+
+[profiles.demo_1h]
+display_name = "Быстрый demo-час"
+description = "Показывает короткое часовое окно для демонстраций, smoke-прогонов и недолгих проверок."
+session_gap_minutes = 15
+rolling_window_hours = 1

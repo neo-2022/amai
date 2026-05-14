@@ -1,5 +1,7 @@
 use super::*;
 
+const EMBEDDED_TOKEN_BUDGET_PROFILES_TOML: &str = include_str!("../../config/token_budget_profiles.toml");
+
 pub(crate) fn load_config(repo_root: &Path) -> Result<TokenBudgetConfigFile> {
     let path = resolve_token_budget_config_path(repo_root);
     let canonical_config_path = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
@@ -13,8 +15,15 @@ pub(crate) fn load_config(repo_root: &Path) -> Result<TokenBudgetConfigFile> {
             }
         }
     }
-    let raw =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let raw = match fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            EMBEDDED_TOKEN_BUDGET_PROFILES_TOML.to_string()
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
     let config: TokenBudgetConfigFile =
         toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))?;
     if let Some((size_bytes, modified_epoch_ms)) = token_budget_config_file_signature(&path) {

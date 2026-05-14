@@ -85,19 +85,30 @@ if [[ "${remote_mode}" -eq 0 ]]; then
     if [[ -n "${auto_skip_stack_reason}" ]]; then
       echo "install_amai.sh: ${auto_skip_stack_reason}" >&2
     fi
-    exec env \
+    env \
       RUSTC="${rustc_bin}" \
       CARGO_PROFILE_DEV_DEBUG=0 \
       CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=off \
       "${cargo_bin}" run --quiet --release --bin amai-bootstrap -- install "${install_cmd_args[@]}"
+    rc=$?
+    ./scripts/install_vscode_user_mcp.sh >/dev/null 2>&1 || true
+    exit "${rc}"
   fi
 fi
 
 if [[ -n "${auto_skip_stack_reason}" ]]; then
   echo "install_amai.sh: ${auto_skip_stack_reason}" >&2
 fi
-exec env \
+env \
   RUSTC="${rustc_bin}" \
   CARGO_PROFILE_DEV_DEBUG=0 \
   CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=off \
   "${cargo_bin}" run --quiet -- bootstrap install --skip-release-build "${install_cmd_args[@]}"
+rc=$?
+if [[ "${remote_mode}" -eq 0 ]]; then
+  normalized_client="$(printf '%s' "${client_target}" | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "${normalized_client}" || "${normalized_client}" == "auto" || "${normalized_client}" == "vscode" ]]; then
+    ./scripts/install_vscode_user_mcp.sh >/dev/null 2>&1 || true
+  fi
+fi
+exit "${rc}"
