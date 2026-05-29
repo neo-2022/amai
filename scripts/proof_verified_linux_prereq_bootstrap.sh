@@ -63,13 +63,19 @@ mkdir -p "${HOME}/.cargo/bin"
 cat >"${HOME}/.cargo/bin/rustup" <<'INNER'
 #!/bin/sh
 set -eu
+printf 'rustup %s\n' "$*" >>"${PROOF_LOG}"
 exit 0
 INNER
 cat >"${HOME}/.cargo/bin/cargo" <<'INNER'
 #!/bin/sh
 set -eu
+printf 'cargo %s\n' "$*" >>"${PROOF_LOG}"
 if [ "${1:-}" = "--version" ]; then
   printf 'cargo proof\n'
+  exit 0
+fi
+if [ "${1:-}" = "fmt" ] && [ "${2:-}" = "--version" ]; then
+  printf 'rustfmt proof\n'
   exit 0
 fi
 exit 0
@@ -129,13 +135,15 @@ exit 1
 EOF
 chmod +x "${fake_bin}/docker"
 
-HOME="${fake_home}" USER="proof" PATH="${fake_bin}:/usr/bin:/bin" \
+HOME="${fake_home}" USER="proof" PROOF_LOG="${proof_log}" PATH="${fake_bin}:/usr/bin:/bin" \
   bash -c "cd '${temp_root}/repo' && source './scripts/ensure_verified_linux_prereqs.sh'; ensure_verified_linux_prereqs 1"
 
 test -x "${fake_home}/.cargo/bin/cargo"
 test -x "${fake_home}/.cargo/bin/rustc"
 rg '^sudo apt-get update$' "${proof_log}" >/dev/null
-rg '^sudo apt-get install -y git curl ca-certificates build-essential pkg-config libssl-dev$' "${proof_log}" >/dev/null
+rg '^sudo apt-get install -y git curl ca-certificates build-essential pkg-config libssl-dev jq rsync python3 cmake$' "${proof_log}" >/dev/null
+rg '^rustup component add rustfmt --toolchain stable$' "${proof_log}" >/dev/null
+rg '^cargo fmt --version$' "${proof_log}" >/dev/null
 if rg '^sudo apt-get install -y docker.io docker-compose-v2$' "${proof_log}" >/dev/null; then
   echo "proof expected Docker package bootstrap to be skipped when docker/compose already work" >&2
   exit 1

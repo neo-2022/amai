@@ -464,16 +464,33 @@ fn match_project_code_by_repo_roots<'a, I>(working_dir: &Path, candidates: I) ->
 where
     I: IntoIterator<Item = (&'a str, &'a str)>,
 {
-    candidates
+    let candidates = candidates
         .into_iter()
+        .map(|(code, repo_root)| (code.to_string(), PathBuf::from(repo_root)))
+        .collect::<Vec<_>>();
+    if let Some((_, code)) = candidates
+        .iter()
         .filter_map(|(code, repo_root)| {
-            let candidate = Path::new(repo_root);
             working_dir
-                .starts_with(candidate)
-                .then(|| (candidate.as_os_str().len(), code.to_string()))
+                .starts_with(repo_root)
+                .then(|| (repo_root.as_os_str().len(), code.clone()))
         })
         .max_by_key(|(length, _)| *length)
-        .map(|(_, code)| code)
+    {
+        return Some(code);
+    }
+    let descendant_matches = candidates
+        .iter()
+        .filter_map(|(code, repo_root)| {
+            repo_root
+                .starts_with(working_dir)
+                .then(|| (repo_root.as_os_str().len(), code.clone()))
+        })
+        .collect::<Vec<_>>();
+    if descendant_matches.len() == 1 {
+        return descendant_matches.into_iter().next().map(|(_, code)| code);
+    }
+    None
 }
 
 async fn lookup_project_code(paths: &BridgePaths, working_dir: &Path) -> Result<String> {
@@ -1104,6 +1121,24 @@ mod tests {
     fn match_project_code_by_repo_roots_returns_none_when_path_is_unbound() {
         let working_dir = Path::new("/tmp/amai/foreign-project");
         let candidates = [("project_a", "/tmp/amai/project-a")];
+        assert!(match_project_code_by_repo_roots(working_dir, candidates).is_none());
+    }
+
+    #[test]
+    fn match_project_code_by_repo_roots_accepts_unique_descendant_project() {
+        let working_dir = Path::new("/tmp/amai");
+        let candidates = [("project_a", "/tmp/amai/project-a")];
+        let resolved = match_project_code_by_repo_roots(working_dir, candidates);
+        assert_eq!(resolved.as_deref(), Some("project_a"));
+    }
+
+    #[test]
+    fn match_project_code_by_repo_roots_rejects_ambiguous_descendant_projects() {
+        let working_dir = Path::new("/tmp/amai");
+        let candidates = [
+            ("project_a", "/tmp/amai/project-a"),
+            ("project_b", "/tmp/amai/project-b"),
+        ];
         assert!(match_project_code_by_repo_roots(working_dir, candidates).is_none());
     }
 

@@ -51,7 +51,7 @@ async fn latest_recent_scope_for_repo_root(db: &Client, repo_root: &str) -> Resu
     if repo_root.is_empty() {
         return Ok(None);
     }
-    let Ok(project) = postgres::get_project_by_repo_root(db, repo_root).await else {
+    let Ok(project) = postgres::resolve_project_by_repo_root_hint(db, repo_root).await else {
         return Ok(None);
     };
     let Some(snapshot) = postgres::latest_observability_snapshot_for_project(

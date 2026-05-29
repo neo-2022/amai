@@ -1,6 +1,6 @@
 [package]
 name = "art-memory-agent-index"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 default-run = "amai"
 license = "Apache-2.0 OR MIT"
@@ -28,6 +28,7 @@ filetime = "0.2.26"
 hex = "0.4.3"
 hdf5 = { package = "hdf5-metno", version = "0.12.3", features = ["static"] }
 ignore = "0.4.25"
+ksni = { version = "0.3.4", features = ["blocking"] }
 native-tls = "0.2.14"
 parquet = { version = "56.2.0", features = ["arrow"] }
 postgres-native-tls = "0.5.2"

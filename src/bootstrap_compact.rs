@@ -147,7 +147,8 @@ async fn install(
     )
     .await?;
 
-    let mut install_bridge = script_command(&repo_root, "scripts/install_vscode_amai_bridge.sh", []);
+    let mut install_bridge =
+        script_command(&repo_root, "scripts/install_vscode_amai_bridge.sh", []);
     if let Some(cli_path) = &vscode_cli {
         install_bridge.env("AMAI_VSCODE_CLI_BIN", cli_path);
     }
@@ -213,7 +214,8 @@ async fn remove(
     } else {
         false
     };
-    let startup_contract_path = repo_root.join(".amai/onboarding/project-chat-startup-contract.json");
+    let startup_contract_path =
+        repo_root.join(".amai/onboarding/project-chat-startup-contract.json");
     if startup_contract_path.is_file() {
         fs::remove_file(&startup_contract_path)
             .with_context(|| format!("failed to remove {}", startup_contract_path.display()))?;
@@ -227,7 +229,10 @@ async fn remove(
     println!("client_config: {}", client_config_path.display());
     println!("server_removed: {}", removed.removed);
     println!("file_purged: {}", removed.purged_file);
-    println!("startup_instruction_removed: {}", startup_instruction_removed);
+    println!(
+        "startup_instruction_removed: {}",
+        startup_instruction_removed
+    );
     println!("client_runtime_removed: {}", bridge_removed);
 
     if !full_remove_mode_enabled() {
@@ -327,7 +332,11 @@ fn write_vscode_mcp_config(repo_root: &Path, output: &Path) -> Result<()> {
     if !payload.is_object() {
         payload = serde_json::json!({ "servers": {} });
     }
-    if payload.get("servers").and_then(|value| value.as_object()).is_none() {
+    if payload
+        .get("servers")
+        .and_then(|value| value.as_object())
+        .is_none()
+    {
         payload["servers"] = serde_json::json!({});
     }
     payload["servers"]["amai"] = serde_json::json!({
@@ -784,12 +793,7 @@ async fn check_dependency_path(program: &Path, args: &[&str]) -> Result<()> {
         .stderr(Stdio::null())
         .status()
         .await
-        .with_context(|| {
-            format!(
-                "failed to start dependency check for {}",
-                program.display()
-            )
-        })?;
+        .with_context(|| format!("failed to start dependency check for {}", program.display()))?;
     if !status.success() {
         bail!(
             "{} is required for compact bootstrap but is not available",

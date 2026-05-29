@@ -1,5 +1,6 @@
-use ksni::menu::{MenuItem, StandardItem};
 use ksni::Tray;
+use ksni::blocking::TrayMethods;
+use ksni::menu::{MenuItem, StandardItem};
 use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
@@ -158,16 +159,13 @@ fn main() {
         .map(PathBuf::from)
         .ok()
         .or_else(|| {
-            std::env::current_exe().ok().and_then(|exe| {
-                exe.parent()
-                    .and_then(|dir| dir.parent())
-                    .map(PathBuf::from)
-            })
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().and_then(|dir| dir.parent()).map(PathBuf::from))
         })
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let tray = AmaiTray { repo_root };
-    let service = ksni::TrayService::new(tray);
-    service.spawn();
+    let _handle = tray.spawn().expect("failed to start Amai tray service");
     loop {
         thread::sleep(Duration::from_secs(60));
     }

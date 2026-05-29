@@ -2969,8 +2969,8 @@ fn install_client_runtime_artifacts(
         return Ok(None);
     }
     if !command_exists_sync("openclaw") {
-        startup_summary.status = "managed_openclaw_agent_workspace_skipped_openclaw_cli_missing"
-            .to_string();
+        startup_summary.status =
+            "managed_openclaw_agent_workspace_skipped_openclaw_cli_missing".to_string();
         startup_summary.auto_start_ready = false;
         startup_summary.reason = "OpenClaw CLI is not available in PATH; Amai generated the managed workspace, but cannot register the project agent automatically. Install OpenClaw, then rerun onboarding."
             .to_string();

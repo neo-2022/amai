@@ -1,6 +1,7 @@
 use super::*;
 
-const EMBEDDED_TOKEN_BUDGET_PROFILES_TOML: &str = include_str!("../../config/token_budget_profiles.toml");
+const EMBEDDED_TOKEN_BUDGET_PROFILES_TOML: &str =
+    include_str!("../../config/token_budget_profiles.toml");
 
 pub(crate) fn load_config(repo_root: &Path) -> Result<TokenBudgetConfigFile> {
     let path = resolve_token_budget_config_path(repo_root);

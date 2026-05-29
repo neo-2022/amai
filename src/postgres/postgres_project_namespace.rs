@@ -175,6 +175,81 @@ pub async fn get_project_by_repo_root(client: &Client, repo_root: &str) -> Resul
         .ok_or_else(|| anyhow!("project not found for repo_root: {canonical_repo_root}"))
 }
 
+pub async fn resolve_project_by_repo_root_hint(
+    client: &Client,
+    repo_root: &str,
+) -> Result<ProjectRecord> {
+    let canonical_repo_root = canonical_repo_root_string(repo_root)?;
+    if let Some(project) = get_bound_project_for_repo_root(client, &canonical_repo_root).await? {
+        return Ok(project);
+    }
+
+    let ancestor_rows = client
+        .query(
+            r#"
+            SELECT
+                p.project_id,
+                p.code,
+                p.display_name,
+                r.repo_root,
+                p.visibility_scope,
+                to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+            FROM ami.project_repo_roots r
+            INNER JOIN ami.projects p ON p.project_id = r.project_id
+            WHERE $1 LIKE r.repo_root || '/%'
+            ORDER BY length(r.repo_root) DESC, p.code ASC
+            LIMIT 1
+            "#,
+            &[&canonical_repo_root],
+        )
+        .await
+        .context("failed to resolve project repo_root ancestor binding")?;
+    if let Some(row) = ancestor_rows.first() {
+        return Ok(project_record_from_row(row));
+    }
+
+    let descendant_rows = client
+        .query(
+            r#"
+            SELECT
+                p.project_id,
+                p.code,
+                p.display_name,
+                r.repo_root,
+                p.visibility_scope,
+                to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+            FROM ami.project_repo_roots r
+            INNER JOIN ami.projects p ON p.project_id = r.project_id
+            WHERE r.repo_root LIKE $1 || '/%'
+            ORDER BY length(r.repo_root) ASC, p.code ASC
+            LIMIT 2
+            "#,
+            &[&canonical_repo_root],
+        )
+        .await
+        .context("failed to resolve project repo_root descendant binding")?;
+    if descendant_rows.len() == 1 {
+        return Ok(project_record_from_row(&descendant_rows[0]));
+    }
+    if descendant_rows.len() > 1 {
+        let codes = descendant_rows
+            .iter()
+            .map(|row| row.get::<_, String>(1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(anyhow!(
+            "repo_root hint {} is ambiguous; matching child projects: {}",
+            canonical_repo_root,
+            codes
+        ));
+    }
+
+    Err(anyhow!(
+        "project not found for repo_root hint: {}",
+        canonical_repo_root
+    ))
+}
+
 pub async fn project_has_repo_root(
     client: &Client,
     project_id: Uuid,

@@ -5011,9 +5011,21 @@ async fn load_startup_context(
         &format!("project_code={}", project.code),
     );
     let step_started = Instant::now();
-    let namespace = postgres::find_namespace_by_code(db, project.project_id, &args.namespace)
-        .await?
-        .ok_or_else(|| anyhow!("continuity namespace not found: {}", args.namespace))?;
+    let namespace =
+        match postgres::find_namespace_by_code(db, project.project_id, &args.namespace).await? {
+            Some(namespace) => namespace,
+            None if args.namespace == "continuity" => {
+                postgres::find_namespace_by_code(db, project.project_id, "default")
+                    .await?
+                    .ok_or_else(|| anyhow!("continuity namespace not found: {}", args.namespace))?
+            }
+            None => {
+                return Err(anyhow!(
+                    "continuity namespace not found: {}",
+                    args.namespace
+                ));
+            }
+        };
     continuity_profile_log(
         "load_startup_context.find_namespace",
         step_started.elapsed().as_millis(),
@@ -6438,7 +6450,7 @@ async fn resolve_project(db: &Client, args: &ContinuityStartupArgs) -> Result<Pr
             .map_err(|_| anyhow!("continuity startup requires --project or --repo-root"))?,
     };
     let repo_root = canonical_string(&repo_root)?;
-    postgres::get_project_by_repo_root(db, &repo_root).await
+    postgres::resolve_project_by_repo_root_hint(db, &repo_root).await
 }
 
 fn summarize_active_workline(text: &str) -> Value {

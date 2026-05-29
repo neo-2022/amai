@@ -51,12 +51,43 @@ ensure_basic_packages() {
   apt_install_missing git curl ca-certificates build-essential pkg-config libssl-dev jq rsync python3 cmake
 }
 
+ensure_rustfmt_component() {
+  export PATH="${HOME}/.cargo/bin:${PATH}"
+
+  if command -v rustup >/dev/null 2>&1; then
+    rustup default stable >/dev/null 2>&1 || true
+    rustup toolchain install stable >/dev/null 2>&1 || true
+    rustup component add rustfmt --toolchain stable >/dev/null 2>&1 \
+      || rustup component add rustfmt >/dev/null 2>&1
+  fi
+
+  if command -v cargo >/dev/null 2>&1 && cargo fmt --version >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if ! command -v rustup >/dev/null 2>&1; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+  fi
+
+  rustup default stable >/dev/null 2>&1 || true
+  rustup toolchain install stable >/dev/null 2>&1 || true
+  rustup component add rustfmt --toolchain stable >/dev/null 2>&1 \
+    || rustup component add rustfmt >/dev/null 2>&1
+
+  cargo fmt --version >/dev/null 2>&1 || {
+    echo "Amai prerequisite bootstrap installed Rust but cargo fmt/rustfmt is still unavailable." >&2
+    return 1
+  }
+}
+
 ensure_rust_toolchain() {
   if command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1; then
     export PATH="${HOME}/.cargo/bin:${PATH}"
     rustup show active-toolchain >/dev/null 2>&1 || true
     rustup default stable >/dev/null 2>&1 || true
     rustup toolchain install stable >/dev/null 2>&1 || true
+    ensure_rustfmt_component
     return 0
   fi
 
@@ -75,6 +106,7 @@ ensure_rust_toolchain() {
     echo "Amai prerequisite bootstrap installed rustup but rustc is still unavailable." >&2
     return 1
   }
+  ensure_rustfmt_component
 }
 
 docker_stack_already_usable() {

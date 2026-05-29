@@ -2224,7 +2224,7 @@ async fn continuity_startup_reconcile_project_record(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return postgres::get_project_by_repo_root(db, repo_root).await;
+        return postgres::resolve_project_by_repo_root_hint(db, repo_root).await;
     }
     if let Some(project) = args
         .project
