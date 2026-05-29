@@ -16,7 +16,8 @@
 # Amai
 
 `Amai` — внешний memory/continuity слой для AI-агентов.
-Он хранит рабочий контекст между сессиями и подключается к клиентам как `MCP stdio server`.
+Он живет как отдельный repo и подключается к клиентам как `MCP stdio server`.
+Для project-scoped работы проект привязывается к canonical `repo_root`: если в workspace есть подпапка с похожим названием, Amai не должен заводить второй проект и должен вернуться к уже bound project.
 
 ## Проверенный контур
 
@@ -24,34 +25,61 @@
 - Клиент: `VS Code` / `Codium`
 - Bridge: `Amai VS Code Bridge` через `OpenVSX`
 
-## MCP: подключение к любому приложению
+## Быстрый старт
 
-Принцип всегда один: клиент должен запускать `scripts/run_mcp_stdio.sh` из установленного репозитория `Amai`.
-`Amai` не привязан к конкретному поставщику моделей: MCP-клиент может работать с любым LLM-провайдером.
-
-### 1) Установка + генерация snippet (`generic`)
+### 1) Materialize repo
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client generic --stack-profile default --yes
+git clone --depth 1 https://github.com/neo-2022/amai.git "${HOME}/.local/share/amai/repo"
+cd "${HOME}/.local/share/amai/repo"
 ```
 
-Если `raw.githubusercontent.com` недоступен:
+Если `git` недоступен, можно materialize тот же repo через `codeload.github.com`:
 
 ```bash
+tmp="$(mktemp -d)" && \
 clone_dir="${HOME}/.local/share/amai/repo" && \
-if [ -d "${clone_dir}/.git" ]; then
-  git -C "${clone_dir}" fetch --depth 1 origin && git -C "${clone_dir}" checkout --force main && git -C "${clone_dir}" reset --hard origin/main
-else
-  git clone --depth 1 https://github.com/neo-2022/amai.git "${clone_dir}"
-fi && \
-"${clone_dir}/scripts/install_amai.sh" --client generic --stack-profile default --yes
+curl -fL --retry 5 --retry-delay 1 --retry-all-errors \
+  -o "$tmp/amai.tgz" \
+  https://codeload.github.com/neo-2022/amai/tar.gz/refs/heads/main && \
+tar -xzf "$tmp/amai.tgz" -C "$tmp" && \
+rm -rf "$clone_dir" && \
+mkdir -p "$(dirname "$clone_dir")" && \
+mv "$tmp/amai-main" "$clone_dir" && \
+cd "$clone_dir"
 ```
 
-Snippet после установки: `~/.local/share/amai/repo/tmp/onboarding/generic-mcp.json`
+### 2) Установить Amai
 
-### 2) Вставить snippet в конфиг клиента
+`VS Code` / `Codium`:
 
-**Формат `mcpServers`:**
+```bash
+./scripts/install_amai.sh --client vscode --stack-profile default --yes
+```
+
+Любой MCP-клиент через `generic`:
+
+```bash
+./scripts/install_amai.sh --client generic --stack-profile default --yes
+```
+
+Если локальный stack не нужен, добавьте `--skip-stack`.
+
+Если managed clone уже есть и его нужно обновить перед install:
+
+```bash
+./scripts/install_from_github.sh --client vscode --stack-profile default --yes
+```
+
+### 3) MCP snippet
+
+После `--client generic` готовый snippet лежит в:
+
+```text
+~/.local/share/amai/repo/tmp/onboarding/generic-mcp.json
+```
+
+Минимальный MCP config выглядит так:
 
 ```json
 {
@@ -65,103 +93,45 @@ Snippet после установки: `~/.local/share/amai/repo/tmp/onboarding/
 }
 ```
 
-**Формат `mcp.servers`:**
+Ключевой контракт простой:
 
-```json
-{
-  "mcp": {
-    "servers": {
-      "amai": {
-        "command": "/abs/path/to/amai/scripts/run_mcp_stdio.sh",
-        "cwd": "/abs/path/to/amai",
-        "args": []
-      }
-    }
-  }
-}
-```
+- `command` указывает на `scripts/run_mcp_stdio.sh`
+- `cwd` указывает на корень установленного repo
+- клиент запускает именно установленный repo, а не случайную временную директорию
 
-Если клиент умеет импорт “чистого server config”, используйте `generic-mcp.json` как есть.
-
-### 3) Важные условия
-
-- `command` должен указывать на `scripts/run_mcp_stdio.sh` установленного `Amai`.
-- `cwd` должен быть корнем установленного repo (обычно `~/.local/share/amai/repo`).
-- Для локального stack нужен `docker`/`compose` (или используйте `--skip-stack`, если нужен только MCP).
-
-### 4) Быстрая проверка MCP
+### 4) Быстрая проверка
 
 ```bash
-cd ~/.local/share/amai/repo && ./scripts/run_mcp_stdio.sh </dev/null >/dev/null 2>&1 || true
+cd "${HOME}/.local/share/amai/repo"
+./scripts/run_mcp_stdio.sh </dev/null >/dev/null 2>&1 || true
 ```
 
-Если клиент видит сервер `amai` и может вызвать tools — интеграция готова.
-
-## Установка (коротко)
-
-### One-click: только Amai
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_amai_oneclick.sh)
-```
-
-Скрипт ставит только `Amai`, проверяет результат и показывает окно успеха/ошибки с подсказкой, что делать дальше.
-Если `Amai` уже установлена, а `VS Code/Codium` появляется позже, `Amai` предложит подключение автоматически после входа в сессию.
-
-### VS Code / Codium (обычный путь)
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client vscode --stack-profile default --yes
-```
-
-CLI клиента ищется автоматически (`code`, `codium`, `code-oss`, включая `~/.local/bin`).
-Если у вас нестандартный путь, задайте его явно:
-
-```bash
-AMAI_VSCODE_CLI_BIN="/абсолютный/путь/к/code-или-codium" \
-bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client vscode --stack-profile default --yes
-```
-
-### Если `raw.githubusercontent.com` недоступен
-
-**Через `git clone`:**
-
-```bash
-clone_dir="${HOME}/.local/share/amai/repo" && \
-if [ -d "${clone_dir}/.git" ]; then
-  git -C "${clone_dir}" fetch --depth 1 origin && git -C "${clone_dir}" checkout --force main && git -C "${clone_dir}" reset --hard origin/main
-else
-  git clone --depth 1 https://github.com/neo-2022/amai.git "${clone_dir}"
-fi && \
-"${clone_dir}/scripts/install_amai.sh" --client vscode --stack-profile default --yes
-```
-
-**Через tarball (`codeload.github.com`):**
-
-```bash
-tmp="$(mktemp -d)" && \
-curl -fL --retry 5 --retry-delay 1 --retry-all-errors -o "$tmp/amai.tgz" https://codeload.github.com/neo-2022/amai/tar.gz/refs/heads/main && \
-tar -xzf "$tmp/amai.tgz" -C "$tmp" && \
-bash "$tmp/amai-main/scripts/install_amai.sh" --client vscode --stack-profile default --yes
-```
-
-## VS Code Bridge
-
-- OpenVSX: https://open-vsx.org/extension/amai/amai-vscode-bridge
-- После установки: bridge и MCP-конфиг добавляются автоматически.
-- Откройте любой рабочий проект в `VS Code` / `Codium` и сделайте `Reload Window`.
-- Важно: install из GitHub ставит bridge из текущего `main`; версия в OpenVSX может отставать до следующей публикации.
-- Для синхронизации OpenVSX с текущим `main` используйте `./scripts/openvsx_bridge_sync.sh sync` (нужен `OVSX_TOKEN`).
+Если клиент видит сервер `amai` и может вызвать tools, MCP path живой.
 
 ## Remove
+
+Обычное отключение клиента и runtime-artifacts:
 
 ```bash
 ~/.local/share/amai/repo/scripts/remove_amai.sh --client vscode
 ```
 
+Жесткий purge хоста для `Amai` + `VS Code/Codium` следов:
+
+```bash
+~/.local/share/amai/repo/scripts/purge_amai_vscode_host.sh
+```
+
+`purge_amai_vscode_host.sh` удаляет пользовательские и системные следы агрессивно. Это не обычный uninstall.
+
+## Где дальше читать
+
+- Полный MCP/install walkthrough: [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md)
+- Bridge package: [tools/vscode-amai-bridge/README.md](tools/vscode-amai-bridge/README.md)
+
 ## License
 
-`PolyForm Noncommercial 1.0.0`  
+`PolyForm Noncommercial 1.0.0`
 Текст лицензии: [LICENSE](LICENSE)
 
 ## Контакты

@@ -318,6 +318,7 @@ elif [[ ! -d "${clone_dir}/.git" ]]; then
   is_git_checkout=0
 else
   git -C "${clone_dir}" remote set-url origin "${repo_url}"
+  git -C "${clone_dir}" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
   if [[ "${download_mode}" == "tarball" ]]; then
     checkout_from_github_tarball "${repo_url}" "${repo_ref}" "${clone_dir}"
     is_git_checkout=0

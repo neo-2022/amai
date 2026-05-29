@@ -10,18 +10,40 @@ modified_at: 2026-03-26 06:30 MSK
 Если ваше приложение поддерживает `MCP`, но его нет в списке “из коробки” (`vscode`, `cursor`, `codex`, `claude-code`, `hermes`, `openclaw`), используйте `generic`:
 `codex` в этом списке — это только имя клиентской интеграции, а не ограничение по модели или поставщику.
 
-1) Установить `Amai` (одной командой):
+1) Materialize repo:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/neo-2022/amai/main/scripts/install_from_github.sh) --client generic --stack-profile default --yes
+git clone --depth 1 https://github.com/neo-2022/amai.git "${HOME}/.local/share/amai/repo"
+cd "${HOME}/.local/share/amai/repo"
 ```
 
-2) В установленном repo взять готовый snippet:
+Если `git` недоступен, можно materialize тот же repo через `codeload.github.com`:
+
+```bash
+tmp="$(mktemp -d)" && \
+clone_dir="${HOME}/.local/share/amai/repo" && \
+curl -fL --retry 5 --retry-delay 1 --retry-all-errors \
+  -o "$tmp/amai.tgz" \
+  https://codeload.github.com/neo-2022/amai/tar.gz/refs/heads/main && \
+tar -xzf "$tmp/amai.tgz" -C "$tmp" && \
+rm -rf "$clone_dir" && \
+mkdir -p "$(dirname "$clone_dir")" && \
+mv "$tmp/amai-main" "$clone_dir" && \
+cd "$clone_dir"
+```
+
+2) Установить `Amai` и сгенерировать snippet:
+
+```bash
+./scripts/install_amai.sh --client generic --stack-profile default --yes
+```
+
+3) В установленном repo взять готовый snippet:
 
 - файл: `~/.local/share/amai/repo/tmp/onboarding/generic-mcp.json`
 - он содержит параметры для `stdio` MCP server (`command`, `cwd`, `args`).
 
-3) Вставить snippet в конфиг вашего приложения в том формате, который оно ожидает.
+4) Вставить snippet в конфиг вашего приложения в том формате, который оно ожидает.
 
 Самые частые форматы MCP-конфигов:
 
@@ -444,6 +466,9 @@ stack-а, но и какие deployment promises вообще честно до�
 - default namespace: `continuity`;
 - machine-readable startup artifact:
   `.amai/onboarding/project-chat-startup-contract.json`;
+- project binding для startup и retrieval всегда идет от canonical `repo_root`;
+  если в дереве проекта есть вложенная папка с похожим названием, это не новый project,
+  а alias/descendant hint для уже bound canonical root;
 - `artifact_enforcement` внутри этого contract теперь буквально фиксирует:
   - `workspace_contract_required_before_tool_call = true`;
   - `workspace_contract_relative_path = .amai/onboarding/project-chat-startup-contract.json`;

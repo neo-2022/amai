@@ -78,6 +78,10 @@ if [ "${1:-}" = "fmt" ] && [ "${2:-}" = "--version" ]; then
   printf 'rustfmt proof\n'
   exit 0
 fi
+if [ "${1:-}" = "clippy" ] && [ "${2:-}" = "--version" ]; then
+  printf 'clippy proof\n'
+  exit 0
+fi
 exit 0
 INNER
 cat >"${HOME}/.cargo/bin/rustc" <<'INNER'
@@ -143,7 +147,9 @@ test -x "${fake_home}/.cargo/bin/rustc"
 rg '^sudo apt-get update$' "${proof_log}" >/dev/null
 rg '^sudo apt-get install -y git curl ca-certificates build-essential pkg-config libssl-dev jq rsync python3 cmake$' "${proof_log}" >/dev/null
 rg '^rustup component add rustfmt --toolchain stable$' "${proof_log}" >/dev/null
+rg '^rustup component add clippy --toolchain stable$' "${proof_log}" >/dev/null
 rg '^cargo fmt --version$' "${proof_log}" >/dev/null
+rg '^cargo clippy --version$' "${proof_log}" >/dev/null
 if rg '^sudo apt-get install -y docker.io docker-compose-v2$' "${proof_log}" >/dev/null; then
   echo "proof expected Docker package bootstrap to be skipped when docker/compose already work" >&2
   exit 1
