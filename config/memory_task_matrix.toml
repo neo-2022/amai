@@ -1,0 +1,213 @@
+[source]
+display_name = "Letta Leaderboard"
+summary = "Референс для stateful agent memory: отдельно мерить core/archival read, write, update и не прятать лишние memory operations под одной красивой цифрой."
+reference_urls = [
+  "https://www.letta.com/blog/letta-leaderboard",
+  "https://docs.letta.com/guides/core-concepts/memory/memory-blocks/"
+]
+
+[matrices.letta_memory_local]
+display_name = "Letta-style local memory matrix"
+summary = "Measured local contour для памяти Amai: core и archival read/write/update плюс multi-agent и multi-project isolation без ручного перебора transcript."
+min_success_rate = 1.0
+min_mean_score = 1.0
+max_failures = 0
+max_p95_ms = 15000.0
+task_codes = [
+  "core_memory_read",
+  "core_memory_write",
+  "core_memory_update",
+  "core_scope_isolation",
+  "archival_memory_read",
+  "archival_memory_write",
+  "archival_memory_update",
+  "archival_project_isolation"
+]
+
+[tasks.core_memory_read]
+order = 1
+class = "read"
+layer = "core"
+eval_pattern = "recovery_target"
+display_name = "Core memory read restores the saved fact"
+kind = "core_read"
+project = "core_read"
+project_display_name = "Memory Eval Core Read"
+namespace = "memory_core_read"
+headline = "Core read fact anchor: amber-otter-reef"
+next_step = "Read the fact from core memory without archival fallback."
+question = "What is the recovery code for the lighthouse incident?"
+expected_answer = "amber-otter-reef"
+expected_operation_count = 3
+agent_scope = "memory-eval::core-read::owner"
+bootstrap_lines = [
+  "# Core bootstrap",
+  "This namespace exists only to make continuity restore legal for the core-memory contour."
+]
+details_lines = [
+  "- The recovery code for the lighthouse incident is amber-otter-reef.",
+  "- Use the answer token amber-otter-reef when the user asks about the lighthouse incident."
+]
+
+[tasks.core_memory_write]
+order = 2
+class = "write"
+layer = "core"
+eval_pattern = "recovery_target"
+display_name = "Core memory write survives a fresh restore call"
+kind = "core_write"
+project = "core_write"
+project_display_name = "Memory Eval Core Write"
+namespace = "memory_core_write"
+headline = "Core write fact anchor: basalt-kestrel-river"
+next_step = "Persist this fact so the next restore still sees it."
+question = "What is the shipping token for the river vault?"
+expected_answer = "basalt-kestrel-river"
+expected_operation_count = 3
+agent_scope = "memory-eval::core-write::owner"
+bootstrap_lines = [
+  "# Core bootstrap",
+  "Core-memory write task namespace."
+]
+details_lines = [
+  "- The shipping token for the river vault is basalt-kestrel-river.",
+  "- Persist basalt-kestrel-river into the current working state."
+]
+
+[tasks.core_memory_update]
+order = 3
+class = "update"
+layer = "core"
+eval_pattern = "recovery_target"
+display_name = "Core memory update keeps the latest fact authoritative"
+kind = "core_update"
+project = "core_update"
+project_display_name = "Memory Eval Core Update"
+namespace = "memory_core_update"
+headline = "Current assignee token: cedar-before-sparrow"
+next_step = "This is the stale value."
+updated_headline = "Current assignee token: cedar-after-lynx"
+updated_next_step = "This is the latest authoritative value."
+expected_answer = "cedar-after-lynx"
+unexpected_answer = "cedar-before-sparrow"
+expected_operation_count = 4
+agent_scope = "memory-eval::core-update::owner"
+bootstrap_lines = [
+  "# Core bootstrap",
+  "Core-memory update task namespace."
+]
+details_lines = [
+  "- The current assignee token is cedar-before-sparrow."
+]
+updated_details_lines = [
+  "- The current assignee token is cedar-after-lynx."
+]
+
+[tasks.core_scope_isolation]
+order = 4
+class = "isolation"
+layer = "core"
+eval_pattern = "isolation_boundary"
+display_name = "Core memory stays isolated across agent scopes"
+kind = "core_scope_isolation"
+project = "core_scope"
+project_display_name = "Memory Eval Core Isolation"
+namespace = "memory_core_scope"
+headline = "Owner-only fact: quartz-marten-shield"
+next_step = "Only the owner scope may restore this fact."
+expected_answer = "quartz-marten-shield"
+expected_error_contains = "no working-state restore bundle found"
+expected_operation_count = 4
+agent_scope = "memory-eval::core-scope::owner"
+isolated_agent_scope = "memory-eval::core-scope::isolated"
+bootstrap_lines = [
+  "# Core bootstrap",
+  "Core-memory isolation task namespace."
+]
+details_lines = [
+  "- The owner-only fact is quartz-marten-shield."
+]
+
+[tasks.archival_memory_read]
+order = 5
+class = "read"
+layer = "archival"
+eval_pattern = "retrieval_target"
+display_name = "Archival memory read retrieves the stored document fact"
+kind = "archival_read"
+project = "archival_read"
+project_display_name = "Memory Eval Archival Read"
+namespace = "memory_archival_read"
+question = "blueprint codename tidal archive"
+expected_answer = "lantern-foam-delta"
+expected_operation_count = 2
+bootstrap_lines = [
+  "# Supporting facts",
+  "The blueprint codename for the tidal archive is lantern-foam-delta."
+]
+
+[tasks.archival_memory_write]
+order = 6
+class = "write"
+layer = "archival"
+eval_pattern = "retrieval_target"
+display_name = "Archival memory write makes a new fact searchable"
+kind = "archival_write"
+project = "archival_write"
+project_display_name = "Memory Eval Archival Write"
+namespace = "memory_archival_write"
+question = "archive courier token"
+expected_answer = "courier-ember-otter"
+expected_operation_count = 2
+bootstrap_lines = [
+  "# Supporting facts",
+  "The archive courier should use the token courier-ember-otter."
+]
+
+[tasks.archival_memory_update]
+order = 7
+class = "update"
+layer = "archival"
+eval_pattern = "recovery_target"
+display_name = "Archival memory update replaces the stale fact"
+kind = "archival_update"
+project = "archival_update"
+project_display_name = "Memory Eval Archival Update"
+namespace = "memory_archival_update"
+question = "customs token glacier manifest"
+expected_answer = "glacier-after-maple"
+unexpected_answer = "glacier-before-willow"
+expected_operation_count = 3
+bootstrap_lines = [
+  "# Supporting facts",
+  "The current customs token for the glacier manifest is glacier-before-willow."
+]
+updated_bootstrap_lines = [
+  "# Supporting facts",
+  "The current customs token for the glacier manifest is glacier-after-maple."
+]
+
+[tasks.archival_project_isolation]
+order = 8
+class = "isolation"
+layer = "archival"
+eval_pattern = "isolation_boundary"
+display_name = "Archival memory does not leak across projects"
+kind = "archival_project_isolation"
+project = "archival_alpha"
+project_display_name = "Memory Eval Archival Alpha"
+namespace = "memory_archival_isolation"
+related_project = "beta"
+related_project_display_name = "Memory Eval Archival Beta"
+related_namespace = "memory_archival_isolation"
+question = "What is the alpha vault secret token?"
+unexpected_answer = "alpha-vault-otter"
+expected_operation_count = 3
+bootstrap_lines = [
+  "# Alpha facts",
+  "The alpha vault secret token is alpha-vault-otter."
+]
+related_bootstrap_lines = [
+  "# Beta facts",
+  "The beta vault uses an unrelated marker called beta-vault-cedar."
+]

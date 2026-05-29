@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+cargo fmt --all --check
+cargo test --quiet
+cargo run --quiet -- compat check
+cargo run --quiet -- status

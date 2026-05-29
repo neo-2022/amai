@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+./scripts/bootstrap_stack.sh
+./scripts/benchmark_contamination_preflight.sh
+
+cargo run --release --quiet -- project register \
+  --code project_alpha \
+  --display-name "Project Alpha" \
+  --repo-root "$PWD/fixtures/project_alpha"
+
+cargo run --release --quiet -- project register \
+  --code project_beta \
+  --display-name "Project Beta" \
+  --repo-root "$PWD/fixtures/project_beta"
+
+cargo run --release --quiet -- namespace ensure \
+  --project project_alpha \
+  --code review \
+  --display-name Review \
+  --retrieval-mode local_plus_related
+
+cargo run --release --quiet -- namespace ensure \
+  --project project_beta \
+  --code review \
+  --display-name Review \
+  --retrieval-mode local_plus_related
+
+cargo run --release --quiet -- relation add \
+  --source project_alpha \
+  --target project_beta \
+  --relation-type shared_runtime \
+  --shared-contour common_contour \
+  --access-mode local_plus_related
+
+cargo run --release --quiet -- index project \
+  --code project_alpha \
+  --path "$PWD/fixtures/project_alpha" \
+  --namespace review \
+  --limit-files 20
+
+cargo run --release --quiet -- index project \
+  --code project_beta \
+  --path "$PWD/fixtures/project_beta" \
+  --namespace review \
+  --limit-files 20
+
+cargo run --release --quiet -- verify load \
+  --project project_alpha \
+  --namespace review \
+  --query "alpha_only_token" \
+  --retrieval-mode local_strict \
+  --limit-documents 4 \
+  --limit-symbols 4 \
+  --limit-chunks 4 \
+  --limit-semantic-chunks 0 \
+  --workers 17 \
+  --iterations-per-worker 589 \
+  --warmup-per-worker 500 \
+  --min-qps 1200000 \
+  --max-p95-ms 1 \
+  --max-error-rate 0
