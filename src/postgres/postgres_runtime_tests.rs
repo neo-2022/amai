@@ -30,22 +30,23 @@ use super::{
     prepare_observability_payload, provenance_marks_memory_card_poisoned,
     reconcile_import_packet_quarantines, record_skill_eval, record_skill_reuse_log,
     record_skill_trial_run, record_skill_trigger_match, replace_document_index,
-    replace_document_index_with_document_id, run_memory_card_policy_scope_filter,
-    run_memory_item_policy_scope_filter, run_skill_card_policy_scope_filter,
-    run_task_node_policy_scope_filter, safe_postgres_descriptor, search_memory_cards_for_namespace,
-    task_node_marks_poisoned, update_import_packet, update_memory_card_truth_state,
-    update_observability_snapshot_payload, update_relation, upsert_project, upsert_stack_meta,
-    validate_artifact_ref_basis, validate_memory_card_candidate,
-    validate_memory_card_policy_scope_filter, validate_memory_card_runtime_states,
-    validate_memory_card_verification_conflict_check, validate_memory_item_candidate,
-    validate_memory_item_policy_scope_filter, validate_memory_item_verification_conflict_check,
-    validate_memory_link_decision_basis, validate_memory_relation_edge_basis,
-    validate_observability_update, validate_pending_link_proposal_basis,
-    validate_skill_activity_basis, validate_skill_card_candidate,
-    validate_skill_card_policy_scope_filter, validate_skill_card_verification_conflict_check,
-    validate_skill_evidence_bundle_basis, validate_stage2_basis, validate_task_event_basis,
-    validate_task_node_candidate, validate_task_node_policy_scope_filter,
-    validate_task_node_verification_conflict_check, with_postgres_advisory_lock,
+    replace_document_index_with_document_id, resolve_project_by_repo_root_hint,
+    run_memory_card_policy_scope_filter, run_memory_item_policy_scope_filter,
+    run_skill_card_policy_scope_filter, run_task_node_policy_scope_filter,
+    safe_postgres_descriptor, search_memory_cards_for_namespace, task_node_marks_poisoned,
+    update_import_packet, update_memory_card_truth_state, update_observability_snapshot_payload,
+    update_relation, upsert_project, upsert_stack_meta, validate_artifact_ref_basis,
+    validate_memory_card_candidate, validate_memory_card_policy_scope_filter,
+    validate_memory_card_runtime_states, validate_memory_card_verification_conflict_check,
+    validate_memory_item_candidate, validate_memory_item_policy_scope_filter,
+    validate_memory_item_verification_conflict_check, validate_memory_link_decision_basis,
+    validate_memory_relation_edge_basis, validate_observability_update,
+    validate_pending_link_proposal_basis, validate_skill_activity_basis,
+    validate_skill_card_candidate, validate_skill_card_policy_scope_filter,
+    validate_skill_card_verification_conflict_check, validate_skill_evidence_bundle_basis,
+    validate_stage2_basis, validate_task_event_basis, validate_task_node_candidate,
+    validate_task_node_policy_scope_filter, validate_task_node_verification_conflict_check,
+    with_postgres_advisory_lock,
 };
 use crate::config::AppConfig;
 use crate::nats;
@@ -19627,6 +19628,118 @@ fn canonical_repo_root_string_rejects_missing_paths() {
     let error = canonical_repo_root_string(&missing.display().to_string())
         .expect_err("missing path must fail");
     assert!(error.to_string().contains("failed to resolve repo_root"));
+}
+
+#[tokio::test]
+async fn upsert_project_creates_default_and_continuity_namespaces() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = Uuid::new_v4();
+    let workspace_code = format!("namespace_ws_{suffix}");
+    let project_code = format!("namespace_project_{suffix}");
+    let repo_root = std::env::temp_dir().join(format!("amai-namespace-project-{suffix}"));
+    std::fs::create_dir_all(&repo_root).expect("repo root");
+
+    ensure_workspace(&client, &workspace_code, "Namespace Workspace", "active")
+        .await
+        .expect("workspace");
+    let project = upsert_project(
+        &client,
+        &project_code,
+        "Namespace Project",
+        &repo_root.display().to_string(),
+        Some("main"),
+        &workspace_code,
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("project");
+
+    get_namespace_by_code(&client, project.project_id, "default")
+        .await
+        .expect("default namespace");
+    get_namespace_by_code(&client, project.project_id, "continuity")
+        .await
+        .expect("continuity namespace");
+}
+
+#[tokio::test]
+async fn repo_root_hint_for_child_or_relocated_alias_returns_canonical_project_root() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = Uuid::new_v4();
+    let workspace_code = format!("root_hint_ws_{suffix}");
+    let project_code = format!("root_hint_project_{suffix}");
+    let parent_root = std::env::temp_dir().join(format!("amai-root-hint-{suffix}"));
+    let child_root = parent_root.join("chimera-pq");
+    std::fs::create_dir_all(&child_root).expect("child repo root");
+
+    ensure_workspace(&client, &workspace_code, "Root Hint Workspace", "active")
+        .await
+        .expect("workspace");
+    upsert_project(
+        &client,
+        &project_code,
+        "Root Hint Project",
+        &child_root.display().to_string(),
+        Some("main"),
+        &workspace_code,
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("initial child project");
+    let project = upsert_project(
+        &client,
+        &project_code,
+        "Root Hint Project",
+        &parent_root.display().to_string(),
+        Some("main"),
+        &workspace_code,
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("relocated parent project");
+
+    let resolved = resolve_project_by_repo_root_hint(&client, &child_root.display().to_string())
+        .await
+        .expect("child repo root hint resolves");
+    assert_eq!(resolved.project_id, project.project_id);
+    assert_eq!(resolved.repo_root, parent_root.display().to_string());
 }
 
 #[test]

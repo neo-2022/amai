@@ -84,9 +84,26 @@ pub(crate) async fn handoff_payload_from_parts_with_db(
     resolved_task_ids: &[String],
 ) -> Result<Value> {
     let project = postgres::get_project_by_code(db, project_code).await?;
-    let namespace = postgres::find_namespace_by_code(db, project.project_id, namespace_code)
-        .await?
-        .ok_or_else(|| anyhow!("continuity namespace not found: {}", namespace_code))?;
+    let namespace =
+        match postgres::find_namespace_by_code(db, project.project_id, namespace_code).await? {
+            Some(namespace) => namespace,
+            None if namespace_code == "continuity" => {
+                postgres::ensure_namespace(
+                    db,
+                    project.project_id,
+                    "continuity",
+                    Some("Continuity"),
+                    &cfg.default_retrieval_mode,
+                )
+                .await?
+            }
+            None => {
+                return Err(anyhow!(
+                    "continuity namespace not found: {}",
+                    namespace_code
+                ));
+            }
+        };
     let previous_restore =
         working_state::load_recent_restore_bundle_without_live_guard(db, &project, &namespace)
             .await?;
@@ -5015,9 +5032,14 @@ async fn load_startup_context(
         match postgres::find_namespace_by_code(db, project.project_id, &args.namespace).await? {
             Some(namespace) => namespace,
             None if args.namespace == "continuity" => {
-                postgres::find_namespace_by_code(db, project.project_id, "default")
-                    .await?
-                    .ok_or_else(|| anyhow!("continuity namespace not found: {}", args.namespace))?
+                postgres::ensure_namespace(
+                    db,
+                    project.project_id,
+                    "continuity",
+                    Some("Continuity"),
+                    "local_strict",
+                )
+                .await?
             }
             None => {
                 return Err(anyhow!(
@@ -6416,6 +6438,39 @@ fn chunk_record(
 }
 
 async fn resolve_project(db: &Client, args: &ContinuityStartupArgs) -> Result<ProjectRecord> {
+    if let Some(repo_root) = args.repo_root.as_ref() {
+        let repo_root = canonical_string(repo_root)?;
+        match postgres::resolve_project_by_repo_root_hint(db, &repo_root).await {
+            Ok(record) => {
+                if let Some(project_code) = args
+                    .project
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    match postgres::get_project_by_code(db, project_code).await {
+                        Ok(project_record) if project_record.project_id != record.project_id => {
+                            return Err(anyhow!(
+                                "repo_root {} resolves to project {}, not requested project {}",
+                                repo_root,
+                                record.code,
+                                project_code
+                            ));
+                        }
+                        Ok(_) => {}
+                        Err(error) if error.to_string().starts_with("project not found:") => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                return Ok(record);
+            }
+            Err(repo_error) => {
+                if args.project.is_none() {
+                    return Err(repo_error);
+                }
+            }
+        }
+    }
     if let Some(project) = &args.project {
         let mut record = postgres::get_project_by_code(db, project).await?;
         if let Some(repo_root) = args.repo_root.as_ref() {
@@ -6719,9 +6774,12 @@ mod tests {
         summarize_required_task_set_for_human_surface, workspace_bound_vscode_chat_profile_name,
         write_compact_chat_prompt_artifact,
     };
-    use crate::cli::ContinuityCompactChatArgs;
-    use crate::cli::ContinuityThreadIndexEnrichArgs;
+    use crate::cli::{
+        ContinuityCompactChatArgs, ContinuityStartupArgs, ContinuityThreadIndexEnrichArgs,
+    };
     use crate::codex_threads::{ChatTail, ThreadTimeSliceSummary, TranscriptMessage};
+    use crate::config::AppConfig;
+    use crate::postgres;
     use crate::postgres::{NamespaceRecord, ProjectRecord};
     use crate::working_state;
     use serde_json::{Value, json};
@@ -6761,6 +6819,72 @@ mod tests {
         // compact_chat_auto_launch_env_lock.
         unsafe { std::env::set_var(key, value) };
         EnvVarRestore { key, previous }
+    }
+
+    fn load_env_for_postgres_test() {
+        if let Ok(env_text) =
+            fs::read_to_string(".env").or_else(|_| fs::read_to_string(".env.example"))
+        {
+            for line in env_text.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                if let Some((key, value)) = trimmed.split_once('=') {
+                    // SAFETY: these integration-style tests load the local Amai
+                    // database environment before opening a connection.
+                    unsafe {
+                        std::env::set_var(key.trim(), value.trim_matches('"'));
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_project_prefers_repo_root_hint_over_stale_client_project_code() {
+        load_env_for_postgres_test();
+        let cfg = AppConfig::from_env().expect("config");
+        let db = postgres::connect_admin(&cfg).await.expect("postgres");
+        postgres::bootstrap_schema(&db, &cfg).await.expect("schema");
+        let suffix = uuid::Uuid::new_v4();
+        let workspace_code = format!("continuity_repo_hint_ws_{suffix}");
+        let project_code = format!("continuity_repo_hint_project_{suffix}");
+        let project_root = std::env::temp_dir().join(format!("amai-continuity-root-{suffix}"));
+        let child_root = project_root.join("child-app");
+        fs::create_dir_all(&child_root).expect("child root");
+
+        postgres::ensure_workspace(&db, &workspace_code, "Continuity Repo Hint", "active")
+            .await
+            .expect("workspace");
+        let project = postgres::upsert_project(
+            &db,
+            &project_code,
+            "Continuity Repo Hint Project",
+            &project_root.display().to_string(),
+            Some("main"),
+            &workspace_code,
+            "project_shared",
+            "local_strict",
+        )
+        .await
+        .expect("project");
+        let args = ContinuityStartupArgs {
+            project: Some("stale_client_project_code".to_string()),
+            repo_root: Some(child_root),
+            namespace: "continuity".to_string(),
+            json: true,
+            runtime_state_json: false,
+            token_source_kind: "proof_continuity_repo_root_hint".to_string(),
+            skip_live_client_budget_guard: true,
+        };
+
+        let resolved = super::resolve_project(&db, &args)
+            .await
+            .expect("repo_root hint should resolve project");
+        assert_eq!(resolved.project_id, project.project_id);
+        assert_eq!(resolved.code, project_code);
+        assert_eq!(resolved.repo_root, project_root.display().to_string());
     }
 
     #[test]

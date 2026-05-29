@@ -93,6 +93,14 @@ pub async fn upsert_project(
         default_mode,
     )
     .await?;
+    ensure_namespace(
+        client,
+        project.project_id,
+        "continuity",
+        Some("Continuity"),
+        default_mode,
+    )
+    .await?;
 
     Ok(project)
 }
@@ -191,7 +199,7 @@ pub async fn resolve_project_by_repo_root_hint(
                 p.project_id,
                 p.code,
                 p.display_name,
-                r.repo_root,
+                p.repo_root,
                 p.visibility_scope,
                 to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
             FROM ami.project_repo_roots r
@@ -215,7 +223,7 @@ pub async fn resolve_project_by_repo_root_hint(
                 p.project_id,
                 p.code,
                 p.display_name,
-                r.repo_root,
+                p.repo_root,
                 p.visibility_scope,
                 to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
             FROM ami.project_repo_roots r
