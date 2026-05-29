@@ -8195,20 +8195,20 @@ fn read_ann_hdf5_metrics(path: &Path, dataset_path: Option<&Path>) -> Result<Ann
     let load_duration = if time_values_ms.is_empty() {
         None
     } else {
-        Some(time_values_ms.iter().sum::<f64>() / 1000.0)
+        Some(round4(time_values_ms.iter().sum::<f64>() / 1000.0))
     };
     let qps = load_duration
         .filter(|seconds| *seconds > 0.0)
-        .map(|seconds| time_values_ms.len() as f64 / seconds);
-    let serial_latency_p95 = percentile_f64(&time_values_ms, 95);
-    let serial_latency_p99 = percentile_f64(&time_values_ms, 99);
+        .map(|seconds| round4(time_values_ms.len() as f64 / seconds));
+    let serial_latency_p95 = percentile_f64(&time_values_ms, 95).map(round4);
+    let serial_latency_p99 = percentile_f64(&time_values_ms, 99).map(round4);
 
     let neighbors_ds = hdf5
         .dataset("neighbors")
         .context("missing neighbors dataset in ann HDF5 result")?;
     let neighbors_shape = neighbors_ds.shape();
     let max_load_count = neighbors_shape.get(1).copied().map(|value| value as f64);
-    let recall = if let Some(dataset_path) = dataset_path {
+    let recall = if let Some(dataset_path) = dataset_path.filter(|path| path.exists()) {
         compute_ann_hdf5_recall(dataset_path, &neighbors_ds)?
     } else {
         None
@@ -9035,11 +9035,11 @@ mod tests {
         ExternalResultSummary, LONGMEMEVAL_OFFICIAL_JUDGE_MAX_ATTEMPTS, MemoryBenchStats,
         MemoryRuntimeCaseMetric, MemoryRuntimeStageMetrics, MemoryScoreStats,
         OFFICIAL_JUDGE_REDACTION_MARKER, VectorDbBenchBundle, adapter_compatibility_overrides,
-        ann_benchmark_dataset_name, benchmark_question_prefers_context_first,
-        benchmark_relaxed_retrieval_query, benchmark_relaxed_retrieval_query_override,
-        benchmark_relaxed_retrieval_terms, benchmark_run_summary_for_qdrant_http_url,
-        benchmark_runtime_corpus_sha256, benchmark_runtime_markers,
-        benchmark_runtime_target_window_bytes, build_launch_commands,
+        ann_benchmark_dataset_name, ann_qdrant_launch_marker,
+        benchmark_question_prefers_context_first, benchmark_relaxed_retrieval_query,
+        benchmark_relaxed_retrieval_query_override, benchmark_relaxed_retrieval_terms,
+        benchmark_run_summary_for_qdrant_http_url, benchmark_runtime_corpus_sha256,
+        benchmark_runtime_markers, benchmark_runtime_target_window_bytes, build_launch_commands,
         build_memory_runtime_answer_source_boundary,
         build_memory_runtime_gold_answer_relevance_boundary, build_memory_runtime_metrics_summary,
         build_memory_runtime_retrieval_relevance_boundary,
@@ -11859,7 +11859,7 @@ query = "Norse OR Denmark OR Iceland OR Norway"
         assert!(joined.contains("./.venv/bin/python run.py --dataset dbpedia-openai-1000k-angular --algorithm qdrant --runs 1 --parallelism 1 --timeout 21600 --force"));
         assert!(joined.contains("network_mode=\"host\""));
         assert!(joined.contains("network_mode=\"bridge\""));
-        assert!(joined.contains(".amai-ann-qdrant-launch-v4"));
+        assert!(joined.contains(&ann_qdrant_launch_marker()));
         assert!(joined.contains(
             "text = text.replace('except docker.errors.APIError as exc:', 'except Exception as exc:')"
         ));
