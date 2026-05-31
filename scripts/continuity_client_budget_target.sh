@@ -133,8 +133,4 @@ if [[ "$api_supported" == "true" ]] \
   fi
 fi
 
-if [[ -x "$REPO_ROOT/target/release/amai" ]]; then
-  exec "$REPO_ROOT/target/release/amai" continuity client-budget-target "${original_args[@]}"
-fi
-
 exec "$SCRIPT_DIR/amai_exec.sh" continuity client-budget-target "${original_args[@]}"

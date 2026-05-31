@@ -134,8 +134,4 @@ if [[ "$api_supported" == "true" ]] \
   fi
 fi
 
-if [[ -x "$REPO_ROOT/target/release/amai" ]]; then
-  exec "$REPO_ROOT/target/release/amai" continuity compact-chat "${original_args[@]}"
-fi
-
 exec "$SCRIPT_DIR/amai_exec.sh" continuity compact-chat "${original_args[@]}"

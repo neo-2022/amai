@@ -54,6 +54,10 @@ chmod +x "${fakebin}/curl"
 move_if_exists target/release/amai
 move_if_exists scripts/amai_exec.sh
 
+# The success-path proof must fail closed if shell fallback is taken. Removing
+# both launcher surfaces guarantees the wrapper can only pass by accepting the
+# validated API payload.
+
 payload="$(
   PATH="${fakebin}:/usr/bin:/bin" AMI_OBSERVE_BIND=127.0.0.1:1 \
     ./scripts/continuity_handoff.sh \
@@ -71,4 +75,4 @@ printf '%s\n' "${payload}" | jq -e '
   and .continuity_handoff.namespace.code == "continuity"
 ' >/dev/null
 
-echo "proof_continuity_handoff_frontdoor_success_path: PASS"
+echo "proof_continuity_handoff_frontdoor_success_path: PASS api success short-circuit"

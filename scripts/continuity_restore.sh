@@ -15,7 +15,4 @@ else
   exit $status
 fi
 
-if [[ -x "./target/release/amai" ]]; then
-  exec "./target/release/amai" continuity restore "$@"
-fi
 exec "$SCRIPT_DIR/amai_exec.sh" continuity restore "$@"

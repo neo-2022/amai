@@ -26,7 +26,4 @@ else
 fi
 
 cd "$SCRIPT_DIR/.."
-if [[ -x "./target/release/amai" ]]; then
-  exec "./target/release/amai" continuity answer "$@"
-fi
 exec "$SCRIPT_DIR/amai_exec.sh" continuity answer "$@"

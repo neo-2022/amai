@@ -33,9 +33,6 @@ extract_handoff_api_response() {
 }
 
 exec_release_or_exec() {
-  if [[ -x "$REPO_ROOT/target/release/amai" ]]; then
-    exec "$REPO_ROOT/target/release/amai" continuity handoff "${original_args[@]}"
-  fi
   exec "$SCRIPT_DIR/amai_exec.sh" continuity handoff "${original_args[@]}"
 }
 
