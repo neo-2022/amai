@@ -156,6 +156,7 @@ pub enum ContinuityCommand {
 #[derive(Debug, Subcommand)]
 pub enum BootstrapCommand {
     Stack(BootstrapStackArgs),
+    Schema,
     Preflight(BootstrapPreflightArgs),
     AgentPreflight(BootstrapAgentPreflightArgs),
     Install(BootstrapOnboardingArgs),
@@ -1843,8 +1844,24 @@ pub struct TransferPolicyEnsureArgs {
     pub allow_import: bool,
     #[arg(long, default_value_t = false)]
     pub allow_verified_writeback: bool,
-    #[arg(long, default_value_t = true)]
+    #[arg(
+        long,
+        default_value_t = true,
+        conflicts_with = "no_requires_human_approval"
+    )]
     pub requires_human_approval: bool,
+    #[arg(
+        long = "no-requires-human-approval",
+        default_value_t = false,
+        conflicts_with = "requires_human_approval"
+    )]
+    pub no_requires_human_approval: bool,
+}
+
+impl TransferPolicyEnsureArgs {
+    pub fn effective_requires_human_approval(&self) -> bool {
+        self.requires_human_approval && !self.no_requires_human_approval
+    }
 }
 
 #[derive(Debug, Args)]
@@ -2854,7 +2871,7 @@ pub struct VerifyMcpMatrixArgs {
     pub related_project: String,
     #[arg(long, default_value = "review")]
     pub namespace: String,
-    #[arg(long, default_value = "codex_5h")]
+    #[arg(long, default_value = "client_primary_budget")]
     pub budget_profile: String,
     #[arg(long)]
     pub min_success_rate: Option<f64>,
@@ -3357,6 +3374,59 @@ mod tests {
         assert!(args.can_promote_after_verification);
         assert_eq!(args.memory_object_ids, vec!["memory-1", "memory-2"]);
         assert_eq!(args.artifact_refs, vec!["artifact://trace/1"]);
+    }
+
+    #[test]
+    fn transfer_policy_ensure_cli_can_release_human_approval_gate() {
+        let cli = Cli::parse_from([
+            "amai",
+            "transfer-policy",
+            "ensure",
+            "--workspace",
+            "default",
+            "--code",
+            "borrow_guard",
+            "--display-name",
+            "Borrow Guard",
+            "--default-decision",
+            "borrowed_unverified",
+            "--allow-cross-project-read",
+            "--allow-import",
+            "--allow-verified-writeback",
+            "--no-requires-human-approval",
+        ]);
+        let Command::TransferPolicy { command } = cli.command else {
+            panic!("expected transfer-policy command");
+        };
+        let TransferPolicyCommand::Ensure(args) = command else {
+            panic!("expected transfer-policy ensure command");
+        };
+        assert!(args.allow_verified_writeback);
+        assert!(!args.effective_requires_human_approval());
+    }
+
+    #[test]
+    fn transfer_policy_ensure_cli_rejects_conflicting_human_approval_flags() {
+        let error = Cli::try_parse_from([
+            "amai",
+            "transfer-policy",
+            "ensure",
+            "--workspace",
+            "default",
+            "--code",
+            "borrow_guard",
+            "--display-name",
+            "Borrow Guard",
+            "--default-decision",
+            "borrowed_unverified",
+            "--allow-cross-project-read",
+            "--allow-import",
+            "--allow-verified-writeback",
+            "--requires-human-approval",
+            "--no-requires-human-approval",
+        ])
+        .expect_err("conflicting approval flags must fail closed");
+        assert!(!error.to_string().is_empty());
     }
 
     #[test]

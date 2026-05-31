@@ -339,8 +339,8 @@ pub(crate) fn exact_client_limit_hourly_burn_value(
                 "status_bar_correlated": true,
                 "source": "codex_app_server_account_rate_limits_read_v1",
                 "window_minutes": window_minutes,
-                "summary": "Exact 5ч source пока недоступен, поэтому KPI честно не посчитан.",
-                "reply_prefix": "5ч KPI: н/д",
+                "summary": "Exact rate-limit source пока недоступен, поэтому burn guard честно не посчитан.",
+                "reply_prefix": "Burn guard: н/д",
             });
         }
     };
@@ -353,8 +353,8 @@ pub(crate) fn exact_client_limit_hourly_burn_value(
             "window_minutes": window_minutes,
             "latest_observed_at_epoch_ms": latest.observed_at_epoch_ms,
             "latest_live_age_seconds": live_age_ms as f64 / 1000.0,
-            "summary": "Exact sample 5ч лимита устарел, поэтому KPI fail-closed не считается.",
-            "reply_prefix": "5ч KPI: н/д",
+            "summary": "Exact sample window устарел, поэтому burn guard fail-closed не считается.",
+            "reply_prefix": "Burn guard: н/д",
         });
     }
     let window_duration_minutes = latest
@@ -367,8 +367,8 @@ pub(crate) fn exact_client_limit_hourly_burn_value(
             "source": latest.source,
             "window_minutes": window_duration_minutes,
             "latest_observed_at_epoch_ms": latest.observed_at_epoch_ms,
-            "summary": "Exact 5ч source не дал reset time, поэтому KPI fail-closed не считается.",
-            "reply_prefix": "5ч KPI: н/д",
+            "summary": "Exact rate-limit source не дал reset time, поэтому burn guard fail-closed не считается.",
+            "reply_prefix": "Burn guard: н/д",
         });
     };
     let reset_at_epoch_ms = primary_resets_at_epoch_seconds.saturating_mul(1000);
@@ -428,9 +428,9 @@ pub(crate) fn exact_client_limit_hourly_burn_value(
     let kpi_percent = signed_kpi_percent.abs();
     let classification = signed_kpi_classification(signed_kpi_percent);
     let reply_prefix = match classification {
-        "overspend" => format!("5ч KPI: переплата {kpi_percent:.2}%"),
-        "saving" => format!("5ч KPI: экономия {kpi_percent:.2}%"),
-        _ => "5ч KPI: 1:1".to_string(),
+        "overspend" => format!("Burn guard: переплата {kpi_percent:.2}%"),
+        "saving" => format!("Burn guard: экономия {kpi_percent:.2}%"),
+        _ => "Burn guard: 1:1".to_string(),
     };
     let projected_full_window_minutes =
         if actual_used_percent <= 0.01 || elapsed_window_minutes <= 0.01 {
@@ -460,7 +460,7 @@ pub(crate) fn exact_client_limit_hourly_burn_value(
         "ideal_used_percent": ideal_used_percent,
         "projected_primary_used_per_hour_percent": projected_primary_used_per_hour_percent,
         "ideal_primary_used_per_hour_percent": ideal_primary_used_per_hour_percent,
-        "equivalent_5h_budget_minutes_per_hour": projected_primary_used_per_hour_percent * 3.0,
+        "equivalent_primary_budget_minutes_per_hour": projected_primary_used_per_hour_percent * 3.0,
         "projected_full_window_minutes": projected_full_window_minutes,
         "projected_reset_delta_minutes": projected_reset_delta_minutes,
         "classification": classification,
@@ -474,7 +474,7 @@ pub(crate) fn exact_client_limit_hourly_burn_value(
         "reply_prefix": reply_prefix,
         "summary": match classification {
             "overspend" => format!(
-                "По текущему положению окна 5ч burn идёт быстрее нормы: использовано {actual_used_percent:.2}% вместо идеальных {ideal_used_percent:.2}% к этому моменту{}."
+                "По текущему положению окна burn основного окна идёт быстрее нормы: использовано {actual_used_percent:.2}% вместо идеальных {ideal_used_percent:.2}% к этому моменту{}."
                 ,
                 if window_progress_state == "preliminary" {
                     " (раннее окно сглажено)"
@@ -483,7 +483,7 @@ pub(crate) fn exact_client_limit_hourly_burn_value(
                 }
             ),
             "saving" => format!(
-                "По текущему положению окна 5ч burn идёт экономно: использовано {actual_used_percent:.2}% вместо идеальных {ideal_used_percent:.2}% к этому моменту{}."
+                "По текущему положению окна burn основного окна идёт экономно: использовано {actual_used_percent:.2}% вместо идеальных {ideal_used_percent:.2}% к этому моменту{}."
                 ,
                 if window_progress_state == "preliminary" {
                     " (раннее окно сглажено)"
@@ -492,7 +492,7 @@ pub(crate) fn exact_client_limit_hourly_burn_value(
                 }
             ),
             _ => format!(
-                "По текущему положению окна 5ч burn идёт почти один в один: использовано {actual_used_percent:.2}% при идеальных {ideal_used_percent:.2}%{}."
+                "По текущему положению окна burn основного окна идёт почти один в один: использовано {actual_used_percent:.2}% при идеальных {ideal_used_percent:.2}%{}."
                 ,
                 if window_progress_state == "preliminary" {
                     " (раннее окно сглажено)"
@@ -517,7 +517,7 @@ pub(crate) async fn collect_exact_client_limit_hourly_burn(
             persist_exact_client_limit_sample(db, observation).await?;
         }
     }
-    // Hourly burn surface is defined by the latest exact 5h sample only, so the
+    // Hourly burn surface is defined by the latest exact primary-window sample only, so the
     // current-session/client-budget path should not pull the whole sample history.
     let rows = postgres::list_observability_snapshots_by_kinds(
         db,
@@ -631,7 +631,7 @@ fn build_exact_client_limit_trend_analysis_value(
                 "source": "codex_app_server_account_rate_limits_read_v1",
                 "status_bar_correlated": true,
                 "analysis_window_minutes": lookback_minutes,
-                "summary": "История exact 5ч samples пока пуста, поэтому тренд не посчитан.",
+                "summary": "История exact samples основного окна пока пуста, поэтому тренд не посчитан.",
             });
         }
     };
@@ -649,7 +649,7 @@ fn build_exact_client_limit_trend_analysis_value(
             "status_bar_correlated": true,
             "analysis_window_minutes": lookback_minutes,
             "latest_observed_at_epoch_ms": latest_point["latest_observed_at_epoch_ms"].clone(),
-            "summary": "Последняя exact точка 5ч KPI сейчас не пригодна для тренд-анализа.",
+            "summary": "Последняя exact точка burn guard сейчас не пригодна для тренд-анализа.",
             "latest_point": latest_point,
         });
     }
@@ -721,8 +721,8 @@ fn build_exact_client_limit_trend_analysis_value(
             "{} За последние {:.2} мин KPI был `{}` и стал `{}` (delta {:+.2} п.п.).",
             direction_summary,
             span_minutes,
-            first_point["reply_prefix"].as_str().unwrap_or("5ч KPI: н/д"),
-            last_point["reply_prefix"].as_str().unwrap_or("5ч KPI: н/д"),
+            first_point["reply_prefix"].as_str().unwrap_or("Burn guard: н/д"),
+            last_point["reply_prefix"].as_str().unwrap_or("Burn guard: н/д"),
             delta_kpi_percent
         ),
         "latest_point": latest_point,
@@ -868,7 +868,7 @@ pub(crate) fn build_client_live_meter_json(
         "rollout_jsonl_malformed_objects_fail_closed": true,
         "status_bar_rate_limits": build_status_bar_rate_limits_json(exact_client_limits),
         "note": if current_thread_bound {
-            "Этот surface поднимает именно live meter клиента из rollout token_count/rate_limits: per-thread 5ч/7д contour берётся из собственного workspace агента, а codex app-server status-bar source остаётся только fallback/global surface."
+            "Этот surface поднимает именно live meter клиента из rollout token_count/rate_limits: per-thread основного/расширенного окна contour берётся из собственного workspace агента, а codex app-server status-bar source остаётся только fallback/global surface."
         } else {
             "Этот surface поднят из rollout token_count/rate_limits, но текущий thread ещё не привязан к observation. Пока не materialized current-thread meter, live-turn rows и rotate-pressure должны деградировать до unknown/stale, а не наследоваться от предыдущего thread. Codex app-server status-bar source при этом остаётся только fallback/global surface."
         }

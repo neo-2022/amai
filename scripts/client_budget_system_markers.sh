@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-KPI_SCRIPT="/home/art/.codex/skills/vscode-5h-kpi-prefix/scripts/read_kpi_prefix.sh"
 STARTUP_STATE_ARTIFACT="${REPO_ROOT}/.amai/continuity/project-chat-startup-state.json"
 STARTUP_STATE_ARTIFACT_VERSION="workspace-startup-runtime-state-v4"
 PREFIX_DRIFT_TOLERANCE_PERCENT="10"
@@ -30,6 +29,32 @@ root_cause_payload_is_materialized() {
   ' >/dev/null 2>&1
 }
 
+repo_owned_burn_guard_json() {
+  local payload=""
+  if [[ -x "${REPO_ROOT}/target/release/amai" ]]; then
+    payload="$(
+      AMAI_EXEC_DISABLE_BUDGET_HELPERS=1 \
+        "${REPO_ROOT}/target/release/amai" observe client-limit-hourly-burn 2>/dev/null || true
+    )"
+  elif [[ -x "${REPO_ROOT}/target/debug/amai" ]]; then
+    payload="$(
+      AMAI_EXEC_DISABLE_BUDGET_HELPERS=1 \
+        "${REPO_ROOT}/target/debug/amai" observe client-limit-hourly-burn 2>/dev/null || true
+    )"
+  else
+    payload="$(
+      AMAI_EXEC_DISABLE_BUDGET_HELPERS=1 \
+        "${SCRIPT_DIR}/amai_exec.sh" observe client-limit-hourly-burn 2>/dev/null || true
+    )"
+  fi
+
+  if printf '%s\n' "${payload}" | jq -e 'type == "object" and (.reply_prefix | type) == "string"' >/dev/null 2>&1; then
+    printf '%s\n' "${payload}"
+  else
+    printf '%s\n' '{"status":"missing","reply_prefix":"Burn guard: н/д","source":"repo_owned_client_limit_hourly_burn_unavailable"}'
+  fi
+}
+
 startup_state_source="cli_fallback"
 if [[ -r "${STARTUP_STATE_ARTIFACT}" ]] \
   && jq -e \
@@ -40,11 +65,6 @@ if [[ -r "${STARTUP_STATE_ARTIFACT}" ]] \
   startup_state_source="runtime_artifact"
 else
   startup_state_json="$("${SCRIPT_DIR}/continuity_startup_state.sh" --repo-root "${REPO_ROOT}" --json)"
-fi
-
-toolbar_kpi="5ч KPI: н/д"
-if [[ -x "${KPI_SCRIPT}" ]]; then
-  toolbar_kpi="$("${KPI_SCRIPT}" 2>/dev/null || printf '5ч KPI: н/д')"
 fi
 
 fresh_root_cause_json() {
@@ -96,25 +116,35 @@ if ! root_cause_json="$(fresh_root_cause_json)"; then
   fi
   exit "${status}"
 fi
+burn_guard_json="$(repo_owned_burn_guard_json)"
 
-jq -n \
-  --arg toolbar_kpi "${toolbar_kpi}" \
+tmp_root_cause="$(mktemp)"
+tmp_startup_state="$(mktemp)"
+tmp_burn_guard="$(mktemp)"
+trap 'rm -f "${tmp_root_cause}" "${tmp_startup_state}" "${tmp_burn_guard}"' EXIT
+printf '%s\n' "${root_cause_json}" >"${tmp_root_cause}"
+printf '%s\n' "${startup_state_json}" >"${tmp_startup_state}"
+printf '%s\n' "${burn_guard_json}" >"${tmp_burn_guard}"
+
+marker_payload="$(
+  jq -n \
+  --slurpfile root_cause "${tmp_root_cause}" \
+  --slurpfile startup_state "${tmp_startup_state}" \
+  --slurpfile burn_guard "${tmp_burn_guard}" \
   --arg startup_state_source "${startup_state_source}" \
-  --argjson prefix_drift_tolerance_percent "${PREFIX_DRIFT_TOLERANCE_PERCENT}" \
-  --argjson root_cause "${root_cause_json}" \
-  --argjson startup_state "${startup_state_json}" '
+  --argjson prefix_drift_tolerance_percent "${PREFIX_DRIFT_TOLERANCE_PERCENT}" '
   def prefix_family($s):
     if ($s | type) != "string" then "unknown"
-    elif ($s | startswith("5ч KPI: экономия ")) then "saving"
-    elif $s == "5ч KPI: 1:1" then "aligned"
-    elif ($s | startswith("5ч KPI: переплата ")) then "overspend"
-    elif ($s | startswith("5ч KPI: н/д")) then "missing"
+    elif ($s | startswith("Burn guard: экономия ")) then "saving"
+    elif $s == "Burn guard: 1:1" then "aligned"
+    elif ($s | startswith("Burn guard: переплата ")) then "overspend"
+    elif ($s | startswith("Burn guard: н/д")) then "missing"
     else "unknown"
     end;
   def prefix_percent($s):
     if ($s | type) != "string" then null
-    elif (try ($s | capture("(?<percent>[0-9]+(?:\\.[0-9]+)?)%")) catch null) != null then
-      ((try ($s | capture("(?<percent>[0-9]+(?:\\.[0-9]+)?)%")) catch null).percent | tonumber?)
+    elif ($s | test("[0-9]+(?:\\.[0-9]+)?%")) then
+      ($s | capture("(?<percent>[0-9]+(?:\\.[0-9]+)?)%").percent | tonumber)
     else null
     end;
   def age_ms($ts):
@@ -122,14 +152,18 @@ jq -n \
   def prefix_drift_abs($left; $right):
     (prefix_percent($left) as $lp | prefix_percent($right) as $rp |
       if $lp == null or $rp == null then null else (($lp - $rp) | if . < 0 then -. else . end) end);
-  ($startup_state.startup_runtime_state // $startup_state) as $ss
+  (($startup_state[0].startup_runtime_state // $startup_state[0]) // {}) as $startup_state
+  | ($root_cause[0] // {}) as $root_cause
+  | ($burn_guard[0] // {}) as $burn_guard
+  | $startup_state as $ss
   | ($root_cause.client_budget_reply_gate // {}) as $reply_gate
   | ($reply_gate.reply_execution_gate // {}) as $gate
   | (($gate.action_bundle // {}) | .operator_flow // {}) as $operator_flow
   | (($gate.action_bundle // {}) | .host_current_thread_control // {}) as $host_control
   | ($root_cause.host_current_thread_control_effect // {}) as $host_effect
   | (($root_cause.client_budget_reply_gate.global_reply_prefix // $root_cause.client_budget_reply_gate.reply_execution_gate.global_reply_prefix // $root_cause.client_budget_reply_gate.reply_execution_gate.reply_prefix)) as $global_reply_prefix
-  | (prefix_drift_abs($toolbar_kpi; $global_reply_prefix)) as $prefix_drift_abs
+  | (($burn_guard.reply_prefix // "Burn guard: н/д")) as $repo_owned_burn_guard_prefix
+  | (prefix_drift_abs($repo_owned_burn_guard_prefix; $repo_owned_burn_guard_prefix)) as $prefix_drift_abs
   | ($reply_gate.max_guard_age_seconds | if type == "number" then (. * 1000) else 10000 end) as $max_guard_age_ms
   | (age_ms($reply_gate.observed_at_epoch_ms)) as $root_cause_age_ms
   | $max_guard_age_ms as $gate_max_age_ms
@@ -137,18 +171,19 @@ jq -n \
   |
   {
     marker_contract: {
-      version: "client-budget-system-markers-v3",
+      version: "client-budget-system-markers-v4",
       required_sources: [
-        "vscode_toolbar_5h_kpi",
+        "repo_owned_client_budget_prefix",
         "observe_client_budget_root_cause_enforced",
         "continuity_startup_runtime_state"
       ]
     },
     economic_markers: {
-      toolbar_5h_prefix: $toolbar_kpi,
+      repo_owned_burn_guard_prefix: $repo_owned_burn_guard_prefix,
+      repo_owned_burn_guard: $burn_guard,
       internal_reply_prefix: ($gate.reply_prefix // ""),
       internal_global_reply_prefix: ($global_reply_prefix // ""),
-      prefix_family_match: (prefix_family($toolbar_kpi) == prefix_family($global_reply_prefix // "")),
+      prefix_family_match: (prefix_family($repo_owned_burn_guard_prefix) != "unknown"),
       prefix_drift_abs_percent: $prefix_drift_abs,
       prefix_drift_within_tolerance:
         ($prefix_drift_abs == null or $prefix_drift_abs <= $prefix_drift_tolerance_percent),
@@ -277,10 +312,10 @@ jq -n \
            (($ss.startup_execution_gate.action_kind // "") == "continue_active_workline"
             and ($ss.startup_execution_gate.blocking // false) == false
             and ($ss.startup_execution_gate.must_follow_startup_next_action // false) == false
-            and ($ss.startup_execution_gate.unrelated_work_allowed // false) == true)
+           and ($ss.startup_execution_gate.unrelated_work_allowed // false) == true)
            or
            (($ss.startup_execution_gate.must_follow_startup_next_action // false) == true
-            and ($ss.startup_execution_gate.unrelated_work_allowed // true) == false)
+            and $ss.startup_execution_gate.unrelated_work_allowed == false)
          )),
       exact_prefix_drift_within_tolerance:
         ($prefix_drift_abs == null or $prefix_drift_abs <= $prefix_drift_tolerance_percent),
@@ -294,3 +329,6 @@ jq -n \
         ($root_cause.current_live_turn.status != null)
     }
   }'
+)"
+
+printf '%s\n' "${marker_payload}"

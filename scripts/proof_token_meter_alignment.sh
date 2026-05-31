@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 source ./scripts/load_env.sh
 
 ./target/release/amai observe token-report \
-  --budget-profile codex_5h \
+  --budget-profile client_primary_budget \
   --include-verify-events true >/tmp/amai-proof-token-meter-alignment.json
 
 python3 - <<'PY'

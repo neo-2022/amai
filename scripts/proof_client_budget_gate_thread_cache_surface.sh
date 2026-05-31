@@ -25,7 +25,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$(dirname "${CACHE_PATH}")"
-now_ms="$(date +%s%3N)"
+now_ms="$(./scripts/epoch_ms.sh)"
 
 cat >"${CACHE_PATH}" <<EOF
 {
@@ -41,7 +41,7 @@ cat >"${CACHE_PATH}" <<EOF
         "action_kind": "compact_current_thread_for_client_budget",
         "blocking": false,
         "reply_budget_mode": "compact_high_signal",
-        "reply_prefix": "5ч KPI: переплата 12.34%",
+        "reply_prefix": "Burn guard: переплата 12.34%",
         "same_meter_pure_burn_turn_active": true,
         "max_tool_roundtrips_soft": 0,
         "action_bundle": {
@@ -62,7 +62,7 @@ cat >"${CACHE_PATH}" <<EOF
     "observed_at_epoch_ms": ${now_ms},
     "reply_execution_gate": {
       "action_kind": "compact_current_thread_for_client_budget",
-      "reply_prefix": "5ч KPI: переплата 12.34%"
+      "reply_prefix": "Burn guard: переплата 12.34%"
     }
   }
 }

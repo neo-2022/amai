@@ -1,4 +1,21 @@
+use super::token_budget_runtime_shared::{
+    OPERATOR_CLIENT_BUDGET_CONTEXT_CONTRACT_VERSION, OPERATOR_GUARD_METRIC_DOMAIN,
+    PUBLIC_PRODUCT_HEADLINE_CONTRACT_VERSION, PUBLIC_SAVINGS_METRIC_CODE,
+    PUBLIC_SAVINGS_METRIC_DOMAIN, PUBLIC_SAVINGS_PROJECTION_CONFIDENCE_EXACT_SAME_METER,
+    PUBLIC_SAVINGS_PROJECTION_CONFIDENCE_EXACT_SAME_METER_VERIFIED,
+    PUBLIC_SAVINGS_PROJECTION_CONFIDENCE_MISSING,
+    PUBLIC_SAVINGS_PROJECTION_CONFIDENCE_PRELIMINARY_SUMMARY,
+    PUBLIC_SAVINGS_PROJECTION_CONFIDENCE_VERIFIED_SUMMARY,
+    PUBLIC_SAVINGS_PROJECTION_CONTRACT_VERSION,
+    PUBLIC_SAVINGS_PROJECTION_PAIR_SOURCE_EXACT_SAME_METER,
+    PUBLIC_SAVINGS_PROJECTION_PAIR_SOURCE_MEASURED_SUMMARY,
+    PUBLIC_SAVINGS_PROJECTION_PAIR_SOURCE_MISSING,
+    PUBLIC_SAVINGS_PROJECTION_PAIR_SOURCE_VERIFIED_SUMMARY,
+    PUBLIC_SAVINGS_PROJECTION_STATUS_MISSING, PUBLIC_SAVINGS_PROJECTION_STATUS_OBSERVED,
+    PUBLIC_SAVINGS_PROJECTION_STATUS_PRELIMINARY,
+};
 use super::*;
+use crate::dashboard_format::format_u64;
 
 fn derived_client_prompt_tokens(
     event: &TokenBudgetEvent,
@@ -520,6 +537,201 @@ fn excluded_event_label(code: &str) -> &'static str {
     }
 }
 
+fn public_savings_projection_pair_text(
+    without_amai_tokens: u64,
+    with_amai_tokens: u64,
+) -> (&'static str, i64, f64, String) {
+    let saved_tokens = without_amai_tokens as i64 - with_amai_tokens as i64;
+    let saved_pct = saved_tokens as f64 * 100.0 / without_amai_tokens as f64;
+    let classification = signed_kpi_classification(saved_pct);
+    let value_text = match classification {
+        "saving" => format!(
+            "Amai savings: без Amai {}, с Amai {}, экономия {} ({:.2}%)",
+            format_u64(Some(without_amai_tokens)),
+            format_u64(Some(with_amai_tokens)),
+            format_u64(Some(saved_tokens as u64)),
+            saved_pct.abs()
+        ),
+        "overspend" => format!(
+            "Amai savings: без Amai {}, с Amai {}, перерасход {} ({:.2}%)",
+            format_u64(Some(without_amai_tokens)),
+            format_u64(Some(with_amai_tokens)),
+            format_u64(Some(saved_tokens.unsigned_abs())),
+            saved_pct.abs()
+        ),
+        _ => format!(
+            "Amai savings: без Amai {}, с Amai {}, 1:1",
+            format_u64(Some(without_amai_tokens)),
+            format_u64(Some(with_amai_tokens)),
+        ),
+    };
+    (classification, saved_tokens, saved_pct, value_text)
+}
+
+fn public_savings_projection_pair(
+    without_amai_tokens: u64,
+    with_amai_tokens: u64,
+) -> Option<(&'static str, i64, f64, String)> {
+    if without_amai_tokens == 0 {
+        return None;
+    }
+    Some(public_savings_projection_pair_text(
+        without_amai_tokens,
+        with_amai_tokens,
+    ))
+}
+
+fn product_headline_same_meter_exact_pair_tokens(summary: &Value) -> Option<(u64, u64, i64, f64)> {
+    let alignment = &summary["client_limit_meter_alignment"];
+    if alignment["same_meter_as_client_limit"].as_bool() != Some(true) {
+        return None;
+    }
+    let without_amai = alignment["strict_client_meter_slice"]["lower_bound_tokens"]
+        .as_u64()
+        .or_else(|| {
+            alignment["baseline_equivalence"]["measured_baseline_tokens_lower_bound"].as_u64()
+        })
+        .or_else(|| summary["verified_without_amai_measured_tokens"].as_u64())
+        .or_else(|| summary["verified_baseline_tokens"].as_u64())?;
+    let with_amai = summary["observed_whole_cycle_with_amai_tokens"]
+        .as_u64()
+        .or_else(|| summary["verified_observed_whole_cycle_with_amai_tokens"].as_u64())
+        .or_else(|| summary["verified_with_amai_measured_tokens"].as_u64())
+        .or_else(|| summary["with_amai_measured_tokens"].as_u64())?;
+    let (_, saved_tokens, saved_pct, _) = public_savings_projection_pair(without_amai, with_amai)?;
+    Some((without_amai, with_amai, saved_tokens, saved_pct))
+}
+
+fn verified_summary_pair_tokens(summary: &Value) -> Option<(u64, u64, i64, f64)> {
+    let without_amai = summary["verified_baseline_tokens"].as_u64()?;
+    let with_amai = summary["verified_observed_whole_cycle_with_amai_tokens"]
+        .as_u64()
+        .or_else(|| summary["verified_with_amai_measured_tokens"].as_u64())?;
+    let (_, saved_tokens, saved_pct, _) = public_savings_projection_pair(without_amai, with_amai)?;
+    Some((without_amai, with_amai, saved_tokens, saved_pct))
+}
+
+fn measured_summary_pair_tokens(summary: &Value) -> Option<(u64, u64, i64, f64)> {
+    let without_amai = summary["baseline_tokens"].as_u64()?;
+    let with_amai = summary["observed_whole_cycle_with_amai_tokens"]
+        .as_u64()
+        .or_else(|| summary["with_amai_measured_tokens"].as_u64())?;
+    let (_, saved_tokens, saved_pct, _) = public_savings_projection_pair(without_amai, with_amai)?;
+    Some((without_amai, with_amai, saved_tokens, saved_pct))
+}
+
+fn build_public_savings_projection(summary: &Value, scope_label: &str) -> Value {
+    let events_total = summary["events_total"].as_u64().unwrap_or(0);
+    let counted_events = summary["counted_events"].as_u64().unwrap_or(0);
+    let coverage = if summary["coverage"].is_object() {
+        summary["coverage"].clone()
+    } else {
+        Value::Null
+    };
+
+    let observed_projection = |confidence: &'static str,
+                               pair_source: &'static str,
+                               same_meter_correlated: bool,
+                               without_amai_tokens: u64,
+                               with_amai_tokens: u64,
+                               saved_tokens: i64,
+                               saved_pct: f64,
+                               status: &'static str| {
+        let (classification, _, _, value_text) =
+            public_savings_projection_pair_text(without_amai_tokens, with_amai_tokens);
+        json!({
+            "metric_domain": PUBLIC_SAVINGS_METRIC_DOMAIN,
+            "metric_code": PUBLIC_SAVINGS_METRIC_CODE,
+            "projection_contract_version": PUBLIC_SAVINGS_PROJECTION_CONTRACT_VERSION,
+            "scope_label": scope_label,
+            "status": status,
+            "preliminary": status == PUBLIC_SAVINGS_PROJECTION_STATUS_PRELIMINARY,
+            "classification": classification,
+            "confidence": confidence,
+            "pair_source": pair_source,
+            "same_meter_correlated": same_meter_correlated,
+            "without_amai_tokens": without_amai_tokens,
+            "with_amai_tokens": with_amai_tokens,
+            "saved_tokens": saved_tokens,
+            "saved_pct": saved_pct,
+            "events_count": events_total,
+            "counted_events": counted_events,
+            "coverage": coverage.clone(),
+            "value_text": value_text,
+        })
+    };
+
+    if let Some((without_amai_tokens, with_amai_tokens, saved_tokens, saved_pct)) =
+        product_headline_same_meter_exact_pair_tokens(summary)
+    {
+        return observed_projection(
+            if counted_events > 0 {
+                PUBLIC_SAVINGS_PROJECTION_CONFIDENCE_EXACT_SAME_METER_VERIFIED
+            } else {
+                PUBLIC_SAVINGS_PROJECTION_CONFIDENCE_EXACT_SAME_METER
+            },
+            PUBLIC_SAVINGS_PROJECTION_PAIR_SOURCE_EXACT_SAME_METER,
+            true,
+            without_amai_tokens,
+            with_amai_tokens,
+            saved_tokens,
+            saved_pct,
+            PUBLIC_SAVINGS_PROJECTION_STATUS_OBSERVED,
+        );
+    }
+
+    if let Some((without_amai_tokens, with_amai_tokens, saved_tokens, saved_pct)) =
+        verified_summary_pair_tokens(summary)
+    {
+        return observed_projection(
+            PUBLIC_SAVINGS_PROJECTION_CONFIDENCE_VERIFIED_SUMMARY,
+            PUBLIC_SAVINGS_PROJECTION_PAIR_SOURCE_VERIFIED_SUMMARY,
+            false,
+            without_amai_tokens,
+            with_amai_tokens,
+            saved_tokens,
+            saved_pct,
+            PUBLIC_SAVINGS_PROJECTION_STATUS_OBSERVED,
+        );
+    }
+
+    if let Some((without_amai_tokens, with_amai_tokens, saved_tokens, saved_pct)) =
+        measured_summary_pair_tokens(summary)
+    {
+        return observed_projection(
+            PUBLIC_SAVINGS_PROJECTION_CONFIDENCE_PRELIMINARY_SUMMARY,
+            PUBLIC_SAVINGS_PROJECTION_PAIR_SOURCE_MEASURED_SUMMARY,
+            false,
+            without_amai_tokens,
+            with_amai_tokens,
+            saved_tokens,
+            saved_pct,
+            PUBLIC_SAVINGS_PROJECTION_STATUS_PRELIMINARY,
+        );
+    }
+
+    json!({
+        "metric_domain": PUBLIC_SAVINGS_METRIC_DOMAIN,
+        "metric_code": PUBLIC_SAVINGS_METRIC_CODE,
+        "projection_contract_version": PUBLIC_SAVINGS_PROJECTION_CONTRACT_VERSION,
+        "scope_label": scope_label,
+        "status": PUBLIC_SAVINGS_PROJECTION_STATUS_MISSING,
+        "preliminary": false,
+        "classification": "missing",
+        "confidence": PUBLIC_SAVINGS_PROJECTION_CONFIDENCE_MISSING,
+        "pair_source": PUBLIC_SAVINGS_PROJECTION_PAIR_SOURCE_MISSING,
+        "same_meter_correlated": false,
+        "without_amai_tokens": Value::Null,
+        "with_amai_tokens": Value::Null,
+        "saved_tokens": Value::Null,
+        "saved_pct": Value::Null,
+        "events_count": events_total,
+        "counted_events": counted_events,
+        "coverage": coverage,
+        "value_text": "Amai savings: н/д",
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn build_product_headline(
     summary: &Value,
@@ -542,28 +754,19 @@ pub(crate) fn build_product_headline_with_target(
 ) -> Value {
     let events_total = summary["events_total"].as_u64().unwrap_or(0);
     let counted_events = summary["counted_events"].as_u64().unwrap_or(0);
-    let legacy_unverified_events = summary["legacy_unverified_events"].as_u64().unwrap_or(0);
-    let preliminary = summary["preliminary"].as_bool().unwrap_or(true);
-    let verified_percent = summary["verified_effective_savings_pct"]
-        .as_f64()
-        .unwrap_or(0.0);
-    let effective_percent = summary["effective_savings_pct"].as_f64().unwrap_or(0.0);
-    let verified_saved_tokens = summary["verified_effective_saved_tokens"]
-        .as_i64()
-        .unwrap_or(0);
-    let effective_saved_tokens = summary["total_effective_saved_tokens"]
-        .as_i64()
-        .unwrap_or(0);
-    let quality_ok_rate = summary["quality_ok_rate"].as_f64().unwrap_or(0.0);
-    let fallback_rate = summary["fallback_rate"].as_f64().unwrap_or(0.0);
-    let same_meter_exact_pair = product_headline_same_meter_exact_pair(summary);
-    let status_bar_correlated = same_meter_exact_pair.is_some();
+    let projection = build_public_savings_projection(summary, scope_label);
+    let projection_status = projection["status"]
+        .as_str()
+        .unwrap_or(PUBLIC_SAVINGS_PROJECTION_STATUS_MISSING);
+    let projection_preliminary = projection["preliminary"].as_bool() == Some(true);
+    let classification = projection["classification"].as_str().unwrap_or("missing");
+    let status_bar_correlated = projection["same_meter_correlated"].as_bool() == Some(true);
     let target_percent = client_budget_target_percent as f64;
     let target_active = client_budget_target_percent > 0;
-    let same_meter_value_percent = same_meter_exact_pair.map(|(_, pct)| pct);
-    let same_meter_saved_tokens = same_meter_exact_pair.map(|(saved_tokens, _)| saved_tokens);
-    let below_status_bar_target =
-        target_active && same_meter_value_percent.is_some_and(|value| value < target_percent);
+    let projection_value_percent = projection["saved_pct"].as_f64();
+    let below_status_bar_target = target_active
+        && status_bar_correlated
+        && projection_value_percent.is_some_and(|value| value < target_percent);
     let client_limit_boundary_semantics =
         client_limit_boundary_semantics.cloned().unwrap_or_else(|| {
             if summary["client_limit_meter_alignment"].is_object() {
@@ -612,153 +815,72 @@ pub(crate) fn build_product_headline_with_target(
         }
         note
     };
-    let below_target_note = format!(
-        "Это exact same-meter метрика, коррелирующая с VS Code status bar. Текущая экономия реальных токенов модели пользователя остаётся ниже целевой планки {}%.",
-        client_budget_target_percent
-    );
-
-    if counted_events > 0 {
-        json!({
-            "metric_code": "verified_effective_savings_pct",
-            "title": "Проверенная реальная экономия",
-            "scope_label": scope_label,
-            "status": if preliminary || below_status_bar_target { "alert" } else { "pass" },
-            "preliminary": preliminary,
-            "value_percent": same_meter_value_percent.unwrap_or(verified_percent),
-            "saved_tokens": same_meter_saved_tokens.unwrap_or(verified_saved_tokens),
-            "events_count": events_total,
-            "counted_events": counted_events,
-            "quality_ok_rate": quality_ok_rate,
-            "fallback_rate": fallback_rate,
-            "client_meter_status_bar_correlated": status_bar_correlated,
-            "client_meter_target_percent": target_percent,
-            "client_meter_target_met": status_bar_correlated && !below_status_bar_target,
-            "client_limit_boundary_semantics": client_limit_boundary_semantics,
-            "note": annotate_note(if preliminary {
-                if status_bar_correlated {
-                    "Это уже quality-gated exact same-meter метрика, коррелирующая с VS Code status bar, но выборка пока ещё маленькая."
-                } else {
-                    "Это уже quality-gated метрика, но выборка пока ещё маленькая."
-                }
-            } else if below_status_bar_target {
-                below_target_note.as_str()
-            } else if status_bar_correlated {
-                "Это главный честный KPI: exact same-meter, quality-gated, коррелирует с VS Code status bar и показывает реальную экономию токенов модели пользователя."
-            } else {
-                "Это главный честный KPI: live-only, quality-gated и с учётом recovery."
-            }),
-        })
-    } else if status_bar_correlated {
-        json!({
-            "metric_code": "exact_same_meter_effective_savings_pct",
-            "title": "Реальная экономия по exact same-meter",
-            "scope_label": scope_label,
-            "status": if below_status_bar_target { "alert" } else { "pass" },
-            "preliminary": false,
-            "value_percent": same_meter_value_percent.unwrap_or(effective_percent),
-            "saved_tokens": same_meter_saved_tokens.unwrap_or(effective_saved_tokens),
-            "events_count": events_total,
-            "counted_events": counted_events,
-            "quality_ok_rate": quality_ok_rate,
-            "fallback_rate": fallback_rate,
-            "client_meter_status_bar_correlated": true,
-            "client_meter_target_percent": target_percent,
-            "client_meter_target_met": !below_status_bar_target,
-            "client_limit_boundary_semantics": client_limit_boundary_semantics,
-            "note": annotate_note(if below_status_bar_target {
-                below_target_note.as_str()
-            } else {
-                "Это exact same-meter метрика, коррелирующая с VS Code status bar. В этом scope truthful client-limit equivalence уже materialized по whole-cycle component semantics, даже если retrieval quality-gated confirmed lane ещё пуст."
-            }),
-        })
-    } else if events_total > 0 {
-        json!({
-            "metric_code": "effective_savings_pct_preliminary",
-            "title": "Реальная экономия пока предварительно",
-            "scope_label": scope_label,
-            "status": "alert",
-            "preliminary": true,
-            "value_percent": effective_percent,
-            "saved_tokens": effective_saved_tokens,
-            "events_count": events_total,
-            "counted_events": counted_events,
-            "quality_ok_rate": quality_ok_rate,
-            "fallback_rate": fallback_rate,
-            "client_limit_boundary_semantics": client_limit_boundary_semantics,
-            "note": annotate_note(if legacy_unverified_events > 0 {
-                "Проверенная выборка ещё не набрана: часть исторических live-событий была записана старым форматом без quality-блока, поэтому пока показывается общая реальная экономия."
-            } else {
-                "Проверенная выборка ещё не набрана, поэтому временно показывается общая реальная экономия по live-событиям."
-            }),
-        })
-    } else {
-        json!({
-            "metric_code": "no_live_events",
-            "title": "Реальная экономия пока не накоплена",
-            "scope_label": scope_label,
-            "status": "unknown",
-            "preliminary": true,
-            "value_percent": 0.0,
-            "saved_tokens": 0,
-            "events_count": 0,
-            "counted_events": 0,
-            "quality_ok_rate": 0.0,
-            "fallback_rate": 0.0,
-            "client_limit_boundary_semantics": client_limit_boundary_semantics,
-            "note": annotate_note("Amai ещё не накопил live-события для этой метрики."),
-        })
-    }
-}
-
-fn product_headline_same_meter_exact_pair(summary: &Value) -> Option<(i64, f64)> {
-    let alignment = &summary["client_limit_meter_alignment"];
-    if alignment["same_meter_as_client_limit"].as_bool() != Some(true) {
-        return None;
-    }
-    let without_amai = alignment["strict_client_meter_slice"]["lower_bound_tokens"]
-        .as_u64()
-        .or_else(|| {
-            alignment["baseline_equivalence"]["measured_baseline_tokens_lower_bound"].as_u64()
-        })
-        .or_else(|| summary["verified_without_amai_measured_tokens"].as_u64())
-        .or_else(|| summary["verified_baseline_tokens"].as_u64())?;
-    let with_amai = summary["observed_whole_cycle_with_amai_tokens"]
-        .as_u64()
-        .or_else(|| summary["verified_observed_whole_cycle_with_amai_tokens"].as_u64())
-        .or_else(|| summary["verified_with_amai_measured_tokens"].as_u64())
-        .or_else(|| summary["with_amai_measured_tokens"].as_u64())?;
-    if without_amai == 0 {
-        return None;
-    }
-    let saved_tokens = without_amai as i64 - with_amai as i64;
-    let value_percent = saved_tokens as f64 * 100.0 / without_amai as f64;
-    Some((saved_tokens, value_percent))
+    let operator_client_budget_context = json!({
+        "metric_domain": OPERATOR_GUARD_METRIC_DOMAIN,
+        "visibility": "operator_only",
+        "context_contract_version": OPERATOR_CLIENT_BUDGET_CONTEXT_CONTRACT_VERSION,
+        "target_percent": target_percent,
+        "same_meter_correlated": status_bar_correlated,
+        "below_target": below_status_bar_target,
+        "target_met": status_bar_correlated && !below_status_bar_target,
+    });
+    let base_note = match projection_status {
+        PUBLIC_SAVINGS_PROJECTION_STATUS_OBSERVED
+            if status_bar_correlated && counted_events > 0 =>
+        {
+            "Это честная Amai savings-пара по exact same-meter шкале: provider-independent, quality-gated и считающая без Amai и с Amai по одной и той же шкале токенов модели пользователя."
+        }
+        PUBLIC_SAVINGS_PROJECTION_STATUS_OBSERVED if status_bar_correlated => {
+            "Это честная Amai savings-пара по exact same-meter шкале: она уже materialized по real model meter, даже если quality-gated confirmed lane для этого scope ещё пуст."
+        }
+        PUBLIC_SAVINGS_PROJECTION_STATUS_OBSERVED => {
+            "Это честная Amai savings-пара по подтверждённой части live summary: provider-independent и quality-gated, но не притворяется client-limit same-meter шкалой."
+        }
+        PUBLIC_SAVINGS_PROJECTION_STATUS_PRELIMINARY if classification == "overspend" => {
+            "Это честная Amai savings-пара пока предварительная и уже показывает перерасход: без Amai и с Amai посчитаны, но final quality-gated или exact same-meter подтверждение для этого scope ещё не materialized."
+        }
+        PUBLIC_SAVINGS_PROJECTION_STATUS_PRELIMINARY => {
+            "Это честная Amai savings-пара пока предварительная: без Amai и с Amai уже посчитаны, но final quality-gated или exact same-meter состояние для этого scope ещё не materialized."
+        }
+        _ if events_total > 0 => {
+            "Live-события уже есть, но честная savings-пара без Amai/с Amai для этого scope ещё не materialized."
+        }
+        _ => "Amai ещё не накопил live-события для этой честной savings-пары.",
+    };
+    json!({
+        "headline_contract_version": PUBLIC_PRODUCT_HEADLINE_CONTRACT_VERSION,
+        "metric_domain": PUBLIC_SAVINGS_METRIC_DOMAIN,
+        "metric_code": PUBLIC_SAVINGS_METRIC_CODE,
+        "title": match projection_status {
+            PUBLIC_SAVINGS_PROJECTION_STATUS_OBSERVED => "Честная экономия Amai",
+            PUBLIC_SAVINGS_PROJECTION_STATUS_PRELIMINARY => "Честная экономия Amai пока предварительная",
+            _ => "Честная экономия Amai пока не накоплена",
+        },
+        "scope_label": scope_label,
+        "classification": projection["classification"].clone(),
+        "confidence": projection["confidence"].clone(),
+        "status": match projection_status {
+            PUBLIC_SAVINGS_PROJECTION_STATUS_OBSERVED if classification == "overspend" => "alert",
+            PUBLIC_SAVINGS_PROJECTION_STATUS_OBSERVED => "pass",
+            PUBLIC_SAVINGS_PROJECTION_STATUS_PRELIMINARY => "waiting",
+            _ => "unknown",
+        },
+        "preliminary": projection_preliminary,
+        "value_percent": projection["saved_pct"].clone(),
+        "saved_tokens": projection["saved_tokens"].clone(),
+        "value_text": projection["value_text"].clone(),
+        "events_count": events_total,
+        "counted_events": counted_events,
+        "client_limit_boundary_semantics": client_limit_boundary_semantics,
+        "operator_client_budget_context": operator_client_budget_context,
+        "public_savings_projection": projection,
+        "note": annotate_note(base_note),
+    })
 }
 
 #[cfg(test)]
 pub(crate) fn scope_same_meter_exact_pair(scope_summary: &Value) -> Option<(u64, u64, i64, f64)> {
-    let alignment = &scope_summary["client_limit_meter_alignment"];
-    if alignment["same_meter_as_client_limit"].as_bool() != Some(true) {
-        return None;
-    }
-    let without_amai = alignment["strict_client_meter_slice"]["lower_bound_tokens"]
-        .as_u64()
-        .or_else(|| {
-            alignment["baseline_equivalence"]["measured_baseline_tokens_lower_bound"].as_u64()
-        })
-        .or_else(|| scope_summary["verified_without_amai_measured_tokens"].as_u64())
-        .or_else(|| scope_summary["verified_baseline_tokens"].as_u64())?;
-    let with_amai = scope_summary["observed_whole_cycle_with_amai_tokens"]
-        .as_u64()
-        .or_else(|| scope_summary["verified_observed_whole_cycle_with_amai_tokens"].as_u64())
-        .or_else(|| scope_summary["verified_with_amai_measured_tokens"].as_u64())
-        .or_else(|| scope_summary["with_amai_measured_tokens"].as_u64())?;
-    if without_amai == 0 {
-        return None;
-    }
-    let saved_tokens = without_amai as i64 - with_amai as i64;
-    let saved_pct = saved_tokens as f64 * 100.0 / without_amai as f64;
-    Some((without_amai, with_amai, saved_tokens, saved_pct))
+    product_headline_same_meter_exact_pair_tokens(scope_summary)
 }
 
 fn current_live_turn_alignment_component<'a>(
@@ -839,6 +961,66 @@ pub(crate) fn current_live_turn_full_turn_exact_pair(
 pub(crate) fn event_to_json(event: &TokenBudgetEvent) -> Value {
     let excluded_reason_code = usage_excluded_reason_code(event);
     let mut object = serde_json::Map::new();
+    let whole_cycle_observed = json!({
+        "client_prompt_tokens": event.client_prompt_tokens,
+        "assistant_generation_tokens": event.assistant_generation_tokens,
+        "tool_overhead_tokens": event.tool_overhead_tokens,
+        "continuity_restore_tokens": event.continuity_restore_tokens,
+    });
+    let recovery = json!({
+        "recovery_tokens": event.recovery_tokens,
+        "fallback_triggered": event.fallback_triggered,
+        "fallback_count": event.fallback_count,
+    });
+    let quality = json!({
+        "quality_ok": event.quality_ok,
+        "quality_score": event.quality_score,
+        "quality_method": event.quality_method.clone(),
+        "quality_tier": event.quality_tier.clone(),
+        "head_hit_target": event.head_hit_target,
+    });
+    let followup = json!({
+        "needed_followup": event.needed_followup,
+        "followup_count": event.followup_count,
+        "followup_of_event_id": event
+            .followup_of_event_id
+            .as_ref()
+            .map(|value| Value::String(value.clone()))
+            .unwrap_or(Value::Null),
+        "resolved_by_event_id": event
+            .resolved_by_event_id
+            .as_ref()
+            .map(|value| Value::String(value.clone()))
+            .unwrap_or(Value::Null),
+    });
+    let shape = json!({
+        "document_hits": event.document_hits,
+        "symbol_hits": event.symbol_hits_count,
+        "file_hits": event.file_hits,
+        "sources_count": event.sources_count,
+        "chunks_count": event.chunks_count,
+        "pack_token_count": event.pack_token_count,
+        "deduped_token_count": event.deduped_token_count,
+    });
+    let savings = json!({
+        "saved_tokens": event.saved_tokens,
+        "effective_saved_tokens": event.effective_saved_tokens,
+        "savings_factor": event.savings_factor,
+        "savings_percent": event.savings_percent,
+        "effective_savings_percent": event.effective_savings_percent,
+    });
+    let accounting = build_tokenomics_accounting_json(
+        build_tokenomics_raw_section(
+            event.naive_tokens,
+            event.context_tokens,
+            event.recovery_tokens,
+            whole_cycle_observed.clone(),
+            recovery.clone(),
+            shape.clone(),
+        ),
+        build_tokenomics_policy_section(quality.clone(), followup.clone()),
+        build_tokenomics_projection_section(savings.clone()),
+    );
     object.insert(
         "created_at_epoch_ms".to_string(),
         Value::from(event.created_at_epoch_ms),
@@ -1144,12 +1326,7 @@ pub(crate) fn event_to_json(event: &TokenBudgetEvent) -> Value {
     );
     object.insert(
         "whole_cycle_observed".to_string(),
-        json!({
-            "client_prompt_tokens": event.client_prompt_tokens,
-            "assistant_generation_tokens": event.assistant_generation_tokens,
-            "tool_overhead_tokens": event.tool_overhead_tokens,
-            "continuity_restore_tokens": event.continuity_restore_tokens,
-        }),
+        whole_cycle_observed.clone(),
     );
     if let Some(source) = &event.tool_overhead_source {
         object.insert(
@@ -1162,6 +1339,12 @@ pub(crate) fn event_to_json(event: &TokenBudgetEvent) -> Value {
     if let Some(source) = &event.pre_amai_baseline_source {
         object.insert("pre_amai_baseline_source".to_string(), source.clone());
     }
+    object.insert("recovery".to_string(), recovery.clone());
+    object.insert("quality".to_string(), quality.clone());
+    object.insert("followup".to_string(), followup.clone());
+    object.insert("shape".to_string(), shape.clone());
+    object.insert("savings".to_string(), savings.clone());
+    object.insert("accounting".to_string(), accounting);
     Value::Object(object)
 }
 
@@ -1234,6 +1417,58 @@ pub(crate) fn build_event_payload(
     let assistant_generation_tokens = whole_cycle_observed["assistant_generation_tokens"].as_u64();
     let tool_overhead_tokens = whole_cycle_observed["tool_overhead_tokens"].as_u64();
     let continuity_restore_tokens = whole_cycle_observed["continuity_restore_tokens"].as_u64();
+    let whole_cycle_observed = json!({
+        "client_prompt_tokens": client_prompt_tokens,
+        "assistant_generation_tokens": assistant_generation_tokens,
+        "tool_overhead_tokens": tool_overhead_tokens,
+        "continuity_restore_tokens": continuity_restore_tokens,
+    });
+    let recovery = json!({
+        "recovery_tokens": recovery_tokens,
+        "fallback_triggered": fallback_triggered,
+        "fallback_count": fallback_count,
+    });
+    let quality_json = json!({
+        "quality_ok": quality.quality_ok,
+        "quality_score": quality.quality_score,
+        "quality_method": quality.quality_method,
+        "quality_tier": quality.quality_tier,
+        "head_hit_target": quality.head_hit_target,
+    });
+    let followup = json!({
+        "needed_followup": quality.needed_followup,
+        "followup_count": quality.followup_count,
+        "followup_of_event_id": Value::Null,
+        "resolved_by_event_id": Value::Null,
+    });
+    let shape = json!({
+        "document_hits": document_hits,
+        "symbol_hits": symbol_hits,
+        "file_hits": file_hits,
+        "sources_count": sources_count,
+        "chunks_count": chunks_count,
+        "pack_token_count": context_tokens,
+        "deduped_token_count": context_tokens,
+    });
+    let savings = json!({
+        "saved_tokens": saved_tokens,
+        "effective_saved_tokens": effective_saved_tokens,
+        "savings_factor": savings_factor,
+        "savings_percent": savings_percent,
+        "effective_savings_percent": effective_savings_percent,
+    });
+    let accounting = build_tokenomics_accounting_json(
+        build_tokenomics_raw_section(
+            naive_tokens as u64,
+            context_tokens as u64,
+            recovery_tokens,
+            whole_cycle_observed.clone(),
+            recovery.clone(),
+            shape.clone(),
+        ),
+        build_tokenomics_policy_section(quality_json.clone(), followup.clone()),
+        build_tokenomics_projection_section(savings.clone()),
+    );
 
     Ok(json!({
         "token_budget_event": {
@@ -1284,46 +1519,13 @@ pub(crate) fn build_event_payload(
                 "rendered_bytes": context_prompt.len(),
                 "tokens": context_tokens,
             },
-            "whole_cycle_observed": {
-                "client_prompt_tokens": client_prompt_tokens,
-                "assistant_generation_tokens": assistant_generation_tokens,
-                "tool_overhead_tokens": tool_overhead_tokens,
-                "continuity_restore_tokens": continuity_restore_tokens,
-            },
-            "recovery": {
-                "recovery_tokens": recovery_tokens,
-                "fallback_triggered": fallback_triggered,
-                "fallback_count": fallback_count,
-            },
-            "quality": {
-                "quality_ok": quality.quality_ok,
-                "quality_score": quality.quality_score,
-                "quality_method": quality.quality_method,
-                "quality_tier": quality.quality_tier,
-                "head_hit_target": quality.head_hit_target,
-            },
-            "followup": {
-                "needed_followup": quality.needed_followup,
-                "followup_count": quality.followup_count,
-                "followup_of_event_id": Value::Null,
-                "resolved_by_event_id": Value::Null,
-            },
-            "shape": {
-                "document_hits": document_hits,
-                "symbol_hits": symbol_hits,
-                "file_hits": file_hits,
-                "sources_count": sources_count,
-                "chunks_count": chunks_count,
-                "pack_token_count": context_tokens,
-                "deduped_token_count": context_tokens,
-            },
-            "savings": {
-                "saved_tokens": saved_tokens,
-                "effective_saved_tokens": effective_saved_tokens,
-                "savings_factor": savings_factor,
-                "savings_percent": savings_percent,
-                "effective_savings_percent": effective_savings_percent,
-            }
+            "whole_cycle_observed": whole_cycle_observed.clone(),
+            "recovery": recovery.clone(),
+            "quality": quality_json.clone(),
+            "followup": followup.clone(),
+            "shape": shape.clone(),
+            "savings": savings.clone(),
+            "accounting": accounting,
         }
     }))
 }

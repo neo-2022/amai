@@ -11,6 +11,7 @@ pub(crate) async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     let profile = resolve_profile(&config, None, &repo_root)?;
     let client_budget_target_percent =
         client_budget_target_percent_for_repo(db, &repo_root).await?;
+    let public_savings_window = resolve_public_savings_window_contract(&config, &repo_root)?;
     let include_verify_events = config.measurement.include_verify_events_by_default;
     record_dashboard_precache_stage_ms(
         &mut pre_cache_timings,
@@ -220,8 +221,12 @@ pub(crate) async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     );
     let personal_agent_scope =
         current_workspace_personal_kpi_selector(db, &repo_root, None).await?;
-    let personal_agent_5h_events =
-        personal_kpi_window_events(&events, personal_agent_scope.as_ref(), now_epoch_ms);
+    let public_savings_window_events = personal_kpi_window_events_for_hours(
+        &events,
+        personal_agent_scope.as_ref(),
+        now_epoch_ms,
+        public_savings_window.hours,
+    );
 
     let stage_started_at = Instant::now();
     let report_components = dashboard_report_signature_components(
@@ -229,7 +234,8 @@ pub(crate) async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         &rolling_window_events,
         &events,
         personal_agent_scope.as_ref(),
-        &personal_agent_5h_events,
+        &public_savings_window_events,
+        &public_savings_window,
         &current_session_assistant_scope,
         rolling_window_assistant_scope
             .as_ref()
@@ -287,8 +293,8 @@ pub(crate) async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     };
     let lifetime_summary =
         summarize_events(&events, now_epoch_ms, &config.measurement, &config.contract);
-    let personal_agent_5h_summary = summarize_events(
-        &personal_agent_5h_events,
+    let public_savings_window_summary = summarize_events(
+        &public_savings_window_events,
         now_epoch_ms,
         &config.measurement,
         &config.contract,
@@ -299,9 +305,10 @@ pub(crate) async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         exact_client_limits_observation.as_ref(),
     );
     let personal_agent_kpi = preferred_personal_agent_kpi(
-        &personal_agent_5h_summary,
+        &public_savings_window_summary,
         personal_agent_scope.as_ref(),
         Some(&client_live_meter),
+        &public_savings_window,
     );
     let DashboardReadOnlyStatementSurfaces {
         current_session_statement_preview,
@@ -333,9 +340,12 @@ pub(crate) async fn collect_dashboard_report(db: &Client) -> Result<Value> {
             "surface": "dashboard_read_only",
             "profile": {
                 "code": profile.code,
+                "requested_code": profile.requested_code,
                 "display_name": profile.display_name,
                 "description": profile.description,
                 "session_gap_minutes": profile.session_gap_minutes,
+                "window_mode": profile.window_mode,
+                "window_label": profile.window_label,
                 "rolling_window_hours": profile.rolling_window_hours,
             },
             "filters": {

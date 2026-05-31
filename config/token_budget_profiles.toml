@@ -8,6 +8,7 @@ tokenizer = "o200k_base"
 naive_limit_files = 200
 naive_max_bytes_per_file = 32768
 include_verify_events_by_default = false
+public_savings_window_hours = 24
 metering_ingest_warning_seconds = 60
 metering_ingest_slo_seconds = 300
 late_arrival_grace_minutes = 60
@@ -67,16 +68,22 @@ contractual_evidence_pack_version = "contractual-evidence-pack-v21"
 display_name = "Обычная рабочая машина"
 description = "Подходит, когда внешний клиент сам не публикует жёсткое окно лимита. Показывает текущую рабочую сессию, последние 24 часа и накопительный итог."
 session_gap_minutes = 30
+window_mode = "fixed_duration"
+window_label = "Операционное 24-часовое окно"
 rolling_window_hours = 24
 
-[profiles.codex_5h]
-display_name = "Codex 5 часов"
-description = "Показывает токены за текущую рабочую сессию, за текущее 5-часовое окно и за всё время. Полезно, когда вы смотрите именно на лимитное окно Codex."
+[profiles.client_primary_budget]
+display_name = "Основное клиентское окно"
+description = "Показывает токены за текущую рабочую сессию, за клиентское лимитное окно и за всё время. Идентификатор профиля не привязан к провайдеру или длительности; конкретная семантика окна задана отдельными полями."
 session_gap_minutes = 30
+window_mode = "fixed_duration"
+window_label = "Основное клиентское лимитное окно"
 rolling_window_hours = 5
 
-[profiles.demo_1h]
-display_name = "Быстрый demo-час"
-description = "Показывает короткое часовое окно для демонстраций, smoke-прогонов и недолгих проверок."
+[profiles.short_demo_window]
+display_name = "Короткое demo-окно"
+description = "Показывает короткое окно для демонстраций, smoke-прогонов и недолгих проверок. Длительность задана семантикой окна, а не кодом профиля."
 session_gap_minutes = 15
+window_mode = "fixed_duration"
+window_label = "Короткое часовое окно"
 rolling_window_hours = 1

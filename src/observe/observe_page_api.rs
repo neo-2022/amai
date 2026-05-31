@@ -7,7 +7,7 @@ use super::{
     current_epoch_ms_u64, dashboard_live_summary_payload_for_request,
     live_active_agent_snapshot_for_request, maybe_auto_launch_same_thread_host_control_from_gate,
     maybe_refresh_stale_observe_cache_for_healthz, merged_thread_bound_snapshot_with_meta,
-    normalize_front_door_client_budget_gate_payload_shape, now_epoch_ms,
+    normalize_front_door_client_budget_gate_payload_shape, now_epoch_ms, observe_cache_meta,
     refresh_client_live_meter_on_request, refresh_observe_cache, resolved_request_thread_hint,
     thread_bound_snapshot_with_meta,
     try_load_fast_thread_bound_materialized_compact_client_budget_surfaces,
@@ -267,14 +267,14 @@ mod tests {
         let reply_prefix = client_budget_target_notice_reply_prefix(&json!({
             "client_budget_target_update": {
                 "operator_notice": {
-                    "reply_prefix": "5ч KPI: экономия 12.00%"
+                    "reply_prefix": "Burn guard: экономия 12.00%"
                 },
                 "client_budget_guard": {
-                    "reply_prefix": "5ч KPI: переплата 7.00%"
+                    "reply_prefix": "Burn guard: переплата 7.00%"
                 }
             }
         }));
-        assert_eq!(reply_prefix, "5ч KPI: экономия 12.00%");
+        assert_eq!(reply_prefix, "Burn guard: экономия 12.00%");
     }
 
     #[test]
@@ -285,11 +285,11 @@ mod tests {
                     "reply_prefix": "   "
                 },
                 "client_budget_guard": {
-                    "reply_prefix": "5ч KPI: переплата 7.00%"
+                    "reply_prefix": "Burn guard: переплата 7.00%"
                 }
             }
         }));
-        assert_eq!(reply_prefix, "5ч KPI: переплата 7.00%");
+        assert_eq!(reply_prefix, "Burn guard: переплата 7.00%");
     }
 
     #[test]
@@ -301,7 +301,7 @@ mod tests {
                         "kind": "source-kind",
                         "thread_id": "source-thread",
                         "message_text": "source message",
-                        "reply_prefix": "5ч KPI: экономия 12.00%",
+                        "reply_prefix": "Burn guard: экономия 12.00%",
                         "exact_chat_command": "/source"
                     },
                     "target_percent": 12,
@@ -309,7 +309,7 @@ mod tests {
                         "status": "degraded_after_primary_write"
                     },
                     "client_budget_guard": {
-                        "reply_prefix": "5ч KPI: переплата 7.00%"
+                        "reply_prefix": "Burn guard: переплата 7.00%"
                     }
                 }
             }),
@@ -318,7 +318,7 @@ mod tests {
         assert_eq!(notice["kind"], json!("source-kind"));
         assert_eq!(notice["thread_id"], json!("source-thread"));
         assert_eq!(notice["message_text"], json!("source message"));
-        assert_eq!(notice["reply_prefix"], json!("5ч KPI: экономия 12.00%"));
+        assert_eq!(notice["reply_prefix"], json!("Burn guard: экономия 12.00%"));
         assert_eq!(notice["exact_chat_command"], json!("/source"));
         assert_eq!(notice["target_percent"], json!(12));
         assert_eq!(
@@ -344,7 +344,7 @@ mod tests {
                         "warning": "restore refresh degraded"
                     },
                     "client_budget_guard": {
-                        "reply_prefix": "5ч KPI: переплата 7.00%"
+                        "reply_prefix": "Burn guard: переплата 7.00%"
                     }
                 }
             }),
@@ -356,7 +356,7 @@ mod tests {
             notice["message_text"],
             json!("Целевая экономия переключена. restore refresh degraded")
         );
-        assert_eq!(notice["reply_prefix"], json!("5ч KPI: переплата 7.00%"));
+        assert_eq!(notice["reply_prefix"], json!("Burn guard: переплата 7.00%"));
         assert!(notice["exact_chat_command"].is_null());
         assert_eq!(notice["target_percent"], json!(7));
     }
@@ -371,7 +371,7 @@ mod tests {
                         "status": "ok"
                     },
                     "client_budget_guard": {
-                        "reply_prefix": "5ч KPI: переплата 7.00%"
+                        "reply_prefix": "Burn guard: переплата 7.00%"
                     }
                 }
             }),
@@ -383,7 +383,7 @@ mod tests {
             notice["message_text"],
             json!("Целевая экономия переключена.")
         );
-        assert_eq!(notice["reply_prefix"], json!("5ч KPI: переплата 7.00%"));
+        assert_eq!(notice["reply_prefix"], json!("Burn guard: переплата 7.00%"));
         assert!(notice["exact_chat_command"].is_null());
         assert_eq!(notice["target_percent"], json!(9));
         assert_eq!(notice["working_state_write_status"]["status"], json!("ok"));
@@ -853,11 +853,19 @@ pub(super) async fn snapshot_api_handler(
             serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
         )
             .into_response(),
-        Err(error) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("{{\"status\":\"down\",\"error\":\"{error:#}\"}}"),
-        )
-            .into_response(),
+        Err(error) => match cold_start_warmup_payload(&state, "snapshot").await {
+            Some(payload) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                no_store_headers("application/json; charset=utf-8"),
+                serde_json::to_string_pretty(&payload).unwrap_or_default(),
+            )
+                .into_response(),
+            None => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("{{\"status\":\"down\",\"error\":\"{error:#}\"}}"),
+            )
+                .into_response(),
+        },
     }
 }
 
@@ -900,12 +908,34 @@ pub(super) async fn healthz_handler(State(state): State<ObserveState>) -> impl I
             )
                 .into_response()
         }
-        Err(error) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("{{\"status\":\"down\",\"error\":\"{error:#}\"}}"),
-        )
-            .into_response(),
+        Err(error) => match cold_start_warmup_payload(&state, "healthz").await {
+            Some(payload) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                no_store_headers("application/json; charset=utf-8"),
+                serde_json::to_string_pretty(&payload).unwrap_or_default(),
+            )
+                .into_response(),
+            None => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("{{\"status\":\"down\",\"error\":\"{error:#}\"}}"),
+            )
+                .into_response(),
+        },
     }
+}
+
+async fn cold_start_warmup_payload(state: &ObserveState, surface: &str) -> Option<Value> {
+    let cache = state.cache.read().await;
+    if !cache.refresh_in_progress || cache.snapshot.is_some() {
+        return None;
+    }
+    Some(json!({
+        "status": "warming_up",
+        "surface": surface,
+        "warmup_pending": true,
+        "error": "initial observe snapshot is still materializing",
+        "observe_cache": observe_cache_meta(&cache, state.dashboard_refresh_ms),
+    }))
 }
 
 pub(super) fn no_store_headers(

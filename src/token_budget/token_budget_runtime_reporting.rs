@@ -246,6 +246,7 @@ pub(crate) async fn collect_report(
         .context("system clock before unix epoch")?
         .as_millis() as i64;
     let session_gap_ms = profile.session_gap_minutes.saturating_mul(60_000) as i64;
+    let public_savings_window = resolve_public_savings_window_contract(&config, repo_root)?;
     let mut session_events = current_session_events(&events, session_gap_ms);
     let mut rolling_window_events = profile
         .rolling_window_hours
@@ -320,8 +321,12 @@ pub(crate) async fn collect_report(
     )
     .await?;
     let personal_agent_scope = current_workspace_personal_kpi_selector(db, repo_root, None).await?;
-    let personal_agent_5h_events =
-        personal_kpi_window_events(&events, personal_agent_scope.as_ref(), now_epoch_ms);
+    let public_savings_window_events = personal_kpi_window_events_for_hours(
+        &events,
+        personal_agent_scope.as_ref(),
+        now_epoch_ms,
+        public_savings_window.hours,
+    );
 
     let latest_event = events
         .last()
@@ -351,8 +356,8 @@ pub(crate) async fn collect_report(
     };
     let lifetime_summary =
         summarize_events(&events, now_epoch_ms, &config.measurement, &config.contract);
-    let personal_agent_5h_summary = summarize_events(
-        &personal_agent_5h_events,
+    let public_savings_window_summary = summarize_events(
+        &public_savings_window_events,
         now_epoch_ms,
         &config.measurement,
         &config.contract,
@@ -363,9 +368,10 @@ pub(crate) async fn collect_report(
         exact_client_limits_observation.as_ref(),
     );
     let personal_agent_kpi = preferred_personal_agent_kpi(
-        &personal_agent_5h_summary,
+        &public_savings_window_summary,
         personal_agent_scope.as_ref(),
         Some(&client_live_meter),
+        &public_savings_window,
     );
     let agent_cycle_economics = build_agent_cycle_economics(
         &config.measurement,
@@ -967,31 +973,46 @@ pub(crate) async fn enrich_live_event_payload(
         let node = payload["token_budget_event"]
             .as_object_mut()
             .ok_or_else(|| anyhow!("token budget payload missing token_budget_event object"))?;
-        let followup = ensure_nested_object(node, "followup")?;
-        followup.insert(
+        {
+            let followup = ensure_nested_object(node, "followup")?;
+            followup.insert(
+                "followup_of_event_id".to_string(),
+                Value::String(previous.event_id.clone()),
+            );
+        }
+        node.insert(
             "followup_of_event_id".to_string(),
             Value::String(previous.event_id.clone()),
         );
-        let quality = ensure_nested_object(node, "quality")?;
-        let quality_ok = quality
-            .get("quality_ok")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let head_hit_target = quality
-            .get("head_hit_target")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let answer_like_proxy = answer_like_from_counts(
-            &target_kind_owned,
-            head_hit_target,
-            exact_hits,
-            symbol_hits,
-            lexical_hits,
-            semantic_hits,
-        );
-        quality.insert(
-            "quality_method".to_string(),
-            Value::String(if quality_ok {
+        let (
+            quality_ok_flat,
+            quality_score_flat,
+            quality_method_flat,
+            quality_tier_flat,
+            head_hit_target_flat,
+        ) = {
+            let quality = ensure_nested_object(node, "quality")?;
+            let quality_ok = quality
+                .get("quality_ok")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let quality_score = quality
+                .get("quality_score")
+                .and_then(Value::as_f64)
+                .unwrap_or(if quality_ok { 1.0 } else { 0.0 });
+            let head_hit_target = quality
+                .get("head_hit_target")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let answer_like_proxy = answer_like_from_counts(
+                &target_kind_owned,
+                head_hit_target,
+                exact_hits,
+                symbol_hits,
+                lexical_hits,
+                semantic_hits,
+            );
+            let quality_method = if quality_ok {
                 if answer_like_proxy {
                     "hybrid_answer_success".to_string()
                 } else {
@@ -999,11 +1020,8 @@ pub(crate) async fn enrich_live_event_payload(
                 }
             } else {
                 "hybrid_followup_pending".to_string()
-            }),
-        );
-        quality.insert(
-            "quality_tier".to_string(),
-            Value::String(if quality_ok {
+            };
+            let quality_tier = if quality_ok {
                 if answer_like_proxy {
                     "answer_success_recovered".to_string()
                 } else {
@@ -1011,22 +1029,122 @@ pub(crate) async fn enrich_live_event_payload(
                 }
             } else {
                 "partial".to_string()
-            }),
+            };
+            quality.insert(
+                "quality_method".to_string(),
+                Value::String(quality_method.clone()),
+            );
+            quality.insert(
+                "quality_tier".to_string(),
+                Value::String(quality_tier.clone()),
+            );
+            (
+                quality_ok,
+                quality_score,
+                quality_method,
+                quality_tier,
+                head_hit_target,
+            )
+        };
+        node.insert("quality_ok".to_string(), Value::Bool(quality_ok_flat));
+        node.insert("quality_score".to_string(), Value::from(quality_score_flat));
+        node.insert(
+            "quality_method".to_string(),
+            Value::String(quality_method_flat),
+        );
+        node.insert("quality_tier".to_string(), Value::String(quality_tier_flat));
+        node.insert(
+            "head_hit_target".to_string(),
+            Value::Bool(head_hit_target_flat),
+        );
+        let snapshot = Value::Object(node.clone());
+        node.insert(
+            "accounting".to_string(),
+            build_tokenomics_accounting_json(
+                build_tokenomics_raw_section(
+                    json_path_u64(&snapshot, &["naive_scope", "tokens"]).unwrap_or(0),
+                    json_path_u64(&snapshot, &["context_pack_render", "tokens"]).unwrap_or(0),
+                    json_path_u64(&snapshot, &["recovery", "recovery_tokens"]).unwrap_or(0),
+                    json_path(&snapshot, &["whole_cycle_observed"])
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                    json_path(&snapshot, &["recovery"])
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                    json_path(&snapshot, &["shape"])
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                ),
+                build_tokenomics_policy_section(
+                    json_path(&snapshot, &["quality"])
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                    json_path(&snapshot, &["followup"])
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                ),
+                build_tokenomics_projection_section(
+                    json_path(&snapshot, &["savings"])
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                ),
+            ),
         );
 
         let mut previous_payload = row.payload.clone();
         let previous_node = previous_payload["token_budget_event"]
             .as_object_mut()
             .ok_or_else(|| anyhow!("previous token budget payload missing token_budget_event"))?;
-        let previous_followup = ensure_nested_object(previous_node, "followup")?;
-        previous_followup.insert(
+        {
+            let previous_followup = ensure_nested_object(previous_node, "followup")?;
+            previous_followup.insert(
+                "resolved_by_event_id".to_string(),
+                Value::String(current_event_id.clone()),
+            );
+            previous_followup.insert("recovery_resolved".to_string(), Value::Bool(true));
+            previous_followup.insert(
+                "recovery_resolved_at_utc".to_string(),
+                Value::from(timestamp_utc),
+            );
+        }
+        previous_node.insert(
             "resolved_by_event_id".to_string(),
             Value::String(current_event_id),
         );
-        previous_followup.insert("recovery_resolved".to_string(), Value::Bool(true));
-        previous_followup.insert(
-            "recovery_resolved_at_utc".to_string(),
-            Value::from(timestamp_utc),
+        let previous_snapshot = Value::Object(previous_node.clone());
+        previous_node.insert(
+            "accounting".to_string(),
+            build_tokenomics_accounting_json(
+                build_tokenomics_raw_section(
+                    json_path_u64(&previous_snapshot, &["naive_scope", "tokens"]).unwrap_or(0),
+                    json_path_u64(&previous_snapshot, &["context_pack_render", "tokens"])
+                        .unwrap_or(0),
+                    json_path_u64(&previous_snapshot, &["recovery", "recovery_tokens"])
+                        .unwrap_or(0),
+                    json_path(&previous_snapshot, &["whole_cycle_observed"])
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                    json_path(&previous_snapshot, &["recovery"])
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                    json_path(&previous_snapshot, &["shape"])
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                ),
+                build_tokenomics_policy_section(
+                    json_path(&previous_snapshot, &["quality"])
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                    json_path(&previous_snapshot, &["followup"])
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                ),
+                build_tokenomics_projection_section(
+                    json_path(&previous_snapshot, &["savings"])
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                ),
+            ),
         );
         postgres::update_observability_snapshot_payload(db, &row.snapshot_id, &previous_payload)
             .await?;

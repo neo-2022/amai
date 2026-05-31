@@ -347,12 +347,19 @@ pub(crate) fn format_time_compare_pair(
     operator: &str,
 ) -> Vec<String> {
     let policy = dashboard_timing_format(snapshot);
+    let target_unit = target_ms.map(|value| auto_duration_display_unit(policy, value));
+    let current_unit = match (target_ms, current_ms, target_unit) {
+        (Some(target), Some(current), Some(unit)) if target > 0.0 && current >= target / 1000.0 => {
+            Some(unit)
+        }
+        _ => None,
+    };
     compare_pair(
         format_threshold_rendered(
             operator,
-            render_duration_ms_with_unit(policy, target_ms, None),
+            render_duration_ms_with_unit(policy, target_ms, target_unit),
         ),
-        render_duration_ms_with_unit(policy, current_ms, None),
+        render_duration_ms_with_unit(policy, current_ms, current_unit),
     )
 }
 

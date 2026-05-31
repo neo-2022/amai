@@ -114,11 +114,16 @@ pub fn write_client_config(args: &McpConfigArgs) -> Result<()> {
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         if matches!(shape, ConfigShape::OpenClawJson) && output.is_file() {
-            openclaw_cli_set_server(
-                output,
-                &normalized_server_name(&args.server_name)?,
-                &rendered,
-            )?;
+            let server_name = normalized_server_name(&args.server_name)?;
+            match openclaw_cli_set_server(output, &server_name, &rendered) {
+                Ok(()) => {}
+                Err(error) if openclaw_cli_command_missing(&error) => {
+                    let final_content = merge_existing_config(shape, args, &rendered, output)?;
+                    std::fs::write(output, final_content.as_bytes())
+                        .with_context(|| format!("failed to write {}", output.display()))?;
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             let final_content = merge_existing_config(shape, args, &rendered, output)?;
             std::fs::write(output, final_content.as_bytes())
@@ -148,7 +153,13 @@ pub fn client_config_contains_server(args: &McpConfigArgs) -> Result<bool> {
         ConfigShape::GenericJson => generic_json_server_exists(&existing, &server_name),
         ConfigShape::VscodeJson => json_server_exists(&existing, "servers", &server_name),
         ConfigShape::McpServersJson => json_server_exists(&existing, "mcpServers", &server_name),
-        ConfigShape::OpenClawJson => openclaw_cli_server_exists(output, &server_name),
+        ConfigShape::OpenClawJson => match openclaw_cli_server_exists(output, &server_name) {
+            Ok(exists) => Ok(exists),
+            Err(error) if openclaw_cli_command_missing(&error) => {
+                openclaw_json_server_exists_in_file(&existing, &server_name)
+            }
+            Err(error) => Err(error),
+        },
         ConfigShape::CodexToml => toml_server_exists(&existing, &server_name),
         ConfigShape::HermesYaml => yaml_server_exists(&existing, "mcp_servers", &server_name),
     }
@@ -182,7 +193,13 @@ pub fn remove_client_config(
         ConfigShape::GenericJson => remove_generic_json_server(&existing, &server_name)?,
         ConfigShape::VscodeJson => remove_json_server(&existing, "servers", &server_name)?,
         ConfigShape::McpServersJson => remove_json_server(&existing, "mcpServers", &server_name)?,
-        ConfigShape::OpenClawJson => remove_openclaw_server_via_cli(output, &server_name)?,
+        ConfigShape::OpenClawJson => match remove_openclaw_server_via_cli(output, &server_name) {
+            Ok(result) => result,
+            Err(error) if openclaw_cli_command_missing(&error) => {
+                remove_openclaw_server_from_file(&existing, &server_name)?
+            }
+            Err(error) => return Err(error),
+        },
         ConfigShape::CodexToml => remove_toml_server(&existing, &server_name)?,
         ConfigShape::HermesYaml => remove_yaml_server(&existing, "mcp_servers", &server_name)?,
     };
@@ -275,6 +292,85 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     if startup_contract["default_namespace"].as_str() != Some("continuity") {
         return Err(anyhow!(
             "MCP startup contract lost default continuity namespace"
+        ));
+    }
+    let workflow_guard = &startup_contract["agent_workflow_guard"];
+    if workflow_guard["guard_version"].as_str() != Some("agent-workflow-guard-v1")
+        || workflow_guard["must_run_before_substantive_report"].as_bool() != Some(true)
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost agent_workflow_guard version or report binding"
+        ));
+    }
+    if workflow_guard["planning"]["plan_required"].as_bool() != Some(true)
+        || workflow_guard["promotion_identity"]["runtime_state_field"].as_str()
+            != Some("workflow_promotion_state")
+        || workflow_guard["promotion_identity"]["current_user_redirect_id_field"].as_str()
+            != Some("current_user_redirect_id")
+        || workflow_guard["promotion_identity"]["promoted_user_redirect_id_field"].as_str()
+            != Some("promoted_user_redirect_id")
+        || workflow_guard["promotion_identity"]["workflow_promotion_event_id_field"].as_str()
+            != Some("workflow_promotion_event_id")
+        || workflow_guard["promotion_identity"]["workflow_promotion_event_id_required"].as_bool()
+            != Some(true)
+        || workflow_guard["promotion_identity"]
+            ["workflow_promotion_event_id_fresh_runtime_nonce_required"]
+            .as_bool()
+            != Some(true)
+        || workflow_guard["promotion_identity"]["source_event_match_required"].as_bool()
+            != Some(true)
+        || workflow_guard["promotion_identity"]["missing_or_mismatch_blocks_report"].as_bool()
+            != Some(true)
+        || workflow_guard["planning"]["plan_items_must_be_reviewed_one_by_one"].as_bool()
+            != Some(true)
+        || workflow_guard["planning"]["specialist_consensus_required_before_implementation"]
+            .as_bool()
+            != Some(true)
+        || workflow_guard["external_reference_policy"]["source_allowlist_kind"].as_str()
+            != Some("official_or_primary_sources_only")
+        || workflow_guard["external_reference_policy"]
+            ["freshness_or_version_metadata_required"]
+            .as_bool()
+            != Some(true)
+        || workflow_guard["external_reference_policy"]["advisory_only"].as_bool() != Some(true)
+        || workflow_guard["external_reference_policy"]
+            ["local_corroboration_required_before_truth_or_runtime_change"]
+            .as_bool()
+            != Some(true)
+        || workflow_guard["external_reference_policy"]["must_not_override_local_contracts_or_gates"]
+            .as_bool()
+            != Some(true)
+        || workflow_guard["implementation"]["per_item_specialist_bughunter_review_required"]
+            .as_bool()
+            != Some(true)
+        || workflow_guard["report_gate"]["final_specialist_bughunter_pass_required"].as_bool()
+            != Some(true)
+        || workflow_guard["report_gate"]["report_allowed_requires_all_green"].as_bool()
+            != Some(true)
+        || workflow_guard["report_gate"]["workflow_before_report_guard_command"].as_str()
+            != Some("./scripts/proof_workflow_before_report.sh")
+        || workflow_guard["report_gate"]["before_report_bundle_command"].as_str()
+            != Some("./scripts/proof_before_report.sh")
+        || workflow_guard["report_gate"]["specialist_signoff_required"].as_bool() != Some(true)
+        || workflow_guard["report_gate"]["specialist_signoff_artifact"].as_str()
+            != Some(".amai/continuity/specialist-team-signoff.json")
+        || workflow_guard["report_gate"]["specialist_signoff_source_manifest"].as_str()
+            != Some(".amai/continuity/specialist-team-signoff-source.json")
+        || workflow_guard["report_gate"]["specialist_signoff_guard_command"].as_str()
+            != Some("./scripts/proof_specialist_signoff.sh")
+        || workflow_guard["report_gate"]["specialist_signoff_materialize_command"].as_str()
+            != Some("./scripts/materialize_specialist_signoff.sh")
+        || workflow_guard["report_gate"]["specialist_signoff_trust_provision_command"].as_str()
+            != Some("./scripts/provision_specialist_signoff_trust.sh")
+        || workflow_guard["report_gate"]["specialist_signoff_trust_root"].as_str()
+            != Some("$HOME/.local/share/amai/signoff-trust/allowed_signers")
+        || workflow_guard["report_gate"]["specialist_signoff_anti_replay_required"].as_bool()
+            != Some(true)
+        || workflow_guard["language_policy"]["user_reply_language"].as_str() != Some("ru")
+        || workflow_guard["language_policy"]["subagent_language"].as_str() != Some("en")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost mandatory specialist workflow guard semantics"
         ));
     }
     if startup_contract["artifact_enforcement"]["workspace_contract_relative_path"].as_str()
@@ -529,6 +625,29 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP startup contract lost tool_runtime_reconcile transport semantics"
         ));
     }
+    let stale_success =
+        &startup_contract["tool_runtime_reconcile"]["success_payload_stale_runtime_artifact"];
+    let stale_conditions = stale_success["stale_conditions"]
+        .as_array()
+        .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if stale_success["detect_after_any_success"].as_bool() != Some(true)
+        || stale_success["inspection_fallback_cli_required"].as_bool() != Some(true)
+        || stale_success["local_cli_reconcile_required"].as_bool() != Some(true)
+        || stale_success["local_cli_unavailable_blocks_report"].as_bool() != Some(true)
+        || stale_success["local_cli_success_replaces_stale_mcp_success"].as_bool() != Some(true)
+        || !stale_conditions.contains(&"startup_contract_sha_mismatch")
+        || !stale_conditions.contains(&"missing_agent_workflow_guard")
+        || !stale_conditions.contains(&"missing_workflow_promotion_state")
+        || !stale_conditions.contains(&"missing_working_state_lineage_event_id")
+        || !stale_conditions.contains(&"missing_active_lease_source_event_id")
+        || !stale_conditions.contains(&"workflow_promotion_source_event_mismatch")
+        || !stale_conditions.contains(&"gate_semantics_inconsistent")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost stale-success runtime reconcile semantics"
+        ));
+    }
     if startup_contract["tool_runtime_reconcile"]["local_cli"]["command"].as_str()
         != Some("continuity startup")
     {
@@ -628,17 +747,17 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             != Some("--enforce-online-reply-prefix")
         || startup_contract["live_client_budget_enforcement"]["required_reply_prefix_source"]
             .as_str()
-            != Some("personal_agent_online_limit_contour")
+            != Some("disabled_by_project_policy")
         || startup_contract["live_client_budget_enforcement"]["required_reply_prefix_non_empty"]
             .as_bool()
-            != Some(true)
+            != Some(false)
         || startup_contract["live_client_budget_enforcement"]
             ["reply_prefix_preflight_blocks_substantive_reply"]
             .as_bool()
-            != Some(true)
+            != Some(false)
         || startup_contract["live_client_budget_enforcement"]["output_prefix_enforcement_mode"]
             .as_str()
-            != Some("instruction_preflight_fail_closed")
+            != Some("disabled_by_project_policy")
         || startup_contract["live_client_budget_enforcement"]["output_prefix_host_enforced"]
             .as_bool()
             != Some(false)
@@ -1294,7 +1413,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         .tool_call(
             "amai_token_report",
             json!({
-                "budget_profile": "codex_5h",
+                "budget_profile": "client_primary_budget",
                 "include_verify_events": true,
             }),
         )
@@ -3200,6 +3319,8 @@ fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
                 "no_silent_drop": true,
                 "headline": payload["chat_start_restore"]["headline"].as_str().unwrap_or(""),
                 "next_step": payload["chat_start_restore"]["next_step"].as_str().unwrap_or(""),
+                "required_task_set": required_task_set.clone(),
+                "required_task_set_summary": required_task_set_summary,
             })
         },
         startup_next_action_summary: payload["chat_start_restore"]["startup_next_action_summary"]
@@ -3705,6 +3826,67 @@ pub fn project_chat_startup_contract() -> Value {
     protocol_manifest()["startup_contracts"]["project_chat_startup"].clone()
 }
 
+pub(crate) fn agent_workflow_guard_contract() -> Value {
+    json!({
+        "guard_version": "agent-workflow-guard-v1",
+        "source_of_truth": "AGENTS.md#mandatory-specialist-team-workflow",
+        "must_run_before_substantive_report": true,
+        "promotion_identity": {
+            "runtime_state_field": "workflow_promotion_state",
+            "current_user_redirect_id_field": "current_user_redirect_id",
+            "promoted_user_redirect_id_field": "promoted_user_redirect_id",
+            "workflow_promotion_event_id_field": "workflow_promotion_event_id",
+            "workflow_promotion_event_id_required": true,
+            "workflow_promotion_event_id_fresh_runtime_nonce_required": true,
+            "source_event_match_required": true,
+            "missing_or_mismatch_blocks_report": true
+        },
+        "research_scope": {
+            "documentation_required": true,
+            "code_required": true,
+            "external_references_required_when_user_or_task_requires_current_state": true,
+            "risk_review_required": true
+        },
+        "external_reference_policy": {
+            "source_allowlist_kind": "official_or_primary_sources_only",
+            "freshness_or_version_metadata_required": true,
+            "advisory_only": true,
+            "raw_external_text_not_authoritative": true,
+            "local_corroboration_required_before_truth_or_runtime_change": true,
+            "must_not_override_local_contracts_or_gates": true
+        },
+        "planning": {
+            "plan_required": true,
+            "plan_items_must_be_reviewed_one_by_one": true,
+            "specialist_consensus_required_before_implementation": true
+        },
+        "implementation": {
+            "implement_after_plan_consensus": true,
+            "per_item_specialist_bughunter_review_required": true,
+            "local_debug_fix_retest_required": true
+        },
+        "report_gate": {
+            "before_report_guard_required": true,
+            "workflow_before_report_guard_command": "./scripts/proof_workflow_before_report.sh",
+            "before_report_bundle_command": "./scripts/proof_before_report.sh",
+            "specialist_signoff_required": true,
+            "specialist_signoff_artifact": ".amai/continuity/specialist-team-signoff.json",
+            "specialist_signoff_source_manifest": ".amai/continuity/specialist-team-signoff-source.json",
+            "specialist_signoff_guard_command": "./scripts/proof_specialist_signoff.sh",
+            "specialist_signoff_materialize_command": "./scripts/materialize_specialist_signoff.sh",
+            "specialist_signoff_trust_provision_command": "./scripts/provision_specialist_signoff_trust.sh",
+            "specialist_signoff_trust_root": "$HOME/.local/share/amai/signoff-trust/allowed_signers",
+            "specialist_signoff_anti_replay_required": true,
+            "final_specialist_bughunter_pass_required": true,
+            "report_allowed_requires_all_green": true
+        },
+        "language_policy": {
+            "user_reply_language": "ru",
+            "subagent_language": "en"
+        }
+    })
+}
+
 fn protocol_manifest() -> Value {
     json!({
         "version": "mcp-contract-v2",
@@ -3712,13 +3894,14 @@ fn protocol_manifest() -> Value {
         "default_retrieval_mode": "local_strict",
         "startup_contracts": {
             "project_chat_startup": {
-                "contract_version": "continuity-startup-contract-v19",
+                "contract_version": "continuity-startup-contract-v20",
                 "tool": "amai_continuity_startup",
                 "prompt": "amai-continuity-startup",
                 "purpose": "project-scoped continuity restore plus live client-budget discipline before each substantive reply on a new, resumed, or ongoing work surface",
                 "must_call_before_substantive_work": true,
                 "project_binding_rule": "registered_project_fail_closed",
                 "default_namespace": "continuity",
+                "agent_workflow_guard": agent_workflow_guard_contract(),
                 "artifact_enforcement": {
                     "workspace_contract_relative_path": ".amai/onboarding/project-chat-startup-contract.json",
                     "workspace_contract_required_before_tool_call": true,
@@ -3732,6 +3915,22 @@ fn protocol_manifest() -> Value {
                     "error_detail_contains": "no continuity import found for",
                     "transport_error_detail_contains": "Transport closed",
                     "transport_error_detail_case_insensitive": true,
+                    "success_payload_stale_runtime_artifact": {
+                        "detect_after_any_success": true,
+                        "inspection_fallback_cli_required": true,
+                        "local_cli_reconcile_required": true,
+                        "local_cli_unavailable_blocks_report": true,
+                        "local_cli_success_replaces_stale_mcp_success": true,
+                        "stale_conditions": [
+                            "startup_contract_sha_mismatch",
+                            "missing_agent_workflow_guard",
+                            "missing_workflow_promotion_state",
+                            "missing_working_state_lineage_event_id",
+                            "missing_active_lease_source_event_id",
+                            "workflow_promotion_source_event_mismatch",
+                            "gate_semantics_inconsistent"
+                        ]
+                    },
                     "local_cli": {
                         "command": "continuity startup",
                         "shell_command": "./scripts/continuity_startup.sh",
@@ -3799,10 +3998,10 @@ fn protocol_manifest() -> Value {
                     "reply_execution_gate_version": "client-reply-budget-gate-v1",
                     "reply_prefix_field": "reply_prefix",
                     "reply_prefix_enforcement_flag": "--enforce-online-reply-prefix",
-                    "required_reply_prefix_source": "personal_agent_online_limit_contour",
-                    "required_reply_prefix_non_empty": true,
-                    "reply_prefix_preflight_blocks_substantive_reply": true,
-                    "output_prefix_enforcement_mode": "instruction_preflight_fail_closed",
+                    "required_reply_prefix_source": "disabled_by_project_policy",
+                    "required_reply_prefix_non_empty": false,
+                    "reply_prefix_preflight_blocks_substantive_reply": false,
+                    "output_prefix_enforcement_mode": "disabled_by_project_policy",
                     "output_prefix_host_enforced": false,
                     "reply_budget_mode_field": "reply_budget_mode",
                     "reply_budget_contract_field": "reply_budget_contract",
@@ -4364,7 +4563,7 @@ fn prompt_result(params: Value) -> McpToolResult<Value> {
                     "content": {
                         "type": "text",
                         "text": format!(
-                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, startup_execution_gate, startup_next_action, execctl_active_lease, and execctl_active_lease_summary. Treat startup_execution_gate as the immediate return-enforcement object. Require gate_semantics_consistent = true before trusting that gate or executing startup_next_action. If amai_continuity_startup fails with tool_execution_failed and detail containing 'no continuity import found for', or if the embedded MCP transport closes before the tool returns a payload, immediately reconcile once via local CLI continuity startup for the same repo_root and namespace before declaring continuity unavailable; if local CLI startup succeeds, treat the MCP failure as a stale embedded MCP session, continue from the local startup payload, and request reconnect for the embedded MCP session. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away. If execctl_active_lease.lease_owner_state is previous_session_owner, do not silently seize the workline; follow startup_next_action first."
+                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, startup_execution_gate, startup_next_action, execctl_active_lease, and execctl_active_lease_summary. Treat startup_execution_gate as the immediate return-enforcement object. Require gate_semantics_consistent = true before trusting that gate or executing startup_next_action. If amai_continuity_startup fails with tool_execution_failed and detail containing 'no continuity import found for', or if the embedded MCP transport closes before the tool returns a payload, immediately reconcile once via local CLI continuity startup for the same repo_root and namespace before declaring continuity unavailable; if local CLI startup succeeds, treat the MCP failure as a stale embedded MCP session, continue from the local startup payload, and request reconnect for the embedded MCP session. Also inspect the runtime state after any successful MCP startup; if it has a stale startup contract sha, missing agent_workflow_guard, missing workflow_promotion_state, workflow source-event mismatch, or gate_semantics_consistent != true, treat that successful MCP payload as stale_embedded_mcp_session, reconcile via local CLI, continue only from the local payload, and request MCP reconnect. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away. If execctl_active_lease.lease_owner_state is previous_session_owner, do not silently seize the workline; follow startup_next_action first."
                         )
                     }
                 }]
@@ -4645,7 +4844,7 @@ fn token_report_input_schema() -> Value {
         "properties": {
             "budget_profile": {
                 "type": "string",
-                "description": "Optional token budget profile code such as codex_5h."
+                "description": "Optional canonical token budget profile code such as client_primary_budget. Provider- or duration-shaped profile names are not accepted."
             },
             "include_verify_events": {
                 "type": "boolean",
@@ -5060,6 +5259,14 @@ fn openclaw_cli_base_command(config_path: &Path) -> std::process::Command {
     command
 }
 
+fn openclaw_cli_command_missing(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| io_error.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
 fn openclaw_cli_set_server(config_path: &Path, server_name: &str, rendered: &str) -> Result<()> {
     let rendered_json: Value =
         serde_json::from_str(rendered).context("failed to parse rendered OpenClaw MCP config")?;
@@ -5138,6 +5345,331 @@ fn remove_openclaw_server_via_cli(
     Ok((updated, true, is_empty))
 }
 
+fn parse_openclaw_json_config(existing: &str) -> Result<Value> {
+    match serde_json::from_str(existing) {
+        Ok(value) => Ok(value),
+        Err(json_error) => {
+            let normalized = normalize_openclaw_json5_subset(existing)?;
+            serde_json::from_str(&normalized).with_context(|| {
+                format!(
+                    "failed to parse OpenClaw config as JSON or supported JSON5 subset; json error: {json_error}"
+                )
+            })
+        }
+    }
+}
+
+fn normalize_openclaw_json5_subset(input: &str) -> Result<String> {
+    let no_comments = strip_json5_line_comments(input);
+    let double_quoted = convert_single_quoted_json5_strings(&no_comments)?;
+    let quoted_keys = quote_json5_unquoted_object_keys(&double_quoted);
+    Ok(remove_json5_trailing_commas(&quoted_keys))
+}
+
+fn strip_json5_line_comments(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        if let Some(active_quote) = quote {
+            output.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+            output.push(ch);
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'/') {
+            let _ = chars.next();
+            for next in chars.by_ref() {
+                if next == '\n' {
+                    output.push('\n');
+                    break;
+                }
+            }
+            continue;
+        }
+        output.push(ch);
+    }
+    output
+}
+
+fn convert_single_quoted_json5_strings(input: &str) -> Result<String> {
+    let mut output = String::with_capacity(input.len());
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        match chars[index] {
+            '"' => {
+                output.push('"');
+                index += 1;
+                let mut escaped = false;
+                while index < chars.len() {
+                    let ch = chars[index];
+                    output.push(ch);
+                    index += 1;
+                    if escaped {
+                        escaped = false;
+                    } else if ch == '\\' {
+                        escaped = true;
+                    } else if ch == '"' {
+                        break;
+                    }
+                }
+            }
+            '\'' => {
+                index += 1;
+                let mut value = String::new();
+                let mut closed = false;
+                while index < chars.len() {
+                    let ch = chars[index];
+                    index += 1;
+                    if ch == '\\' {
+                        if index >= chars.len() {
+                            value.push('\\');
+                            break;
+                        }
+                        let escaped = chars[index];
+                        index += 1;
+                        match escaped {
+                            '\'' => value.push('\''),
+                            '"' => value.push('"'),
+                            '\\' => value.push('\\'),
+                            'n' => value.push('\n'),
+                            'r' => value.push('\r'),
+                            't' => value.push('\t'),
+                            other => {
+                                value.push('\\');
+                                value.push(other);
+                            }
+                        }
+                    } else if ch == '\'' {
+                        closed = true;
+                        break;
+                    } else {
+                        value.push(ch);
+                    }
+                }
+                if !closed {
+                    return Err(anyhow!(
+                        "unterminated single-quoted string in OpenClaw config"
+                    ));
+                }
+                output.push_str(
+                    &serde_json::to_string(&value)
+                        .context("failed to quote OpenClaw JSON5 string")?,
+                );
+            }
+            ch => {
+                output.push(ch);
+                index += 1;
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn quote_json5_unquoted_object_keys(input: &str) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    let mut expecting_key = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '"' {
+            output.push(ch);
+            index += 1;
+            let mut escaped = false;
+            while index < chars.len() {
+                let current = chars[index];
+                output.push(current);
+                index += 1;
+                if escaped {
+                    escaped = false;
+                } else if current == '\\' {
+                    escaped = true;
+                } else if current == '"' {
+                    break;
+                }
+            }
+            expecting_key = false;
+            continue;
+        }
+        if expecting_key {
+            if ch.is_whitespace() {
+                output.push(ch);
+                index += 1;
+                continue;
+            }
+            if ch == '}' {
+                output.push(ch);
+                expecting_key = false;
+                index += 1;
+                continue;
+            }
+            if is_json5_identifier_start(ch) {
+                let start = index;
+                index += 1;
+                while index < chars.len() && is_json5_identifier_continue(chars[index]) {
+                    index += 1;
+                }
+                let key = chars[start..index].iter().collect::<String>();
+                let mut lookahead = index;
+                let mut whitespace = String::new();
+                while lookahead < chars.len() && chars[lookahead].is_whitespace() {
+                    whitespace.push(chars[lookahead]);
+                    lookahead += 1;
+                }
+                if lookahead < chars.len() && chars[lookahead] == ':' {
+                    output.push_str(
+                        &serde_json::to_string(&key).expect("serializing a string key cannot fail"),
+                    );
+                    output.push_str(&whitespace);
+                    output.push(':');
+                    index = lookahead + 1;
+                    expecting_key = false;
+                    continue;
+                }
+                output.push_str(&key);
+                output.push_str(&whitespace);
+                index = lookahead;
+                expecting_key = false;
+                continue;
+            }
+        }
+        output.push(ch);
+        expecting_key = ch == '{' || ch == ',';
+        index += 1;
+    }
+    output
+}
+
+fn is_json5_identifier_start(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphabetic()
+}
+
+fn is_json5_identifier_continue(ch: char) -> bool {
+    is_json5_identifier_start(ch) || ch.is_ascii_digit() || ch == '-'
+}
+
+fn remove_json5_trailing_commas(input: &str) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '"' {
+            output.push(ch);
+            index += 1;
+            let mut escaped = false;
+            while index < chars.len() {
+                let current = chars[index];
+                output.push(current);
+                index += 1;
+                if escaped {
+                    escaped = false;
+                } else if current == '\\' {
+                    escaped = true;
+                } else if current == '"' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch == ',' {
+            let mut lookahead = index + 1;
+            while lookahead < chars.len() && chars[lookahead].is_whitespace() {
+                lookahead += 1;
+            }
+            if lookahead < chars.len() && matches!(chars[lookahead], '}' | ']') {
+                index += 1;
+                continue;
+            }
+        }
+        output.push(ch);
+        index += 1;
+    }
+    output
+}
+
+fn merge_openclaw_json_config(existing: &str, rendered: &str, server_name: &str) -> Result<String> {
+    let mut existing_value = parse_openclaw_json_config(existing)?;
+    let rendered_value: Value =
+        serde_json::from_str(rendered).context("failed to parse rendered OpenClaw MCP config")?;
+    let server = nested_json_server(&rendered_value, &["mcp", "servers"], server_name)?
+        .cloned()
+        .ok_or_else(|| anyhow!("rendered OpenClaw config is missing server {server_name}"))?;
+    let root = existing_value
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("OpenClaw config root must be an object"))?;
+    let mcp = root.entry("mcp".to_string()).or_insert_with(|| json!({}));
+    let mcp_object = mcp
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("OpenClaw config mcp field must be an object"))?;
+    let servers = mcp_object
+        .entry("servers".to_string())
+        .or_insert_with(|| json!({}));
+    let servers_object = servers
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("OpenClaw config mcp.servers field must be an object"))?;
+    servers_object.insert(server_name.to_string(), server);
+    serde_json::to_string_pretty(&existing_value).context("failed to serialize OpenClaw config")
+}
+
+fn openclaw_json_server_exists_in_file(existing: &str, server_name: &str) -> Result<bool> {
+    let value = parse_openclaw_json_config(existing)?;
+    Ok(nested_json_server(&value, &["mcp", "servers"], server_name)?.is_some())
+}
+
+fn remove_openclaw_server_from_file(
+    existing: &str,
+    server_name: &str,
+) -> Result<(String, bool, bool)> {
+    let mut value = parse_openclaw_json_config(existing)?;
+    let Some(root) = value.as_object_mut() else {
+        return Err(anyhow!("OpenClaw config root must be an object"));
+    };
+    let removed = root
+        .get_mut("mcp")
+        .and_then(Value::as_object_mut)
+        .and_then(|mcp| {
+            let removed = mcp
+                .get_mut("servers")
+                .and_then(Value::as_object_mut)
+                .and_then(|servers| servers.remove(server_name))
+                .is_some();
+            let servers_empty = mcp
+                .get("servers")
+                .and_then(Value::as_object)
+                .is_some_and(|servers| servers.is_empty());
+            if servers_empty {
+                mcp.remove("servers");
+            }
+            Some(removed)
+        })
+        .unwrap_or(false);
+    let mcp_empty = root
+        .get("mcp")
+        .and_then(Value::as_object)
+        .is_some_and(|mcp| mcp.is_empty());
+    if mcp_empty {
+        root.remove("mcp");
+    }
+    let is_empty = value == json!({});
+    let updated = serde_json::to_string_pretty(&value)
+        .context("failed to serialize OpenClaw config after removal")?;
+    Ok((updated, removed, is_empty))
+}
+
 fn merge_existing_config(
     shape: ConfigShape,
     args: &McpConfigArgs,
@@ -5164,7 +5696,11 @@ fn merge_existing_config(
             "mcpServers",
             &normalized_server_name(&args.server_name)?,
         ),
-        ConfigShape::OpenClawJson => Ok(rendered.to_string()),
+        ConfigShape::OpenClawJson => merge_openclaw_json_config(
+            &existing,
+            rendered,
+            &normalized_server_name(&args.server_name)?,
+        ),
         ConfigShape::CodexToml => merge_toml_server(
             &existing,
             rendered,
@@ -7804,7 +8340,7 @@ mod tests {
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["contract_version"].as_str(),
-            Some("continuity-startup-contract-v19")
+            Some("continuity-startup-contract-v20")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["must_call_before_substantive_work"].as_bool(),
@@ -7878,6 +8414,97 @@ mod tests {
                 ["workspace_runtime_state_artifact_version"]
                 .as_str(),
             Some("workspace-startup-runtime-state-v4")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["guard_version"]
+                .as_str(),
+            Some("agent-workflow-guard-v1")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["planning"]["specialist_consensus_required_before_implementation"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["promotion_identity"]["runtime_state_field"]
+                .as_str(),
+            Some("workflow_promotion_state")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["promotion_identity"]["source_event_match_required"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["promotion_identity"]["workflow_promotion_event_id_field"]
+                .as_str(),
+            Some("workflow_promotion_event_id")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["promotion_identity"]["workflow_promotion_event_id_required"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["implementation"]["per_item_specialist_bughunter_review_required"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["report_gate"]["workflow_before_report_guard_command"]
+                .as_str(),
+            Some("./scripts/proof_workflow_before_report.sh")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["external_reference_policy"]["source_allowlist_kind"]
+                .as_str(),
+            Some("official_or_primary_sources_only")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["external_reference_policy"]
+                ["local_corroboration_required_before_truth_or_runtime_change"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["report_gate"]["specialist_signoff_guard_command"]
+                .as_str(),
+            Some("./scripts/proof_specialist_signoff.sh")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["report_gate"]["specialist_signoff_materialize_command"]
+                .as_str(),
+            Some("./scripts/materialize_specialist_signoff.sh")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["report_gate"]["specialist_signoff_trust_provision_command"]
+                .as_str(),
+            Some("./scripts/provision_specialist_signoff_trust.sh")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["report_gate"]["report_allowed_requires_all_green"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["language_policy"]["subagent_language"]
+                .as_str(),
+            Some("en")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["runtime_state_artifact"]
@@ -7962,6 +8589,41 @@ mod tests {
                 ["transport_error_detail_contains"]
                 .as_str(),
             Some("Transport closed")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["success_payload_stale_runtime_artifact"]["detect_after_any_success"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["success_payload_stale_runtime_artifact"]
+                ["local_cli_success_replaces_stale_mcp_success"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["success_payload_stale_runtime_artifact"]["local_cli_unavailable_blocks_report"]
+                .as_bool(),
+            Some(true)
+        );
+        assert!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["success_payload_stale_runtime_artifact"]["stale_conditions"]
+                .as_array()
+                .is_some_and(|items| items
+                    .iter()
+                    .any(|item| item == "missing_agent_workflow_guard"))
+        );
+        assert!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["success_payload_stale_runtime_artifact"]["stale_conditions"]
+                .as_array()
+                .is_some_and(|items| items
+                    .iter()
+                    .any(|item| item == "missing_active_lease_source_event_id"))
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
@@ -8201,7 +8863,7 @@ mod tests {
         let expected_target_pattern = continuity::client_budget_target_chat_command_pattern();
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["contract_version"].as_str(),
-            Some("continuity-startup-contract-v19")
+            Some("continuity-startup-contract-v20")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
@@ -8249,25 +8911,25 @@ mod tests {
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
                 ["required_reply_prefix_source"]
                 .as_str(),
-            Some("personal_agent_online_limit_contour")
+            Some("disabled_by_project_policy")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
                 ["required_reply_prefix_non_empty"]
                 .as_bool(),
-            Some(true)
+            Some(false)
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
                 ["reply_prefix_preflight_blocks_substantive_reply"]
                 .as_bool(),
-            Some(true)
+            Some(false)
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
                 ["output_prefix_enforcement_mode"]
                 .as_str(),
-            Some("instruction_preflight_fail_closed")
+            Some("disabled_by_project_policy")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
@@ -9208,7 +9870,7 @@ mod tests {
                 },
                 "required_return_task": {
                     "headline": "MCP context pack now replaces verified legacy tool-overhead with truthful structured-content tokens",
-                    "next_step": "Continue the >90% 5h KPI line from a new clean work surface."
+                    "next_step": "Continue the >90% Burn guard line from a new clean work surface."
                 }
             }
         });
@@ -9316,18 +9978,18 @@ mod tests {
     fn client_budget_blocked_tool_result_keeps_compact_machine_readable_gate() {
         let guard = json!({
             "status_label": "сожми текущий чат сейчас",
-            "reply_prefix": "5ч KPI: переплата 6.62%",
+            "reply_prefix": "Burn guard: переплата 6.62%",
             "observed_at_epoch_ms": 1774765483000_u64,
             "max_guard_age_seconds": 10,
             "last_request": "187520 из 258400",
-            "client_limits": "5ч остаётся 89.00%, 7д остаётся 3.00%",
+            "client_limits": "основное окно остаётся 89.00%, расширенное окно остаётся 3.00%",
             "reply_execution_gate": {
                 "action_kind": "rotate_chat_for_client_budget",
                 "blocking": true,
                 "must_rotate_before_reply": true,
                 "must_wait_for_budget_recovery_before_reply": false,
                 "reply_budget_mode": working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
-                "reply_prefix": "5ч KPI: переплата 6.62%",
+                "reply_prefix": "Burn guard: переплата 6.62%",
                 "preserves_return_obligation": true,
                 "blocking_reply_contract": working_state::build_client_budget_blocking_reply_contract(
                     working_state::ClientBudgetBlockingReplyMode::RotateChatOnly,
@@ -9355,13 +10017,13 @@ mod tests {
         );
         assert_eq!(
             result["structuredContent"]["client_budget_reply_gate"]["reply_prefix"].as_str(),
-            Some("5ч KPI: переплата 6.62%")
+            Some("Burn guard: переплата 6.62%")
         );
         assert_eq!(
             result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]
                 ["reply_prefix"]
                 .as_str(),
-            Some("5ч KPI: переплата 6.62%")
+            Some("Burn guard: переплата 6.62%")
         );
         assert_eq!(
             result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]
@@ -9372,7 +10034,7 @@ mod tests {
         assert_eq!(
             result["content"][0]["text"].as_str(),
             Some(
-                "5ч KPI: переплата 6.62%\ntool blocked by live client budget gate: rotate into a new clean work surface before retrying this tool"
+                "Burn guard: переплата 6.62%\ntool blocked by live client budget gate: rotate into a new clean work surface before retrying this tool"
             )
         );
         assert!(
@@ -9386,18 +10048,18 @@ mod tests {
     fn client_budget_blocked_tool_result_keeps_same_meter_stop_loss_reason() {
         let guard = json!({
             "status_label": "сожми текущий чат сейчас",
-            "reply_prefix": "5ч KPI: переплата 42.00%",
+            "reply_prefix": "Burn guard: переплата 42.00%",
             "observed_at_epoch_ms": 1774765483000_u64,
             "max_guard_age_seconds": 10,
             "last_request": "120531 из 258400",
-            "client_limits": "5ч остаётся 11.00%, 7д остаётся 77.00%",
+            "client_limits": "основное окно остаётся 11.00%, расширенное окно остаётся 77.00%",
             "reply_execution_gate": {
                 "action_kind": "compact_current_thread_for_client_budget",
                 "blocking": false,
                 "must_rotate_before_reply": false,
                 "must_wait_for_budget_recovery_before_reply": false,
                 "reply_budget_mode": working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
-                "reply_prefix": "5ч KPI: переплата 42.00%",
+                "reply_prefix": "Burn guard: переплата 42.00%",
                 "same_meter_pure_burn_turn_active": true,
                 "must_avoid_new_tool_turn_without_specific_delta_goal": true,
                 "max_tool_roundtrips_soft": 0,
@@ -9438,7 +10100,7 @@ mod tests {
         assert_eq!(
             result["content"][0]["text"].as_str(),
             Some(
-                "5ч KPI: переплата 42.00%\ntool blocked by live client budget gate: avoid a new expensive Amai tool turn until you have a specific material delta goal or after compaction/rotation changes the live budget gate"
+                "Burn guard: переплата 42.00%\ntool blocked by live client budget gate: avoid a new expensive Amai tool turn until you have a specific material delta goal or after compaction/rotation changes the live budget gate"
             )
         );
     }
@@ -9447,18 +10109,18 @@ mod tests {
     fn client_budget_blocked_tool_result_marks_zero_roundtrip_stop_loss_without_pure_burn() {
         let guard = json!({
             "status_label": "сожми текущий чат сейчас",
-            "reply_prefix": "5ч KPI: переплата 8.00%",
+            "reply_prefix": "Burn guard: переплата 8.00%",
             "observed_at_epoch_ms": 1774765483000_u64,
             "max_guard_age_seconds": 10,
             "last_request": "88234 из 258400",
-            "client_limits": "5ч остаётся 65.85%, 7д остаётся 70.00%",
+            "client_limits": "основное окно остаётся 65.85%, расширенное окно остаётся 70.00%",
             "reply_execution_gate": {
                 "action_kind": "rotate_chat_for_client_budget",
                 "blocking": false,
                 "must_rotate_before_reply": false,
                 "must_wait_for_budget_recovery_before_reply": false,
                 "reply_budget_mode": working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
-                "reply_prefix": "5ч KPI: переплата 8.00%",
+                "reply_prefix": "Burn guard: переплата 8.00%",
                 "same_meter_pure_burn_turn_active": false,
                 "must_avoid_new_tool_turn_without_specific_delta_goal": true,
                 "max_tool_roundtrips_soft": 0,
@@ -9487,7 +10149,7 @@ mod tests {
         assert_eq!(
             result["content"][0]["text"].as_str(),
             Some(
-                "5ч KPI: переплата 8.00%\ntool blocked by live client budget gate: rotate into a new clean work surface before retrying this tool"
+                "Burn guard: переплата 8.00%\ntool blocked by live client budget gate: rotate into a new clean work surface before retrying this tool"
             )
         );
     }
@@ -9496,18 +10158,18 @@ mod tests {
     fn client_budget_blocked_tool_result_compact_current_thread_hint_is_actionable() {
         let guard = json!({
             "status_label": "сожми текущий чат сейчас",
-            "reply_prefix": "5ч KPI: экономия 4.33%",
+            "reply_prefix": "Burn guard: экономия 4.33%",
             "observed_at_epoch_ms": 1774765483000_u64,
             "max_guard_age_seconds": 10,
             "last_request": "130966 из 258400",
-            "client_limits": "5ч остаётся 83.00%, 7д остаётся 69.00%",
+            "client_limits": "основное окно остаётся 83.00%, расширенное окно остаётся 69.00%",
             "reply_execution_gate": {
                 "action_kind": "compact_current_thread_for_client_budget",
                 "blocking": false,
                 "must_rotate_before_reply": false,
                 "must_wait_for_budget_recovery_before_reply": false,
                 "reply_budget_mode": working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
-                "reply_prefix": "5ч KPI: экономия 4.33%",
+                "reply_prefix": "Burn guard: экономия 4.33%",
                 "same_meter_pure_burn_turn_active": false,
                 "must_avoid_new_tool_turn_without_specific_delta_goal": true,
                 "max_tool_roundtrips_soft": 0,
@@ -9524,7 +10186,7 @@ mod tests {
         assert_eq!(
             result["content"][0]["text"].as_str(),
             Some(
-                "5ч KPI: экономия 4.33%\ntool blocked by live client budget gate: wait until current-thread compaction changes the live budget gate before retrying this tool"
+                "Burn guard: экономия 4.33%\ntool blocked by live client budget gate: wait until current-thread compaction changes the live budget gate before retrying this tool"
             )
         );
     }

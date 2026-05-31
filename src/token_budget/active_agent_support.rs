@@ -1,4 +1,5 @@
 use super::*;
+use crate::dashboard_format::format_u64;
 
 pub(super) const ACTIVE_AGENT_RECENT_THREAD_FALLBACK_MAX_AGE_MS: i64 = 5 * 60 * 1000;
 pub(super) const ACTIVE_AGENT_SECONDARY_LIMIT_WINDOW_HOURS: i64 = 24 * 7;
@@ -41,12 +42,52 @@ pub(super) fn active_agent_limit_percent_text(percent: f64) -> String {
     format!("{:.2}%", percent.clamp(0.0, 100.0))
 }
 
+fn personal_agent_savings_reply_prefix_from_pair(
+    without_amai_tokens: u64,
+    with_amai_tokens: u64,
+) -> String {
+    if without_amai_tokens == 0 {
+        return "Amai savings: н/д".to_string();
+    }
+
+    let signed_saved_tokens = without_amai_tokens as i64 - with_amai_tokens as i64;
+    let signed_saved_percent = signed_saved_tokens as f64 * 100.0 / without_amai_tokens as f64;
+
+    match signed_kpi_classification(signed_saved_percent) {
+        "saving" => format!(
+            "Amai savings: без Amai {}, с Amai {}, экономия {} ({:.2}%)",
+            format_u64(Some(without_amai_tokens)),
+            format_u64(Some(with_amai_tokens)),
+            format_u64(Some(signed_saved_tokens as u64)),
+            signed_saved_percent
+        ),
+        "overspend" => format!(
+            "Amai savings: без Amai {}, с Amai {}, перерасход {} ({:.2}%)",
+            format_u64(Some(without_amai_tokens)),
+            format_u64(Some(with_amai_tokens)),
+            format_u64(Some(signed_saved_tokens.unsigned_abs())),
+            signed_saved_percent.abs()
+        ),
+        _ => format!(
+            "Amai savings: без Amai {}, с Amai {}, 1:1",
+            format_u64(Some(without_amai_tokens)),
+            format_u64(Some(with_amai_tokens)),
+        ),
+    }
+}
+
 pub(super) fn active_agent_personal_kpi_window(
     events: &[TokenBudgetEvent],
     selector: &PersonalKpiSelector,
     now_epoch_ms: i64,
+    public_savings_window: &PublicSavingsWindowContract,
 ) -> (Vec<TokenBudgetEvent>, PersonalKpiSelector, bool) {
-    let strict_events = personal_kpi_window_events(events, Some(selector), now_epoch_ms);
+    let strict_events = personal_kpi_window_events_for_hours(
+        events,
+        Some(selector),
+        now_epoch_ms,
+        public_savings_window.hours,
+    );
     if selector.thread_id.is_none() || !strict_events.is_empty() {
         return (strict_events, selector.clone(), false);
     }
@@ -55,8 +96,12 @@ pub(super) fn active_agent_personal_kpi_window(
         thread_id: None,
         ..selector.clone()
     };
-    let fallback_events =
-        personal_kpi_window_events(events, Some(&fallback_selector), now_epoch_ms);
+    let fallback_events = personal_kpi_window_events_for_hours(
+        events,
+        Some(&fallback_selector),
+        now_epoch_ms,
+        public_savings_window.hours,
+    );
     if fallback_events.is_empty() {
         (strict_events, selector.clone(), false)
     } else {
@@ -102,71 +147,100 @@ pub(super) async fn current_workspace_personal_kpi_selector(
     }))
 }
 
-#[cfg(test)]
 pub(super) fn personal_agent_kpi_from_summary(
     summary: &Value,
     selector: Option<&PersonalKpiSelector>,
+    public_savings_window: &PublicSavingsWindowContract,
 ) -> Value {
     let (scope_kind, scope_label) = selector
         .map(|value| (value.scope_kind(), value.scope_label()))
         .unwrap_or(("unbound", "unbound"));
     let events_total = summary["events_total"].as_u64().unwrap_or(0);
     let counted_events = summary["counted_events"].as_u64().unwrap_or(0);
-    let (status, confidence, kpi_percent) = if counted_events > 0 {
-        (
-            "observed",
-            "verified",
-            summary["verified_effective_savings_pct"]
-                .as_f64()
-                .unwrap_or(0.0),
-        )
+    let confidence = if counted_events > 0 {
+        "verified"
     } else if events_total > 0 {
-        (
-            "observed",
-            "preliminary",
-            summary["effective_savings_pct"].as_f64().unwrap_or(0.0),
-        )
+        "preliminary"
     } else {
-        ("missing", "missing", 0.0)
+        "missing"
     };
-    if status == "missing" {
+    let pair = summary["verified_baseline_tokens"]
+        .as_u64()
+        .or_else(|| summary["baseline_tokens"].as_u64())
+        .and_then(|without_amai_tokens| {
+            let with_amai_tokens = summary["verified_observed_whole_cycle_with_amai_tokens"]
+                .as_u64()
+                .or_else(|| summary["verified_with_amai_measured_tokens"].as_u64())
+                .or_else(|| summary["observed_whole_cycle_with_amai_tokens"].as_u64())
+                .or_else(|| summary["with_amai_measured_tokens"].as_u64())
+                .or_else(|| summary["verified_delivered_tokens"].as_u64())
+                .or_else(|| summary["delivered_tokens"].as_u64())?;
+            (without_amai_tokens > 0).then_some((without_amai_tokens, with_amai_tokens))
+        });
+    let Some((without_amai_tokens, with_amai_tokens)) = pair else {
         return json!({
             "status": "missing",
             "confidence": confidence,
             "scope_kind": scope_kind,
             "scope_label": scope_label,
-            "window_hours": PERSONAL_AGENT_KPI_WINDOW_HOURS,
+            "window_hours": public_savings_window.hours,
+            "window_source": public_savings_window.source,
             "events_total": events_total,
             "counted_events": counted_events,
-            "reply_prefix": "5ч KPI: н/д",
-            "summary": "Для личного 5ч KPI этого agent_scope пока нет measured событий.",
+            "without_amai_tokens": Value::Null,
+            "with_amai_tokens": Value::Null,
+            "saved_tokens": Value::Null,
+            "saved_pct": Value::Null,
+            "reply_prefix": "Amai savings: н/д",
+            "summary": "Для Amai savings этой линии пока не materialized честная token-pair пара.",
         });
-    }
-    let classification = signed_kpi_classification(kpi_percent);
-    let reply_prefix = reply_prefix_for_signed_kpi_percent(kpi_percent);
+    };
+    let saved_tokens = without_amai_tokens as i64 - with_amai_tokens as i64;
+    let signed_kpi_percent = if without_amai_tokens == 0 {
+        0.0
+    } else {
+        saved_tokens as f64 * 100.0 / without_amai_tokens as f64
+    };
+    let classification = signed_kpi_classification(signed_kpi_percent);
+    let reply_prefix =
+        personal_agent_savings_reply_prefix_from_pair(without_amai_tokens, with_amai_tokens);
     json!({
         "status": "observed",
         "confidence": confidence,
         "scope_kind": scope_kind,
         "scope_label": scope_label,
-        "window_hours": PERSONAL_AGENT_KPI_WINDOW_HOURS,
+        "window_hours": public_savings_window.hours,
+        "window_source": public_savings_window.source,
         "events_total": events_total,
         "counted_events": counted_events,
         "classification": classification,
-        "kpi_percent": kpi_percent.abs(),
-        "signed_kpi_percent": kpi_percent,
+        "without_amai_tokens": without_amai_tokens,
+        "with_amai_tokens": with_amai_tokens,
+        "saved_tokens": saved_tokens,
+        "saved_pct": signed_kpi_percent.abs(),
+        "kpi_percent": signed_kpi_percent.abs(),
+        "signed_kpi_percent": signed_kpi_percent,
         "reply_prefix": reply_prefix,
         "summary": match classification {
             "saving" => format!(
-                "Личный 5ч KPI текущего agent_scope идёт в экономии {:.2}% по measured token budget.",
-                kpi_percent
+                "Личная Amai savings текущего agent_scope: без Amai {}, с Amai {}, экономия {} ({:.2}%).",
+                format_u64(Some(without_amai_tokens)),
+                format_u64(Some(with_amai_tokens)),
+                format_u64(Some(saved_tokens as u64)),
+                signed_kpi_percent.abs()
             ),
             "overspend" => format!(
-                "Личный 5ч KPI текущего agent_scope идёт в переплате {:.2}% по measured token budget.",
-                kpi_percent.abs()
+                "Личная Amai savings текущего agent_scope: без Amai {}, с Amai {}, перерасход {} ({:.2}%).",
+                format_u64(Some(without_amai_tokens)),
+                format_u64(Some(with_amai_tokens)),
+                format_u64(Some(saved_tokens.unsigned_abs())),
+                signed_kpi_percent.abs()
             ),
-            _ => "Личный 5ч KPI текущего agent_scope идёт примерно 1:1 по measured token budget."
-                .to_string(),
+            _ => format!(
+                "Личная Amai savings текущего agent_scope идёт примерно 1:1: без Amai {}, с Amai {}.",
+                format_u64(Some(without_amai_tokens)),
+                format_u64(Some(with_amai_tokens)),
+            ),
         },
     })
 }
@@ -175,34 +249,23 @@ pub(super) fn preferred_personal_agent_kpi(
     summary: &Value,
     selector: Option<&PersonalKpiSelector>,
     client_live_meter: Option<&Value>,
+    public_savings_window: &PublicSavingsWindowContract,
 ) -> Value {
-    let (scope_kind, scope_label) = selector
-        .map(|value| (value.scope_kind(), value.scope_label()))
-        .unwrap_or(("unbound", "unbound"));
-    if let Some(online) = client_live_meter.and_then(|meter| {
-        personal_agent_online_kpi_from_client_live_meter(meter, scope_kind, scope_label)
-    }) {
-        return online;
-    }
-    let events_total = summary["events_total"].as_u64().unwrap_or(0);
-    let counted_events = summary["counted_events"].as_u64().unwrap_or(0);
-    json!({
-        "status": "missing",
-        "confidence": "missing",
-        "scope_kind": scope_kind,
-        "scope_label": scope_label,
-        "window_hours": PERSONAL_AGENT_KPI_WINDOW_HOURS,
-        "events_total": events_total,
-        "counted_events": counted_events,
-        "reply_prefix": "5ч KPI: н/д",
-        "summary": "Для личного 5ч KPI нет exact VS Code status-bar rate-limit contour. Measured token-budget fallback для этого KPI запрещён.",
-    })
+    let _ = client_live_meter;
+    personal_agent_kpi_from_summary(summary, selector, public_savings_window)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn public_savings_window() -> PublicSavingsWindowContract {
+        PublicSavingsWindowContract {
+            hours: 24,
+            source: "repo_config",
+        }
+    }
 
     fn selector(thread_id: Option<&str>) -> PersonalKpiSelector {
         PersonalKpiSelector {
@@ -220,16 +283,19 @@ mod tests {
                 "events_total": 3,
                 "counted_events": 2,
                 "verified_effective_savings_pct": 61.25,
-                "effective_savings_pct": 44.0
+                "effective_savings_pct": 44.0,
+                "verified_baseline_tokens": 240,
+                "verified_observed_whole_cycle_with_amai_tokens": 93
             }),
             Some(&selector(None)),
+            &public_savings_window(),
         );
         assert_eq!(value["status"].as_str(), Some("observed"));
         assert_eq!(value["confidence"].as_str(), Some("verified"));
         assert_eq!(value["classification"].as_str(), Some("saving"));
         assert_eq!(
             value["reply_prefix"].as_str(),
-            Some("5ч KPI: экономия 61.25%")
+            Some("Amai savings: без Amai 240, с Amai 93, экономия 147 (61.25%)")
         );
     }
 
@@ -241,20 +307,23 @@ mod tests {
                 "counted_events": 0
             }),
             Some(&selector(Some("thread-123"))),
+            &public_savings_window(),
         );
         assert_eq!(value["scope_kind"].as_str(), Some("personal_thread_scope"));
         assert_eq!(value["scope_label"].as_str(), Some("thread-123"));
-        assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: н/д"));
+        assert_eq!(value["reply_prefix"].as_str(), Some("Amai savings: н/д"));
     }
 
     #[test]
-    fn preferred_personal_agent_kpi_prefers_online_limit_contour_over_measured_summary() {
+    fn preferred_personal_agent_kpi_uses_summary_even_when_live_meter_present() {
         let value = preferred_personal_agent_kpi(
             &json!({
                 "events_total": 3,
                 "counted_events": 2,
                 "verified_effective_savings_pct": 61.25,
-                "effective_savings_pct": 44.0
+                "effective_savings_pct": 44.0,
+                "verified_baseline_tokens": 240,
+                "verified_observed_whole_cycle_with_amai_tokens": 93
             }),
             Some(&selector(Some("thread-amai"))),
             Some(&json!({
@@ -272,37 +341,35 @@ mod tests {
                     "primary_resets_at_epoch_seconds": 1775063220u64
                 }
             })),
+            &public_savings_window(),
         );
-        assert_eq!(value["confidence"].as_str(), Some("online_limit_contour"));
         assert_eq!(
             value["reply_prefix"].as_str(),
-            Some("5ч KPI: экономия 78.12%")
+            Some("Amai savings: без Amai 240, с Amai 93, экономия 147 (61.25%)")
         );
     }
 
     #[test]
-    fn preferred_personal_agent_kpi_fails_closed_without_online_limit_contour() {
+    fn preferred_personal_agent_kpi_uses_summary_without_live_meter() {
         let value = preferred_personal_agent_kpi(
             &json!({
                 "events_total": 3,
                 "counted_events": 2,
                 "verified_effective_savings_pct": 61.25,
-                "effective_savings_pct": 44.0
+                "effective_savings_pct": 44.0,
+                "verified_baseline_tokens": 240,
+                "verified_observed_whole_cycle_with_amai_tokens": 93
             }),
             Some(&selector(Some("thread-amai"))),
             Some(&json!({
-                "ended_at_epoch_ms": 1775056740000u64,
-                "status_bar_rate_limits": {
-                    "status": "missing"
-                }
+                "ended_at_epoch_ms": 1775056740000u64
             })),
+            &public_savings_window(),
         );
-        assert_eq!(value["status"].as_str(), Some("missing"));
-        assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: н/д"));
-        assert!(
-            value["summary"]
-                .as_str()
-                .is_some_and(|summary| summary.contains("запрещён"))
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(
+            value["reply_prefix"].as_str(),
+            Some("Amai savings: без Amai 240, с Amai 93, экономия 147 (61.25%)")
         );
     }
 
@@ -327,7 +394,7 @@ mod tests {
             agent_scope: agent_scope.to_string(),
             payload_origin: "context_pack_token_budget".to_string(),
             session_id: "session-default".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 0,
             occurred_at_epoch_ms: 0,
             ingested_at_epoch_ms: 0,
@@ -449,7 +516,7 @@ mod tests {
         ];
 
         let (window, resolved_selector, used_fallback) =
-            active_agent_personal_kpi_window(&events, &selector, 2_000);
+            active_agent_personal_kpi_window(&events, &selector, 2_000, &public_savings_window());
 
         assert!(used_fallback);
         assert_eq!(resolved_selector.thread_id, None);

@@ -18,21 +18,33 @@ pub(super) fn build_headline(snapshot: &Value, captured_at_epoch_ms: u64) -> Val
     };
     let live_status = live_latency_compare_status(snapshot);
     let status = combine_headline_statuses(sla_status, live_status);
+    let active_agent_value_text = active_agent_headline["value_text"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let active_agent_title = if active_agent_value_text.is_some() {
+        active_agent_headline["title"].as_str()
+    } else {
+        None
+    };
+    let token_headline_value_text = token_headline["value_text"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     json!({
         "status": status,
         "status_label": headline_status_label(status),
         "status_reason": headline_status_reason(pass, alert, critical, unknown, live_status),
         "captured_at": human_timestamp(captured_at_epoch_ms),
         "summary": format!("SLA сейчас: pass={pass}, alert={alert}, critical={critical}, unknown={unknown}"),
-        "token_title": active_agent_headline["title"]
-            .as_str()
+        "token_title": active_agent_title
             .or_else(|| token_headline["title"].as_str())
             .unwrap_or("ещё нет данных"),
-        "token_value": active_agent_headline["value_text"]
-            .as_str()
+        "token_value": active_agent_value_text
             .map(str::to_string)
+            .or_else(|| token_headline_value_text.map(str::to_string))
             .unwrap_or_else(|| format_percent(token_headline["value_percent"].as_f64())),
-        "token_scope": if active_agent_headline.is_object() {
+        "token_scope": if active_agent_value_text.is_some() {
             ""
         } else {
             token_headline["scope_label"].as_str().unwrap_or("")
@@ -126,8 +138,8 @@ mod tests {
             },
             "active_agent_budget": {
                 "headline": {
-                    "title": "Средний KPI активных агентов",
-                    "value_text": "5ч KPI: экономия 40.00%",
+                    "title": "Экономия токенов активных агентов",
+                    "value_text": "Amai savings: без Amai 2000, с Amai 1200, экономия 800 (40.00%)",
                     "scope_label": "среднее по 2 активным агентам"
                 }
             },
@@ -144,13 +156,97 @@ mod tests {
         let headline = build_headline(&snapshot, 1775039106398);
         assert_eq!(
             headline["token_title"].as_str(),
-            Some("Средний KPI активных агентов")
+            Some("Экономия токенов активных агентов")
         );
         assert_eq!(
             headline["token_value"].as_str(),
-            Some("5ч KPI: экономия 40.00%")
+            Some("Amai savings: без Amai 2000, с Amai 1200, экономия 800 (40.00%)")
         );
         assert_eq!(headline["token_scope"].as_str(), Some(""));
+    }
+
+    #[test]
+    fn build_headline_falls_back_to_token_value_text_when_active_agent_value_is_blank() {
+        let snapshot = json!({
+            "sla": {
+                "summary": {
+                    "pass": 19,
+                    "alert": 0,
+                    "critical": 0,
+                    "unknown": 0
+                }
+            },
+            "active_agent_budget": {
+                "headline": {
+                    "title": "Экономия токенов активных агентов",
+                    "value_text": "   ",
+                    "scope_label": "среднее по 2 активным агентам"
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "headline": {
+                        "title": "Честная экономия Amai",
+                        "value_text": "Amai savings: без Amai 1000, с Amai 600, экономия 400 (40.00%)",
+                        "value_percent": 40.0,
+                        "scope_label": "окно Обычная рабочая машина"
+                    }
+                }
+            }
+        });
+
+        let headline = build_headline(&snapshot, 1775039106398);
+        assert_eq!(
+            headline["token_value"].as_str(),
+            Some("Amai savings: без Amai 1000, с Amai 600, экономия 400 (40.00%)")
+        );
+        assert_eq!(
+            headline["token_title"].as_str(),
+            Some("Честная экономия Amai")
+        );
+        assert_eq!(
+            headline["token_scope"].as_str(),
+            Some("окно Обычная рабочая машина")
+        );
+    }
+
+    #[test]
+    fn build_headline_falls_back_to_token_headline_when_active_agent_headline_is_missing() {
+        let snapshot = json!({
+            "sla": {
+                "summary": {
+                    "pass": 19,
+                    "alert": 0,
+                    "critical": 0,
+                    "unknown": 0
+                }
+            },
+            "active_agent_budget": {},
+            "token_budget_report": {
+                "token_budget_report": {
+                    "headline": {
+                        "title": "Честная экономия Amai",
+                        "value_text": "Amai savings: без Amai 900, с Amai 500, экономия 400 (44.44%)",
+                        "value_percent": 44.44,
+                        "scope_label": "окно Обычная рабочая машина"
+                    }
+                }
+            }
+        });
+
+        let headline = build_headline(&snapshot, 1775039106398);
+        assert_eq!(
+            headline["token_title"].as_str(),
+            Some("Честная экономия Amai")
+        );
+        assert_eq!(
+            headline["token_value"].as_str(),
+            Some("Amai savings: без Amai 900, с Amai 500, экономия 400 (44.44%)")
+        );
+        assert_eq!(
+            headline["token_scope"].as_str(),
+            Some("окно Обычная рабочая машина")
+        );
     }
 
     #[test]

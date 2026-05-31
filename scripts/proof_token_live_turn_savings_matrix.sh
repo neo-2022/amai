@@ -14,14 +14,42 @@ alpha_project_code="proof_shape_alpha_${proof_id}"
 beta_project_code="proof_shape_beta_${proof_id}"
 declare -a cleanup_threads=()
 
+sqlite_exec() {
+  local db_path="$1"
+  local sql="$2"
+  DB_PATH="$db_path" SQL="$sql" python3 - <<'PY'
+import os
+import sqlite3
+
+conn = sqlite3.connect(os.environ["DB_PATH"])
+try:
+    conn.execute(os.environ["SQL"])
+    conn.commit()
+finally:
+    conn.close()
+PY
+}
+
 cleanup() {
   local thread_id
   for thread_id in "${cleanup_threads[@]:-}"; do
-    sqlite3 ~/.codex/state_5.sqlite "DELETE FROM threads WHERE id = '$thread_id';" >/dev/null 2>&1 || true
+    sqlite_exec ~/.codex/state_5.sqlite "DELETE FROM threads WHERE id = '$thread_id';" >/dev/null 2>&1 || true
   done
   rm -rf "$temp_root"
 }
 trap cleanup EXIT
+
+clear_workspace_restore_pack_rows() {
+  psql "$AMI_POSTGRES_DSN" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+DELETE FROM ami.restore_packs rp
+USING ami.projects p, ami.namespaces n
+WHERE rp.project_id = p.project_id
+  AND rp.namespace_id = n.namespace_id
+  AND p.code = 'amai'
+  AND n.code = 'continuity'
+  AND rp.pack_kind = 'workspace_restore_pack';
+SQL
+}
 
 write_rollout_file() {
   local rollout_path="$1"
@@ -92,7 +120,7 @@ PY
 insert_thread_row() {
   local thread_id="$1"
   local rollout_path="$2"
-  sqlite3 ~/.codex/state_5.sqlite \
+  sqlite_exec ~/.codex/state_5.sqlite \
     "INSERT INTO threads (
         id,
         rollout_path,
@@ -134,7 +162,7 @@ insert_thread_row() {
 update_thread_rollout_path() {
   local thread_id="$1"
   local rollout_path="$2"
-  sqlite3 ~/.codex/state_5.sqlite \
+  sqlite_exec ~/.codex/state_5.sqlite \
     "UPDATE threads
      SET rollout_path = '$rollout_path',
          updated_at = strftime('%s','now')
@@ -178,7 +206,7 @@ wait_for_token_metrics() {
     sleep 1
   done
   ./target/release/amai observe token-report \
-    --budget-profile codex_5h \
+    --budget-profile client_primary_budget \
     --include-verify-events true >/dev/null
   row="$(fetch_token_metrics "$source_kind" "$context_pack_id")"
   if [[ -z "$row" ]]; then
@@ -268,7 +296,7 @@ wait_for_current_live_turn_snapshot() {
   local attempt=""
   for attempt in {1..16}; do
     timeout 2s ./target/release/amai observe token-report \
-      --budget-profile codex_5h \
+      --budget-profile client_primary_budget \
       --include-verify-events true >/dev/null || true
     CODEX_THREAD_ID="$thread_id" AMAI_AGENT_SCOPE="proof_live_turn_matrix" \
       timeout 20s ./target/release/amai observe snapshot >"$snapshot_path" || true
@@ -453,6 +481,7 @@ run_case() {
   local timestamp_rfc3339
   timestamp_rfc3339="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+  clear_workspace_restore_pack_rows
   write_rollout_file \
     "$rollout_path" \
     "$timestamp_rfc3339" \
@@ -506,17 +535,17 @@ run_case() {
   purge_thread_budget_caches "$thread_id"
   purge_shared_token_budget_caches
 
-  ./target/release/amai observe token-report \
-    --budget-profile codex_5h \
-    --include-verify-events true >/dev/null
-
-  wait_for_current_live_turn_snapshot "$snapshot_path" "$shape" "$thread_id" "$turn_id"
-
   repair_live_source_kind \
     "$live_source_kind" \
     "$context_pack_id" \
     "$repaired_source_kind" \
     "proof_live_turn_matrix_cleanup"
+
+  ./target/release/amai observe token-report \
+    --budget-profile client_primary_budget \
+    --include-verify-events true >/dev/null
+
+  wait_for_current_live_turn_snapshot "$snapshot_path" "$shape" "$thread_id" "$turn_id"
 
   printf '%s\t%s\t%s\t%s\t%s\n' \
     "$shape" \

@@ -610,7 +610,11 @@ pub(super) fn build_statement_period_json(
             "value": profile.session_gap_minutes,
         }),
         "rolling_window" => json!({
-            "kind": "rolling_window_hours",
+            "kind": match profile.window_mode {
+                TokenBudgetWindowMode::FixedDuration => "fixed_duration",
+                TokenBudgetWindowMode::ObservedClientPrimaryLimit => "observed_client_primary_limit",
+            },
+            "label": profile.window_label.clone(),
             "value": profile.rolling_window_hours,
         }),
         "lifetime" => json!({
@@ -4474,7 +4478,10 @@ pub(super) fn build_contractual_evidence_pack(
             "scope_label": scope_label,
             "budget_profile": {
                 "code": profile.code.clone(),
+                "requested_code": profile.requested_code.clone(),
                 "display_name": profile.display_name.clone(),
+                "window_mode": profile.window_mode,
+                "window_label": profile.window_label.clone(),
             },
         "include_verify_events": include_verify_events,
         "truth_guardrail": {

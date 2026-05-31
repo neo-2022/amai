@@ -283,6 +283,24 @@ pub(super) fn live_usage_identity_shadow_key(event: &TokenBudgetEvent) -> Option
 }
 
 pub(super) fn dashboard_token_event_merge_key(event: &TokenBudgetEvent) -> String {
+    if event.traffic_class == "live" {
+        if let Some(context_pack_id) = event
+            .context_pack_id
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            return format!(
+                "{}:{}:{}:{}:{}:{}",
+                event.project,
+                event.namespace,
+                event.agent_scope,
+                event.measurement_scope,
+                event.source_kind,
+                context_pack_id
+            );
+        }
+    }
     live_usage_identity_shadow_key(event).unwrap_or_else(|| {
         format!(
             "{}:{}:{}:{}:{}:{}",

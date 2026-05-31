@@ -1333,7 +1333,7 @@ mod tests {
                     },
                     "client_limit_hourly_burn": {
                         "status": "observed",
-                        "reply_prefix": "5ч KPI: переплата 20.00%"
+                        "reply_prefix": "Burn guard: переплата 20.00%"
                     },
                     "statement_previews": {
                         "current_session": {
@@ -1369,7 +1369,7 @@ mod tests {
         let payload = super::client_budget_root_cause_payload(&snapshot);
         assert_eq!(
             payload["reply_prefix"].as_str(),
-            Some("5ч KPI: переплата 20.00%")
+            Some("Burn guard: переплата 20.00%")
         );
         assert_eq!(
             payload["exact_pair_status"]["primary_blocker_code"].as_str(),
@@ -1428,7 +1428,7 @@ mod tests {
                     },
                     "client_limit_hourly_burn": {
                         "status": "observed",
-                        "reply_prefix": "5ч KPI: переплата 75.41%"
+                        "reply_prefix": "Burn guard: переплата 75.41%"
                     },
                     "statement_previews": {
                         "current_session": {
@@ -1513,7 +1513,7 @@ mod tests {
                     },
                     "client_limit_hourly_burn": {
                         "status": "observed",
-                        "reply_prefix": "5ч KPI: переплата 1988.49%"
+                        "reply_prefix": "Burn guard: переплата 1988.49%"
                     },
                     "statement_previews": {
                         "current_session": {

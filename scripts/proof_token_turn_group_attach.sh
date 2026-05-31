@@ -52,7 +52,7 @@ report_path="/tmp/amai-proof-token-turn-group-report.json"
   --assistant-generation-tokens 77 >"$attach_path"
 
 ./target/release/amai observe token-report \
-  --budget-profile codex_5h \
+  --budget-profile client_primary_budget \
   --include-verify-events true >"$report_path"
 
 ATTACH_PATH="$attach_path" REPORT_PATH="$report_path" CONTEXT_PACK_ID="$context_pack_id" TURN_ID="$turn_id" python3 - <<'PY'

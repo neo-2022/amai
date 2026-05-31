@@ -10,7 +10,7 @@ bundle_dir="$tmpdir/token-statement-export"
 
 ./target/release/amai observe token-statement-export \
   --scope lifetime \
-  --budget-profile codex_5h \
+  --budget-profile client_primary_budget \
   --include-verify-events true \
   --output-dir "$bundle_dir" >/tmp/amai-proof-token-statement-export-path.txt
 

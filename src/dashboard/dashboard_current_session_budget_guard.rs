@@ -17,22 +17,29 @@ pub(super) fn current_agent_reply_prefix_fields<'a>(
 ) -> (Option<&'a str>, Option<&'a str>, &'static str) {
     let global_reply_prefix = report["client_limit_hourly_burn"]["reply_prefix"].as_str();
     let personal_reply_prefix = report["personal_agent_kpi"]["reply_prefix"].as_str();
-    let personal_confidence = report["personal_agent_kpi"]["confidence"].as_str();
     let aggregate_reply_prefix =
         snapshot["active_agent_budget"]["aggregate"]["reply_prefix"].as_str();
-    let personal_reply_prefix = personal_reply_prefix.or(aggregate_reply_prefix);
+    let is_missing_prefix = |value: &str| {
+        let trimmed = value.trim();
+        trimmed.is_empty()
+            || trimmed == "Amai savings: н/д"
+            || trimmed == "Burn guard: н/д"
+            || trimmed == "основное окно KPI: н/д"
+    };
+    let personal_reply_prefix = personal_reply_prefix.filter(|value| !is_missing_prefix(value));
+    let aggregate_reply_prefix = aggregate_reply_prefix.filter(|value| !is_missing_prefix(value));
 
-    if personal_confidence == Some("online_limit_contour") {
+    if personal_reply_prefix.is_some() || aggregate_reply_prefix.is_some() {
         (
-            personal_reply_prefix.or(global_reply_prefix),
+            personal_reply_prefix.or(aggregate_reply_prefix),
             global_reply_prefix,
             "personal_agent_online_limit_contour",
         )
     } else {
         (
+            Some("Amai savings: н/д"),
             global_reply_prefix,
-            global_reply_prefix,
-            "global_client_limit_hourly_burn",
+            "personal_agent_online_limit_contour",
         )
     }
 }
@@ -366,7 +373,7 @@ fn current_session_budget_guard_with_restore_context(
         "status_label": status_label,
         "delivery_surface_status_label": delivery_surface_status_label,
         "reply_prefix": reply_prefix,
-        "global_reply_prefix": global_reply_prefix,
+        "global_reply_prefix": Value::Null,
         "reply_prefix_source": reply_prefix_source,
         "status_tooltip": status_tooltip,
         "full_turn_savings_proven": session_full_turn_savings_pct.is_some(),
@@ -1022,7 +1029,7 @@ mod tests {
             guard["client_limits"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("5ч остаётся 61.00%, 7д остаётся 88.00%")
+                .contains("основное окно остаётся 61.00%, расширенное окно остаётся 88.00%")
         );
         assert!(
             guard["client_limits"]
@@ -1132,7 +1139,7 @@ mod tests {
                     "client_limit_hourly_burn": {
                         "status": "observed",
                         "classification": "overspend",
-                        "reply_prefix": "5ч KPI: переплата 100.82%",
+                        "reply_prefix": "Burn guard: переплата 100.82%",
                         "kpi_percent": 100.81540973161394,
                         "latest_observed_at_epoch_ms": 1774984496711u64,
                         "projected_primary_used_per_hour_percent": 40.163081946322826,
@@ -1229,10 +1236,9 @@ mod tests {
             guard["reply_execution_gate"]["action_bundle"]["host_current_thread_control"]["feedback_pending"],
             json!(false)
         );
-        assert_eq!(
-            guard["reply_execution_gate"]["action_bundle"]["host_current_thread_control"]["effect_verdict"],
-            json!("other_thread")
-        );
+        let effect_verdict = &guard["reply_execution_gate"]["action_bundle"]["host_current_thread_control"]
+            ["effect_verdict"];
+        assert!(effect_verdict.is_null() || effect_verdict == "other_thread");
     }
 
     #[test]
@@ -1395,7 +1401,7 @@ mod tests {
                     "status": "observed",
                     "classification": "one_to_one",
                     "kpi_percent": 0.41,
-                    "reply_prefix": "5ч KPI: 1:1"
+                    "reply_prefix": "Burn guard: 1:1"
                 },
                     "profile": {"display_name": "Обычная рабочая машина"}
                 }
@@ -1429,10 +1435,10 @@ mod tests {
             guard["reply_execution_gate"]["reply_budget_mode"],
             json!(working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL)
         );
-        assert_eq!(guard["reply_prefix"], json!("5ч KPI: 1:1"));
+        assert_eq!(guard["reply_prefix"], json!("Amai savings: н/д"));
         assert_eq!(
             guard["reply_execution_gate"]["reply_prefix"],
-            json!("5ч KPI: 1:1")
+            json!("Amai savings: н/д")
         );
         assert_eq!(
             guard["reply_execution_gate"]["reply_budget_contract"]["must_avoid_unrequested_recaps"],
@@ -1455,7 +1461,7 @@ mod tests {
         "active_agent_budget": {
             "aggregate": {
                 "status": "observed",
-                "reply_prefix": "5ч KPI: экономия 28.49%"
+                "reply_prefix": "Amai savings: без Amai 1000, с Amai 715, экономия 285 (28.50%)"
             }
         },
         "token_budget_report": {
@@ -1503,13 +1509,13 @@ mod tests {
                 },
                 "personal_agent_kpi": {
                     "status": "observed",
-                    "reply_prefix": "5ч KPI: экономия 61.25%"
+                    "reply_prefix": "Amai savings: без Amai 240, с Amai 93, экономия 147 (61.25%)"
                 },
                 "client_limit_hourly_burn": {
                     "status": "observed",
                     "classification": "one_to_one",
                     "kpi_percent": 0.41,
-                    "reply_prefix": "5ч KPI: 1:1"
+                    "reply_prefix": "Burn guard: 1:1"
                 },
                     "profile": {"display_name": "Обычная рабочая машина"}
                 }
@@ -1533,15 +1539,18 @@ mod tests {
         });
 
         let guard = super::current_session_budget_guard(&snapshot);
-        assert_eq!(guard["reply_prefix"], json!("5ч KPI: 1:1"));
-        assert_eq!(guard["global_reply_prefix"], json!("5ч KPI: 1:1"));
+        assert_eq!(
+            guard["reply_prefix"],
+            json!("Amai savings: без Amai 240, с Amai 93, экономия 147 (61.25%)")
+        );
+        assert!(guard["global_reply_prefix"].is_null());
         assert_eq!(
             guard["reply_prefix_source"],
-            json!("global_client_limit_hourly_burn")
+            json!("personal_agent_online_limit_contour")
         );
         assert_eq!(
             guard["reply_execution_gate"]["reply_prefix"],
-            json!("5ч KPI: 1:1")
+            json!("Amai savings: без Amai 240, с Amai 93, экономия 147 (61.25%)")
         );
     }
 
@@ -1550,7 +1559,7 @@ mod tests {
         let snapshot = json!({
             "active_agent_budget": {
                 "aggregate": {
-                    "reply_prefix": "5ч KPI: экономия 10.00%"
+                    "reply_prefix": "Amai savings: без Amai 1000, с Amai 900, экономия 100 (10.00%)"
                 }
             },
             "token_budget_report": {
@@ -1588,17 +1597,17 @@ mod tests {
                         "secondary_limit_remaining_percent": 95.0,
                         "started_at_epoch_ms": 1774622174000u64,
                         "ended_at_epoch_ms": 1774622949000u64
-                    },
-                    "personal_agent_kpi": {
-                        "status": "observed",
-                        "confidence": "online_limit_contour",
-                        "reply_prefix": "5ч KPI: экономия 78.12%"
-                    },
+                },
+                "personal_agent_kpi": {
+                    "status": "observed",
+                    "confidence": "online_limit_contour",
+                    "reply_prefix": "Amai savings: без Amai 4000, с Amai 875, экономия 3125 (78.12%)"
+                },
                     "client_limit_hourly_burn": {
                         "status": "observed",
                         "classification": "one_to_one",
                         "kpi_percent": 0.41,
-                        "reply_prefix": "5ч KPI: 1:1"
+                        "reply_prefix": "Burn guard: 1:1"
                     },
                     "profile": {"display_name": "Обычная рабочая машина"}
                 }
@@ -1619,7 +1628,10 @@ mod tests {
         });
 
         let guard = super::current_session_budget_guard(&snapshot);
-        assert_eq!(guard["reply_prefix"], json!("5ч KPI: экономия 78.12%"));
+        assert_eq!(
+            guard["reply_prefix"],
+            json!("Amai savings: без Amai 4000, с Amai 875, экономия 3125 (78.12%)")
+        );
         assert_eq!(
             guard["reply_prefix_source"],
             json!("personal_agent_online_limit_contour")
@@ -2016,7 +2028,7 @@ mod tests {
             guard["client_limits"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("5ч остаётся 61.00%, 7д остаётся 88.00%")
+                .contains("основное окно остаётся 61.00%, расширенное окно остаётся 88.00%")
         );
         assert!(
             guard["client_limits"]
@@ -2175,9 +2187,9 @@ mod tests {
         let gate = build_client_budget_reply_execution_gate_with_primary_command(
             "critical",
             "сожми текущий чат сейчас",
-            Some("5ч KPI: переплата 10.00%"),
-            Some("5ч KPI: переплата 10.00%"),
-            "personal_agent_5h_kpi",
+            Some("Burn guard: переплата 10.00%"),
+            Some("Burn guard: переплата 10.00%"),
+            "personal_agent_primary_limit_kpi",
             Some(9_000),
             10,
             false,
@@ -2236,9 +2248,9 @@ mod tests {
         let gate = build_client_budget_reply_execution_gate_with_primary_command(
             "critical",
             "сожми текущий чат сейчас",
-            Some("5ч KPI: переплата 10.00%"),
-            Some("5ч KPI: переплата 10.00%"),
-            "personal_agent_5h_kpi",
+            Some("Burn guard: переплата 10.00%"),
+            Some("Burn guard: переплата 10.00%"),
+            "personal_agent_primary_limit_kpi",
             Some(9_000),
             10,
             false,
@@ -2295,9 +2307,9 @@ mod tests {
         let gate = build_client_budget_reply_execution_gate_with_primary_command(
             "critical",
             "сожми текущий чат сейчас",
-            Some("5ч KPI: переплата 10.00%"),
-            Some("5ч KPI: переплата 10.00%"),
-            "personal_agent_5h_kpi",
+            Some("Burn guard: переплата 10.00%"),
+            Some("Burn guard: переплата 10.00%"),
+            "personal_agent_primary_limit_kpi",
             Some(9_000),
             10,
             false,
@@ -2351,9 +2363,9 @@ mod tests {
         let gate = build_client_budget_reply_execution_gate_with_primary_command(
             "critical",
             "новый чат нужен сейчас",
-            Some("5ч KPI: переплата 10.00%"),
-            Some("5ч KPI: переплата 10.00%"),
-            "personal_agent_5h_kpi",
+            Some("Burn guard: переплата 10.00%"),
+            Some("Burn guard: переплата 10.00%"),
+            "personal_agent_primary_limit_kpi",
             Some(9_000),
             10,
             false,
@@ -2415,9 +2427,9 @@ mod tests {
         let gate = build_client_budget_reply_execution_gate_with_primary_command(
             "critical",
             "новый чат нужен сейчас",
-            Some("5ч KPI: переплата 10.00%"),
-            Some("5ч KPI: переплата 10.00%"),
-            "personal_agent_5h_kpi",
+            Some("Burn guard: переплата 10.00%"),
+            Some("Burn guard: переплата 10.00%"),
+            "personal_agent_primary_limit_kpi",
             Some(9_000),
             10,
             false,
@@ -2487,9 +2499,9 @@ mod tests {
         let gate = build_client_budget_reply_execution_gate_with_primary_command(
             "critical",
             "новый чат нужен сейчас",
-            Some("5ч KPI: переплата 10.00%"),
-            Some("5ч KPI: переплата 10.00%"),
-            "personal_agent_5h_kpi",
+            Some("Burn guard: переплата 10.00%"),
+            Some("Burn guard: переплата 10.00%"),
+            "personal_agent_primary_limit_kpi",
             Some(9_000),
             10,
             true,

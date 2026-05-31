@@ -231,6 +231,17 @@ contract.
 - `budget_profile`
 - `model_class`
 
+## Budget profile identity
+
+`budget_profile` и `rolling_window_profile` должны хранить canonical profile code, а не
+provider/duration-shaped label:
+- canonical пример: `client_primary_budget`;
+- конкретное окно задаётся полями профиля `window_mode` и `window_label`, а не кодом профиля.
+
+Новые события и defaults пишут canonical code. Исторические persisted events со старым
+`rolling_window_profile` остаются только raw immutable history. Они не становятся accepted input,
+fallback mapping, canonical rewrite rule или новым source of truth.
+
 ## Как понимать главные поля
 
 `baseline_tokens`
@@ -355,8 +366,8 @@ contract.
 - `lifetime`
 
 Рекомендуемые rolling windows:
-- `5h`
-- `24h`
+- основное клиентское лимитное окно;
+- операционное 24-часовое окно.
 
 Каждый rollup должен показывать:
 - `events_count`
@@ -1344,7 +1355,7 @@ Hashes по line items нужны затем, чтобы:
   - `component_event_coverage`
   - `blocking_reasons`
   Это нужно затем, чтобы live lower-bound savings не притворялись уже эквивалентными
-  тому же самому полному метру, которым внешний клиент считает общий `5h` limit.
+  тому же самому полному метру, которым внешний клиент считает основной лимит.
 - dashboard hero-cards обязаны поднимать этот same layer в user-facing виде:
   - отдельная строка `Связь с лимитом клиента`;
   - честное различение `only_non_live_scope_activity`,
@@ -1588,6 +1599,10 @@ Ledger должен уметь срезы по реальному типу во�
 - `Answer-like rate`
 - `Events counted`
 
+При этом `Burn guard` / burn-rate contour остаётся internal operational guardrail для pressure,
+rotation и operator diagnostics. Он не является public headline metric и не должен подменять
+`Verified Effective Savings %` или `Amai savings` на пользовательской панели.
+
 Не нужно выносить в headline:
 - лучший одиночный benchmark;
 - максимальный single-event win;
@@ -1610,7 +1625,11 @@ Ledger считается trustworthy только если одновремен
 
 Канонический headline metric:
 
-`Verified Effective Savings %`
+`Amai savings token pair`
+
+Он показывает `without Amai`, `with Amai`, `saved tokens` и процент экономии по
+provider-independent tokenonomics pair. `verified_effective_savings_pct` остаётся расчётным
+полем внутри summary/projection, но не является public headline metric.
 
 При этом в текущем runtime `Amai` уже отдельно считает и более строгий secondary contour:
 - `verified_answer_like_savings_pct`

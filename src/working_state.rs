@@ -515,7 +515,7 @@ fn compact_reply_budget_summary(target_percent: u64) -> String {
         "Target economy is set to 0%, so compact mode only activates from rotate-pressure, overspend, or other hard client-budget signals. Ответ остаётся содержательным, но должен быть жёстко compact: один абзац или максимум два bullets, сначала прямой результат, затем только изменившиеся факты без повторов.".to_string()
     } else {
         format!(
-            "Exact 5ч KPI ниже целевой планки {target_percent}% или rotate-pressure уже materialized. Ответ остаётся содержательным, но должен быть жёстко compact: один абзац или максимум два bullets, сначала прямой результат, затем только изменившиеся факты без повторов."
+            "Exact Burn guard ниже целевой планки {target_percent}% или rotate-pressure уже materialized. Ответ остаётся содержательным, но должен быть жёстко compact: один абзац или максимум два bullets, сначала прямой результат, затем только изменившиеся факты без повторов."
         )
     }
 }
@@ -548,7 +548,7 @@ pub(crate) fn build_client_reply_budget_contract_with_target(
         summary,
     ) = {
         let preserve_summary = "Host уже compacted этот thread. Защити новую компактную поверхность: минимум промежуточных апдейтов, никаких широких разведочных проходов без прямого запроса, один плотный batched read вместо серии мелких exploratory tool turns.";
-        let inactive_target_pressure_summary = "Даже без host compaction exact 5ч KPI уже ниже целевой планки, поэтому режь расход заранее: короткий ответ без commentary-only апдейтов и без нового tool turn, пока не появится точная material delta-goal.";
+        let inactive_target_pressure_summary = "Даже без host compaction exact Burn guard уже ниже целевой планки, поэтому режь расход заранее: короткий ответ без commentary-only апдейтов и без нового tool turn, пока не появится точная material delta-goal.";
         let preserve_target_pressure_summary = "Целевая планка уже не держится даже в preserve-stage, поэтому экономию нужно защищать сразу: не отправляй commentary-only апдейты, не дроби tool-чтение на серию мелких запросов и жди meaningful result перед следующим progress reply.";
         let critical_regrowth_summary = "После host compaction thread уже снова отъел заметную долю восстановленной поверхности. С этого момента каждый лишний tool turn дорог: не отправляй commentary-only апдейты, не дроби чтение на мелкие запросы, отвечай только после meaningful patch/result delta и не гоняй повторные live-diagnostic reread/retry loops без новой дельты.";
         let pure_burn_turn_summary = "Текущий live-turn уже показывает no_amai_activity_in_current_live_turn, значит этот turn пока только сжигает окно клиента. Не отправляй новый progress reply без material patch/result/decision delta и не начинай новый tool turn без точной гипотезы, что именно изменится.";
@@ -5976,6 +5976,8 @@ fn build_startup_next_action(
             "no_silent_drop": no_silent_drop,
             "headline": active_headline,
             "next_step": active_next_step,
+            "required_task_set": required_task_set,
+            "required_task_set_summary": required_task_set_summary,
         })
     }
 }
@@ -9624,6 +9626,75 @@ mod tests {
         (cfg, client, project, namespace, repo_root)
     }
 
+    fn mutable_restore_pack_test_bundle(
+        project: &ProjectRecord,
+        namespace: &NamespaceRecord,
+        repo_root: &str,
+        event_id: &str,
+        current_goal: &str,
+        captured_at_epoch_ms: i64,
+    ) -> Value {
+        let handoff_path = format!("{repo_root}/MUTABLE_RESTORE_PACK.md");
+        let restore = json!({
+            "project": {
+                "code": project.code.clone(),
+                "visibility_scope": "project_shared"
+            },
+            "namespace": {
+                "code": namespace.code.clone(),
+                "retrieval_mode": "local_strict"
+            },
+            "agent_scope": "proof::mutable-restore-pack",
+            "session_id": "session-mutable-restore-pack",
+            "thread_id": "thread-mutable-restore-pack",
+            "visible_projects": [{"project_code": project.code.clone(), "repo_root": repo_root}],
+            "current_goal": current_goal,
+            "next_step": "Keep derived restore pack aligned with mutable source snapshot.",
+            "restore_confidence": "durable",
+            "restore_freshness_state": "fresh",
+            "captured_at_epoch_ms": captured_at_epoch_ms,
+            "source_summary": "Source snapshot replay proof.",
+            "latest_decision_trace": {"scope": "project_shared"},
+            "state_lineage": {
+                "authoritative_event_id": event_id,
+                "authoritative_event_kind": "continuity_handoff",
+                "authoritative_source_kind": "continuity_handoff",
+                "authoritative_local_path": handoff_path,
+            },
+            "recent_actions": [{
+                "event_id": event_id,
+                "event_kind": "continuity_handoff",
+                "headline": current_goal,
+                "summary": "Mutable source replay proof.",
+                "execution_state": "succeeded",
+                "recorded_at_epoch_ms": captured_at_epoch_ms,
+                "authoritative": true,
+                "local_path": handoff_path,
+            }],
+            "pending_return_queue": [],
+            "project_task_tree": {
+                "nodes": [{
+                    "task_id": "task::mutable-restore-pack",
+                    "headline": current_goal,
+                    "next_step": "Keep derived restore pack aligned with mutable source snapshot.",
+                    "task_state": "active",
+                    "resume_state": "active",
+                    "task_role": "active",
+                    "source_kind": "continuity_handoff",
+                }]
+            },
+            "project_task_ledger": {"entries": []},
+            "active_files": [handoff_path],
+            "open_questions": [],
+            "rejected_hypotheses": [],
+        });
+        let workspace_restore_pack = super::build_workspace_restore_pack(&restore);
+        json!({
+            "working_state_restore": restore,
+            "workspace_restore_pack": workspace_restore_pack
+        })
+    }
+
     #[tokio::test]
     async fn record_handoff_event_materializes_workspace_restore_pack() {
         load_working_state_test_env();
@@ -9734,6 +9805,110 @@ mod tests {
                 .is_some_and(|items| !items.is_empty())
         );
         assert_eq!(evidence_span["kind"], json!("working_state_restore"));
+    }
+
+    #[tokio::test]
+    async fn materialize_restore_pack_refreshes_newer_mutable_source_snapshot_without_downgrade() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("mutable_restore_pack_replay").await;
+        let event_id = format!("event:mutable-restore-pack:{}", Uuid::new_v4());
+
+        let first_bundle = mutable_restore_pack_test_bundle(
+            &project,
+            &namespace,
+            &repo_root,
+            &event_id,
+            "Mutable restore pack v1",
+            100,
+        );
+        let first_payload = super::persisted_restore_snapshot_payload(&first_bundle);
+        let source_snapshot_id = postgres::insert_observability_snapshot(
+            &client,
+            WORKING_STATE_RESTORE_KIND,
+            &first_payload,
+        )
+        .await
+        .expect("first mutable restore snapshot");
+        super::materialize_restore_pack(
+            &client,
+            &project,
+            &namespace,
+            &first_bundle,
+            source_snapshot_id,
+        )
+        .await
+        .expect("first restore pack materialization");
+
+        let second_bundle = mutable_restore_pack_test_bundle(
+            &project,
+            &namespace,
+            &repo_root,
+            &event_id,
+            "Mutable restore pack v2",
+            200,
+        );
+        let second_payload = super::persisted_restore_snapshot_payload(&second_bundle);
+        let second_snapshot_id = postgres::insert_observability_snapshot(
+            &client,
+            WORKING_STATE_RESTORE_KIND,
+            &second_payload,
+        )
+        .await
+        .expect("newer mutable restore snapshot");
+        assert_eq!(second_snapshot_id, source_snapshot_id);
+        super::materialize_restore_pack(
+            &client,
+            &project,
+            &namespace,
+            &second_bundle,
+            source_snapshot_id,
+        )
+        .await
+        .expect("newer restore pack refresh");
+
+        let older_bundle = mutable_restore_pack_test_bundle(
+            &project,
+            &namespace,
+            &repo_root,
+            &event_id,
+            "Mutable restore pack older replay",
+            50,
+        );
+        super::materialize_restore_pack(
+            &client,
+            &project,
+            &namespace,
+            &older_bundle,
+            source_snapshot_id,
+        )
+        .await
+        .expect("older restore pack replay preserves newer row");
+
+        let row = client
+            .query_one(
+                r#"
+                SELECT COUNT(*) OVER(), payload, captured_at_epoch_ms
+                FROM ami.restore_packs
+                WHERE project_id = $1
+                  AND namespace_id = $2
+                  AND pack_kind = 'workspace_restore_pack'
+                  AND source_snapshot_id = $3
+                LIMIT 1
+                "#,
+                &[
+                    &project.project_id,
+                    &namespace.namespace_id,
+                    &source_snapshot_id,
+                ],
+            )
+            .await
+            .expect("mutable restore pack row");
+        let count: i64 = row.get(0);
+        let payload: Value = row.get(1);
+        let captured_at_epoch_ms: Option<i64> = row.get(2);
+        assert_eq!(count, 1);
+        assert_eq!(payload["current_goal"], json!("Mutable restore pack v2"));
+        assert_eq!(captured_at_epoch_ms, Some(200));
     }
 
     #[tokio::test]

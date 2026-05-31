@@ -34,7 +34,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$(dirname "${CACHE_PATH}")"
-now_ms="$(date +%s%3N)"
+now_ms="$(./scripts/epoch_ms.sh)"
 
 cat >"${CACHE_PATH}" <<EOF
 {
@@ -51,7 +51,7 @@ cat >"${CACHE_PATH}" <<EOF
         "must_rotate_before_reply": false,
         "must_wait_for_budget_recovery_before_reply": true,
         "reply_budget_mode": "compact_high_signal",
-        "reply_prefix": "5ч KPI: переплата 12.34%"
+        "reply_prefix": "Burn guard: переплата 12.34%"
       }
     }
   },
@@ -61,7 +61,7 @@ cat >"${CACHE_PATH}" <<EOF
       "action_kind": "wait_for_global_client_budget_recovery",
       "blocking": true,
       "must_wait_for_budget_recovery_before_reply": true,
-      "reply_prefix": "5ч KPI: переплата 12.34%"
+      "reply_prefix": "Burn guard: переплата 12.34%"
     }
   }
 }
@@ -100,7 +100,7 @@ expected_template="$(jq -r '
 ' .amai/onboarding/project-chat-startup-contract.json)"
 
 printf '%s\n' "${output}" | jq -Rn \
-  --arg expected_prefix "5ч KPI: переплата 12.34%" \
+  --arg expected_prefix "Burn guard: переплата 12.34%" \
   --arg expected_template "${expected_template}" '
   [inputs] as $lines
   | ($lines | length) >= 2

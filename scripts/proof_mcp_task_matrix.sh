@@ -2,6 +2,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+source "./scripts/stage2_fixture_roots.sh"
+stage2_prepare_fixture_roots "$PWD"
 source "./scripts/load_env.sh"
 
 ./scripts/benchmark_contamination_preflight.sh --strict-heavy
@@ -17,12 +19,12 @@ SQL
 cargo run --release --quiet -- project register \
   --code project_alpha \
   --display-name "Project Alpha" \
-  --repo-root "$PWD/fixtures/project_alpha"
+  --repo-root "${AMAI_STAGE2_PROJECT_ALPHA_ROOT}"
 
 cargo run --release --quiet -- project register \
   --code project_beta \
   --display-name "Project Beta" \
-  --repo-root "$PWD/fixtures/project_beta"
+  --repo-root "${AMAI_STAGE2_PROJECT_BETA_ROOT}"
 
 cargo run --release --quiet -- namespace ensure \
   --project project_alpha \
@@ -45,13 +47,13 @@ cargo run --release --quiet -- relation add \
 
 cargo run --release --quiet -- index project \
   --code project_alpha \
-  --path "$PWD/fixtures/project_alpha" \
+  --path "${AMAI_STAGE2_PROJECT_ALPHA_ROOT}" \
   --namespace review \
   --limit-files 20
 
 cargo run --release --quiet -- index project \
   --code project_beta \
-  --path "$PWD/fixtures/project_beta" \
+  --path "${AMAI_STAGE2_PROJECT_BETA_ROOT}" \
   --namespace review \
   --limit-files 20
 
@@ -60,14 +62,14 @@ live_output_first="$(cargo run --release --quiet -- verify mcp-matrix \
   --project project_alpha \
   --related-project project_beta \
   --namespace review \
-  --budget-profile codex_5h)"
+  --budget-profile client_primary_budget)"
 
 live_output_second="$(cargo run --release --quiet -- verify mcp-matrix \
   --matrix live_mcpbench_local \
   --project project_alpha \
   --related-project project_beta \
   --namespace review \
-  --budget-profile codex_5h)"
+  --budget-profile client_primary_budget)"
 
 assert_live_common() {
   local output="$1"
@@ -113,7 +115,7 @@ universe_output="$(cargo run --release --quiet -- verify mcp-matrix \
   --project project_alpha \
   --related-project project_beta \
   --namespace review \
-  --budget-profile codex_5h)"
+  --budget-profile client_primary_budget)"
 
 printf '%s\n' "$universe_output" | rg '"matrix": "mcp_universe_local"' >/dev/null
 printf '%s\n' "$universe_output" | rg '"tasks_failed": 0' >/dev/null

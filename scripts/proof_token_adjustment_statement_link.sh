@@ -9,7 +9,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 registry="$tmpdir/token_adjustment_registry.json"
 
 expected_statement_id="$(
-  ./target/release/amai observe token-report --budget-profile codex_5h --include-verify-events true \
+  ./target/release/amai observe token-report --budget-profile client_primary_budget --include-verify-events true \
     | jq -r '.token_budget_report.statement_export_previews.lifetime.statement_preview_id'
 )"
 printf '%s' "$expected_statement_id" >/tmp/amai-proof-token-adjustment-statement-link.json.expected
@@ -21,7 +21,7 @@ AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH="$registry" \
   --status pending_review \
   --reason-code contaminated_live_session \
   --resolve-related-statement-id \
-  --budget-profile codex_5h \
+  --budget-profile client_primary_budget \
   --include-verify-events true >/tmp/amai-proof-token-adjustment-statement-link.json
 
 python3 - <<'PY'

@@ -1,5 +1,6 @@
 use super::dashboard_agent_scope_activity::active_agent_activity_entries;
 use super::*;
+use crate::dashboard_format::format_u64;
 
 fn active_agent_profile_log(stage: &str, elapsed_ms: u128, extra: &str) {
     continuity_profile_log(&format!("active_agent_budget.{stage}"), elapsed_ms, extra);
@@ -120,11 +121,19 @@ fn active_agent_selector_from_activity(
 
 pub(super) fn active_agent_kpi_aggregate(entries: &[Value]) -> Value {
     let active_count = entries.len() as u64;
-    let observed = entries
+    let observed_pairs = entries
         .iter()
-        .filter_map(|entry| entry["personal_agent_kpi"]["signed_kpi_percent"].as_f64())
+        .filter_map(|entry| {
+            let kpi = &entry["personal_agent_kpi"];
+            if kpi["status"].as_str() != Some("observed") {
+                return None;
+            }
+            let without_amai_tokens = kpi["without_amai_tokens"].as_u64()?;
+            let with_amai_tokens = kpi["with_amai_tokens"].as_u64()?;
+            (without_amai_tokens > 0).then_some((without_amai_tokens, with_amai_tokens))
+        })
         .collect::<Vec<_>>();
-    let observed_count = observed.len() as u64;
+    let observed_count = observed_pairs.len() as u64;
     let missing_count = active_count.saturating_sub(observed_count);
     if active_count == 0 {
         return json!({
@@ -132,23 +141,58 @@ pub(super) fn active_agent_kpi_aggregate(entries: &[Value]) -> Value {
             "active_count": active_count,
             "observed_count": observed_count,
             "missing_count": missing_count,
-            "reply_prefix": "5ч KPI: н/д",
+            "without_amai_tokens": Value::Null,
+            "with_amai_tokens": Value::Null,
+            "saved_tokens": Value::Null,
+            "saved_pct": Value::Null,
+            "reply_prefix": "Amai savings: н/д",
             "scope_label": "активных агентов сейчас нет",
-            "summary": "Active lease сейчас нет, поэтому средний личный KPI по работающим агентам не считается."
+            "summary": "Сейчас нет активных агентов, поэтому суммарная Amai savings по ним пока не считается."
         });
     }
-    if missing_count > 0 || observed.is_empty() {
+    if missing_count > 0 || observed_pairs.is_empty() {
         return json!({
             "status": "partial",
             "active_count": active_count,
             "observed_count": observed_count,
             "missing_count": missing_count,
-            "reply_prefix": "5ч KPI: н/д",
-            "scope_label": format!("из {} активных агентов KPI materialized у {}", active_count, observed_count),
-            "summary": "Не у всех активных агентов уже есть личный measured 5ч KPI, поэтому среднее fail-closed не считается."
+            "without_amai_tokens": Value::Null,
+            "with_amai_tokens": Value::Null,
+            "saved_tokens": Value::Null,
+            "saved_pct": Value::Null,
+            "reply_prefix": "Amai savings: н/д",
+            "scope_label": format!(
+                "из {} активных агентов уже подтверждены {}",
+                active_count, observed_count
+            ),
+            "summary": "Не у всех активных агентов уже есть полная подтверждённая пара «обычный путь / путь через Amai», поэтому честную сумму пока не считаем."
         });
     }
-    let signed_average = observed.iter().sum::<f64>() / observed.len() as f64;
+    let without_amai_tokens = observed_pairs
+        .iter()
+        .map(|(without, _)| *without)
+        .sum::<u64>();
+    let with_amai_tokens = observed_pairs.iter().map(|(_, with)| *with).sum::<u64>();
+    if without_amai_tokens == 0 {
+        return json!({
+            "status": "partial",
+            "active_count": active_count,
+            "observed_count": observed_count,
+            "missing_count": missing_count,
+            "without_amai_tokens": Value::Null,
+            "with_amai_tokens": Value::Null,
+            "saved_tokens": Value::Null,
+            "saved_pct": Value::Null,
+            "reply_prefix": "Amai savings: н/д",
+            "scope_label": format!(
+                "из {} активных агентов уже подтверждены {}",
+                active_count, observed_count
+            ),
+            "summary": "У активных агентов пока ещё не собрана полная подтверждённая база для честной общей суммы Amai savings."
+        });
+    }
+    let saved_tokens = without_amai_tokens as i64 - with_amai_tokens as i64;
+    let signed_average = saved_tokens as f64 * 100.0 / without_amai_tokens as f64;
     let classification = signed_kpi_classification(signed_average);
     json!({
         "status": "observed",
@@ -158,12 +202,61 @@ pub(super) fn active_agent_kpi_aggregate(entries: &[Value]) -> Value {
         "classification": classification,
         "signed_kpi_percent": signed_average,
         "kpi_percent": signed_average.abs(),
-        "reply_prefix": reply_prefix_for_signed_kpi_percent(signed_average),
-        "scope_label": format!("среднее по {} активным агентам", active_count),
+        "without_amai_tokens": without_amai_tokens,
+        "with_amai_tokens": with_amai_tokens,
+        "saved_tokens": saved_tokens,
+        "saved_pct": signed_average.abs(),
+        "reply_prefix": if signed_average.is_finite() {
+            if signed_average > 0.0 {
+                format!(
+                    "Amai savings: без Amai {}, с Amai {}, экономия {} ({:.2}%)",
+                    format_u64(Some(without_amai_tokens)),
+                    format_u64(Some(with_amai_tokens)),
+                    format_u64(Some(saved_tokens as u64)),
+                    signed_average.abs()
+                )
+            } else if signed_average < 0.0 {
+                format!(
+                    "Amai savings: без Amai {}, с Amai {}, перерасход {} ({:.2}%)",
+                    format_u64(Some(without_amai_tokens)),
+                    format_u64(Some(with_amai_tokens)),
+                    format_u64(Some(saved_tokens.unsigned_abs())),
+                    signed_average.abs()
+                )
+            } else {
+                format!(
+                    "Amai savings: без Amai {}, с Amai {}, 1:1",
+                    format_u64(Some(without_amai_tokens)),
+                    format_u64(Some(with_amai_tokens)),
+                )
+            }
+        } else {
+            "Amai savings: н/д".to_string()
+        },
+        "scope_label": format!("суммарно по {} активным агентам", active_count),
         "summary": match classification {
-            "saving" => format!("Средний личный 5ч KPI по активным агентам сейчас в экономии {:.2}%.", signed_average),
-            "overspend" => format!("Средний личный 5ч KPI по активным агентам сейчас в переплате {:.2}%.", signed_average.abs()),
-            _ => "Средний личный 5ч KPI по активным агентам сейчас идёт примерно 1:1.".to_string(),
+            "saving" => format!(
+                "Суммарная Amai savings по {} активным агентам: без Amai {}, с Amai {}, экономия {} ({:.2}%).",
+                active_count,
+                format_u64(Some(without_amai_tokens)),
+                format_u64(Some(with_amai_tokens)),
+                format_u64(Some(saved_tokens as u64)),
+                signed_average.abs()
+            ),
+            "overspend" => format!(
+                "Суммарная Amai savings по {} активным агентам: без Amai {}, с Amai {}, перерасход {} ({:.2}%).",
+                active_count,
+                format_u64(Some(without_amai_tokens)),
+                format_u64(Some(with_amai_tokens)),
+                format_u64(Some(saved_tokens.unsigned_abs())),
+                signed_average.abs()
+            ),
+            _ => format!(
+                "Суммарная Amai savings по {} активным агентам идёт примерно 1:1: без Amai {}, с Amai {}.",
+                active_count,
+                format_u64(Some(without_amai_tokens)),
+                format_u64(Some(with_amai_tokens)),
+            ),
         }
     })
 }
@@ -174,6 +267,35 @@ fn active_agent_limit_weight_tokens(summary: &Value) -> u64 {
         .filter(|value| *value > 0)
         .or_else(|| summary["observed_whole_cycle_with_amai_tokens"].as_u64())
         .unwrap_or(0)
+}
+
+fn public_limit_surface_value_text(
+    primary_remaining_percent: f64,
+    secondary_remaining_percent: f64,
+) -> String {
+    format!(
+        "основное окно остаётся {}, расширенное окно остаётся {}",
+        active_agent_limit_percent_text(primary_remaining_percent),
+        active_agent_limit_percent_text(secondary_remaining_percent),
+    )
+}
+
+fn public_limit_surface_tooltip(
+    _source_label: &str,
+    primary_remaining_percent: f64,
+    primary_used_percent: f64,
+    secondary_remaining_percent: f64,
+    secondary_used_percent: f64,
+    source_note: &str,
+) -> String {
+    format!(
+        "Этот ряд показывает текущий лимит именно этого агента.\n- Основное окно: остаётся {} (использовано {})\n- Расширенное окно: остаётся {} (использовано {})\n- {}",
+        active_agent_limit_percent_text(primary_remaining_percent),
+        active_agent_limit_percent_text(primary_used_percent),
+        active_agent_limit_percent_text(secondary_remaining_percent),
+        active_agent_limit_percent_text(secondary_used_percent),
+        source_note,
+    )
 }
 
 fn proof_like_runtime_marker(value: Option<&str>) -> bool {
@@ -272,7 +394,7 @@ pub(super) fn attach_active_agent_personal_limit_surfaces(agents: &mut [Value]) 
                         "status": "missing",
                         "label_text": "Лимит клиента сейчас:",
                         "value_text": "н/д",
-                        "tooltip": "Личный online limit surface этого агента ещё не materialized из его собственного VS Code workspace/thread contour. Другие источники для строки лимитов запрещены.",
+                        "tooltip": "Для этого агента пока нет надёжного личного лимита по основной и расширенной шкале. Другие источники сюда не подмешиваются.",
                     }),
                 );
             }
@@ -297,7 +419,7 @@ pub(super) fn attach_active_agent_personal_limit_surfaces(agents: &mut [Value]) 
         let source_label = preferred_limits
             .as_ref()
             .map(|limits| limits.source_label)
-            .unwrap_or("thread-local VS Code workspace limit contour");
+            .unwrap_or("local agent limit source");
         let source_kind = preferred_limits
             .as_ref()
             .map(|limits| limits.source_kind)
@@ -305,24 +427,16 @@ pub(super) fn attach_active_agent_personal_limit_surfaces(agents: &mut [Value]) 
         let (label_text, source_note) = match source_kind {
             "status_bar_exact" => (
                 "Лимит клиента сейчас:",
-                format!(
-                    "Это exact global live limit contour клиента из {}. Он должен совпадать с VS Code toolbar и с отдельной строкой `Лимит клиента сейчас` в live budget surface.",
-                    source_label
-                ),
+                "Это общий клиентский лимит, который сейчас виден для всех активных агентов."
+                    .to_string(),
             ),
             "thread_local_rollout" => (
-                "Личный thread-limit агента:",
-                format!(
-                    "Это текущий live limit contour именно этого агента, materialized из {}.",
-                    source_label
-                ),
+                "Лимит этой работы сейчас:",
+                "Это текущий лимит именно этой работы.".to_string(),
             ),
             _ => (
-                "Личный thread-limit агента:",
-                format!(
-                    "Это текущий live limit contour именно этого агента, materialized из {}.",
-                    source_label
-                ),
+                "Лимит этой работы сейчас:",
+                "Это текущий лимит именно этой работы.".to_string(),
             ),
         };
         if let Some(root) = agent.as_object_mut() {
@@ -331,23 +445,21 @@ pub(super) fn attach_active_agent_personal_limit_surfaces(agents: &mut [Value]) 
                 json!({
                     "status": "observed",
                     "label_text": label_text,
-                    "value_text": format!(
-                        "5ч остаётся {}, 7д остаётся {}",
-                        active_agent_limit_percent_text(primary_remaining_percent),
-                        active_agent_limit_percent_text(secondary_remaining_percent),
+                    "value_text": public_limit_surface_value_text(
+                        primary_remaining_percent,
+                        secondary_remaining_percent,
                     ),
                     "primary_used_percent": primary_used_percent,
                     "primary_remaining_percent": primary_remaining_percent,
                     "secondary_used_percent": secondary_used_percent,
                     "secondary_remaining_percent": secondary_remaining_percent,
-                    "tooltip": format!(
-                        "Этот ряд показывает online limit contour именно этого агента из {}.\n- Лимит 5ч: остаётся {} (использовано {})\n- Лимит 7д: остаётся {} (использовано {})\n- {}",
+                    "tooltip": public_limit_surface_tooltip(
                         source_label,
-                        active_agent_limit_percent_text(primary_remaining_percent),
-                        active_agent_limit_percent_text(primary_used_percent),
-                        active_agent_limit_percent_text(secondary_remaining_percent),
-                        active_agent_limit_percent_text(secondary_used_percent),
-                        source_note,
+                        primary_remaining_percent,
+                        primary_used_percent,
+                        secondary_remaining_percent,
+                        secondary_used_percent,
+                        &source_note,
                     ),
                 }),
             );
@@ -363,6 +475,7 @@ pub(crate) async fn collect_active_agent_live_budget_surface(
     let total_started = std::time::Instant::now();
     let config = load_config(current_repo_root)?;
     let profile = resolve_profile(&config, None, current_repo_root)?;
+    let public_savings_window = resolve_public_savings_window_contract(&config, current_repo_root)?;
     let session_gap_ms = profile.session_gap_minutes as i64 * 60_000;
     let live_events_started = std::time::Instant::now();
     let mut live_events = load_dashboard_token_events(db, current_repo_root, false).await?;
@@ -421,8 +534,12 @@ pub(crate) async fn collect_active_agent_live_budget_surface(
         if !seen.insert(selector.signature_key()) {
             continue;
         }
-        let (scoped_events, kpi_selector, used_scope_fallback) =
-            active_agent_personal_kpi_window(&live_events, &selector, now_epoch_ms);
+        let (scoped_events, kpi_selector, used_scope_fallback) = active_agent_personal_kpi_window(
+            &live_events,
+            &selector,
+            now_epoch_ms,
+            &public_savings_window,
+        );
         let scoped_summary = summarize_events(
             &scoped_events,
             now_epoch_ms,
@@ -434,7 +551,7 @@ pub(crate) async fn collect_active_agent_live_budget_surface(
         let primary_limit_events = rolling_window_events_for_duration(
             &scoped_live_events,
             now_epoch_ms,
-            PERSONAL_AGENT_KPI_WINDOW_HOURS,
+            public_savings_window.hours as i64,
         );
         let secondary_limit_events = rolling_window_events_for_duration(
             &scoped_live_events,
@@ -475,6 +592,7 @@ pub(crate) async fn collect_active_agent_live_budget_surface(
             current_repo_root,
             &selector,
             now_epoch_ms as u64,
+            &public_savings_window,
         );
         let snapshot_fields_present = snapshot_fields.is_some();
         let snapshot_fields_elapsed_ms = snapshot_fields_started.elapsed().as_millis();
@@ -490,6 +608,7 @@ pub(crate) async fn collect_active_agent_live_budget_surface(
                     &scoped_summary,
                     Some(&kpi_selector),
                     Some(&client_live_meter),
+                    &public_savings_window,
                 );
                 (client_live_meter, personal_agent_kpi)
             } else if let Some((client_live_meter, personal_agent_kpi)) = snapshot_fields {
@@ -510,6 +629,7 @@ pub(crate) async fn collect_active_agent_live_budget_surface(
                     &scoped_summary,
                     Some(&kpi_selector),
                     Some(&client_live_meter),
+                    &public_savings_window,
                 );
                 (client_live_meter, personal_agent_kpi)
             };
@@ -523,7 +643,7 @@ pub(crate) async fn collect_active_agent_live_budget_surface(
                 node.insert(
                     "summary".to_string(),
                     Value::from(
-                        "Для личного 5ч KPI thread-bound online contour не materialized. Same-agent_scope measured fallback для этого KPI запрещён.",
+                        "Для личной Amai savings thread-bound online contour не materialized. Same-agent_scope measured fallback для этой savings-пары запрещён.",
                     ),
                 );
             }
@@ -589,7 +709,7 @@ pub(crate) async fn collect_active_agent_live_budget_surface(
         "source": "observe_active_agent_budget_v1",
         "captured_at_epoch_ms": now_epoch_ms,
         "headline": {
-            "title": "Средний KPI активных агентов",
+            "title": "Экономия токенов активных агентов",
             "value_text": aggregate["reply_prefix"].clone(),
             "scope_label": aggregate["scope_label"].clone(),
         },
@@ -661,7 +781,7 @@ mod tests {
 
         assert_eq!(
             agents[0]["personal_client_limit"]["value_text"].as_str(),
-            Some("5ч остаётся 93.00%, 7д остаётся 98.00%")
+            Some("основное окно остаётся 93.00%, расширенное окно остаётся 98.00%")
         );
         assert_eq!(
             agents[0]["personal_client_limit"]["primary_used_percent"].as_f64(),
@@ -674,7 +794,10 @@ mod tests {
         assert!(
             agents[0]["personal_client_limit"]["tooltip"]
                 .as_str()
-                .is_some_and(|tooltip| tooltip.contains("status-bar"))
+                .is_some_and(|tooltip| {
+                    tooltip.contains("общий клиентский лимит")
+                        && !tooltip.contains("duration-shaped")
+                })
         );
     }
 
@@ -706,11 +829,11 @@ mod tests {
         );
         assert_eq!(
             agents[0]["personal_client_limit"]["label_text"].as_str(),
-            Some("Личный thread-limit агента:")
+            Some("Лимит этой работы сейчас:")
         );
         assert_eq!(
             agents[0]["personal_client_limit"]["value_text"].as_str(),
-            Some("5ч остаётся 93.00%, 7д остаётся 98.00%")
+            Some("основное окно остаётся 93.00%, расширенное окно остаётся 98.00%")
         );
     }
 
@@ -762,7 +885,7 @@ mod tests {
                     "current_thread_bound": false
                 },
                 "personal_agent_kpi": {
-                    "reply_prefix": "5ч KPI: экономия 64.81%"
+                    "reply_prefix": "Amai savings: без Amai 1000, с Amai 352, экономия 648 (64.80%)"
                 }
             }),
             json!({
@@ -776,7 +899,7 @@ mod tests {
                     "current_thread_bound": true
                 },
                 "personal_agent_kpi": {
-                    "reply_prefix": "5ч KPI: экономия 66.15%"
+                    "reply_prefix": "Amai savings: без Amai 1000, с Amai 339, экономия 661 (66.10%)"
                 }
             }),
             json!({
@@ -790,7 +913,7 @@ mod tests {
                     "current_thread_bound": true
                 },
                 "personal_agent_kpi": {
-                    "reply_prefix": "5ч KPI: переплата 72.23%"
+                    "reply_prefix": "Amai savings: без Amai 1000, с Amai 1722, перерасход 722 (72.20%)"
                 }
             }),
         ]);
@@ -799,45 +922,53 @@ mod tests {
         assert_eq!(deduped[0]["thread_id"], json!("thread-live"));
         assert_eq!(
             deduped[0]["personal_agent_kpi"]["reply_prefix"],
-            json!("5ч KPI: экономия 66.15%")
+            json!("Amai savings: без Amai 1000, с Amai 339, экономия 661 (66.10%)")
         );
         assert_eq!(deduped[1]["thread_id"], json!("thread-bounty"));
     }
 
     #[test]
-    fn active_agent_kpi_aggregate_averages_only_when_all_active_agents_are_observed() {
+    fn active_agent_kpi_aggregate_sums_token_pairs_when_all_active_agents_are_observed() {
         let value = active_agent_kpi_aggregate(&[
             json!({
                 "personal_agent_kpi": {
-                    "signed_kpi_percent": 60.0
+                    "status": "observed",
+                    "without_amai_tokens": 1000,
+                    "with_amai_tokens": 400
                 }
             }),
             json!({
                 "personal_agent_kpi": {
-                    "signed_kpi_percent": 20.0
+                    "status": "observed",
+                    "without_amai_tokens": 1000,
+                    "with_amai_tokens": 800
                 }
             }),
         ]);
         assert_eq!(value["status"].as_str(), Some("observed"));
         assert_eq!(
             value["reply_prefix"].as_str(),
-            Some("5ч KPI: экономия 40.00%")
+            Some("Amai savings: без Amai 2000, с Amai 1200, экономия 800 (40.00%)")
         );
         assert_eq!(value["active_count"].as_u64(), Some(2));
         assert_eq!(value["missing_count"].as_u64(), Some(0));
     }
 
     #[test]
-    fn active_agent_kpi_aggregate_averages_mixed_saving_and_overspend_by_sign() {
+    fn active_agent_kpi_aggregate_sums_mixed_saving_and_overspend_by_tokens() {
         let value = active_agent_kpi_aggregate(&[
             json!({
                 "personal_agent_kpi": {
-                    "signed_kpi_percent": 66.15
+                    "status": "observed",
+                    "without_amai_tokens": 2000,
+                    "with_amai_tokens": 677
                 }
             }),
             json!({
                 "personal_agent_kpi": {
-                    "signed_kpi_percent": -44.0
+                    "status": "observed",
+                    "without_amai_tokens": 1000,
+                    "with_amai_tokens": 1440
                 }
             }),
         ]);
@@ -845,7 +976,7 @@ mod tests {
         assert_eq!(value["classification"].as_str(), Some("saving"));
         assert_eq!(
             value["reply_prefix"].as_str(),
-            Some("5ч KPI: экономия 11.08%")
+            Some("Amai savings: без Amai 3000, с Amai 2117, экономия 883 (29.43%)")
         );
         assert_eq!(value["active_count"].as_u64(), Some(2));
         assert_eq!(value["missing_count"].as_u64(), Some(0));
@@ -856,17 +987,20 @@ mod tests {
         let value = active_agent_kpi_aggregate(&[
             json!({
                 "personal_agent_kpi": {
-                    "signed_kpi_percent": 60.0
+                    "status": "observed",
+                    "without_amai_tokens": 1000,
+                    "with_amai_tokens": 400
                 }
             }),
             json!({
                 "personal_agent_kpi": {
-                    "reply_prefix": "5ч KPI: н/д"
+                    "status": "observed",
+                    "reply_prefix": "Amai savings: н/д"
                 }
             }),
         ]);
         assert_eq!(value["status"].as_str(), Some("partial"));
-        assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: н/д"));
+        assert_eq!(value["reply_prefix"].as_str(), Some("Amai savings: н/д"));
         assert_eq!(value["active_count"].as_u64(), Some(2));
         assert_eq!(value["missing_count"].as_u64(), Some(1));
     }

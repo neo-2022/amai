@@ -219,7 +219,7 @@ fresh_compact_client_budget_root_cause_cache_available() {
   [[ -f "$root_cause_cache_path" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   local now_ms fetched_at_ms observed_at_ms cache_thread_id
-  now_ms="$(date +%s%3N 2>/dev/null || true)"
+  now_ms="$(./scripts/epoch_ms.sh 2>/dev/null || true)"
   [[ -n "$now_ms" ]] || return 1
   fetched_at_ms="$(jq -r '.fetched_at_epoch_ms // 0' "$root_cause_cache_path" 2>/dev/null || printf '0')"
   observed_at_ms="$(
@@ -255,7 +255,7 @@ fresh_compact_client_budget_gate_cache_available() {
   [[ -f "$gate_cache_path" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   local now_ms fetched_at_ms observed_at_ms cache_thread_id
-  now_ms="$(date +%s%3N 2>/dev/null || true)"
+  now_ms="$(./scripts/epoch_ms.sh 2>/dev/null || true)"
   [[ -n "$now_ms" ]] || return 1
   fetched_at_ms="$(jq -r '.fetched_at_epoch_ms // 0' "$gate_cache_path" 2>/dev/null || printf '0')"
   observed_at_ms="$(
@@ -290,7 +290,7 @@ compact_client_budget_gate_payload_is_fresh() {
   [[ -n "$payload" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   local now_ms observed_at_ms max_guard_age_seconds
-  now_ms="$(date +%s%3N 2>/dev/null || true)"
+  now_ms="$(./scripts/epoch_ms.sh 2>/dev/null || true)"
   [[ -n "$now_ms" ]] || return 1
   observed_at_ms="$(
     printf '%s' "$payload" | jq -r '
@@ -315,15 +315,42 @@ compact_client_budget_gate_payload_is_fresh() {
 fallback_gate_payload_from_startup_state() {
   command -v jq >/dev/null 2>&1 || return 1
   [[ -x "$REPO_ROOT/target/debug/amai" ]] || return 1
-  local prefix now_ms
+  local startup_state_json prefix now_ms generated_at_ms authoritative_event_id source_event_id
+  local gate_semantics_consistent
+  startup_state_json="$(
+    "$REPO_ROOT/target/debug/amai" continuity startup-state --repo-root "$REPO_ROOT" --json 2>/dev/null || true
+  )"
+  [[ -n "$startup_state_json" ]] || return 1
   prefix="$(
-    "$REPO_ROOT/target/debug/amai" continuity startup-state --repo-root "$REPO_ROOT" --json 2>/dev/null |
+    printf '%s' "$startup_state_json" |
       jq -r '.startup_runtime_state.reply_execution_gate.reply_prefix // empty' 2>/dev/null || true
   )"
   prefix="$(printf '%s' "$prefix" | sed -e 's/^[[:space:]]\\+//' -e 's/[[:space:]]\\+$//')"
   [[ -n "$prefix" ]] || return 1
-  now_ms="$(date +%s%3N 2>/dev/null || true)"
+  now_ms="$(./scripts/epoch_ms.sh 2>/dev/null || true)"
   [[ -n "$now_ms" ]] || return 1
+  generated_at_ms="$(
+    printf '%s' "$startup_state_json" |
+      jq -r '.startup_runtime_state.generated_at_epoch_ms // 0' 2>/dev/null || printf '0'
+  )"
+  authoritative_event_id="$(
+    printf '%s' "$startup_state_json" |
+      jq -r '.startup_runtime_state.working_state_restore_lineage.authoritative_event_id // empty' 2>/dev/null || true
+  )"
+  source_event_id="$(
+    printf '%s' "$startup_state_json" |
+      jq -r '.startup_runtime_state.continuity_startup_summary.execctl_active_lease.source_event_id // empty' 2>/dev/null || true
+  )"
+  gate_semantics_consistent="$(
+    printf '%s' "$startup_state_json" |
+      jq -r '.startup_runtime_state.gate_semantics_consistent // false' 2>/dev/null || true
+  )"
+  [[ "$generated_at_ms" =~ ^[0-9]+$ ]] || return 1
+  [[ -n "$authoritative_event_id" ]] || return 1
+  [[ -n "$source_event_id" ]] || return 1
+  [[ "$authoritative_event_id" == "$source_event_id" ]] || return 1
+  [[ "$gate_semantics_consistent" == "true" ]] || return 1
+  (( now_ms - generated_at_ms <= 10000 )) || return 1
   jq -c -n \
     --arg prefix "$prefix" \
     --argjson observed_at_epoch_ms "$now_ms" \
@@ -514,7 +541,7 @@ if [[ "$enforce_online_reply_prefix" == "true" ]]; then
       | ((.reply_prefix_source // "") | tostring) as $source
       | if ($prefix | length) == 0 then
           "missing_reply_prefix"
-        elif $prefix == "5ч KPI: н/д" then
+        elif $prefix == "Burn guard: н/д" or $prefix == "основное окно KPI: н/д" then
           "reply_prefix_not_materialized"
         elif $source != "personal_agent_online_limit_contour" then
           "wrong_reply_prefix_source:" + $source

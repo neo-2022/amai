@@ -12,9 +12,9 @@ pub(super) fn signed_kpi_classification(kpi_percent: f64) -> &'static str {
 
 pub(super) fn reply_prefix_for_signed_kpi_percent(kpi_percent: f64) -> String {
     match signed_kpi_classification(kpi_percent) {
-        "saving" => format!("5ч KPI: экономия {kpi_percent:.2}%"),
-        "overspend" => format!("5ч KPI: переплата {:.2}%", kpi_percent.abs()),
-        _ => "5ч KPI: 1:1".to_string(),
+        "saving" => format!("Burn guard: экономия {kpi_percent:.2}%"),
+        "overspend" => format!("Burn guard: переплата {:.2}%", kpi_percent.abs()),
+        _ => "Burn guard: 1:1".to_string(),
     }
 }
 
@@ -208,6 +208,7 @@ pub(super) fn personal_agent_online_kpi_from_client_live_meter(
             elapsed_window_minutes,
             super::DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MIN_HISTORY_SPAN_MINUTES,
         );
+    let window_hours = window_duration_minutes.saturating_add(59) / 60;
     let classification = signed_kpi_classification(signed_kpi_percent);
     let reply_prefix = reply_prefix_for_signed_kpi_percent(signed_kpi_percent);
     Some(json!({
@@ -225,12 +226,12 @@ pub(super) fn personal_agent_online_kpi_from_client_live_meter(
         "elapsed_window_minutes": elapsed_window_minutes,
         "minimum_elapsed_window_minutes": super::DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MIN_HISTORY_SPAN_MINUTES,
         "reply_prefix": reply_prefix,
-        "window_hours": super::PERSONAL_AGENT_KPI_WINDOW_HOURS,
+        "window_hours": window_hours,
         "events_total": 0,
         "counted_events": 0,
         "summary": match classification {
             "saving" => format!(
-                "Личный 5ч KPI текущего active thread идёт в экономии {:.2}% по {}{}.",
+                "Личный burn-guard текущего active thread идёт в экономии {:.2}% по {}{}.",
                 signed_kpi_percent,
                 preferred_limits.source_label
                 ,
@@ -241,7 +242,7 @@ pub(super) fn personal_agent_online_kpi_from_client_live_meter(
                 }
             ),
             "overspend" => format!(
-                "Личный 5ч KPI текущего active thread идёт в переплате {:.2}% по {}{}.",
+                "Личный burn-guard текущего active thread идёт в переплате {:.2}% по {}{}.",
                 signed_kpi_percent.abs(),
                 preferred_limits.source_label,
                 if window_progress_state == "preliminary" {
@@ -251,7 +252,7 @@ pub(super) fn personal_agent_online_kpi_from_client_live_meter(
                 }
             ),
             _ => format!(
-                "Личный 5ч KPI текущего active thread идёт примерно 1:1 по {}{}.",
+                "Личный burn-guard текущего active thread идёт примерно 1:1 по {}{}.",
                 preferred_limits.source_label,
                 if window_progress_state == "preliminary" {
                     " (раннее окно сглажено)"
@@ -296,7 +297,7 @@ mod tests {
         assert_eq!(value["scope_label"].as_str(), Some("thread-bounty"));
         assert_eq!(
             value["reply_prefix"].as_str(),
-            Some("5ч KPI: экономия 78.12%")
+            Some("Burn guard: экономия 78.12%")
         );
         assert!(
             value["summary"]
@@ -338,7 +339,7 @@ mod tests {
         assert_eq!(value["confidence"].as_str(), Some("online_limit_contour"));
         assert_eq!(
             value["reply_prefix"].as_str(),
-            Some("5ч KPI: переплата 45.31%")
+            Some("Burn guard: переплата 45.31%")
         );
         assert!(
             value["summary"]
@@ -374,7 +375,7 @@ mod tests {
         assert_eq!(value["window_progress_state"].as_str(), Some("preliminary"));
         assert_eq!(
             value["reply_prefix"].as_str(),
-            Some("5ч KPI: переплата 50.91%")
+            Some("Burn guard: переплата 50.91%")
         );
         assert_eq!(value["minimum_elapsed_window_minutes"].as_u64(), Some(55));
     }

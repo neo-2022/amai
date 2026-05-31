@@ -15,7 +15,7 @@ report_path="/tmp/amai-proof-token-cli-tool-overhead-report.json"
   --token-source-kind "$source_kind" >"$context_pack_raw"
 
 ./target/release/amai observe token-report \
-  --budget-profile codex_5h \
+  --budget-profile client_primary_budget \
   --include-verify-events true >"$report_path"
 
 SOURCE_KIND="$source_kind" REPORT_PATH="$report_path" python3 - <<'PY'

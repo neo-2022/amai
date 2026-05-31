@@ -46,19 +46,16 @@ pub(super) fn filter_events_for_personal_kpi_selector(
         .collect()
 }
 
-pub(super) fn personal_kpi_window_events(
+pub(super) fn personal_kpi_window_events_for_hours(
     events: &[TokenBudgetEvent],
     selector: Option<&PersonalKpiSelector>,
     now_epoch_ms: i64,
+    hours: u64,
 ) -> Vec<TokenBudgetEvent> {
     selector
         .map(|selector| {
             let scoped = filter_events_for_personal_kpi_selector(events, selector);
-            rolling_window_events_for_duration(
-                &scoped,
-                now_epoch_ms,
-                PERSONAL_AGENT_KPI_WINDOW_HOURS,
-            )
+            rolling_window_events_for_duration(&scoped, now_epoch_ms, hours as i64)
         })
         .unwrap_or_default()
 }

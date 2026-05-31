@@ -1,3 +1,4 @@
+use super::dashboard_hero_cards::compact_token_hero_card;
 use super::*;
 
 pub fn build_payload(
@@ -80,7 +81,8 @@ pub fn build_live_summary_payload(
             "observe_refresh_slowest_stage_ms": observe_refresh_slowest_stage_ms,
         },
         "headline": build_headline(snapshot, captured_at_epoch_ms),
-        "active_agent_card": build_active_agent_budget_session_card(snapshot),
+        "active_agent_card": build_active_agent_budget_session_card(snapshot)
+            .map(compact_token_hero_card),
         "top_cards": build_top_cards(snapshot),
         "service_cards": build_service_cards(snapshot),
     }))
@@ -253,14 +255,14 @@ mod tests {
             },
             "active_agent_budget": {
                 "headline": {
-                    "title": "Средний KPI активных агентов",
-                    "value_text": "5ч KPI: экономия 40.00%",
+                    "title": "Экономия токенов активных агентов",
+                    "value_text": "Amai savings: без Amai 2000, с Amai 1200, экономия 800 (40.00%)",
                     "scope_label": "среднее по 2 активным агентам"
                 },
                 "aggregate": {
                     "status": "observed",
                     "classification": "saving",
-                    "reply_prefix": "5ч KPI: экономия 40.00%"
+                    "reply_prefix": "Amai savings: без Amai 2000, с Amai 1200, экономия 800 (40.00%)"
                 },
                 "agents": [
                     {
@@ -269,11 +271,11 @@ mod tests {
                         "thread_title": "Amai dashboard",
                         "cwd": "/home/art/agent-memory-index",
                         "personal_agent_kpi": {
-                            "reply_prefix": "5ч KPI: экономия 60.00%",
+                            "reply_prefix": "Amai savings: без Amai 1000, с Amai 400, экономия 600 (60.00%)",
                             "summary": "agent one"
                         },
                         "personal_client_limit": {
-                            "value_text": "5ч остаётся 43.00%, 7д остаётся 72.00%",
+                            "value_text": "основное окно остаётся 43.00%, расширенное окно остаётся 72.00%",
                             "tooltip": "personal limit one"
                         }
                     },
@@ -283,11 +285,11 @@ mod tests {
                         "thread_title": "Bug bounty",
                         "cwd": "/home/art/Bug-Bounty",
                         "personal_agent_kpi": {
-                            "reply_prefix": "5ч KPI: экономия 20.00%",
+                            "reply_prefix": "Amai savings: без Amai 1000, с Amai 800, экономия 200 (20.00%)",
                             "summary": "agent two"
                         },
                         "personal_client_limit": {
-                            "value_text": "5ч остаётся 88.00%, 7д остаётся 91.00%",
+                            "value_text": "основное окно остаётся 88.00%, расширенное окно остаётся 91.00%",
                             "tooltip": "personal limit two"
                         }
                     }
@@ -299,16 +301,29 @@ mod tests {
             .expect("payload");
         assert_eq!(
             payload["headline"]["token_value"].as_str(),
-            Some("5ч KPI: экономия 40.00%")
+            Some("Amai savings: без Amai 2000, с Amai 1200, экономия 800 (40.00%)")
         );
         assert_eq!(
             payload["active_agent_card"]["value"].as_str(),
-            Some("5ч KPI: экономия 40.00%")
+            Some("Amai savings: без Amai 2000, с Amai 1200, экономия 800 (40.00%)")
         );
         assert_eq!(
             payload["active_agent_card"]["presentation_variant"].as_str(),
             Some("active_agent_budget_grouped_v3")
         );
+        let blocks = payload["active_agent_card"]["agent_blocks"]
+            .as_array()
+            .expect("agent blocks");
+        assert!(blocks[0]["agent_tooltip"].is_null());
+        assert!(blocks[0].get("agent_scope").is_none());
+        assert_eq!(blocks[0]["kpi_label"].as_str(), Some("Экономия:"));
+        assert!(
+            blocks[0]["kpi_tooltip"]
+                .as_str()
+                .is_some_and(|value| value.contains("честная пара без Amai / с Amai"))
+        );
+        assert!(blocks[0].get("pressure_value").is_none());
+        assert!(blocks[0].get("pressure_tooltip").is_none());
         let top_cards = payload["top_cards"].as_array().expect("top cards");
         assert_eq!(top_cards.len(), 2);
         assert_eq!(top_cards[0]["title"].as_str(), Some("Скорость ответа"));

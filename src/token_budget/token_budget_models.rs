@@ -31,6 +31,8 @@ pub(crate) struct MeasurementConfig {
     pub(crate) naive_max_bytes_per_file: usize,
     #[serde(default)]
     pub(crate) include_verify_events_by_default: bool,
+    #[serde(default = "default_public_savings_window_hours")]
+    pub(crate) public_savings_window_hours: u64,
     #[serde(default = "default_metering_ingest_warning_seconds")]
     pub(crate) metering_ingest_warning_seconds: u64,
     #[serde(default = "default_metering_ingest_slo_seconds")]
@@ -210,21 +212,40 @@ impl Default for TokenBudgetContractConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TokenBudgetWindowMode {
+    FixedDuration,
+    ObservedClientPrimaryLimit,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct TokenBudgetProfile {
     pub(crate) display_name: String,
     pub(crate) description: String,
     pub(crate) session_gap_minutes: u64,
+    #[serde(default = "default_token_budget_window_mode")]
+    pub(crate) window_mode: TokenBudgetWindowMode,
+    pub(crate) window_label: String,
     pub(crate) rolling_window_hours: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedProfile {
     pub(crate) code: String,
+    pub(crate) requested_code: String,
     pub(crate) display_name: String,
     pub(crate) description: String,
     pub(crate) session_gap_minutes: u64,
+    pub(crate) window_mode: TokenBudgetWindowMode,
+    pub(crate) window_label: String,
     pub(crate) rolling_window_hours: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublicSavingsWindowContract {
+    pub(crate) hours: u64,
+    pub(crate) source: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -489,6 +510,10 @@ pub(crate) fn default_late_arrival_grace_minutes() -> u64 {
     60
 }
 
+pub(crate) fn default_token_budget_window_mode() -> TokenBudgetWindowMode {
+    TokenBudgetWindowMode::FixedDuration
+}
+
 pub(crate) fn default_usage_event_schema_version() -> String {
     "billing-usage-event-v2".to_string()
 }
@@ -515,6 +540,10 @@ pub(crate) fn default_quality_method_version() -> String {
 
 pub(crate) fn default_coverage_model_version() -> String {
     "token-coverage-v1".to_string()
+}
+
+pub(crate) fn default_public_savings_window_hours() -> u64 {
+    24
 }
 
 pub(crate) fn default_metering_freshness_model_version() -> String {

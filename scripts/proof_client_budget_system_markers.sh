@@ -9,7 +9,8 @@ cd "${REPO_ROOT}"
 payload="$("${SCRIPT_DIR}/client_budget_system_markers.sh")"
 
 printf '%s\n' "${payload}" | jq -e '
-  .marker_contract.version == "client-budget-system-markers-v3"
+  .marker_contract.version == "client-budget-system-markers-v4"
+  and (.economic_markers.repo_owned_burn_guard_prefix | type) == "string"
   and (.economic_markers.reply_execution_gate.action_kind | type) == "string"
   and (
     (.economic_markers.operator_action.primary_command_kind | type) == "string"

@@ -1303,7 +1303,7 @@ mod tests {
                 "warning": "test warning"
             },
             "client_budget_reply_gate": {
-                "reply_prefix": "5ч KPI: переплата 0.00%"
+                "reply_prefix": "Burn guard: переплата 0.00%"
             },
             "operator_notice": {
                 "kind": "host_current_thread_control_launch_opened"
@@ -1331,11 +1331,11 @@ mod tests {
                     "warning": "test warning"
                 },
                 "client_budget_reply_gate": {
-                    "reply_prefix": "5ч KPI: переплата 0.00%"
+                    "reply_prefix": "Burn guard: переплата 0.00%"
                 },
                 "operator_notice": {
                     "kind": "host_current_thread_control_launch_opened",
-                    "reply_prefix": "5ч KPI: экономия 12.00%",
+                    "reply_prefix": "Burn guard: экономия 12.00%",
                     "feedback_kind": "opened",
                     "message_text": "opened with warning",
                     "command_id": "source-command-id",
@@ -1360,7 +1360,7 @@ mod tests {
         assert_eq!(notice["feedback_kind"], json!("opened"));
         assert_eq!(notice["command_id"], json!("source-command-id"));
         assert_eq!(notice["message_text"], json!("opened with warning"));
-        assert_eq!(notice["reply_prefix"], json!("5ч KPI: экономия 12.00%"));
+        assert_eq!(notice["reply_prefix"], json!("Burn guard: экономия 12.00%"));
         assert_eq!(notice["thread_id"], json!("source-thread-id"));
         assert_eq!(notice["thread_id_hint"], json!("source-thread-id"));
     }
@@ -1371,7 +1371,7 @@ mod tests {
             "client_budget_host_control_launch": {
                 "command_id": "thread-overlay-open-current",
                 "client_budget_reply_gate": {
-                    "reply_prefix": "5ч KPI: переплата 0.00%"
+                    "reply_prefix": "Burn guard: переплата 0.00%"
                 },
                 "operator_notice": {
                     "kind": "   ",
@@ -1389,7 +1389,7 @@ mod tests {
             notice["kind"],
             json!("host_current_thread_control_launch_opened")
         );
-        assert_eq!(notice["reply_prefix"], json!("5ч KPI: переплата 0.00%"));
+        assert_eq!(notice["reply_prefix"], json!("Burn guard: переплата 0.00%"));
         assert_eq!(notice["feedback_kind"], json!("opened"));
         assert_eq!(notice["thread_id"], json!("thread-1"));
         assert_eq!(notice["thread_id_hint"], json!("thread-1"));
@@ -1405,7 +1405,7 @@ mod tests {
                     "warning": "refresh degraded"
                 },
                 "client_budget_reply_gate": {
-                    "reply_prefix": "5ч KPI: переплата 0.00%"
+                    "reply_prefix": "Burn guard: переплата 0.00%"
                 },
                 "operator_notice": {
                     "kind": "   ",
@@ -1428,7 +1428,7 @@ mod tests {
             notice["message_text"],
             json!("Запрошен same-thread host control. refresh degraded")
         );
-        assert_eq!(notice["reply_prefix"], json!("5ч KPI: переплата 0.00%"));
+        assert_eq!(notice["reply_prefix"], json!("Burn guard: переплата 0.00%"));
     }
 
     #[test]
@@ -1442,12 +1442,12 @@ mod tests {
                     "warning": "refresh degraded"
                 },
                 "client_budget_reply_gate": {
-                    "reply_prefix": "5ч KPI: переплата 0.00%"
+                    "reply_prefix": "Burn guard: переплата 0.00%"
                 },
                 "operator_notice": {
                     "kind": "host_current_thread_control_feedback_failed",
                     "message_text": "source notice text",
-                    "reply_prefix": "5ч KPI: экономия 12.00%",
+                    "reply_prefix": "Burn guard: экономия 12.00%",
                     "feedback_kind": "failed",
                     "command_id": "source-command-id",
                     "thread_id": "source-thread-id"
@@ -1461,7 +1461,7 @@ mod tests {
             json!("host_current_thread_control_feedback_failed")
         );
         assert_eq!(notice["message_text"], json!("source notice text"));
-        assert_eq!(notice["reply_prefix"], json!("5ч KPI: экономия 12.00%"));
+        assert_eq!(notice["reply_prefix"], json!("Burn guard: экономия 12.00%"));
         assert_eq!(notice["feedback_kind"], json!("failed"));
         assert_eq!(notice["command_id"], json!("source-command-id"));
         assert_eq!(notice["thread_id"], json!("source-thread-id"));
@@ -1482,7 +1482,7 @@ mod tests {
                     "warning": "refresh degraded"
                 },
                 "client_budget_reply_gate": {
-                    "reply_prefix": "5ч KPI: переплата 0.00%"
+                    "reply_prefix": "Burn guard: переплата 0.00%"
                 },
                 "operator_notice": {
                     "kind": "   ",
@@ -1503,7 +1503,7 @@ mod tests {
         assert_eq!(notice["feedback_kind"], json!("opened"));
         assert_eq!(notice["command_id"], json!("thread-overlay-open-current"));
         assert_eq!(notice["thread_id"], json!("thread-1"));
-        assert_eq!(notice["reply_prefix"], json!("5ч KPI: переплата 0.00%"));
+        assert_eq!(notice["reply_prefix"], json!("Burn guard: переплата 0.00%"));
         assert_eq!(
             notice["message_text"],
             json!("Подтверждено: same-thread overlay открылся. refresh degraded")
@@ -1574,7 +1574,7 @@ mod tests {
                 "kind": "client_budget_compact_chat_requested",
                 "thread_id": "source-thread-id",
                 "message_text": "source message",
-                "reply_prefix": "5ч KPI: экономия 12.00%",
+                "reply_prefix": "Burn guard: экономия 12.00%",
                 "exact_chat_command": "/source",
                 "prompt_file": "/tmp/prompt.md",
                 "launch_clean_chat_command": "code chat --mode agent",
@@ -1609,7 +1609,7 @@ mod tests {
         );
         assert_eq!(notice["thread_id"], json!("source-thread-id"));
         assert_eq!(notice["message_text"], json!("source message"));
-        assert_eq!(notice["reply_prefix"], json!("5ч KPI: экономия 12.00%"));
+        assert_eq!(notice["reply_prefix"], json!("Burn guard: экономия 12.00%"));
         assert_eq!(notice["exact_chat_command"], json!("/source"));
         assert_eq!(notice["prompt_text"], json!("restore prompt"));
         assert_eq!(notice["prompt_file"], json!("/tmp/prompt.md"));
@@ -1727,7 +1727,7 @@ mod tests {
             "operator_notice": {
                 "kind": "client_budget_compact_chat_launch_requested",
                 "message_text": "message",
-                "reply_prefix": "5ч KPI: переплата 1.00%",
+                "reply_prefix": "Burn guard: переплата 1.00%",
                 "exact_chat_command": "компакт_чат",
                 "prompt_file": "/tmp/prompt.txt",
                 "thread_id": "source-thread-id",
@@ -1808,7 +1808,7 @@ mod tests {
             },
             "operator_notice": {
                 "message_text": "manual fallback required",
-                "reply_prefix": "5ч KPI: переплата 1.00%",
+                "reply_prefix": "Burn guard: переплата 1.00%",
                 "exact_chat_command": "компакт_чат",
                 "prompt_file": "/tmp/prompt.txt",
                 "required_host_action": "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable",
@@ -1860,7 +1860,7 @@ mod tests {
             },
             "operator_notice": {
                 "message_text": "launch not requested",
-                "reply_prefix": "5ч KPI: переплата 1.00%",
+                "reply_prefix": "Burn guard: переплата 1.00%",
                 "exact_chat_command": "компакт_чат",
                 "prompt_file": "/tmp/prompt.txt",
                 "required_host_action": "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable",
@@ -1912,7 +1912,7 @@ mod tests {
             },
             "operator_notice": {
                 "message_text": "launch bridge unavailable",
-                "reply_prefix": "5ч KPI: переплата 1.00%",
+                "reply_prefix": "Burn guard: переплата 1.00%",
                 "exact_chat_command": "компакт_чат",
                 "prompt_file": "/tmp/prompt.txt",
                 "required_host_action": "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable",
@@ -1964,7 +1964,7 @@ mod tests {
             },
             "operator_notice": {
                 "message_text": "policy blocked auto launch",
-                "reply_prefix": "5ч KPI: переплата 1.00%",
+                "reply_prefix": "Burn guard: переплата 1.00%",
                 "exact_chat_command": "компакт_чат",
                 "prompt_file": "/tmp/prompt.txt",
                 "required_host_action": "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable",

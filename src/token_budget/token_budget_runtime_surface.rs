@@ -20,18 +20,16 @@ pub(crate) use self::client_limit_runtime::{
     client_limit_trend_direction, exact_client_limit_hourly_burn_value,
 };
 use self::client_meter_kpi::{
-    damp_signed_kpi_percent_for_window_progress, personal_agent_online_kpi_from_client_live_meter,
-    preferred_active_agent_limit_surface, preferred_online_limit_surface,
-    reply_prefix_for_signed_kpi_percent, signed_kpi_classification,
+    damp_signed_kpi_percent_for_window_progress, preferred_active_agent_limit_surface,
+    preferred_online_limit_surface, signed_kpi_classification,
 };
 pub(crate) use self::client_rate_limit_surfaces::*;
-use self::context_pack_thread_bindings::{
-    latest_working_state_context_pack_metadata, merged_context_pack_rollout_metadata,
-    merged_context_pack_thread_ids_with_repo_fallback,
-    repo_fallback_thread_ids_for_context_packs,
-};
 #[cfg(test)]
 use self::context_pack_thread_bindings::merged_context_pack_thread_ids;
+use self::context_pack_thread_bindings::{
+    latest_working_state_context_pack_metadata, merged_context_pack_rollout_metadata,
+    merged_context_pack_thread_ids_with_repo_fallback, repo_fallback_thread_ids_for_context_packs,
+};
 pub(crate) use self::dashboard_active_agents::collect_active_agent_live_budget_surface;
 use self::dashboard_active_agents::user_visible_agent_activity_is_proof_runtime;
 pub(crate) use self::dashboard_agent_scope_activity::{
@@ -120,30 +118,11 @@ use self::dashboard_statement_preview::{
 };
 use self::personal_kpi_window::{
     default_agent_scope_label, filter_events_for_personal_kpi_selector,
-    normalize_token_event_agent_scope, personal_kpi_window_events,
+    normalize_token_event_agent_scope, personal_kpi_window_events_for_hours,
     rolling_window_events_for_duration,
 };
-use self::token_budget_runtime_event_flow::*;
-use self::token_budget_runtime_observed::*;
-use self::token_budget_runtime_support::*;
-pub(crate) use self::token_budget_runtime_event_flow::{
-    attach_whole_cycle_observed_for_context_pack, attach_whole_cycle_observed_for_turn_group,
-    attach_whole_cycle_observed_to_context_pack,
-    attach_whole_cycle_observed_to_turn_group_with_thread_hint,
-    collect_default_report_with_overrides, continuity_restore_observed_config,
-    observe_cli_context_pack_tool_overhead, observe_context_pack_tool_overhead,
-    observe_rollout_assistant_generation, preferred_dashboard_thread_binding_hint,
-    prewarm_shared_tokenizer, record_context_pack_event,
-    record_continuity_restore_observed_event, record_continuity_restore_observed_event_with_config,
-    record_verify_benchmark_event, record_verify_context_pack_event,
-};
-pub(crate) use self::token_budget_runtime_observed::{
-    build_continuity_restore_observed_event, count_cli_context_pack_output_overhead_tokens,
-    count_tool_overhead_tokens,
-    latest_token_budget_snapshots_for_context_packs, mcp_context_pack_tool_overhead_source_status,
-};
-#[cfg(test)]
-pub(crate) use self::token_budget_runtime_observed::apply_tool_overhead_observed_and_source_status;
+pub use self::token_adjustments::{add_adjustment_entry, print_adjustment_registry};
+pub(crate) use self::token_budget_models::*;
 pub(crate) use self::token_budget_runtime_analytics::{
     answer_like_from_counts, build_event_payload, build_product_headline_with_target,
     current_epoch_ms, current_live_turn_full_turn_exact_pair, derive_baseline_strategy,
@@ -155,25 +134,8 @@ pub(crate) use self::token_budget_runtime_analytics::{
 pub(crate) use self::token_budget_runtime_analytics::{
     build_product_headline, derive_quality_verdict, scope_same_meter_exact_pair,
 };
-pub(crate) use self::token_budget_runtime_support::{
-    active_same_meter_scope_events, cached_dashboard_working_state_metadata, current_session_events,
-    dashboard_event_snapshot_kinds, dashboard_working_state_metadata_signature,
-    ensure_nested_object, filter_context_pack_metadata, followup_event_key,
-    followup_queries_related, load_config, load_dashboard_current_session_events,
-    load_dashboard_token_events, load_dashboard_token_events_with_summary, load_events,
-    matches_token_ledger_repair_selector, needs_live_reverification, parse_snapshot_event,
-    reconcile_followup_recovery, repair_legacy_token_event_payload, resolve_profile,
-    resolve_session_id, rewrite_token_ledger_source_kind_payload,
-    store_dashboard_working_state_metadata, usage_backfill_status, usage_dedup_key,
-    usage_excluded_reason_code, usage_lifecycle_status, usage_reporting_layer,
-    reverify_live_event_payload,
-};
 #[cfg(test)]
-pub(crate) use self::token_budget_runtime_support::{
-    apply_reverification_metadata, dashboard_token_events_signature,
-    filter_dashboard_token_events, recent_current_session_slice_complete,
-    suppress_shadowed_live_events,
-};
+pub(crate) use self::token_budget_runtime_contextual::working_state_retrieval_context_pack_is_live;
 pub(crate) use self::token_budget_runtime_contextual::{
     apply_open_turn_pending_activity_surface, build_tokenizer, collect_naive_scope,
     continuity_profile_log, current_live_turn_context_pack_match_bounds,
@@ -181,29 +143,49 @@ pub(crate) use self::token_budget_runtime_contextual::{
     ledger_item_relative_path, live_turn_retrieval_context_pack_ids,
     load_agent_display_name_overrides_for_scopes, percent_from_signed,
     preferred_dashboard_thread_binding_hint_with_override,
-    preferred_rollout_client_meter_observation,
-    recent_client_thread_json_has_connected_model,
+    preferred_rollout_client_meter_observation, recent_client_thread_json_has_connected_model,
     recent_client_thread_record_has_connected_model,
     recent_thread_live_retrieval_context_pack_ids_after_turn, render_context_pack_prompt,
     render_naive_scope_prompt, shared_tokenizer,
 };
-#[cfg(test)]
-pub(crate) use self::token_budget_runtime_contextual::working_state_retrieval_context_pack_is_live;
 pub(crate) use self::token_budget_runtime_dashboard::{
     collect_dashboard_report, collect_default_report,
 };
+use self::token_budget_runtime_event_flow::*;
+pub(crate) use self::token_budget_runtime_event_flow::{
+    attach_whole_cycle_observed_for_context_pack, attach_whole_cycle_observed_for_turn_group,
+    attach_whole_cycle_observed_to_context_pack,
+    attach_whole_cycle_observed_to_turn_group_with_thread_hint,
+    collect_default_report_with_overrides, continuity_restore_observed_config,
+    observe_cli_context_pack_tool_overhead, observe_context_pack_tool_overhead,
+    observe_rollout_assistant_generation, preferred_dashboard_thread_binding_hint,
+    prewarm_shared_tokenizer, record_context_pack_event, record_continuity_restore_observed_event,
+    record_continuity_restore_observed_event_with_config, record_verify_benchmark_event,
+    record_verify_context_pack_event,
+};
 pub(crate) use self::token_budget_runtime_maintenance::{
-    print_client_limit_hourly_burn, print_client_limit_trend_analysis,
-    print_contractual_sources, print_evidence_pack, print_report,
-    print_statement_export_bundle, repair_token_ledger_events, reverify_legacy_live_events,
-    TokenLedgerRepairRequest,
+    TokenLedgerRepairRequest, print_client_limit_hourly_burn, print_client_limit_trend_analysis,
+    print_contractual_sources, print_evidence_pack, print_report, print_statement_export_bundle,
+    repair_token_ledger_events, reverify_legacy_live_events,
+};
+#[cfg(test)]
+pub(crate) use self::token_budget_runtime_observed::apply_tool_overhead_observed_and_source_status;
+use self::token_budget_runtime_observed::*;
+pub(crate) use self::token_budget_runtime_observed::{
+    build_continuity_restore_observed_event, count_cli_context_pack_output_overhead_tokens,
+    count_tool_overhead_tokens, latest_token_budget_snapshots_for_context_packs,
+    mcp_context_pack_tool_overhead_source_status,
+};
+#[cfg(test)]
+pub(crate) use self::token_budget_runtime_reporting::live_turn_token_budget_events;
+pub(crate) use self::token_budget_runtime_reporting::{
+    build_current_live_turn_surface, collect_report, enrich_live_event_payload,
 };
 pub(crate) use self::token_budget_runtime_shared::DEFAULT_CLIENT_LIMIT_TREND_ANALYSIS_LOOKBACK_MINUTES;
 use self::token_budget_runtime_shared::{
     ACTIVE_THREAD_HINT_MAX_AGE_MS, ACTIVE_THREAD_HINT_SHARED_CACHE_RELATIVE_PATH,
     ACTIVE_THREAD_HINT_SHARED_CACHE_VERSION, AGENT_CYCLE_TIMELINE_MAX_POINTS,
-    ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS,
-    ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND,
+    ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS, ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND,
     CLI_CONTEXT_PACK_TOOL_OVERHEAD_CONTRACT_VERSION,
     CLI_CONTEXT_PACK_TOOL_OVERHEAD_LEGACY_CONTRACT_VERSION,
     CLIENT_LIMIT_TREND_ANALYSIS_SNAPSHOT_KIND, CONFIG_RELATIVE_PATH,
@@ -230,19 +212,32 @@ use self::token_budget_runtime_shared::{
     DASHBOARD_WORKING_STATE_METADATA_CACHE, DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MAX_LIVE_AGE_SECONDS,
     DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MIN_HISTORY_SPAN_MINUTES,
     DEFAULT_CLIENT_LIMIT_HOURLY_BURN_WINDOW_MINUTES, EXACT_CLIENT_LIMIT_SAMPLE_SNAPSHOT_KIND,
-    MCP_CONTEXT_PACK_TOOL_OVERHEAD_CONTRACT_VERSION, PERSONAL_AGENT_KPI_WINDOW_HOURS,
+    MAX_PUBLIC_SAVINGS_WINDOW_HOURS,
+    MCP_CONTEXT_PACK_TOOL_OVERHEAD_CONTRACT_VERSION,
     THREAD_BOUND_BUDGET_SNAPSHOT_SHARED_CACHE_VERSION,
     THREAD_BOUND_SNAPSHOT_INVALIDATION_SHARED_CACHE_VERSION, TOKEN_BUDGET_CONFIG_CACHE,
     TOOL_OVERHEAD_SECONDARY_CONTEXT_PACK_MATCH_MAX_DELTA_MS,
 };
 #[cfg(test)]
 pub(crate) use self::token_budget_runtime_support::dashboard_token_events_signature_from_summary;
-pub(crate) use self::token_budget_runtime_reporting::{
-    build_current_live_turn_surface, collect_report, enrich_live_event_payload,
+use self::token_budget_runtime_support::*;
+pub(crate) use self::token_budget_runtime_support::{
+    active_same_meter_scope_events, cached_dashboard_working_state_metadata,
+    current_session_events, dashboard_event_snapshot_kinds,
+    dashboard_working_state_metadata_signature, ensure_nested_object, filter_context_pack_metadata,
+    followup_event_key, followup_queries_related, load_config,
+    load_dashboard_current_session_events, load_dashboard_token_events,
+    load_dashboard_token_events_with_summary, load_events, matches_token_ledger_repair_selector,
+    needs_live_reverification, parse_snapshot_event, reconcile_followup_recovery,
+    repair_legacy_token_event_payload, resolve_profile, resolve_session_id,
+    reverify_live_event_payload, rewrite_token_ledger_source_kind_payload,
+    store_dashboard_working_state_metadata, usage_backfill_status, usage_dedup_key,
+    usage_excluded_reason_code, usage_lifecycle_status, usage_reporting_layer,
 };
 #[cfg(test)]
-pub(crate) use self::token_budget_runtime_reporting::live_turn_token_budget_events;
-pub use self::token_adjustments::{add_adjustment_entry, print_adjustment_registry};
-pub(crate) use self::token_budget_models::*;
+pub(crate) use self::token_budget_runtime_support::{
+    apply_reverification_metadata, dashboard_token_events_signature, filter_dashboard_token_events,
+    recent_current_session_slice_complete, suppress_shadowed_live_events,
+};
 
 use self::token_budget_contractual_surfaces::*;

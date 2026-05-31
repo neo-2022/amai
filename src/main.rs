@@ -269,6 +269,11 @@ async fn main() -> Result<()> {
                 let cfg = config::AppConfig::from_env()?;
                 bootstrap::bootstrap_stack(&cfg).await?
             }
+            BootstrapCommand::Schema => {
+                let cfg = config::AppConfig::from_env()?;
+                let db = postgres::connect_admin(&cfg).await?;
+                postgres::bootstrap_schema(&db, &cfg).await?;
+            }
             BootstrapCommand::Preflight(args) => {
                 let repo_root = config::discover_repo_root(None)?;
                 profiles::print_preflight(&repo_root, &args.stack_profile)?;
@@ -1259,7 +1264,7 @@ async fn main() -> Result<()> {
                         args.allow_cross_project_read,
                         args.allow_import,
                         args.allow_verified_writeback,
-                        args.requires_human_approval,
+                        args.effective_requires_human_approval(),
                     )
                     .await?;
                     println!(

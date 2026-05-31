@@ -18,7 +18,7 @@ cargo run --release --quiet -- context pack \
   --limit-semantic-chunks 8 >/tmp/amai-proof-context-pack.out
 
 cargo run --release --quiet -- observe token-report \
-  --budget-profile codex_5h \
+  --budget-profile client_primary_budget \
   --include-verify-events true >/tmp/amai-proof-token-ledger.out
 
 python3 - <<'PY'
@@ -28,7 +28,7 @@ from pathlib import Path
 report = json.loads(Path("/tmp/amai-proof-token-ledger.out").read_text())
 root = report["token_budget_report"]
 
-assert root["profile"]["code"] == "codex_5h", root["profile"]
+assert root["profile"]["code"] == "client_primary_budget", root["profile"]
 assert root["current_session"]["events_total"] >= 1, root["current_session"]
 assert root["lifetime"]["events_total"] >= 1, root["lifetime"]
 assert root["lifetime"]["total_saved_tokens"] > 0, root["lifetime"]

@@ -8,15 +8,15 @@ tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
 internal_provider_billed_tokens="$(
-  cargo run --release --quiet -- observe token-report --budget-profile codex_5h --include-verify-events true \
+  cargo run --release --quiet -- observe token-report --budget-profile client_primary_budget --include-verify-events true \
     | jq -r '.token_budget_report.statement_previews.lifetime.internal_provider_billed_tokens'
 )"
 period_start="$(
-  cargo run --release --quiet -- observe token-report --budget-profile codex_5h --include-verify-events true \
+  cargo run --release --quiet -- observe token-report --budget-profile client_primary_budget --include-verify-events true \
     | jq -r '.token_budget_report.statement_previews.lifetime.period.period_start_epoch_ms'
 )"
 period_end="$(
-  cargo run --release --quiet -- observe token-report --budget-profile codex_5h --include-verify-events true \
+  cargo run --release --quiet -- observe token-report --budget-profile client_primary_budget --include-verify-events true \
     | jq -r '.token_budget_report.statement_previews.lifetime.period.period_end_epoch_ms'
 )"
 period_start=$((period_start - 600000))
@@ -98,7 +98,7 @@ AMAI_PROVIDER_INVOICE_EXPORT_PATH="$tmpdir/provider_invoice_export.json" \
 AMAI_INFRA_COST_PROFILE_PATH="$tmpdir/infra_cost_profile.json" \
   cargo run --release --quiet -- observe token-contractual-sources \
   --scope lifetime \
-  --budget-profile codex_5h \
+  --budget-profile client_primary_budget \
   --include-verify-events true >/tmp/amai-proof-token-contractual-sources.json
 
 python3 - <<'PY'

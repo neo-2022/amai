@@ -2142,7 +2142,7 @@
       client_live_full_turn_savings: ["client_live_full_turn_savings", "Amai в полном live-turn"],
       client_live_context: ["client_live_context", "Последний запрос клиента"],
       client_live_limit: ["client_live_limit", "Лимит клиента сейчас", "Последний observed лимит клиента"],
-      client_limit_hourly_burn: ["client_limit_hourly_burn", "KPI 5ч лимита"],
+      client_limit_hourly_burn: ["client_limit_hourly_burn"],
     };
     const errorBanner = document.getElementById("error-banner");
     const tooltipLayer = document.getElementById("tooltip-layer");
@@ -2325,7 +2325,7 @@
       trigger.setAttribute("aria-expanded", "false");
       trigger.setAttribute(
         "aria-label",
-        `5ч KPI ${selector.kpi_value_text}. Нажмите, чтобы выбрать целевой режим экономии.`
+        `Burn guard ${selector.kpi_value_text}. Нажмите, чтобы выбрать целевой режим экономии.`
       );
       trigger.addEventListener("click", (event) => {
         event.preventDefault();
@@ -2552,21 +2552,12 @@
       head.appendChild(createEditableActiveAgentLabel(block, "active-agent-budget-agent-name"));
       head.appendChild(
         labelWithTooltip(
-          block.kpi_value || "5ч KPI: н/д",
+          block.kpi_value || "Amai savings: н/д",
           block.kpi_tooltip || null,
           "active-agent-budget-kpi-inline"
         )
       );
       section.appendChild(head);
-      if (block.pressure_value) {
-        section.appendChild(
-          labelWithTooltip(
-            block.pressure_value,
-            block.pressure_tooltip || null,
-            "active-agent-budget-pressure-inline"
-          )
-        );
-      }
       return section;
     }
 
@@ -2611,7 +2602,7 @@
         );
         section.appendChild(
           createActiveAgentBudgetField(
-            "KPI:",
+            block.kpi_label || "Экономия:",
             block.kpi_value,
             block.kpi_tooltip || null
           )

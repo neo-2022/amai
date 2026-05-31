@@ -153,6 +153,11 @@
   project, возвращать `ami.projects.repo_root`, auto-create `continuity` namespace при project upsert
   и fail-closed останавливаться на ambiguous parent hints вместо создания второго проекта по похожему
   имени подпапки.
+- refresh 2026-05-29 22:39 MSK: root-binding fix доведён до registration path, а не только до
+  startup/restore: `project register` теперь блокирует foreign exact/symlink/child `repo_root`
+  claim, если hint резолвится в уже bound project. `proof_project_registration_canonicalization.sh`
+  больше не зависит от host path `/home/art/Art`, сам создаёт canonical root/symlink/child probe и
+  проходит вместе с `proof_project_relocation_contour.sh` после установки host `psql`.
 
 Что уже materialized в рамках этапа:
 - `workspace` truth-layer;
@@ -776,7 +781,7 @@ No checkbox is removed by this snapshot: current audit found downgraded broad cl
     `null`.
   - human compact-chat тоже выровнен по reply-prefix: если `reply_prefix` в
     payload отсутствует или пуст, оператор больше не видит fake KPI-строку
-    `5ч KPI: н/д`, а получает честное `ещё нет данных`.
+    `Burn guard: н/д`, а получает честное `ещё нет данных`.
   - prompt-level `execctl` summary тоже выровнен: если `resume_state`
     отсутствует, prompt больше не сочиняет псевдо-состояние `n/a`, а использует
     честный neutral marker `?`, не выдавая это за реальное runtime state.
@@ -815,13 +820,14 @@ No checkbox is removed by this snapshot: current audit found downgraded broad cl
     маскировалось под “возврат точно чист”.
   - исправлен front-door drift для `continuity handoff`: если локальный
     `observe /api/continuity-handoff` недоступен, `./scripts/continuity_handoff.sh`
-    больше не уходит сразу в тяжёлый `amai_exec.sh -> cargo build --release`
-    contour и не выглядит как “handoff завис”. Теперь shell front-door сначала
-    использует готовый `./target/release/amai continuity handoff`, а в rebuild
-    fallback идёт только если release binary реально отсутствует. Добавлен
-    regression proof `./scripts/proof_continuity_handoff_frontdoor.sh`, который
-    специально ломает API bind и требует быстрый успешный handoff с реальным
-    обновлением `state/continuity-imports/amai/live-handoff.md`.
+    теперь уходит в канонический launcher `scripts/amai_exec.sh`, а не в
+    устаревший прямой contour по похожему локальному binary path. Это
+    сохраняет единый freshness/build policy: launcher переиспользует свежий
+    local binary и rebuild-ит только когда binary отсутствует или устарел.
+    Добавлен regression proof `./scripts/proof_continuity_handoff_frontdoor.sh`,
+    который специально ломает API bind и требует быстрый успешный handoff через
+    тот же launcher contour с реальным обновлением
+    `state/continuity-imports/amai/live-handoff.md`.
   - соседний `observe` front-door contour тоже materialized безопасно:
     `./scripts/ensure_observe_frontdoor.sh` теперь может быстро поднять
     `observe serve` только когда bind реально отсутствует, а
@@ -829,24 +835,22 @@ No checkbox is removed by this snapshot: current audit found downgraded broad cl
     успешный shell `continuity_handoff`, но и проход соседних read-side
     wrappers `client_budget_root_cause.sh` и `client_budget_gate.sh`, чтобы
     front-door не был “зелёным” только для одного handoff-path.
-  - базовые shell continuity wrappers тоже перестали молча зависеть от
-    `amai_exec.sh` как от единственного пути запуска: `continuity_startup.sh`,
-    `continuity_startup_state.sh`, `continuity_restore.sh` и `continuity_answer.sh`
-    плюс delivery surfaces `continuity_compact_chat.sh` и
-    `continuity_client_budget_target.sh` теперь сначала используют готовый
-    `./target/release/amai`, а только потом
-    fallback-ят в `amai_exec.sh`; внутренний autolaunch path в
-    `client_budget_gate.sh` для `observe ctl-launch` выровнен так же. Отдельно
-    исправлен hidden branch в `continuity_handoff.sh`: missing `--details-file`
-    больше не срывается в прямой `scripts/amai_exec.sh` path и не падает
-    ложным `No such file or directory`, а повторяет каноническую ошибку
-    release binary `failed to read ...`. Добавлен
-    regression proof `./scripts/proof_continuity_shell_release_fallback.sh`,
-    который временно убирает `scripts/amai_exec.sh` и требует успешный
-    `startup`, `startup-state`, `restore`, `answer`, `compact-chat` и
-    `client-budget-target` через один release binary, плюс успешный shell
-    `continuity_handoff` при сломанном API front-door и negative-path handoff
-    с отсутствующим `details-file`.
+  - базовые shell continuity wrappers выровнены на один канонический launcher:
+    `continuity_startup.sh`, `continuity_startup_state.sh`,
+    `continuity_restore.sh`, `continuity_answer.sh`,
+    `continuity_compact_chat.sh`, `continuity_client_budget_target.sh` и
+    hidden fallback branch внутри `continuity_handoff.sh` теперь всегда
+    делегируют в `scripts/amai_exec.sh`, а не держат рядом собственные прямые
+    `./target/release/amai` fast-path. Это убирает stale startup/runtime drift,
+    когда wrapper мог обойти общий freshness/build policy и записать старый
+    startup artifact после уже обновлённого source tree. Missing `--details-file`
+    в `continuity_handoff.sh` по-прежнему возвращает каноническую ошибку
+    `failed to read ...`, но уже через тот же launcher contour. Обновлён
+    regression proof `./scripts/proof_continuity_shell_release_fallback.sh`
+    (legacy filename сохранён), который теперь проверяет не release-only
+    fallback, а launcher-routing/integrity truth: все перечисленные wrappers
+    обязаны пройти через `scripts/amai_exec.sh`, а proof дополнительно ловит
+    missing-details negative path для handoff.
   - соседний front-door payload contract выровнен и для delivery wrappers:
     `continuity_compact_chat.sh` и `continuity_client_budget_target.sh` больше
     не принимают любой non-empty API body как будто это валидный projection.

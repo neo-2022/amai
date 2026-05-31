@@ -618,6 +618,12 @@ pub(super) fn startup_runtime_state_audit_json(
                 )
             })
             .unwrap_or(Value::Null),
+        "agent_workflow_guard": artifact_payload
+            .map(|payload| payload["agent_workflow_guard"].clone())
+            .unwrap_or(Value::Null),
+        "workflow_promotion_state": artifact_payload
+            .map(|payload| payload["workflow_promotion_state"].clone())
+            .unwrap_or(Value::Null),
         "startup_execution_gate": artifact_payload
             .map(|payload| {
                 compact_startup_state_cli_startup_execution_gate(
@@ -647,8 +653,13 @@ pub(super) fn startup_runtime_state_audit_json(
             .unwrap_or(Value::Null),
         "execctl_active_lease": artifact_payload
             .map(|payload| {
+                let authoritative_event_id = payload["working_state_restore_lineage"]
+                    ["authoritative_event_id"]
+                    .as_str()
+                    .filter(|value| !value.trim().is_empty());
                 compact_startup_runtime_execctl_active_lease(
                     &payload["continuity_startup_summary"]["execctl_active_lease"],
+                    authoritative_event_id,
                 )
             })
             .unwrap_or(Value::Null),
@@ -688,6 +699,10 @@ pub(super) fn build_startup_runtime_state_artifact(
         hex_sha256(&serde_json::to_vec(&mcp::project_chat_startup_contract())?);
     let startup_execution_gate = build_startup_execution_gate(payload);
     let mut continuity_startup_summary = mcp::continuity_startup_summary_json(payload);
+    let authoritative_event_id =
+        payload["working_state_restore"]["state_lineage"]["authoritative_event_id"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty());
     if let Some(summary) = continuity_startup_summary.as_object_mut() {
         summary.insert(
             "startup_execution_gate".to_string(),
@@ -720,7 +735,10 @@ pub(super) fn build_startup_runtime_state_artifact(
             .unwrap_or_else(|| payload["chat_start_restore"]["execctl_active_lease"].clone());
         summary.insert(
             "execctl_active_lease".to_string(),
-            compact_startup_runtime_execctl_active_lease(&execctl_active_lease_source),
+            compact_startup_runtime_execctl_active_lease(
+                &execctl_active_lease_source,
+                authoritative_event_id,
+            ),
         );
         summary.insert(
             "project_task_tree".to_string(),
@@ -741,7 +759,7 @@ pub(super) fn build_startup_runtime_state_artifact(
             .as_str()
             .is_some_and(|value| !value.trim().is_empty()),
     );
-    let gate_semantics_consistent = evaluate_startup_execution_gate_consistency(
+    let startup_gate_semantics_consistent = evaluate_startup_execution_gate_consistency(
         &continuity_startup_summary,
         &startup_execution_gate,
         prompt_text_present,
@@ -761,6 +779,20 @@ pub(super) fn build_startup_runtime_state_artifact(
         } else {
             Value::Null
         };
+    let agent_workflow_guard = mcp::agent_workflow_guard_contract();
+    let workflow_promotion_state = build_workflow_promotion_state(
+        &continuity_startup_summary,
+        &payload["working_state_restore"]["state_lineage"],
+        generated_at_epoch_ms,
+    );
+    let gate_semantics_consistent = startup_gate_semantics_consistent.map(|legacy_ok| {
+        legacy_ok
+            && workflow_promotion_state["source_event_match"].as_bool() == Some(true)
+            && workflow_promotion_state["workflow_promotion_event_id"]
+                .as_str()
+                .is_some_and(|value| !value.trim().is_empty())
+            && workflow_promotion_state["missing_or_mismatch_blocks_report"].as_bool() == Some(true)
+    });
     let execctl_resume_state = continuity_startup_summary["execctl_resume_state"].clone();
     let execctl_resume_contract_summary =
         continuity_startup_summary["execctl_resume_contract_summary"].clone();
@@ -791,6 +823,8 @@ pub(super) fn build_startup_runtime_state_artifact(
         "client_budget_guard": client_budget_guard,
         "reply_execution_gate": reply_execution_gate,
         "blocking_reply_contract": blocking_reply_contract,
+        "agent_workflow_guard": agent_workflow_guard,
+        "workflow_promotion_state": workflow_promotion_state,
         "chat_start_restore": {
             "headline": normalized_optional_text_json(
                 payload["chat_start_restore"]["headline"].as_str(),
@@ -857,6 +891,48 @@ pub(super) fn compact_startup_runtime_state_lineage(lineage: &Value) -> Value {
         }
     }
     Value::Object(compact)
+}
+
+fn build_workflow_promotion_state(
+    summary: &Value,
+    lineage: &Value,
+    generated_at_epoch_ms: u64,
+) -> Value {
+    let current_user_redirect_id = lineage["authoritative_event_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let promoted_user_redirect_id = summary["execctl_active_lease"]["source_event_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let source_event_match = match (current_user_redirect_id, promoted_user_redirect_id) {
+        (Some(current), Some(promoted)) => Some(current == promoted),
+        _ => Some(false),
+    };
+    let workflow_promotion_event_id = match (current_user_redirect_id, promoted_user_redirect_id) {
+        (Some(current), Some(promoted)) => Some(format!(
+            "workflow-promotion-{}",
+            hex_sha256(format!("{current}:{promoted}:{generated_at_epoch_ms}").as_bytes())
+        )),
+        _ => None,
+    };
+    json!({
+        "state_version": "workflow-promotion-state-v1",
+        "current_user_redirect_id": normalized_optional_text_json(current_user_redirect_id),
+        "promoted_user_redirect_id": normalized_optional_text_json(promoted_user_redirect_id),
+        "workflow_promotion_event_id": normalized_optional_text_json(workflow_promotion_event_id.as_deref()),
+        "workflow_promotion_event_epoch_ms": generated_at_epoch_ms,
+        "source_event_match": source_event_match,
+        "missing_or_mismatch_blocks_report": true,
+        "active_workline_headline": normalized_optional_text_json(summary["headline"].as_str()),
+        "active_lease_headline": normalized_optional_text_json(
+            summary["execctl_active_lease"]["headline"].as_str(),
+        ),
+        "lease_owner_state": normalized_optional_text_json(
+            summary["execctl_active_lease"]["lease_owner_state"].as_str(),
+        ),
+    })
 }
 
 pub(super) fn persist_startup_runtime_state_artifact(

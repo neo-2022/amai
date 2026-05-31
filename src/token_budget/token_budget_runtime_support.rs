@@ -81,7 +81,7 @@ pub(crate) fn resolve_profile(
         .ok()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
         .and_then(|value| value["client_key"].as_str().map(ToOwned::to_owned));
-    let profile_code = if let Some(requested) = requested_profile {
+    let requested_code = if let Some(requested) = requested_profile {
         requested.to_string()
     } else if let Ok(from_env) = std::env::var("AMAI_TOKEN_BUDGET_PROFILE") {
         from_env
@@ -94,17 +94,91 @@ pub(crate) fn resolve_profile(
     } else {
         config.default_profile.clone()
     };
+    let requested_code = requested_code.trim().to_string();
+    if requested_code.is_empty() {
+        return Err(anyhow!("token budget profile must not be empty"));
+    }
+    let profile_code = requested_code.clone();
     let profile = config
         .profiles
         .get(&profile_code)
         .ok_or_else(|| anyhow!("unknown token budget profile: {profile_code}"))?;
+    let window_label = profile.window_label.trim().to_string();
+    if window_label.is_empty() {
+        return Err(anyhow!(
+            "token budget profile {profile_code} must define a non-empty window_label"
+        ));
+    }
     Ok(ResolvedProfile {
         code: profile_code,
+        requested_code,
         display_name: profile.display_name.clone(),
         description: profile.description.clone(),
         session_gap_minutes: profile.session_gap_minutes,
+        window_mode: profile.window_mode,
+        window_label,
         rolling_window_hours: profile.rolling_window_hours,
     })
+}
+
+pub(crate) fn resolve_public_savings_window_contract(
+    config: &TokenBudgetConfigFile,
+    repo_root: &Path,
+) -> Result<PublicSavingsWindowContract> {
+    let config_path = resolve_token_budget_config_path(repo_root);
+    let resolved_hours = config.measurement.public_savings_window_hours;
+    if !(1..=MAX_PUBLIC_SAVINGS_WINDOW_HOURS).contains(&resolved_hours) {
+        return Err(anyhow!(
+            "invalid public_savings_window_hours={}, expected 1..={}",
+            resolved_hours,
+            MAX_PUBLIC_SAVINGS_WINDOW_HOURS
+        ));
+    }
+    let (hours, source) = match repo_config_public_savings_window_hours(&config_path)? {
+        Some(hours) => {
+            if hours != resolved_hours {
+                return Err(anyhow!(
+                    "resolved public_savings_window_hours mismatch for {}: explicit repo value={} resolved value={}",
+                    config_path.display(),
+                    hours,
+                    resolved_hours
+                ));
+            }
+            (hours, "repo_config")
+        }
+        None => (resolved_hours, "embedded_default"),
+    };
+    Ok(PublicSavingsWindowContract { hours, source })
+}
+
+fn repo_config_public_savings_window_hours(path: &Path) -> Result<Option<u64>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let parsed: toml::Value =
+        toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))?;
+    let measurement = parsed
+        .get("measurement")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| anyhow!("missing [measurement] table in {}", path.display()))?;
+    let raw_hours = measurement
+        .get("public_savings_window_hours")
+        .and_then(toml::Value::as_integer)
+        .ok_or_else(|| {
+            anyhow!(
+                "missing measurement.public_savings_window_hours in {}",
+                path.display()
+            )
+        })?;
+    let hours = u64::try_from(raw_hours).map_err(|_| {
+        anyhow!(
+            "measurement.public_savings_window_hours in {} must be a positive integer",
+            path.display()
+        )
+    })?;
+    Ok(Some(hours))
 }
 
 #[cfg(test)]
@@ -670,6 +744,8 @@ pub(crate) fn parse_snapshot_event(
         .unwrap_or_default();
     let rolling_window_profile = node["rolling_window_profile"]
         .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_default();
     let timestamp_utc = node["timestamp_utc"]
@@ -818,77 +894,217 @@ pub(crate) fn parse_snapshot_event(
         .as_str()
         .unwrap_or("unsettled_report_only")
         .to_string();
-    let saved_tokens = node["savings"]["saved_tokens"].as_u64().unwrap_or(0);
-    let naive_tokens = node["naive_scope"]["tokens"]
-        .as_u64()
+    let saved_tokens = json_path_u64(
+        node,
+        &["accounting", "projection", "savings", "saved_tokens"],
+    )
+    .or_else(|| node["savings"]["saved_tokens"].as_u64())
+    .or_else(|| node["saved_tokens"].as_u64())
+    .unwrap_or(0);
+    let naive_tokens = json_path_u64(node, &["accounting", "raw", "baseline_tokens"])
+        .or_else(|| node["naive_scope"]["tokens"].as_u64())
         .or_else(|| node["baseline_tokens"].as_u64())
+        .or_else(|| node["naive_tokens"].as_u64())
         .unwrap_or(0);
-    let context_tokens = node["context_pack_render"]["tokens"]
-        .as_u64()
+    let context_tokens = json_path_u64(node, &["accounting", "raw", "delivered_tokens"])
+        .or_else(|| node["context_pack_render"]["tokens"].as_u64())
         .or_else(|| node["delivered_tokens"].as_u64())
+        .or_else(|| node["context_tokens"].as_u64())
         .unwrap_or(0);
-    let recovery_tokens = node["recovery"]["recovery_tokens"].as_u64().unwrap_or(0);
-    let effective_saved_tokens = node["savings"]["effective_saved_tokens"]
-        .as_i64()
-        .unwrap_or_else(|| naive_tokens as i64 - (context_tokens as i64 + recovery_tokens as i64));
-    let savings_factor = node["savings"]["savings_factor"].as_f64().unwrap_or(0.0);
-    let savings_percent = node["savings"]["savings_percent"]
-        .as_f64()
-        .or_else(|| node["gross_savings_pct"].as_f64())
-        .unwrap_or(0.0);
-    let effective_savings_percent = node["savings"]["effective_savings_percent"]
-        .as_f64()
-        .unwrap_or_else(|| percent_from_signed(effective_saved_tokens, naive_tokens));
-    let quality_ok = node["quality"]["quality_ok"].as_bool().unwrap_or(false);
-    let quality_score = node["quality"]["quality_score"]
-        .as_f64()
+    let recovery_tokens = json_path_u64(node, &["accounting", "raw", "recovery_tokens"])
+        .or_else(|| node["recovery"]["recovery_tokens"].as_u64())
+        .or_else(|| node["recovery_tokens"].as_u64())
+        .unwrap_or(0);
+    let effective_saved_tokens = json_path_i64(
+        node,
+        &[
+            "accounting",
+            "projection",
+            "savings",
+            "effective_saved_tokens",
+        ],
+    )
+    .or_else(|| node["savings"]["effective_saved_tokens"].as_i64())
+    .or_else(|| node["effective_saved_tokens"].as_i64())
+    .unwrap_or_else(|| naive_tokens as i64 - (context_tokens as i64 + recovery_tokens as i64));
+    let savings_factor = json_path_f64(
+        node,
+        &["accounting", "projection", "savings", "savings_factor"],
+    )
+    .or_else(|| node["savings"]["savings_factor"].as_f64())
+    .or_else(|| node["savings_factor"].as_f64())
+    .unwrap_or(0.0);
+    let savings_percent = json_path_f64(
+        node,
+        &["accounting", "projection", "savings", "savings_percent"],
+    )
+    .or_else(|| node["savings"]["savings_percent"].as_f64())
+    .or_else(|| node["gross_savings_pct"].as_f64())
+    .or_else(|| node["savings_percent"].as_f64())
+    .unwrap_or(0.0);
+    let effective_savings_percent = json_path_f64(
+        node,
+        &[
+            "accounting",
+            "projection",
+            "savings",
+            "effective_savings_percent",
+        ],
+    )
+    .or_else(|| node["savings"]["effective_savings_percent"].as_f64())
+    .or_else(|| node["effective_savings_percent"].as_f64())
+    .unwrap_or_else(|| percent_from_signed(effective_saved_tokens, naive_tokens));
+    let quality_ok = json_path_bool(node, &["accounting", "policy", "quality", "quality_ok"])
+        .or_else(|| node["quality"]["quality_ok"].as_bool())
+        .or_else(|| node["quality_ok"].as_bool())
+        .unwrap_or(false);
+    let quality_score = json_path_f64(node, &["accounting", "policy", "quality", "quality_score"])
+        .or_else(|| node["quality"]["quality_score"].as_f64())
+        .or_else(|| node["quality_score"].as_f64())
         .unwrap_or(if quality_ok { 1.0 } else { 0.0 });
-    let quality_method = node["quality"]["quality_method"]
-        .as_str()
-        .unwrap_or(if node["quality"].is_object() {
-            "unknown"
-        } else {
-            "legacy_unverified"
+    let quality_method =
+        json_path_string(node, &["accounting", "policy", "quality", "quality_method"])
+            .or_else(|| {
+                node["quality"]["quality_method"]
+                    .as_str()
+                    .map(ToOwned::to_owned)
+            })
+            .or_else(|| node["quality_method"].as_str().map(ToOwned::to_owned))
+            .unwrap_or_else(|| {
+                if node["quality"].is_object() {
+                    "unknown".to_string()
+                } else {
+                    "legacy_unverified".to_string()
+                }
+            });
+    let quality_tier = json_path_string(node, &["accounting", "policy", "quality", "quality_tier"])
+        .or_else(|| {
+            node["quality"]["quality_tier"]
+                .as_str()
+                .map(ToOwned::to_owned)
         })
-        .to_string();
-    let quality_tier = node["quality"]["quality_tier"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_string();
-    let head_hit_target = node["quality"]["head_hit_target"]
-        .as_bool()
-        .unwrap_or(false);
-    let needed_followup = node["followup"]["needed_followup"]
-        .as_bool()
-        .unwrap_or(!quality_ok);
-    let followup_count = node["followup"]["followup_count"].as_u64().unwrap_or(0);
-    let followup_of_event_id = node["followup"]["followup_of_event_id"]
-        .as_str()
-        .map(ToOwned::to_owned);
-    let resolved_by_event_id = node["followup"]["resolved_by_event_id"]
-        .as_str()
-        .map(ToOwned::to_owned);
-    let fallback_triggered = node["recovery"]["fallback_triggered"]
-        .as_bool()
-        .unwrap_or(false);
-    let fallback_count = node["recovery"]["fallback_count"].as_u64().unwrap_or(0);
-    let document_hits = node["shape"]["document_hits"].as_u64().unwrap_or(0);
-    let symbol_hits_count = node["shape"]["symbol_hits"].as_u64().unwrap_or(0);
-    let file_hits = node["shape"]["file_hits"].as_u64().unwrap_or(0);
-    let sources_count = node["shape"]["sources_count"].as_u64().unwrap_or(0);
-    let chunks_count = node["shape"]["chunks_count"].as_u64().unwrap_or(0);
-    let pack_token_count = node["shape"]["pack_token_count"]
-        .as_u64()
+        .or_else(|| node["quality_tier"].as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "unknown".to_string());
+    let head_hit_target = json_path_bool(
+        node,
+        &["accounting", "policy", "quality", "head_hit_target"],
+    )
+    .or_else(|| node["quality"]["head_hit_target"].as_bool())
+    .or_else(|| node["head_hit_target"].as_bool())
+    .unwrap_or(false);
+    let needed_followup = json_path_bool(
+        node,
+        &["accounting", "policy", "followup", "needed_followup"],
+    )
+    .or_else(|| node["followup"]["needed_followup"].as_bool())
+    .or_else(|| node["needed_followup"].as_bool())
+    .unwrap_or(!quality_ok);
+    let followup_count = json_path_u64(
+        node,
+        &["accounting", "policy", "followup", "followup_count"],
+    )
+    .or_else(|| node["followup"]["followup_count"].as_u64())
+    .or_else(|| node["followup_count"].as_u64())
+    .unwrap_or(0);
+    let followup_of_event_id = json_path_string(
+        node,
+        &["accounting", "policy", "followup", "followup_of_event_id"],
+    )
+    .or_else(|| {
+        node["followup"]["followup_of_event_id"]
+            .as_str()
+            .map(ToOwned::to_owned)
+    });
+    let resolved_by_event_id = json_path_string(
+        node,
+        &["accounting", "policy", "followup", "resolved_by_event_id"],
+    )
+    .or_else(|| {
+        node["followup"]["resolved_by_event_id"]
+            .as_str()
+            .map(ToOwned::to_owned)
+    });
+    let fallback_triggered = json_path_bool(
+        node,
+        &["accounting", "raw", "recovery", "fallback_triggered"],
+    )
+    .or_else(|| node["recovery"]["fallback_triggered"].as_bool())
+    .or_else(|| node["fallback_triggered"].as_bool())
+    .unwrap_or(false);
+    let fallback_count = json_path_u64(node, &["accounting", "raw", "recovery", "fallback_count"])
+        .or_else(|| node["recovery"]["fallback_count"].as_u64())
+        .or_else(|| node["fallback_count"].as_u64())
+        .unwrap_or(0);
+    let document_hits = json_path_u64(node, &["accounting", "raw", "shape", "document_hits"])
+        .or_else(|| node["shape"]["document_hits"].as_u64())
+        .or_else(|| node["document_hits"].as_u64())
+        .unwrap_or(0);
+    let symbol_hits_count = json_path_u64(node, &["accounting", "raw", "shape", "symbol_hits"])
+        .or_else(|| node["shape"]["symbol_hits"].as_u64())
+        .or_else(|| node["symbol_hits_count"].as_u64())
+        .or_else(|| node["symbol_hits"].as_u64())
+        .unwrap_or(0);
+    let file_hits = json_path_u64(node, &["accounting", "raw", "shape", "file_hits"])
+        .or_else(|| node["shape"]["file_hits"].as_u64())
+        .or_else(|| node["file_hits"].as_u64())
+        .unwrap_or(0);
+    let sources_count = json_path_u64(node, &["accounting", "raw", "shape", "sources_count"])
+        .or_else(|| node["shape"]["sources_count"].as_u64())
+        .or_else(|| node["sources_count"].as_u64())
+        .unwrap_or(0);
+    let chunks_count = json_path_u64(node, &["accounting", "raw", "shape", "chunks_count"])
+        .or_else(|| node["shape"]["chunks_count"].as_u64())
+        .or_else(|| node["chunks_count"].as_u64())
+        .unwrap_or(0);
+    let pack_token_count = json_path_u64(node, &["accounting", "raw", "shape", "pack_token_count"])
+        .or_else(|| node["shape"]["pack_token_count"].as_u64())
+        .or_else(|| node["pack_token_count"].as_u64())
         .unwrap_or(context_tokens);
-    let deduped_token_count = node["shape"]["deduped_token_count"]
-        .as_u64()
-        .unwrap_or(context_tokens);
-    let client_prompt_tokens = node["whole_cycle_observed"]["client_prompt_tokens"].as_u64();
-    let assistant_generation_tokens =
-        node["whole_cycle_observed"]["assistant_generation_tokens"].as_u64();
-    let tool_overhead_tokens = node["whole_cycle_observed"]["tool_overhead_tokens"].as_u64();
-    let continuity_restore_tokens =
-        node["whole_cycle_observed"]["continuity_restore_tokens"].as_u64();
+    let deduped_token_count =
+        json_path_u64(node, &["accounting", "raw", "shape", "deduped_token_count"])
+            .or_else(|| node["shape"]["deduped_token_count"].as_u64())
+            .or_else(|| node["deduped_token_count"].as_u64())
+            .unwrap_or(context_tokens);
+    let client_prompt_tokens = json_path_u64(
+        node,
+        &[
+            "accounting",
+            "raw",
+            "whole_cycle_observed",
+            "client_prompt_tokens",
+        ],
+    )
+    .or_else(|| node["whole_cycle_observed"]["client_prompt_tokens"].as_u64());
+    let assistant_generation_tokens = json_path_u64(
+        node,
+        &[
+            "accounting",
+            "raw",
+            "whole_cycle_observed",
+            "assistant_generation_tokens",
+        ],
+    )
+    .or_else(|| node["whole_cycle_observed"]["assistant_generation_tokens"].as_u64());
+    let tool_overhead_tokens = json_path_u64(
+        node,
+        &[
+            "accounting",
+            "raw",
+            "whole_cycle_observed",
+            "tool_overhead_tokens",
+        ],
+    )
+    .or_else(|| node["whole_cycle_observed"]["tool_overhead_tokens"].as_u64());
+    let continuity_restore_tokens = json_path_u64(
+        node,
+        &[
+            "accounting",
+            "raw",
+            "whole_cycle_observed",
+            "continuity_restore_tokens",
+        ],
+    )
+    .or_else(|| node["whole_cycle_observed"]["continuity_restore_tokens"].as_u64());
     let tool_overhead_source = node["whole_cycle_observed_source"]["tool_overhead"]
         .as_object()
         .map(|_| node["whole_cycle_observed_source"]["tool_overhead"].clone());
@@ -1229,6 +1445,79 @@ pub(crate) fn usage_backfill_status(event: &TokenBudgetEvent) -> &'static str {
     }
 }
 
+pub(crate) fn json_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut current = value;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    Some(current)
+}
+
+pub(crate) fn json_path_u64(value: &Value, path: &[&str]) -> Option<u64> {
+    json_path(value, path).and_then(Value::as_u64)
+}
+
+pub(crate) fn json_path_i64(value: &Value, path: &[&str]) -> Option<i64> {
+    json_path(value, path).and_then(Value::as_i64)
+}
+
+pub(crate) fn json_path_f64(value: &Value, path: &[&str]) -> Option<f64> {
+    json_path(value, path).and_then(Value::as_f64)
+}
+
+pub(crate) fn json_path_bool(value: &Value, path: &[&str]) -> Option<bool> {
+    json_path(value, path).and_then(Value::as_bool)
+}
+
+pub(crate) fn json_path_string(value: &Value, path: &[&str]) -> Option<String> {
+    json_path(value, path)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+pub(crate) fn build_tokenomics_raw_section(
+    baseline_tokens: u64,
+    delivered_tokens: u64,
+    recovery_tokens: u64,
+    whole_cycle_observed: Value,
+    recovery: Value,
+    shape: Value,
+) -> Value {
+    json!({
+        "baseline_tokens": baseline_tokens,
+        "delivered_tokens": delivered_tokens,
+        "recovery_tokens": recovery_tokens,
+        "whole_cycle_observed": whole_cycle_observed,
+        "recovery": recovery,
+        "shape": shape,
+    })
+}
+
+pub(crate) fn build_tokenomics_policy_section(quality: Value, followup: Value) -> Value {
+    json!({
+        "quality": quality,
+        "followup": followup,
+    })
+}
+
+pub(crate) fn build_tokenomics_projection_section(savings: Value) -> Value {
+    json!({
+        "savings": savings,
+    })
+}
+
+pub(crate) fn build_tokenomics_accounting_json(
+    raw: Value,
+    policy: Value,
+    projection: Value,
+) -> Value {
+    json!({
+        "raw": raw,
+        "policy": policy,
+        "projection": projection,
+    })
+}
+
 pub(crate) async fn reverify_live_event_payload(
     cfg: &AppConfig,
     db: &mut Client,
@@ -1395,6 +1684,92 @@ pub(crate) fn apply_reverification_metadata(
             Value::from(reverified_at_utc),
         );
     }
+    let (
+        quality_ok_flat,
+        quality_score_flat,
+        quality_method_flat,
+        quality_tier_flat,
+        head_hit_target_flat,
+    ) = rebuilt_node
+        .get("quality")
+        .and_then(Value::as_object)
+        .map(|quality| {
+            (
+                quality
+                    .get("quality_ok")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(quality_ok),
+                quality
+                    .get("quality_score")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(if quality_ok { 1.0 } else { 0.0 }),
+                quality
+                    .get("quality_method")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                quality
+                    .get("quality_tier")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                quality
+                    .get("head_hit_target")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+        })
+        .unwrap_or((
+            quality_ok,
+            if quality_ok { 1.0 } else { 0.0 },
+            "unknown".to_string(),
+            "unknown".to_string(),
+            false,
+        ));
+    rebuilt_node.insert("quality_ok".to_string(), Value::Bool(quality_ok_flat));
+    rebuilt_node.insert("quality_score".to_string(), Value::from(quality_score_flat));
+    rebuilt_node.insert(
+        "quality_method".to_string(),
+        Value::String(quality_method_flat),
+    );
+    rebuilt_node.insert("quality_tier".to_string(), Value::String(quality_tier_flat));
+    rebuilt_node.insert(
+        "head_hit_target".to_string(),
+        Value::Bool(head_hit_target_flat),
+    );
+    let snapshot = Value::Object(rebuilt_node.clone());
+    rebuilt_node.insert(
+        "accounting".to_string(),
+        build_tokenomics_accounting_json(
+            build_tokenomics_raw_section(
+                json_path_u64(&snapshot, &["naive_scope", "tokens"]).unwrap_or(0),
+                json_path_u64(&snapshot, &["context_pack_render", "tokens"]).unwrap_or(0),
+                json_path_u64(&snapshot, &["recovery", "recovery_tokens"]).unwrap_or(0),
+                json_path(&snapshot, &["whole_cycle_observed"])
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+                json_path(&snapshot, &["recovery"])
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+                json_path(&snapshot, &["shape"])
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+            ),
+            build_tokenomics_policy_section(
+                json_path(&snapshot, &["quality"])
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+                json_path(&snapshot, &["followup"])
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+            ),
+            build_tokenomics_projection_section(
+                json_path(&snapshot, &["savings"])
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+            ),
+        ),
+    );
     rebuilt_node.insert(
         "reverification".to_string(),
         json!({
@@ -1422,32 +1797,40 @@ pub(crate) fn repair_legacy_token_event_payload(payload: &Value) -> Option<Value
         .get("query")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let query_type = object
-        .get("query_type")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty() && *value != "unknown")
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| derive_query_type(query).to_string());
     let mut changed = false;
 
-    if !object.contains_key("traffic_class") {
-        object.insert(
-            "traffic_class".to_string(),
-            Value::String(derive_traffic_class(source_kind)),
-        );
-        changed = true;
+    fn sync_alias(
+        object: &mut serde_json::Map<String, Value>,
+        changed: &mut bool,
+        key: &str,
+        value: Value,
+    ) {
+        if object.get(key) != Some(&value) {
+            object.insert(key.to_string(), value);
+            *changed = true;
+        }
     }
-    if !object.contains_key("query_type") {
-        object.insert("query_type".to_string(), Value::String(query_type.clone()));
-        changed = true;
-    }
-    if !object.contains_key("baseline_strategy") {
-        object.insert(
-            "baseline_strategy".to_string(),
-            Value::String(derive_baseline_strategy(&query_type).to_string()),
-        );
-        changed = true;
-    }
+
+    let query_type = derive_query_type(query).to_string();
+    let baseline_strategy = derive_baseline_strategy(&query_type).to_string();
+    sync_alias(
+        object,
+        &mut changed,
+        "traffic_class",
+        Value::String(derive_traffic_class(source_kind)),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "query_type",
+        Value::String(query_type.clone()),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "baseline_strategy",
+        Value::String(baseline_strategy),
+    );
     if !object.contains_key("recovery") {
         object.insert(
             "recovery".to_string(),
@@ -1482,41 +1865,740 @@ pub(crate) fn repair_legacy_token_event_payload(payload: &Value) -> Option<Value
         );
         changed = true;
     }
+    if !object.contains_key("followup") {
+        let quality_ok = object
+            .get("quality")
+            .and_then(|value| value.get("quality_ok"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        object.insert(
+            "followup".to_string(),
+            json!({
+                "needed_followup": !quality_ok,
+                "followup_count": 0,
+                "followup_of_event_id": Value::Null,
+                "resolved_by_event_id": Value::Null
+            }),
+        );
+        changed = true;
+    }
+    if !object.contains_key("whole_cycle_observed") {
+        object.insert(
+            "whole_cycle_observed".to_string(),
+            json!({
+                "client_prompt_tokens": Value::Null,
+                "assistant_generation_tokens": Value::Null,
+                "tool_overhead_tokens": Value::Null,
+                "continuity_restore_tokens": Value::Null
+            }),
+        );
+        changed = true;
+    }
+    let read_snapshot = Value::Object(object.clone());
     let naive_tokens = object
-        .get("naive_scope")
-        .and_then(|value| value.get("tokens"))
+        .get("baseline_tokens")
         .and_then(Value::as_u64)
+        .or_else(|| object.get("naive_tokens").and_then(Value::as_u64))
+        .or_else(|| {
+            object
+                .get("naive_scope")
+                .and_then(|value| value.get("tokens"))
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| json_path_u64(&read_snapshot, &["accounting", "raw", "baseline_tokens"]))
         .unwrap_or(0);
     let context_tokens = object
-        .get("context_pack_render")
-        .and_then(|value| value.get("tokens"))
+        .get("delivered_tokens")
         .and_then(Value::as_u64)
+        .or_else(|| object.get("context_tokens").and_then(Value::as_u64))
+        .or_else(|| {
+            object
+                .get("context_pack_render")
+                .and_then(|value| value.get("tokens"))
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| json_path_u64(&read_snapshot, &["accounting", "raw", "delivered_tokens"]))
         .unwrap_or(0);
     let recovery_tokens = object
-        .get("recovery")
-        .and_then(|value| value.get("recovery_tokens"))
+        .get("recovery_tokens")
         .and_then(Value::as_u64)
+        .or_else(|| {
+            object
+                .get("recovery")
+                .and_then(|value| value.get("recovery_tokens"))
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| json_path_u64(&read_snapshot, &["accounting", "raw", "recovery_tokens"]))
         .unwrap_or(0);
+    let repair_quality_ok = object
+        .get("quality_ok")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            object
+                .get("quality")
+                .and_then(|value| value.get("quality_ok"))
+                .and_then(Value::as_bool)
+        })
+        .or_else(|| {
+            json_path_bool(
+                &read_snapshot,
+                &["accounting", "policy", "quality", "quality_ok"],
+            )
+        })
+        .unwrap_or(false);
+    let repair_quality_score = object
+        .get("quality_score")
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            object
+                .get("quality")
+                .and_then(|value| value.get("quality_score"))
+                .and_then(Value::as_f64)
+        })
+        .or_else(|| {
+            json_path_f64(
+                &read_snapshot,
+                &["accounting", "policy", "quality", "quality_score"],
+            )
+        })
+        .unwrap_or(if repair_quality_ok { 1.0 } else { 0.0 });
+    let repair_quality_method = object
+        .get("quality_method")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            object
+                .get("quality")
+                .and_then(|value| value.get("quality_method"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            json_path_string(
+                &read_snapshot,
+                &["accounting", "policy", "quality", "quality_method"],
+            )
+        })
+        .unwrap_or_else(|| "legacy_unverified".to_string());
+    let repair_quality_tier = object
+        .get("quality_tier")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            object
+                .get("quality")
+                .and_then(|value| value.get("quality_tier"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            json_path_string(
+                &read_snapshot,
+                &["accounting", "policy", "quality", "quality_tier"],
+            )
+        })
+        .unwrap_or_else(|| "unverified".to_string());
+    let repair_head_hit_target = object
+        .get("head_hit_target")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            object
+                .get("quality")
+                .and_then(|value| value.get("head_hit_target"))
+                .and_then(Value::as_bool)
+        })
+        .or_else(|| {
+            json_path_bool(
+                &read_snapshot,
+                &["accounting", "policy", "quality", "head_hit_target"],
+            )
+        })
+        .unwrap_or(false);
+    let repair_needed_followup = object
+        .get("needed_followup")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            object
+                .get("followup")
+                .and_then(|value| value.get("needed_followup"))
+                .and_then(Value::as_bool)
+        })
+        .or_else(|| {
+            json_path_bool(
+                &read_snapshot,
+                &["accounting", "policy", "followup", "needed_followup"],
+            )
+        })
+        .unwrap_or(!repair_quality_ok);
+    let repair_followup_count = object
+        .get("followup_count")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            object
+                .get("followup")
+                .and_then(|value| value.get("followup_count"))
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| {
+            json_path_u64(
+                &read_snapshot,
+                &["accounting", "policy", "followup", "followup_count"],
+            )
+        })
+        .unwrap_or(0);
+    let repair_followup_of_event_id = object
+        .get("followup_of_event_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            object
+                .get("followup")
+                .and_then(|value| value.get("followup_of_event_id"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            json_path_string(
+                &read_snapshot,
+                &["accounting", "policy", "followup", "followup_of_event_id"],
+            )
+        });
+    let repair_resolved_by_event_id = object
+        .get("resolved_by_event_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            object
+                .get("followup")
+                .and_then(|value| value.get("resolved_by_event_id"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            json_path_string(
+                &read_snapshot,
+                &["accounting", "policy", "followup", "resolved_by_event_id"],
+            )
+        });
+    let repair_fallback_triggered = object
+        .get("fallback_triggered")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            object
+                .get("recovery")
+                .and_then(|value| value.get("fallback_triggered"))
+                .and_then(Value::as_bool)
+        })
+        .or_else(|| {
+            json_path_bool(
+                &read_snapshot,
+                &["accounting", "raw", "recovery", "fallback_triggered"],
+            )
+        })
+        .unwrap_or(false);
+    let repair_fallback_count = object
+        .get("fallback_count")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            object
+                .get("recovery")
+                .and_then(|value| value.get("fallback_count"))
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| {
+            json_path_u64(
+                &read_snapshot,
+                &["accounting", "raw", "recovery", "fallback_count"],
+            )
+        })
+        .unwrap_or(0);
+    let savings_factor = if context_tokens == 0 {
+        naive_tokens as f64
+    } else {
+        naive_tokens as f64 / context_tokens as f64
+    };
+    let savings_percent = if naive_tokens == 0 {
+        0.0
+    } else {
+        naive_tokens.saturating_sub(context_tokens) as f64 * 100.0 / naive_tokens as f64
+    };
+    let effective_saved_tokens =
+        naive_tokens as i64 - (context_tokens as i64 + recovery_tokens as i64);
+    let effective_savings_percent = percent_from_signed(effective_saved_tokens, naive_tokens);
     if let Some(savings) = object.get_mut("savings").and_then(Value::as_object_mut) {
+        if !savings.contains_key("saved_tokens") {
+            savings.insert(
+                "saved_tokens".to_string(),
+                Value::from(naive_tokens.saturating_sub(context_tokens)),
+            );
+            changed = true;
+        }
+        if !savings.contains_key("savings_factor") {
+            savings.insert("savings_factor".to_string(), Value::from(savings_factor));
+            changed = true;
+        }
+        if !savings.contains_key("savings_percent") {
+            savings.insert("savings_percent".to_string(), Value::from(savings_percent));
+            changed = true;
+        }
         if !savings.contains_key("effective_saved_tokens") {
             savings.insert(
                 "effective_saved_tokens".to_string(),
-                Value::from(naive_tokens as i64 - (context_tokens as i64 + recovery_tokens as i64)),
+                Value::from(effective_saved_tokens),
             );
             changed = true;
         }
         if !savings.contains_key("effective_savings_percent") {
-            let effective_saved_tokens = savings
-                .get("effective_saved_tokens")
-                .and_then(Value::as_i64)
-                .unwrap_or(naive_tokens as i64 - (context_tokens as i64 + recovery_tokens as i64));
             savings.insert(
                 "effective_savings_percent".to_string(),
-                Value::from(percent_from_signed(effective_saved_tokens, naive_tokens)),
+                Value::from(effective_savings_percent),
             );
             changed = true;
         }
+    } else {
+        object.insert(
+            "savings".to_string(),
+            json!({
+                "saved_tokens": naive_tokens.saturating_sub(context_tokens),
+                "effective_saved_tokens": effective_saved_tokens,
+                "savings_factor": savings_factor,
+                "savings_percent": savings_percent,
+                "effective_savings_percent": effective_savings_percent
+            }),
+        );
+        changed = true;
     }
+
+    fn sync_nested_map(
+        object: &mut serde_json::Map<String, Value>,
+        changed: &mut bool,
+        key: &str,
+        fields: &[(&str, Value)],
+    ) {
+        let slot = object
+            .entry(key.to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        let nested = if let Some(nested) = slot.as_object_mut() {
+            nested
+        } else {
+            *slot = Value::Object(serde_json::Map::new());
+            *changed = true;
+            slot.as_object_mut()
+                .expect("nested object should be initialized")
+        };
+        for (field, value) in fields {
+            if nested.get(*field) != Some(value) {
+                nested.insert((*field).to_string(), value.clone());
+                *changed = true;
+            }
+        }
+    }
+
+    sync_nested_map(
+        object,
+        &mut changed,
+        "naive_scope",
+        &[("tokens", Value::from(naive_tokens))],
+    );
+    sync_nested_map(
+        object,
+        &mut changed,
+        "context_pack_render",
+        &[("tokens", Value::from(context_tokens))],
+    );
+    sync_nested_map(
+        object,
+        &mut changed,
+        "recovery",
+        &[
+            ("recovery_tokens", Value::from(recovery_tokens)),
+            ("fallback_triggered", Value::Bool(repair_fallback_triggered)),
+            ("fallback_count", Value::from(repair_fallback_count)),
+        ],
+    );
+    sync_nested_map(
+        object,
+        &mut changed,
+        "quality",
+        &[
+            ("quality_ok", Value::Bool(repair_quality_ok)),
+            ("quality_score", Value::from(repair_quality_score)),
+            (
+                "quality_method",
+                Value::String(repair_quality_method.clone()),
+            ),
+            ("quality_tier", Value::String(repair_quality_tier.clone())),
+            ("head_hit_target", Value::Bool(repair_head_hit_target)),
+        ],
+    );
+    sync_nested_map(
+        object,
+        &mut changed,
+        "followup",
+        &[
+            ("needed_followup", Value::Bool(repair_needed_followup)),
+            ("followup_count", Value::from(repair_followup_count)),
+            (
+                "followup_of_event_id",
+                repair_followup_of_event_id
+                    .clone()
+                    .map(Value::String)
+                    .unwrap_or(Value::Null),
+            ),
+            (
+                "resolved_by_event_id",
+                repair_resolved_by_event_id
+                    .clone()
+                    .map(Value::String)
+                    .unwrap_or(Value::Null),
+            ),
+        ],
+    );
+    sync_nested_map(
+        object,
+        &mut changed,
+        "savings",
+        &[
+            (
+                "saved_tokens",
+                Value::from(naive_tokens.saturating_sub(context_tokens)),
+            ),
+            (
+                "effective_saved_tokens",
+                Value::from(effective_saved_tokens),
+            ),
+            ("savings_factor", Value::from(savings_factor)),
+            ("savings_percent", Value::from(savings_percent)),
+            (
+                "effective_savings_percent",
+                Value::from(effective_savings_percent),
+            ),
+        ],
+    );
+
+    let snapshot = Value::Object(object.clone());
+    let accounting = build_tokenomics_accounting_json(
+        build_tokenomics_raw_section(
+            json_path_u64(&snapshot, &["naive_scope", "tokens"]).unwrap_or(naive_tokens),
+            json_path_u64(&snapshot, &["context_pack_render", "tokens"]).unwrap_or(context_tokens),
+            json_path_u64(&snapshot, &["recovery", "recovery_tokens"]).unwrap_or(recovery_tokens),
+            json_path(&snapshot, &["whole_cycle_observed"])
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+            json_path(&snapshot, &["recovery"])
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+            json_path(&snapshot, &["shape"])
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+        ),
+        build_tokenomics_policy_section(
+            json_path(&snapshot, &["quality"])
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+            json_path(&snapshot, &["followup"])
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+        ),
+        build_tokenomics_projection_section(
+            json_path(&snapshot, &["savings"])
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+        ),
+    );
+    if object.get("accounting") != Some(&accounting) {
+        object.insert("accounting".to_string(), accounting);
+        changed = true;
+    }
+
+    let quality_ok = object
+        .get("quality")
+        .and_then(|value| value.get("quality_ok"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let quality_score = object
+        .get("quality")
+        .and_then(|value| value.get("quality_score"))
+        .and_then(Value::as_f64)
+        .unwrap_or(if quality_ok { 1.0 } else { 0.0 });
+    let quality_method = object
+        .get("quality")
+        .and_then(|value| value.get("quality_method"))
+        .and_then(Value::as_str)
+        .unwrap_or("legacy_unverified")
+        .to_string();
+    let quality_tier = object
+        .get("quality")
+        .and_then(|value| value.get("quality_tier"))
+        .and_then(Value::as_str)
+        .unwrap_or("unverified")
+        .to_string();
+    let head_hit_target = object
+        .get("quality")
+        .and_then(|value| value.get("head_hit_target"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    sync_alias(object, &mut changed, "quality_ok", Value::Bool(quality_ok));
+    sync_alias(
+        object,
+        &mut changed,
+        "quality_score",
+        Value::from(quality_score),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "quality_method",
+        Value::String(quality_method.clone()),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "quality_tier",
+        Value::String(quality_tier.clone()),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "head_hit_target",
+        Value::Bool(head_hit_target),
+    );
+    let needed_followup = object
+        .get("followup")
+        .and_then(|value| value.get("needed_followup"))
+        .and_then(Value::as_bool)
+        .unwrap_or(!quality_ok);
+    let followup_count = object
+        .get("followup")
+        .and_then(|value| value.get("followup_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    sync_alias(
+        object,
+        &mut changed,
+        "needed_followup",
+        Value::Bool(needed_followup),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "followup_count",
+        Value::from(followup_count),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "fallback_triggered",
+        object
+            .get("recovery")
+            .and_then(|value| value.get("fallback_triggered"))
+            .cloned()
+            .unwrap_or(Value::Bool(false)),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "fallback_count",
+        object
+            .get("recovery")
+            .and_then(|value| value.get("fallback_count"))
+            .cloned()
+            .unwrap_or(Value::from(0_u64)),
+    );
+    let followup_of_event_id = object
+        .get("followup")
+        .and_then(|value| value.get("followup_of_event_id"))
+        .cloned();
+    let resolved_by_event_id = object
+        .get("followup")
+        .and_then(|value| value.get("resolved_by_event_id"))
+        .cloned();
+    if let Some(value) = followup_of_event_id {
+        if object.get("followup_of_event_id") != Some(&value) {
+            object.insert("followup_of_event_id".to_string(), value);
+            changed = true;
+        }
+    }
+    if let Some(value) = resolved_by_event_id {
+        if object.get("resolved_by_event_id") != Some(&value) {
+            object.insert("resolved_by_event_id".to_string(), value);
+            changed = true;
+        }
+    }
+
+    sync_alias(
+        object,
+        &mut changed,
+        "baseline_tokens",
+        Value::from(naive_tokens),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "naive_tokens",
+        Value::from(naive_tokens),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "delivered_tokens",
+        Value::from(context_tokens),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "context_tokens",
+        Value::from(context_tokens),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "saved_tokens",
+        Value::from(naive_tokens.saturating_sub(context_tokens)),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "recovery_tokens",
+        Value::from(recovery_tokens),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "effective_saved_tokens",
+        Value::from(effective_saved_tokens),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "effective_savings_percent",
+        Value::from(effective_savings_percent),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "savings_factor",
+        Value::from(savings_factor),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "savings_percent",
+        Value::from(savings_percent),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "gross_savings_pct",
+        Value::from(savings_percent),
+    );
+    sync_alias(object, &mut changed, "quality_ok", Value::Bool(quality_ok));
+    sync_alias(
+        object,
+        &mut changed,
+        "quality_score",
+        Value::from(
+            object
+                .get("quality")
+                .and_then(|value| value.get("quality_score"))
+                .and_then(Value::as_f64)
+                .unwrap_or(if quality_ok { 1.0 } else { 0.0 }),
+        ),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "quality_method",
+        Value::String(
+            object
+                .get("quality")
+                .and_then(|value| value.get("quality_method"))
+                .and_then(Value::as_str)
+                .unwrap_or("legacy_unverified")
+                .to_string(),
+        ),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "quality_tier",
+        Value::String(
+            object
+                .get("quality")
+                .and_then(|value| value.get("quality_tier"))
+                .and_then(Value::as_str)
+                .unwrap_or("unverified")
+                .to_string(),
+        ),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "head_hit_target",
+        Value::Bool(
+            object
+                .get("quality")
+                .and_then(|value| value.get("head_hit_target"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        ),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "needed_followup",
+        Value::Bool(
+            object
+                .get("followup")
+                .and_then(|value| value.get("needed_followup"))
+                .and_then(Value::as_bool)
+                .unwrap_or(!quality_ok),
+        ),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "followup_count",
+        Value::from(
+            object
+                .get("followup")
+                .and_then(|value| value.get("followup_count"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        ),
+    );
+    if let Some(value) = object
+        .get("followup")
+        .and_then(|value| value.get("followup_of_event_id"))
+    {
+        sync_alias(object, &mut changed, "followup_of_event_id", value.clone());
+    }
+    if let Some(value) = object
+        .get("followup")
+        .and_then(|value| value.get("resolved_by_event_id"))
+    {
+        sync_alias(object, &mut changed, "resolved_by_event_id", value.clone());
+    }
+    sync_alias(
+        object,
+        &mut changed,
+        "fallback_triggered",
+        object
+            .get("recovery")
+            .and_then(|value| value.get("fallback_triggered"))
+            .cloned()
+            .unwrap_or(Value::Bool(false)),
+    );
+    sync_alias(
+        object,
+        &mut changed,
+        "fallback_count",
+        object
+            .get("recovery")
+            .and_then(|value| value.get("fallback_count"))
+            .cloned()
+            .unwrap_or(Value::from(0_u64)),
+    );
 
     changed.then_some(updated)
 }
@@ -1609,24 +2691,91 @@ pub(crate) fn set_recovery_penalty(
     let node = payload["token_budget_event"]
         .as_object_mut()
         .ok_or_else(|| anyhow!("token budget payload missing token_budget_event object"))?;
-    let recovery = ensure_nested_object(node, "recovery")?;
-    recovery.insert("recovery_tokens".to_string(), Value::from(recovery_tokens));
-    let followup = ensure_nested_object(node, "followup")?;
-    followup.insert("followup_count".to_string(), Value::from(followup_count));
+    {
+        let recovery = ensure_nested_object(node, "recovery")?;
+        recovery.insert("recovery_tokens".to_string(), Value::from(recovery_tokens));
+    }
+    {
+        let followup = ensure_nested_object(node, "followup")?;
+        followup.insert("followup_count".to_string(), Value::from(followup_count));
+    }
 
-    let context_tokens = node["context_pack_render"]["tokens"].as_u64().unwrap_or(0);
-    let naive_tokens = node["naive_scope"]["tokens"].as_u64().unwrap_or(0);
+    let read_snapshot = Value::Object(node.clone());
+    let context_tokens = node
+        .get("context_pack_render")
+        .and_then(|value| value.get("tokens"))
+        .and_then(Value::as_u64)
+        .or_else(|| node.get("delivered_tokens").and_then(Value::as_u64))
+        .or_else(|| node.get("context_tokens").and_then(Value::as_u64))
+        .or_else(|| json_path_u64(&read_snapshot, &["accounting", "raw", "delivered_tokens"]))
+        .unwrap_or(0);
+    let naive_tokens = node
+        .get("naive_scope")
+        .and_then(|value| value.get("tokens"))
+        .and_then(Value::as_u64)
+        .or_else(|| node.get("baseline_tokens").and_then(Value::as_u64))
+        .or_else(|| node.get("naive_tokens").and_then(Value::as_u64))
+        .or_else(|| json_path_u64(&read_snapshot, &["accounting", "raw", "baseline_tokens"]))
+        .unwrap_or(0);
     let effective_saved_tokens =
         naive_tokens as i64 - (context_tokens as i64 + recovery_tokens as i64);
     let effective_savings_percent = percent_from_signed(effective_saved_tokens, naive_tokens);
-    let savings = ensure_nested_object(node, "savings")?;
-    savings.insert(
+    {
+        let savings = ensure_nested_object(node, "savings")?;
+        savings.insert(
+            "effective_saved_tokens".to_string(),
+            Value::from(effective_saved_tokens),
+        );
+        savings.insert(
+            "effective_savings_percent".to_string(),
+            Value::from(effective_savings_percent),
+        );
+    }
+    node.insert("recovery_tokens".to_string(), Value::from(recovery_tokens));
+    node.insert("followup_count".to_string(), Value::from(followup_count));
+    node.insert(
         "effective_saved_tokens".to_string(),
         Value::from(effective_saved_tokens),
     );
-    savings.insert(
+    node.insert(
         "effective_savings_percent".to_string(),
         Value::from(effective_savings_percent),
+    );
+
+    let snapshot = Value::Object(node.clone());
+    node.insert(
+        "accounting".to_string(),
+        build_tokenomics_accounting_json(
+            build_tokenomics_raw_section(
+                json_path_u64(&snapshot, &["naive_scope", "tokens"]).unwrap_or(naive_tokens),
+                json_path_u64(&snapshot, &["context_pack_render", "tokens"])
+                    .unwrap_or(context_tokens),
+                json_path_u64(&snapshot, &["recovery", "recovery_tokens"])
+                    .unwrap_or(recovery_tokens),
+                json_path(&snapshot, &["whole_cycle_observed"])
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+                json_path(&snapshot, &["recovery"])
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+                json_path(&snapshot, &["shape"])
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+            ),
+            build_tokenomics_policy_section(
+                json_path(&snapshot, &["quality"])
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+                json_path(&snapshot, &["followup"])
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+            ),
+            build_tokenomics_projection_section(
+                json_path(&snapshot, &["savings"])
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+            ),
+        ),
     );
     Ok(())
 }

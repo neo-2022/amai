@@ -39,7 +39,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$(dirname "${CACHE_PATH}")"
-now_ms="$(date +%s%3N)"
+now_ms="$(./scripts/epoch_ms.sh)"
 rm -f "${THREAD_CACHE_PATH}"
 
 cat >"${CACHE_PATH}" <<EOF
@@ -56,7 +56,7 @@ cat >"${CACHE_PATH}" <<EOF
         "must_rotate_before_reply": false,
         "must_wait_for_budget_recovery_before_reply": false,
         "reply_budget_mode": "compact_high_signal",
-        "reply_prefix": "5ч KPI: переплата 12.34%",
+        "reply_prefix": "Burn guard: переплата 12.34%",
         "same_meter_pure_burn_turn_active": false,
         "must_require_material_delta_before_next_reply": false,
         "must_avoid_progress_reply_when_only_guard_changed": false,
@@ -90,7 +90,7 @@ cat >"${CACHE_PATH}" <<EOF
       "observed_at_epoch_ms": ${now_ms},
       "reply_execution_gate": {
         "action_kind": "compact_current_thread_for_client_budget",
-        "reply_prefix": "5ч KPI: переплата 12.34%"
+        "reply_prefix": "Burn guard: переплата 12.34%"
       }
     }
   },
@@ -98,7 +98,7 @@ cat >"${CACHE_PATH}" <<EOF
     "observed_at_epoch_ms": ${now_ms},
     "reply_execution_gate": {
       "action_kind": "compact_current_thread_for_client_budget",
-      "reply_prefix": "5ч KPI: переплата 12.34%"
+      "reply_prefix": "Burn guard: переплата 12.34%"
     }
   }
 }
@@ -107,7 +107,7 @@ EOF
 payload="$(env -u CODEX_THREAD_ID AMI_OBSERVE_BIND=127.0.0.1:1 "${SCRIPT_DIR}/client_budget_root_cause.sh" --enforce-reply-gate)"
 
 printf '%s\n' "${payload}" | jq -e '
-  .client_budget_reply_gate.reply_execution_gate.reply_prefix == "5ч KPI: переплата 12.34%"
+  .client_budget_reply_gate.reply_execution_gate.reply_prefix == "Burn guard: переплата 12.34%"
   and .client_budget_reply_gate.reply_execution_gate.action_kind == "compact_current_thread_for_client_budget"
   and .thread_binding_state == "current_thread_bound"
   and .host_context_compaction.stage == "preserve"

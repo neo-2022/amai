@@ -16,7 +16,7 @@ report_path="/tmp/amai-proof-token-mcp-assistant-generation.json"
   --token-source-kind "$source_kind" >/tmp/amai-proof-token-mcp-assistant-generation-verify.json
 
 ./target/release/amai observe token-report \
-  --budget-profile codex_5h \
+  --budget-profile client_primary_budget \
   --include-verify-events true >"$report_path"
 
 SOURCE_KIND="$source_kind" REPORT_PATH="$report_path" python3 - <<'PY'

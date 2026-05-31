@@ -11,7 +11,7 @@ cat >"$tmpdir/pure-burn-gate.json" <<'EOF'
   "client_budget_reply_gate": {
     "reply_execution_gate": {
       "action_kind": "rotate_chat_for_client_budget",
-      "reply_prefix": "5ч KPI: экономия 12.00%",
+      "reply_prefix": "Burn guard: экономия 12.00%",
       "same_meter_pure_burn_turn_active": true,
       "must_avoid_new_tool_turn_without_specific_delta_goal": true,
       "max_tool_roundtrips_soft": 0
@@ -25,7 +25,7 @@ cat >"$tmpdir/zero-roundtrip-gate.json" <<'EOF'
   "client_budget_reply_gate": {
     "reply_execution_gate": {
       "action_kind": "compact_current_thread_for_client_budget",
-      "reply_prefix": "5ч KPI: переплата 8.00%",
+      "reply_prefix": "Burn guard: переплата 8.00%",
       "same_meter_pure_burn_turn_active": false,
       "must_avoid_new_tool_turn_without_specific_delta_goal": true,
       "max_tool_roundtrips_soft": 0

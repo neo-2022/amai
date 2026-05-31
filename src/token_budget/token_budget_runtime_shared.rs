@@ -53,7 +53,32 @@ pub(super) const DASHBOARD_SAME_METER_SYNC_SHARED_CACHE_VERSION: &str =
 pub(super) const DASHBOARD_CURRENT_SESSION_RECENT_EVENTS_LIMIT: i64 = 512;
 pub(super) const EXACT_CLIENT_LIMIT_SAMPLE_SNAPSHOT_KIND: &str = "client_status_bar_rate_limits";
 pub(super) const CLIENT_LIMIT_TREND_ANALYSIS_SNAPSHOT_KIND: &str = "client_limit_hourly_burn_trend";
-pub(super) const PERSONAL_AGENT_KPI_WINDOW_HOURS: i64 = 5;
+pub(super) const MAX_PUBLIC_SAVINGS_WINDOW_HOURS: u64 = 24 * 30;
+pub(super) const PUBLIC_SAVINGS_METRIC_DOMAIN: &str = "product_tokenonomics";
+pub(super) const PUBLIC_SAVINGS_METRIC_CODE: &str = "amai_savings_token_pair";
+pub(super) const PUBLIC_SAVINGS_PROJECTION_CONTRACT_VERSION: &str = "public-savings-projection-v2";
+pub(super) const PUBLIC_PRODUCT_HEADLINE_CONTRACT_VERSION: &str = "public-product-headline-v3";
+pub(super) const PUBLIC_SAVINGS_PROJECTION_STATUS_OBSERVED: &str = "observed";
+pub(super) const PUBLIC_SAVINGS_PROJECTION_STATUS_PRELIMINARY: &str = "preliminary";
+pub(super) const PUBLIC_SAVINGS_PROJECTION_STATUS_MISSING: &str = "missing";
+pub(super) const PUBLIC_SAVINGS_PROJECTION_PAIR_SOURCE_EXACT_SAME_METER: &str =
+    "exact_same_meter_pair";
+pub(super) const PUBLIC_SAVINGS_PROJECTION_PAIR_SOURCE_VERIFIED_SUMMARY: &str =
+    "verified_scope_summary_pair";
+pub(super) const PUBLIC_SAVINGS_PROJECTION_PAIR_SOURCE_MEASURED_SUMMARY: &str =
+    "measured_scope_summary_pair";
+pub(super) const PUBLIC_SAVINGS_PROJECTION_PAIR_SOURCE_MISSING: &str = "missing";
+pub(super) const PUBLIC_SAVINGS_PROJECTION_CONFIDENCE_EXACT_SAME_METER_VERIFIED: &str =
+    "exact_same_meter_verified";
+pub(super) const PUBLIC_SAVINGS_PROJECTION_CONFIDENCE_EXACT_SAME_METER: &str = "exact_same_meter";
+pub(super) const PUBLIC_SAVINGS_PROJECTION_CONFIDENCE_VERIFIED_SUMMARY: &str =
+    "verified_summary_pair";
+pub(super) const PUBLIC_SAVINGS_PROJECTION_CONFIDENCE_PRELIMINARY_SUMMARY: &str =
+    "preliminary_summary_pair";
+pub(super) const PUBLIC_SAVINGS_PROJECTION_CONFIDENCE_MISSING: &str = "missing";
+pub(super) const OPERATOR_CLIENT_BUDGET_CONTEXT_CONTRACT_VERSION: &str =
+    "operator-client-budget-context-v1";
+pub(super) const OPERATOR_GUARD_METRIC_DOMAIN: &str = "operator_guard";
 pub(super) const DEFAULT_CLIENT_LIMIT_HOURLY_BURN_WINDOW_MINUTES: u64 = 60;
 pub(super) const DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MAX_LIVE_AGE_SECONDS: u64 = 10;
 pub(super) const DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MIN_HISTORY_SPAN_MINUTES: u64 = 55;

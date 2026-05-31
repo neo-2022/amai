@@ -696,10 +696,10 @@ async fn run_token_report_live_task(
         .as_u64()
         .ok_or_else(|| anyhow!("token_report current_session.events_total is missing"))?;
     let honest_empty_state = match metric_code {
-        "verified_effective_savings_pct" => {
+        "amai_savings_token_pair" => {
             if headline_events_count == 0 || headline_counted_events == 0 {
                 return Err(anyhow!(
-                    "token report returned verified_effective_savings_pct without counted headline events"
+                    "token report returned amai_savings_token_pair without counted headline events"
                 ));
             }
             false

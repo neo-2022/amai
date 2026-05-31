@@ -83,7 +83,7 @@ PY
   --apply >"$attach_path"
 
 ./target/release/amai observe token-report \
-  --budget-profile codex_5h \
+  --budget-profile client_primary_budget \
   --include-verify-events true >"$report_path"
 
 SOURCE_KIND="$source_kind" ATTACH_PATH="$attach_path" REPORT_PATH="$report_path" python3 - <<'PY'

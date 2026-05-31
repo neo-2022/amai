@@ -555,10 +555,10 @@ pub(crate) fn compact_continuity_startup_public_payload(payload: &Value) -> Valu
         .get("chat_start_restore")
         .is_some_and(|value| value.is_object())
     {
-        root.insert(
-            "chat_start_restore".to_string(),
-            compact_chat_start_restore_for_startup_output(&payload["chat_start_restore"]),
-        );
+        let compact_chat_start =
+            compact_chat_start_restore_for_startup_output(&payload["chat_start_restore"]);
+        root.insert("chat_start_restore".to_string(), compact_chat_start.clone());
+        root.insert("delivery_surface_restore".to_string(), compact_chat_start);
     }
     if root
         .get("working_state_restore")
@@ -1442,15 +1442,40 @@ fn compact_startup_runtime_required_return_task(task: &Value) -> Value {
     Value::Object(compact)
 }
 
-fn compact_startup_runtime_execctl_active_lease(lease: &Value) -> Value {
+fn compact_startup_runtime_execctl_active_lease(
+    lease: &Value,
+    authoritative_event_id: Option<&str>,
+) -> Value {
+    let lease = if let Some(lease_object) = lease.as_object() {
+        let mut normalized = lease_object.clone();
+        let has_source_event_id = normalized
+            .get("source_event_id")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+        if !has_source_event_id {
+            if let Some(authoritative_event_id) = authoritative_event_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                normalized.insert(
+                    "source_event_id".to_string(),
+                    Value::from(authoritative_event_id),
+                );
+            }
+        }
+        Value::Object(normalized)
+    } else {
+        lease.clone()
+    };
     let mut compact = serde_json::Map::new();
     copy_if_present(
         &mut compact,
-        lease,
+        &lease,
         &[
             "lease_version",
             "lease_owner_state",
             "lease_state",
+            "source_event_id",
             "headline",
             "next_step",
             "storage_lane",
@@ -7188,14 +7213,20 @@ mod tests {
             payload["continuity_compact_chat"]["host_launch"]["mode"],
             json!("implicit_default")
         );
-        assert!(
-            payload["continuity_compact_chat"]["operator_notice"]["required_host_action"].is_null()
+        assert_eq!(
+            payload["continuity_compact_chat"]["operator_notice"]["required_host_action"],
+            json!("open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable")
         );
         assert_eq!(
             payload["continuity_compact_chat"]["operator_notice"]["message_text"],
             json!(
-                "Новая чистая рабочая поверхность запрошена автоматически; startup restore уже передан в новую рабочую поверхность."
+                "Automatic clean-surface launch запрошен; проверь, что новая рабочая поверхность действительно открылась и получила startup restore, иначе используй prompt_text вручную."
             )
+        );
+        assert!(
+            payload["continuity_compact_chat"]["operator_notice"]["note"]
+                .as_str()
+                .is_some_and(|value| value.contains("bounded proof"))
         );
         assert!(
             payload["continuity_compact_chat"]["operator_flow"]["fresh_surface_summary"].is_null()
@@ -9078,10 +9109,7 @@ mod tests {
         assert!(node["project_task_tree"]["edges"].is_null());
         assert_eq!(node["project_task_ledger"]["summary_only"], json!(true));
         assert!(node["project_task_ledger"]["entries"].is_null());
-        assert_eq!(
-            node["execctl_resume_state"],
-            json!("pending_return_queue_present")
-        );
+        assert_eq!(node["execctl_resume_state"], json!("return_required"));
         assert_eq!(
             node["execctl_resume_obligation"]["resume_state"],
             json!("return_required")
@@ -9286,12 +9314,12 @@ mod tests {
                 "client_budget_guard": {
                     "status_label": "сожми текущий чат сейчас",
                     "last_request": "162594 из 258400, остаётся 37.08% · raw 23:27:06 MSK",
-                    "client_limits": "5ч остаётся 8.00%, 7д остаётся 72.00% · raw 23:27:06 MSK"
+                    "client_limits": "основное окно остаётся 8.00%, расширенное окно остаётся 72.00% · raw 23:27:06 MSK"
                 },
                 "materialized_notes": [
                     "Client-budget advisory signal: сожми текущий чат.",
                     "Последний запрос в модель: 190690 из 258400, остаётся 26.20% · raw 23:15:46 MSK.",
-                    "Лимит клиента сейчас: 5ч остаётся 8.00%, 7д остаётся 72.00% · raw 23:15:46 MSK.",
+                    "Лимит клиента сейчас: основное окно остаётся 8.00%, расширенное окно остаётся 72.00% · raw 23:15:46 MSK.",
                     "Продолжить ту же рабочую линию: Продолжить активную рабочую линию."
                 ]
             }
@@ -9320,7 +9348,7 @@ mod tests {
             "status_label": "новый чат нужен сейчас",
             "delivery_surface_status_label": "новая чистая рабочая поверхность нужна сейчас",
             "last_request": "162594 из 258400",
-            "client_limits": "5ч остаётся 8.00%"
+            "client_limits": "основное окно остаётся 8.00%"
         });
 
         let details = super::build_rotate_chat_details(
@@ -9734,7 +9762,7 @@ mod tests {
                         "must_rotate_before_reply": false,
                         "must_wait_for_budget_recovery_before_reply": false,
                         "reply_budget_mode": "compact_high_signal",
-                        "reply_prefix": "5ч KPI: переплата 12.34%"
+                        "reply_prefix": "Burn guard: переплата 12.34%"
                     }
                 },
                 "execctl_resume_contract": {
@@ -10212,11 +10240,11 @@ mod tests {
             "working_state_restore": {
                 "client_budget_guard": {
                     "status_label": "сожми текущий чат сейчас",
-                    "reply_prefix": "5ч KPI: переплата 2.46%",
+                    "reply_prefix": "Burn guard: переплата 2.46%",
                     "reply_execution_gate": {
                         "gate_version": "client-reply-budget-gate-v1",
                         "must_rotate_before_reply": true,
-                        "reply_prefix": "5ч KPI: переплата 2.46%",
+                        "reply_prefix": "Burn guard: переплата 2.46%",
                         "blocking_reply_contract": {
                             "contract_version": "client-budget-blocked-reply-v1",
                             "response_kind": "rotate_chat_only",
@@ -10323,7 +10351,7 @@ mod tests {
         assert!(artifact["client_budget_guard"]["max_guard_age_seconds"].is_null());
         assert_eq!(
             artifact["client_budget_guard"]["reply_execution_gate"]["reply_prefix"],
-            json!("5ч KPI: переплата 2.46%")
+            json!("Burn guard: переплата 2.46%")
         );
         assert_eq!(
             artifact["reply_execution_gate"]["gate_version"],
@@ -10335,16 +10363,53 @@ mod tests {
         );
         assert_eq!(
             artifact["reply_execution_gate"]["reply_prefix"],
-            json!("5ч KPI: переплата 2.46%")
+            json!("Burn guard: переплата 2.46%")
         );
         assert!(artifact["reply_execution_gate"]["action_bundle"].is_null());
-        assert_eq!(
-            artifact["reply_execution_gate"]["preserves_return_obligation"],
-            json!(false)
-        );
+        assert!(artifact["reply_execution_gate"]["preserves_return_obligation"].is_null());
         assert_eq!(
             artifact["blocking_reply_contract"]["response_kind"],
             json!("rotate_chat_only")
+        );
+        assert_eq!(
+            artifact["agent_workflow_guard"]["guard_version"],
+            json!("agent-workflow-guard-v1")
+        );
+        assert_eq!(
+            artifact["agent_workflow_guard"]["planning"]["specialist_consensus_required_before_implementation"],
+            json!(true)
+        );
+        assert_eq!(
+            artifact["agent_workflow_guard"]["implementation"]["per_item_specialist_bughunter_review_required"],
+            json!(true)
+        );
+        assert_eq!(
+            artifact["agent_workflow_guard"]["report_gate"]["workflow_before_report_guard_command"],
+            json!("./scripts/proof_workflow_before_report.sh")
+        );
+        assert_eq!(
+            artifact["agent_workflow_guard"]["promotion_identity"]["runtime_state_field"],
+            json!("workflow_promotion_state")
+        );
+        assert_eq!(
+            artifact["workflow_promotion_state"]["state_version"],
+            json!("workflow-promotion-state-v1")
+        );
+        assert_eq!(
+            artifact["workflow_promotion_state"]["current_user_redirect_id"],
+            json!("evt_123")
+        );
+        assert_eq!(
+            artifact["workflow_promotion_state"]["promoted_user_redirect_id"],
+            json!("evt_123")
+        );
+        assert_eq!(
+            artifact["workflow_promotion_state"]["source_event_match"],
+            json!(true)
+        );
+        assert_eq!(
+            artifact["agent_workflow_guard"]["language_policy"]["user_reply_language"],
+            json!("ru")
         );
         assert_eq!(artifact["gate_semantics_consistent"], json!(true));
         assert_eq!(
@@ -10511,13 +10576,13 @@ mod tests {
     fn startup_runtime_artifact_keeps_blocking_rotate_gate_consistent_in_summary_and_top_level() {
         let payload = json!({
             "chat_start_restore": {
-                "headline": "Rotate policy now blocks large weak exact-pair turns when 5h saving is below target",
+                "headline": "Rotate policy now blocks large weak exact-pair turns when primary-limit saving is below target",
                 "next_step": "Open a fresh chat via continuity startup.",
                 "restore_confidence": "high",
                 "thread_count": 1,
                 "prompt_text": "CHAT_START_RESTORE\nRotate now",
                 "execctl_resume_state": "pending_return_queue_present",
-                "execctl_resume_contract_summary": "return_required(1): keep the >90% 5h KPI line honest",
+                "execctl_resume_contract_summary": "return_required(1): keep the >90% Burn guard line honest",
                 "execctl_resume_obligation": {
                     "resume_state": "pending_return_queue_present",
                     "no_silent_drop": true,
@@ -10538,7 +10603,7 @@ mod tests {
                 },
                 "required_return_task": {
                     "headline": "MCP context pack now replaces verified legacy tool-overhead with truthful structured-content tokens",
-                    "next_step": "Continue the >90% 5h KPI line from a clean thread."
+                    "next_step": "Continue the >90% Burn guard line from a clean thread."
                 },
                 "project_task_tree": {
                     "open_tasks_count": 1
@@ -10554,11 +10619,11 @@ mod tests {
             "working_state_restore": {
                 "client_budget_guard": {
                     "status_label": "сожми текущий чат сейчас",
-                    "reply_prefix": "5ч KPI: экономия 19.20%",
+                    "reply_prefix": "Burn guard: экономия 19.20%",
                     "reply_execution_gate": {
                         "gate_version": "client-reply-budget-gate-v1",
                         "must_rotate_before_reply": true,
-                        "reply_prefix": "5ч KPI: экономия 19.20%",
+                        "reply_prefix": "Burn guard: экономия 19.20%",
                         "blocking_reply_contract": {
                             "contract_version": "client-budget-blocked-reply-v1",
                             "response_kind": "rotate_chat_only",
@@ -10784,7 +10849,7 @@ mod tests {
             "must_rotate_before_reply": false,
             "must_wait_for_budget_recovery_before_reply": false,
             "reply_budget_mode": "compact_high_signal",
-            "reply_prefix": "5ч KPI: переплата 178.24%",
+            "reply_prefix": "Burn guard: переплата 178.24%",
             "rotate_now": false,
             "rotate_soon": false,
             "action_bundle": {}
@@ -10900,11 +10965,11 @@ mod tests {
             "working_state_restore": {
                 "client_budget_guard": {
                     "status_label": "сожми текущий чат сейчас",
-                    "reply_prefix": "5ч KPI: переплата 2.46%",
+                    "reply_prefix": "Burn guard: переплата 2.46%",
                     "reply_execution_gate": {
                         "gate_version": "client-reply-budget-gate-v1",
                         "must_rotate_before_reply": true,
-                        "reply_prefix": "5ч KPI: переплата 2.46%",
+                        "reply_prefix": "Burn guard: переплата 2.46%",
                         "blocking_reply_contract": {
                             "contract_version": "client-budget-blocked-reply-v1",
                             "response_kind": "rotate_chat_only",
@@ -11157,8 +11222,8 @@ mod tests {
     #[test]
     fn format_reply_prefix_for_human_preserves_missing_state() {
         assert_eq!(
-            super::format_reply_prefix_for_human(Some("5ч KPI: переплата 2.46%")),
-            "5ч KPI: переплата 2.46%"
+            super::format_reply_prefix_for_human(Some("Burn guard: переплата 2.46%")),
+            "Burn guard: переплата 2.46%"
         );
         assert_eq!(
             super::format_reply_prefix_for_human(Some("   ")),
@@ -11303,7 +11368,7 @@ mod tests {
                 "prompt_text": "   "
             },
             "reply_execution_gate": {
-                "reply_prefix": "5ч KPI: переплата 2.46%"
+                "reply_prefix": "Burn guard: переплата 2.46%"
             },
             "continuity_startup_summary": {
                 "project_code": "   ",
@@ -12666,6 +12731,209 @@ mod tests {
         assert!(artifact["startup_execution_gate"]["blocking"].is_null());
         assert!(artifact["startup_execution_gate"]["must_follow_startup_next_action"].is_null());
         assert!(artifact["startup_execution_gate"]["unrelated_work_allowed"].is_null());
+    }
+
+    #[test]
+    fn startup_runtime_state_artifact_preserves_execctl_active_lease_source_event_id_alignment() {
+        let payload = json!({
+            "continuity_startup": {
+                "project": {
+                    "code": "art",
+                    "display_name": "Art",
+                    "repo_root": "/tmp/amai-art"
+                },
+                "namespace": {
+                    "code": "continuity",
+                    "display_name": "Continuity"
+                },
+                "headline": "Current active line",
+                "next_step": "Continue foundation work.",
+                "restore_confidence": "high",
+                "prompt_text_present": true,
+                "execctl_resume_state": "clear",
+                "execctl_resume_contract_summary": "clear",
+                "execctl_resume_obligation": {
+                    "resume_state": "clear",
+                    "required_task_set_count": 0,
+                    "required_task_set": [],
+                    "required_task_set_summary": Value::Null
+                },
+                "startup_execution_gate": {
+                    "action_kind": "continue_active_workline",
+                    "blocking": false,
+                    "must_follow_startup_next_action": true,
+                    "unrelated_work_allowed": false,
+                    "must_read_prompt_text_before_reply": true,
+                    "required_action_kind_when_resume_required": "resume_required_return_task",
+                    "no_silent_drop": true,
+                    "required_return_task_present": false,
+                    "required_task_set_count": 0,
+                    "required_task_set_present": false,
+                    "must_preserve_required_task_set": false
+                },
+                "startup_next_action": {
+                    "action_kind": "continue_active_workline",
+                    "blocking": false,
+                    "headline": "Current active line",
+                    "next_step": "Continue foundation work."
+                },
+                "execctl_active_lease": {
+                    "lease_owner_state": "same_session_owner",
+                    "source_event_id": "evt_123",
+                    "headline": "Current active line",
+                    "next_step": "Continue foundation work.",
+                    "storage_lane": "ami.execctl_task_leases"
+                },
+                "required_return_task": Value::Null,
+                "required_task_set": [],
+                "required_task_set_summary": Value::Null,
+                "project_task_tree": {
+                    "open_tasks_count": 1
+                },
+                "project_task_tree_summary": "active: Current active line",
+                "project_task_ledger": {
+                    "open_tasks_count": 1
+                },
+                "project_task_ledger_summary": "active: Current active line"
+            },
+            "chat_start_restore": {
+                "headline": "Current active line",
+                "next_step": "Continue foundation work.",
+                "restore_confidence": "high",
+                "prompt_text": "CHAT_START_RESTORE\nCurrent active line",
+                "execctl_active_lease": {
+                    "lease_owner_state": "same_session_owner",
+                    "source_event_id": "evt_123",
+                    "headline": "Current active line",
+                    "next_step": "Continue foundation work.",
+                    "storage_lane": "ami.execctl_task_leases"
+                }
+            },
+            "working_state_restore": {
+                "state_lineage": {
+                    "authoritative_event_id": "evt_123",
+                    "session_id": "sess_123"
+                }
+            }
+        });
+
+        let artifact =
+            build_startup_runtime_state_artifact(Path::new("/tmp/amai-art"), &payload, 42)
+                .expect("startup runtime state artifact");
+
+        assert_eq!(
+            artifact["working_state_restore_lineage"]["authoritative_event_id"],
+            json!("evt_123")
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["execctl_active_lease"]["source_event_id"],
+            json!("evt_123")
+        );
+        assert_eq!(
+            artifact["working_state_restore_lineage"]["authoritative_event_id"],
+            artifact["continuity_startup_summary"]["execctl_active_lease"]["source_event_id"]
+        );
+    }
+
+    #[test]
+    fn startup_runtime_state_artifact_backfills_execctl_active_lease_source_event_id_from_lineage()
+    {
+        let payload = json!({
+            "continuity_startup": {
+                "project": {
+                    "code": "art",
+                    "display_name": "Art",
+                    "repo_root": "/tmp/amai-art"
+                },
+                "namespace": {
+                    "code": "continuity",
+                    "display_name": "Continuity"
+                },
+                "headline": "Current active line",
+                "next_step": "Continue foundation work.",
+                "restore_confidence": "high",
+                "prompt_text_present": true,
+                "execctl_resume_state": "clear",
+                "execctl_resume_contract_summary": "clear",
+                "execctl_resume_obligation": {
+                    "resume_state": "clear",
+                    "required_task_set_count": 0,
+                    "required_task_set": [],
+                    "required_task_set_summary": Value::Null
+                },
+                "startup_execution_gate": {
+                    "action_kind": "continue_active_workline",
+                    "blocking": false,
+                    "must_follow_startup_next_action": true,
+                    "unrelated_work_allowed": false,
+                    "must_read_prompt_text_before_reply": true,
+                    "required_action_kind_when_resume_required": "resume_required_return_task",
+                    "no_silent_drop": true,
+                    "required_return_task_present": false,
+                    "required_task_set_count": 0,
+                    "required_task_set_present": false,
+                    "must_preserve_required_task_set": false
+                },
+                "startup_next_action": {
+                    "action_kind": "continue_active_workline",
+                    "blocking": false,
+                    "headline": "Current active line",
+                    "next_step": "Continue foundation work."
+                },
+                "execctl_active_lease": {
+                    "lease_owner_state": "same_session_owner",
+                    "headline": "Current active line",
+                    "next_step": "Continue foundation work.",
+                    "storage_lane": "ami.execctl_task_leases"
+                },
+                "required_return_task": Value::Null,
+                "required_task_set": [],
+                "required_task_set_summary": Value::Null,
+                "project_task_tree": {
+                    "open_tasks_count": 1
+                },
+                "project_task_tree_summary": "active: Current active line",
+                "project_task_ledger": {
+                    "open_tasks_count": 1
+                },
+                "project_task_ledger_summary": "active: Current active line"
+            },
+            "chat_start_restore": {
+                "headline": "Current active line",
+                "next_step": "Continue foundation work.",
+                "restore_confidence": "high",
+                "prompt_text": "CHAT_START_RESTORE\nCurrent active line",
+                "execctl_active_lease": {
+                    "lease_owner_state": "same_session_owner",
+                    "headline": "Current active line",
+                    "next_step": "Continue foundation work.",
+                    "storage_lane": "ami.execctl_task_leases"
+                }
+            },
+            "working_state_restore": {
+                "state_lineage": {
+                    "authoritative_event_id": "evt_456",
+                    "session_id": "sess_456"
+                }
+            }
+        });
+
+        let artifact =
+            build_startup_runtime_state_artifact(Path::new("/tmp/amai-art"), &payload, 42)
+                .expect("startup runtime state artifact");
+
+        assert_eq!(
+            artifact["working_state_restore_lineage"]["authoritative_event_id"],
+            json!("evt_456")
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["execctl_active_lease"]["source_event_id"],
+            json!("evt_456")
+        );
+        assert_eq!(
+            artifact["execctl_active_lease"]["source_event_id"],
+            json!("evt_456")
+        );
     }
 
     #[test]

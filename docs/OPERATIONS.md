@@ -2195,10 +2195,10 @@ cargo run --release -- verify token-benchmark-suite \
 ./scripts/token_report.sh
 ```
 
-Если хотите отдельно смотреть 5-часовое окно Codex:
+Если хотите отдельно смотреть основное клиентское лимитное окно:
 
 ```bash
-./scripts/token_report.sh --budget-profile codex_5h
+./scripts/token_report.sh --budget-profile client_primary_budget
 ```
 
 Канонический spec этого слоя:
@@ -2621,7 +2621,7 @@ cargo run --release -- observe token-evidence-pack --scope current_session --out
 Dashboard hero-cards теперь тоже обязаны поднимать `client_limit_meter_alignment`.
 Это нужно затем, чтобы оператор видел distinction между:
 - lower-bound savings inside Amai;
-- и тем самым внешним meter, которым клиент реально сжигает свой live `5h` лимит.
+- и тем самым внешним meter, которым клиент реально сжигает свой основной live-лимит.
 
 MCP `amai_context_pack` теперь тоже участвует в same-meter path:
 - tool result после построения summary/stats дописывает observed `tool_overhead_tokens`
@@ -2843,7 +2843,7 @@ already-measured strict same-meter slice и не выглядела как об�
   repo-thread из SQLite;
 - запрещено использовать `total_token_usage.total_tokens` как surrogate для текущего
   context-window pressure: это cumulative source, а не snapshot последнего запроса.
-- если live client-turn pressure уже высокий, остаток 5h лимита низкий, а доля
+- если live client-turn pressure уже высокий, остаток основного лимита низкий, а доля
   `Amai в полном live-turn` остаётся слабой, current-session card обязана уйти в
   operator-facing warning из канонического same-thread advisory set
   (`сожми текущий чат` / `сожми текущий чат сейчас`), если host current-thread control

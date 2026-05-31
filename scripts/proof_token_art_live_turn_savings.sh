@@ -20,11 +20,39 @@ live_source_kind="live_art_continuity_${proof_id}"
 repaired_source_kind="proof_art_continuity_live_turn"
 
 cleanup() {
-  sqlite3 ~/.codex/state_5.sqlite "DELETE FROM threads WHERE id = '$thread_id';" >/dev/null 2>&1 || true
+  sqlite_exec ~/.codex/state_5.sqlite "DELETE FROM threads WHERE id = '$thread_id';" >/dev/null 2>&1 || true
   rm -f "$rollout_path"
   rm -f "$completed_rollout_path"
 }
 trap cleanup EXIT
+
+sqlite_exec() {
+  local db_path="$1"
+  local sql="$2"
+  DB_PATH="$db_path" SQL="$sql" python3 - <<'PY'
+import os
+import sqlite3
+
+conn = sqlite3.connect(os.environ["DB_PATH"])
+try:
+    conn.execute(os.environ["SQL"])
+    conn.commit()
+finally:
+    conn.close()
+PY
+}
+
+clear_workspace_restore_pack_rows() {
+  psql "$AMI_POSTGRES_DSN" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+DELETE FROM ami.restore_packs rp
+USING ami.projects p, ami.namespaces n
+WHERE rp.project_id = p.project_id
+  AND rp.namespace_id = n.namespace_id
+  AND p.code = 'amai'
+  AND n.code = 'continuity'
+  AND rp.pack_kind = 'workspace_restore_pack';
+SQL
+}
 
 write_rollout_file() {
   local total_tokens="$1"
@@ -122,7 +150,7 @@ wait_for_token_metrics() {
     sleep 1
   done
   ./target/release/amai observe token-report \
-    --budget-profile codex_5h \
+    --budget-profile client_primary_budget \
     --include-verify-events true >/dev/null
   fetch_token_metrics "$source_kind" "$context_pack_id"
 }
@@ -159,7 +187,7 @@ wait_for_current_live_turn_snapshot() {
   local attempt=""
   for attempt in {1..16}; do
     timeout 2s ./target/release/amai observe token-report \
-      --budget-profile codex_5h \
+      --budget-profile client_primary_budget \
       --include-verify-events true >/dev/null || true
     CODEX_THREAD_ID="$thread_id" AMAI_AGENT_SCOPE="proof_art_continuity_live_turn" \
       timeout 20s ./target/release/amai observe snapshot >"$snapshot_path" || true
@@ -184,7 +212,7 @@ wait_for_current_live_turn_snapshot() {
 update_thread_rollout_path() {
   local thread_id="$1"
   local rollout_path="$2"
-  sqlite3 ~/.codex/state_5.sqlite \
+  sqlite_exec ~/.codex/state_5.sqlite \
     "UPDATE threads
      SET rollout_path = '$rollout_path',
          updated_at = strftime('%s','now')
@@ -215,7 +243,7 @@ purge_shared_token_budget_caches() {
     state/token_budget/live_turn_retrieval_context_pack_invalidation.json
 }
 
-sqlite3 ~/.codex/state_5.sqlite \
+sqlite_exec ~/.codex/state_5.sqlite \
   "INSERT INTO threads (
       id,
       rollout_path,
@@ -251,6 +279,8 @@ sqlite3 ~/.codex/state_5.sqlite \
       'proof art continuity live turn',
       'enabled'
     );" >/dev/null
+
+clear_workspace_restore_pack_rows
 
 write_rollout_file 1200 0
 
@@ -291,12 +321,6 @@ update_thread_rollout_path "$thread_id" "$completed_rollout_path"
 purge_thread_budget_caches "$thread_id"
 purge_shared_token_budget_caches
 
-./target/release/amai observe token-report \
-  --budget-profile codex_5h \
-  --include-verify-events true >/dev/null
-
-wait_for_current_live_turn_snapshot "$snapshot_path" "$thread_id" "$turn_id"
-
 ./target/release/amai observe repair-token-ledger \
   --apply \
   --limit 256 \
@@ -304,6 +328,12 @@ wait_for_current_live_turn_snapshot "$snapshot_path" "$thread_id" "$turn_id"
   --correlation-id "$context_pack_id" \
   --rewrite-source-kind "$repaired_source_kind" \
   --repair-reason "proof_art_continuity_live_turn_cleanup" >/dev/null
+
+./target/release/amai observe token-report \
+  --budget-profile client_primary_budget \
+  --include-verify-events true >/dev/null
+
+wait_for_current_live_turn_snapshot "$snapshot_path" "$thread_id" "$turn_id"
 
 printf 'art_continuity\t%s\t%s\t%s\t%s\n' \
   "$naive_tokens" \

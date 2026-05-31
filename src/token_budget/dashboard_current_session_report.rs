@@ -6,20 +6,25 @@ pub(crate) async fn collect_dashboard_current_session_budget_report_with_thread_
     explicit_thread_id_hint: Option<&str>,
 ) -> Result<Value> {
     let repo_root = config::discover_repo_root(None)?;
-    let now_epoch_ms = current_epoch_ms().unwrap_or_default() as u64;
-    if let Some(report) = reusable_exact_thread_current_session_budget_report_from_base_report(
-        base_report,
-        explicit_thread_id_hint,
-    ) {
-        return Ok(report);
-    }
     let repo_root_str = repo_root
         .to_str()
         .ok_or_else(|| anyhow!("repo_root must be valid UTF-8"))?;
     let config = load_config(&repo_root)?;
     let profile = resolve_profile(&config, None, &repo_root)?;
     let include_verify_events = config.measurement.include_verify_events_by_default;
+    let public_savings_window = resolve_public_savings_window_contract(&config, &repo_root)?;
     let session_gap_ms = profile.session_gap_minutes.saturating_mul(60_000) as i64;
+    let personal_agent_scope =
+        current_workspace_personal_kpi_selector(db, &repo_root, explicit_thread_id_hint).await?;
+    let now_epoch_ms = current_epoch_ms().unwrap_or_default() as u64;
+    if let Some(report) = reusable_exact_thread_current_session_budget_report_from_base_report(
+        base_report,
+        explicit_thread_id_hint,
+        personal_agent_scope.as_ref(),
+        &public_savings_window,
+    ) {
+        return Ok(report);
+    }
 
     let (rollout_observation_signature, rollout_observations) =
         dashboard_rollout_assistant_generation_observations_for_repo(&repo_root)?;
@@ -60,8 +65,6 @@ pub(crate) async fn collect_dashboard_current_session_budget_report_with_thread_
         .await?;
     }
 
-    let personal_agent_scope =
-        current_workspace_personal_kpi_selector(db, &repo_root, explicit_thread_id_hint).await?;
     let snapshot_kinds = dashboard_event_snapshot_kinds(include_verify_events);
     let dashboard_summary =
         postgres::summarize_observability_snapshots_by_kinds(db, snapshot_kinds).await?;
@@ -76,13 +79,14 @@ pub(crate) async fn collect_dashboard_current_session_budget_report_with_thread_
     personal_kpi_source_events.sort_by_key(|event| event.created_at_epoch_ms);
     let personal_kpi_source_events =
         reconcile_followup_recovery(&personal_kpi_source_events, session_gap_ms);
-    let personal_agent_5h_events = personal_kpi_window_events(
+    let public_savings_window_events = personal_kpi_window_events_for_hours(
         &personal_kpi_source_events,
         personal_agent_scope.as_ref(),
         now_epoch_ms as i64,
+        public_savings_window.hours,
     );
-    let personal_agent_5h_summary = summarize_events(
-        &personal_agent_5h_events,
+    let public_savings_window_summary = summarize_events(
+        &public_savings_window_events,
         now_epoch_ms as i64,
         &config.measurement,
         &config.contract,
@@ -205,9 +209,10 @@ pub(crate) async fn collect_dashboard_current_session_budget_report_with_thread_
             (client_live_meter, current_live_turn)
         };
     let personal_agent_kpi = preferred_personal_agent_kpi(
-        &personal_agent_5h_summary,
+        &public_savings_window_summary,
         personal_agent_scope.as_ref(),
         Some(&client_live_meter),
+        &public_savings_window,
     );
     Ok(json!({
         "token_budget_report": {
@@ -232,13 +237,19 @@ pub(crate) async fn collect_dashboard_current_session_budget_report_with_thread_
 pub(super) fn reusable_exact_thread_current_session_budget_report_from_base_report(
     base_report: Option<&Value>,
     explicit_thread_id_hint: Option<&str>,
+    personal_agent_scope: Option<&PersonalKpiSelector>,
+    public_savings_window: &PublicSavingsWindowContract,
 ) -> Option<Value> {
     let now_epoch_ms = current_epoch_ms().ok()? as u64;
     let report = base_report?;
     let client_budget_target_percent = report["client_budget_target_percent"].clone();
     let current_session = report["current_session"].clone();
     let current_session_statement_preview = report["statement_previews"]["current_session"].clone();
-    let personal_agent_kpi = report["personal_agent_kpi"].clone();
+    let personal_agent_kpi = validated_personal_agent_kpi_for_selector(
+        &report["personal_agent_kpi"],
+        personal_agent_scope?,
+        public_savings_window,
+    )?;
     let client_limit_hourly_burn = reusable_client_limit_hourly_burn_from_base_report(
         base_report,
         now_epoch_ms,
@@ -446,6 +457,7 @@ pub(super) fn active_agent_budget_fields_from_thread_bound_snapshot(
     repo_root: &Path,
     selector: &PersonalKpiSelector,
     now_epoch_ms: u64,
+    public_savings_window: &PublicSavingsWindowContract,
 ) -> Option<(Value, Value)> {
     let thread_id = selector.thread_id.as_deref()?.trim();
     if thread_id.is_empty() {
@@ -469,8 +481,41 @@ pub(super) fn active_agent_budget_fields_from_thread_bound_snapshot(
         ACTIVE_AGENT_RECENT_THREAD_FALLBACK_MAX_AGE_MS as u64,
     )?;
     let personal_agent_kpi =
-        preferred_personal_agent_kpi(&json!({}), Some(selector), Some(&client_live_meter));
+        reusable_thread_bound_personal_agent_kpi(report, selector, public_savings_window)?;
     Some((client_live_meter, personal_agent_kpi))
+}
+
+fn reusable_thread_bound_personal_agent_kpi(
+    report: &Value,
+    selector: &PersonalKpiSelector,
+    public_savings_window: &PublicSavingsWindowContract,
+) -> Option<Value> {
+    validated_personal_agent_kpi_for_selector(
+        &report["personal_agent_kpi"],
+        selector,
+        public_savings_window,
+    )
+}
+
+fn validated_personal_agent_kpi_for_selector(
+    personal_agent_kpi: &Value,
+    selector: &PersonalKpiSelector,
+    public_savings_window: &PublicSavingsWindowContract,
+) -> Option<Value> {
+    if !personal_agent_kpi.is_object() {
+        return None;
+    }
+    if personal_agent_kpi["window_hours"].as_u64() != Some(public_savings_window.hours)
+        || personal_agent_kpi["window_source"].as_str() != Some(public_savings_window.source)
+    {
+        return None;
+    }
+    if personal_agent_kpi["scope_kind"].as_str() != Some(selector.scope_kind())
+        || personal_agent_kpi["scope_label"].as_str() != Some(selector.scope_label())
+    {
+        return None;
+    }
+    Some(personal_agent_kpi.clone())
 }
 
 pub(super) fn reusable_exact_thread_budget_live_surfaces_from_base_report(
@@ -579,6 +624,22 @@ mod tests {
     use std::fs;
     use uuid::Uuid;
 
+    fn public_savings_window_contract() -> PublicSavingsWindowContract {
+        PublicSavingsWindowContract {
+            hours: 24,
+            source: "repo_config",
+        }
+    }
+
+    fn selector(thread_id: &str) -> PersonalKpiSelector {
+        PersonalKpiSelector {
+            project_code: "amai".to_string(),
+            namespace_code: "continuity".to_string(),
+            agent_scope: "amai::continuity::default".to_string(),
+            thread_id: Some(thread_id.to_string()),
+        }
+    }
+
     #[test]
     fn reusable_exact_thread_budget_live_surfaces_from_base_report_accepts_matching_thread() {
         let observed_at_epoch_ms = current_epoch_ms().unwrap_or_default() as u64;
@@ -657,7 +718,11 @@ mod tests {
             },
             "personal_agent_kpi": {
                 "status": "observed",
-                "reply_prefix": "5ч KPI: 1:1"
+                "scope_kind": "personal_thread_scope",
+                "scope_label": "thread-current",
+                "window_hours": 24,
+                "window_source": "repo_config",
+                "reply_prefix": "Amai savings: н/д"
             },
             "client_limit_hourly_burn": {
                 "status": "observed",
@@ -681,6 +746,8 @@ mod tests {
         let reused = reusable_exact_thread_current_session_budget_report_from_base_report(
             Some(&report),
             Some("thread-current"),
+            Some(&selector("thread-current")),
+            &public_savings_window_contract(),
         )
         .expect("reusable current-session budget report");
 
@@ -729,7 +796,11 @@ mod tests {
             },
             "personal_agent_kpi": {
                 "status": "observed",
-                "reply_prefix": "5ч KPI: 1:1"
+                "scope_kind": "personal_thread_scope",
+                "scope_label": "thread-current",
+                "window_hours": 24,
+                "window_source": "repo_config",
+                "reply_prefix": "Amai savings: н/д"
             },
             "client_limit_hourly_burn": {
                 "status": "observed",
@@ -754,6 +825,64 @@ mod tests {
             reusable_exact_thread_current_session_budget_report_from_base_report(
                 Some(&report),
                 Some("thread-current"),
+                Some(&selector("thread-current")),
+                &public_savings_window_contract(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn reusable_exact_thread_current_session_budget_report_rejects_stale_public_window_kpi() {
+        let observed_at_epoch_ms = current_epoch_ms().unwrap_or_default() as u64;
+        let report = json!({
+            "filters": {
+                "include_verify_events": false
+            },
+            "client_budget_target_percent": 50,
+            "current_session": {
+                "same_meter_saved_pct": 12.34
+            },
+            "statement_previews": {
+                "current_session": {
+                    "client_limit_meter_alignment": {
+                        "equivalence_status": "same_meter_equivalent"
+                    }
+                }
+            },
+            "personal_agent_kpi": {
+                "status": "observed",
+                "scope_kind": "personal_thread_scope",
+                "scope_label": "thread-current",
+                "window_hours": 5,
+                "window_source": "embedded_default",
+                "reply_prefix": "Amai savings: н/д"
+            },
+            "client_limit_hourly_burn": {
+                "status": "observed",
+                "latest_observed_at_epoch_ms": observed_at_epoch_ms
+            },
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true,
+                "status_bar_rate_limits": {
+                    "status": "observed",
+                    "observed_at_epoch_ms": observed_at_epoch_ms,
+                    "primary_limit_used_percent": 12.5
+                }
+            },
+            "current_live_turn": {
+                "thread_id": "thread-current",
+                "status": "no_amai_activity_in_current_live_turn"
+            }
+        });
+
+        assert!(
+            reusable_exact_thread_current_session_budget_report_from_base_report(
+                Some(&report),
+                Some("thread-current"),
+                Some(&selector("thread-current")),
+                &public_savings_window_contract(),
             )
             .is_none()
         );
@@ -910,6 +1039,138 @@ mod tests {
                 &temp_root,
                 thread_id,
                 observed_at_epoch_ms,
+            )
+            .is_none()
+        );
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn active_agent_budget_fields_from_thread_bound_snapshot_reuses_matching_public_window_kpi() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "amai-active-agent-thread-bound-kpi-{}",
+            Uuid::new_v4()
+        ));
+        let thread_id = "thread-current";
+        let observed_at_epoch_ms = current_epoch_ms().unwrap_or_default() as u64;
+        let path = thread_bound_budget_snapshot_shared_cache_path(&temp_root, thread_id);
+        fs::create_dir_all(path.parent().expect("snapshot parent"))
+            .expect("create snapshot parent");
+        let persisted = json!({
+            "cache_version": THREAD_BOUND_BUDGET_SNAPSHOT_SHARED_CACHE_VERSION,
+            "fetched_at_epoch_ms": observed_at_epoch_ms,
+            "thread_id": thread_id,
+            "snapshot": {
+                "token_budget_report": {
+                    "token_budget_report": {
+                        "client_live_meter": {
+                            "thread_id": thread_id,
+                            "current_thread_bound": true,
+                            "status_bar_rate_limits": {
+                                "status": "observed",
+                                "observed_at_epoch_ms": observed_at_epoch_ms,
+                                "primary_limit_used_percent": 11.0,
+                                "primary_limit_remaining_percent": 89.0
+                            }
+                        },
+                        "current_live_turn": {
+                            "thread_id": thread_id,
+                            "status": "no_amai_activity_in_current_live_turn"
+                        },
+                        "personal_agent_kpi": {
+                            "status": "observed",
+                            "scope_kind": "personal_thread_scope",
+                            "scope_label": thread_id,
+                            "window_hours": 24,
+                            "window_source": "repo_config",
+                            "reply_prefix": "Amai savings: без Amai 240, с Amai 120, экономия 120 (50.00%)"
+                        }
+                    }
+                }
+            }
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec(&persisted).expect("serialize snapshot"),
+        )
+        .expect("write snapshot");
+
+        let reused = active_agent_budget_fields_from_thread_bound_snapshot(
+            &temp_root,
+            &selector(thread_id),
+            observed_at_epoch_ms,
+            &public_savings_window_contract(),
+        )
+        .expect("reused active-agent fields");
+
+        assert_eq!(reused.0["thread_id"], json!(thread_id));
+        assert_eq!(reused.1["window_hours"], json!(24));
+        assert_eq!(reused.1["window_source"], json!("repo_config"));
+        assert_eq!(
+            reused.1["reply_prefix"],
+            json!("Amai savings: без Amai 240, с Amai 120, экономия 120 (50.00%)")
+        );
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn active_agent_budget_fields_from_thread_bound_snapshot_rejects_stale_public_window_kpi() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "amai-active-agent-thread-bound-kpi-stale-{}",
+            Uuid::new_v4()
+        ));
+        let thread_id = "thread-current";
+        let observed_at_epoch_ms = current_epoch_ms().unwrap_or_default() as u64;
+        let path = thread_bound_budget_snapshot_shared_cache_path(&temp_root, thread_id);
+        fs::create_dir_all(path.parent().expect("snapshot parent"))
+            .expect("create snapshot parent");
+        let persisted = json!({
+            "cache_version": THREAD_BOUND_BUDGET_SNAPSHOT_SHARED_CACHE_VERSION,
+            "fetched_at_epoch_ms": observed_at_epoch_ms,
+            "thread_id": thread_id,
+            "snapshot": {
+                "token_budget_report": {
+                    "token_budget_report": {
+                        "client_live_meter": {
+                            "thread_id": thread_id,
+                            "current_thread_bound": true,
+                            "status_bar_rate_limits": {
+                                "status": "observed",
+                                "observed_at_epoch_ms": observed_at_epoch_ms,
+                                "primary_limit_used_percent": 11.0,
+                                "primary_limit_remaining_percent": 89.0
+                            }
+                        },
+                        "current_live_turn": {
+                            "thread_id": thread_id,
+                            "status": "no_amai_activity_in_current_live_turn"
+                        },
+                        "personal_agent_kpi": {
+                            "status": "observed",
+                            "scope_kind": "personal_thread_scope",
+                            "scope_label": thread_id,
+                            "window_hours": 5,
+                            "window_source": "embedded_default",
+                            "reply_prefix": "Amai savings: без Amai 240, с Amai 120, экономия 120 (50.00%)"
+                        }
+                    }
+                }
+            }
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec(&persisted).expect("serialize snapshot"),
+        )
+        .expect("write snapshot");
+
+        assert!(
+            active_agent_budget_fields_from_thread_bound_snapshot(
+                &temp_root,
+                &selector(thread_id),
+                observed_at_epoch_ms,
+                &public_savings_window_contract(),
             )
             .is_none()
         );

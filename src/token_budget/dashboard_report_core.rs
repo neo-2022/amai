@@ -1,3 +1,7 @@
+use super::token_budget_runtime_shared::{
+    OPERATOR_CLIENT_BUDGET_CONTEXT_CONTRACT_VERSION, PUBLIC_PRODUCT_HEADLINE_CONTRACT_VERSION,
+    PUBLIC_SAVINGS_PROJECTION_CONTRACT_VERSION,
+};
 use super::*;
 
 static DASHBOARD_REPORT_CACHE: OnceLock<Mutex<Option<DashboardReportCache>>> = OnceLock::new();
@@ -16,7 +20,9 @@ pub(super) struct DashboardReportSignatureComponents {
     pub(super) rolling_window_events: String,
     pub(super) lifetime_events: String,
     pub(super) personal_agent_scope: String,
-    pub(super) personal_agent_5h_events: String,
+    pub(super) public_savings_window_events: String,
+    pub(super) public_savings_window_hours: u64,
+    pub(super) public_savings_window_source: String,
     pub(super) current_session_assistant_scope: String,
     pub(super) rolling_window_assistant_scope: String,
     pub(super) lifetime_assistant_scope: String,
@@ -24,6 +30,9 @@ pub(super) struct DashboardReportSignatureComponents {
     pub(super) exact_client_limits: String,
     pub(super) live_response_latency: String,
     pub(super) client_budget_target_percent: u64,
+    pub(super) public_savings_projection_contract_version: String,
+    pub(super) public_product_headline_contract_version: String,
+    pub(super) operator_client_budget_context_contract_version: String,
 }
 
 pub(super) fn dashboard_report_signature_components(
@@ -31,7 +40,8 @@ pub(super) fn dashboard_report_signature_components(
     rolling_window_events: &[TokenBudgetEvent],
     lifetime_events: &[TokenBudgetEvent],
     personal_agent_scope: Option<&PersonalKpiSelector>,
-    personal_agent_5h_events: &[TokenBudgetEvent],
+    public_savings_window_events: &[TokenBudgetEvent],
+    public_savings_window: &PublicSavingsWindowContract,
     current_session_assistant_scope: &AssistantGenerationScopeObservation,
     rolling_window_assistant_scope: Option<&AssistantGenerationScopeObservation>,
     lifetime_assistant_scope: &AssistantGenerationScopeObservation,
@@ -48,7 +58,11 @@ pub(super) fn dashboard_report_signature_components(
         personal_agent_scope: personal_agent_scope
             .map(PersonalKpiSelector::signature_key)
             .unwrap_or_else(|| "unbound".to_string()),
-        personal_agent_5h_events: dashboard_report_events_signature(personal_agent_5h_events),
+        public_savings_window_events: dashboard_report_events_signature(
+            public_savings_window_events,
+        ),
+        public_savings_window_hours: public_savings_window.hours,
+        public_savings_window_source: public_savings_window.source.to_string(),
         current_session_assistant_scope: dashboard_report_assistant_scope_signature(
             current_session_assistant_scope,
         ),
@@ -67,6 +81,12 @@ pub(super) fn dashboard_report_signature_components(
         ),
         live_response_latency: live_response_latency_surface_signature(live_response_latency),
         client_budget_target_percent,
+        public_savings_projection_contract_version: PUBLIC_SAVINGS_PROJECTION_CONTRACT_VERSION
+            .to_string(),
+        public_product_headline_contract_version: PUBLIC_PRODUCT_HEADLINE_CONTRACT_VERSION
+            .to_string(),
+        operator_client_budget_context_contract_version:
+            OPERATOR_CLIENT_BUDGET_CONTEXT_CONTRACT_VERSION.to_string(),
     }
 }
 
@@ -78,7 +98,9 @@ pub(super) fn dashboard_report_signature(
         "rolling_window_events": components.rolling_window_events,
         "lifetime_events": components.lifetime_events,
         "personal_agent_scope": components.personal_agent_scope,
-        "personal_agent_5h_events": components.personal_agent_5h_events,
+        "public_savings_window_events": components.public_savings_window_events,
+        "public_savings_window_hours": components.public_savings_window_hours,
+        "public_savings_window_source": components.public_savings_window_source,
         "current_session_assistant_scope": components.current_session_assistant_scope,
         "rolling_window_assistant_scope": components.rolling_window_assistant_scope,
         "lifetime_assistant_scope": components.lifetime_assistant_scope,
@@ -86,6 +108,9 @@ pub(super) fn dashboard_report_signature(
         "exact_client_limits": components.exact_client_limits,
         "live_response_latency": components.live_response_latency,
         "client_budget_target_percent": components.client_budget_target_percent,
+        "public_savings_projection_contract_version": components.public_savings_projection_contract_version,
+        "public_product_headline_contract_version": components.public_product_headline_contract_version,
+        "operator_client_budget_context_contract_version": components.operator_client_budget_context_contract_version,
     });
     hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
 }

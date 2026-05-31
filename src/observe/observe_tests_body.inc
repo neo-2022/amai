@@ -261,7 +261,7 @@ async fn dashboard_page_route_keeps_live_summary_contract_without_cached_bootstr
             "status": "pass",
             "status_label": "ok",
             "status_reason": "cached payload",
-            "token_value": "5ч KPI: 1:1",
+            "token_value": "Burn guard: 1:1",
             "token_scope": ""
         },
         "hero_cards": [],
@@ -925,6 +925,40 @@ async fn healthz_route_returns_up_envelope_for_ready_cache() {
 }
 
 #[tokio::test]
+async fn healthz_route_returns_warming_up_envelope_while_initial_refresh_is_in_progress() {
+    let mut cache = ObserveCache::default();
+    cache.refresh_in_progress = true;
+    cache.last_refresh_started_epoch_ms = Some(super::now_epoch_ms());
+
+    let app = Router::new()
+        .route("/healthz", get(super::healthz_handler))
+        .with_state(test_observe_state(cache));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body bytes");
+    let payload: Value = serde_json::from_slice(&body).expect("health payload");
+    assert_eq!(payload["status"], json!("warming_up"));
+    assert_eq!(payload["surface"], json!("healthz"));
+    assert_eq!(payload["warmup_pending"], json!(true));
+    assert_eq!(
+        payload["error"],
+        json!("initial observe snapshot is still materializing")
+    );
+    assert_eq!(payload["observe_cache"]["refresh_in_progress"], json!(true));
+}
+
+#[tokio::test]
 async fn healthz_route_returns_down_envelope_when_cache_is_stale() {
     let mut cache = ObserveCache::default();
     cache.snapshot = Some(json!({
@@ -956,6 +990,40 @@ async fn healthz_route_returns_down_envelope_when_cache_is_stale() {
     let payload: Value = serde_json::from_slice(&body).expect("health payload");
     assert_eq!(payload["status"], json!("down"));
     assert_eq!(payload["cache_stale"], json!(true));
+}
+
+#[tokio::test]
+async fn snapshot_route_returns_warming_up_envelope_while_initial_refresh_is_in_progress() {
+    let mut cache = ObserveCache::default();
+    cache.refresh_in_progress = true;
+    cache.last_refresh_started_epoch_ms = Some(super::now_epoch_ms());
+
+    let app = Router::new()
+        .route("/api/snapshot", get(super::snapshot_api_handler))
+        .with_state(test_observe_state(cache));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/snapshot")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body bytes");
+    let payload: Value = serde_json::from_slice(&body).expect("snapshot payload");
+    assert_eq!(payload["status"], json!("warming_up"));
+    assert_eq!(payload["surface"], json!("snapshot"));
+    assert_eq!(payload["warmup_pending"], json!(true));
+    assert_eq!(
+        payload["error"],
+        json!("initial observe snapshot is still materializing")
+    );
+    assert_eq!(payload["observe_cache"]["refresh_in_progress"], json!(true));
 }
 
 #[tokio::test]
@@ -1070,13 +1138,13 @@ fn legacy_active_agent_payload_matches_live_summary_bundle_on_same_snapshot() {
             "source": "live_active_agent_budget_surface",
             "headline": {
                 "title": "Средний KPI активных агентов",
-                "value_text": "5ч KPI: экономия 40.00%",
+                "value_text": "Burn guard: экономия 40.00%",
                 "scope_label": "среднее по 2 активным агентам"
             },
             "aggregate": {
                 "status": "observed",
                 "classification": "saving",
-                "reply_prefix": "5ч KPI: экономия 40.00%"
+                "reply_prefix": "Burn guard: экономия 40.00%"
             },
             "agents": [
                 {
@@ -1085,11 +1153,11 @@ fn legacy_active_agent_payload_matches_live_summary_bundle_on_same_snapshot() {
                     "thread_title": "Amai dashboard",
                     "cwd": "/home/art/agent-memory-index",
                     "personal_agent_kpi": {
-                        "reply_prefix": "5ч KPI: экономия 60.00%",
+                        "reply_prefix": "Burn guard: экономия 60.00%",
                         "summary": "agent one"
                     },
                     "personal_client_limit": {
-                        "value_text": "5ч остаётся 43.00%, 7д остаётся 72.00%",
+                        "value_text": "основное окно остаётся 43.00%, расширенное окно остаётся 72.00%",
                         "tooltip": "personal limit one"
                     }
                 },
@@ -1099,11 +1167,11 @@ fn legacy_active_agent_payload_matches_live_summary_bundle_on_same_snapshot() {
                     "thread_title": "Bug bounty",
                     "cwd": "/home/art/Bug-Bounty",
                     "personal_agent_kpi": {
-                        "reply_prefix": "5ч KPI: экономия 20.00%",
+                        "reply_prefix": "Burn guard: экономия 20.00%",
                         "summary": "agent two"
                     },
                     "personal_client_limit": {
-                        "value_text": "5ч остаётся 88.00%, 7д остаётся 91.00%",
+                        "value_text": "основное окно остаётся 88.00%, расширенное окно остаётся 91.00%",
                         "tooltip": "personal limit two"
                     }
                 }
@@ -1281,7 +1349,7 @@ fn merge_thread_bound_snapshot_preserves_full_dashboard_thresholds() {
         "token_budget_report": {
             "token_budget_report": {
                 "headline": {
-                    "title": "5ч KPI: экономия",
+                    "title": "Burn guard: экономия",
                     "value_percent": 42.0
                 },
                 "current_session": {
@@ -1399,7 +1467,7 @@ fn overlay_live_active_agent_surfaces_replaces_cached_agent_card_data() {
                 {
                     "agent_label": "Amai",
                     "personal_client_limit": {
-                        "value_text": "5ч остаётся 44.00%, 7д остаётся 23.00%"
+                        "value_text": "основное окно остаётся 44.00%, расширенное окно остаётся 23.00%"
                     }
                 }
             ]
@@ -1418,7 +1486,7 @@ fn overlay_live_active_agent_surfaces_replaces_cached_agent_card_data() {
                 {
                     "agent_label": "Amai",
                     "personal_client_limit": {
-                        "value_text": "5ч остаётся 42.00%, 7д остаётся 22.00%"
+                        "value_text": "основное окно остаётся 42.00%, расширенное окно остаётся 22.00%"
                     }
                 }
             ]
@@ -1427,7 +1495,7 @@ fn overlay_live_active_agent_surfaces_replaces_cached_agent_card_data() {
 
     assert_eq!(
         merged["active_agent_budget"]["agents"][0]["personal_client_limit"]["value_text"].as_str(),
-        Some("5ч остаётся 42.00%, 7д остаётся 22.00%")
+        Some("основное окно остаётся 42.00%, расширенное окно остаётся 22.00%")
     );
     assert_eq!(
         merged["agent_scope_activity"]["active_now_scopes"][0]["owner_thread_id"].as_str(),
@@ -2074,7 +2142,7 @@ fn shared_client_budget_surfaces_cache_reuses_fresh_bundle() {
         "client_budget_reply_gate": {
             "observed_at_epoch_ms": 9_500,
             "reply_execution_gate": {
-                "reply_prefix": "5ч KPI: переплата 10.00%"
+                "reply_prefix": "Burn guard: переплата 10.00%"
             }
         }
     });
@@ -2102,7 +2170,7 @@ fn shared_client_budget_surfaces_cache_reuses_fresh_bundle() {
     );
     assert_eq!(
         loaded.root_cause["client_budget_reply_gate"]["reply_execution_gate"]["reply_prefix"],
-        json!("5ч KPI: переплата 10.00%")
+        json!("Burn guard: переплата 10.00%")
     );
     let _ = fs::remove_dir_all(&temp_root);
 }
@@ -2125,7 +2193,7 @@ fn try_load_fast_thread_bound_materialized_compact_client_budget_surfaces_uses_c
         "client_budget_reply_gate": {
             "observed_at_epoch_ms": observed_at_epoch_ms,
             "reply_execution_gate": {
-                "reply_prefix": "5ч KPI: переплата 10.00%"
+                "reply_prefix": "Burn guard: переплата 10.00%"
             }
         }
     });
@@ -2160,7 +2228,7 @@ fn try_load_fast_thread_bound_materialized_compact_client_budget_surfaces_uses_c
     .expect("fast thread-bound surfaces");
     assert_eq!(
         loaded.surfaces.root_cause_payload["client_budget_reply_gate"]["reply_execution_gate"]["reply_prefix"],
-        json!("5ч KPI: переплата 10.00%")
+        json!("Burn guard: переплата 10.00%")
     );
     assert_eq!(
         loaded.gate.gate_payload["client_budget_reply_gate"]["reply_execution_gate"]["action_kind"],
@@ -2638,7 +2706,7 @@ fn shared_client_budget_gate_cache_reuses_fresh_bundle() {
         "client_budget_reply_gate": {
             "observed_at_epoch_ms": 9_500,
             "reply_execution_gate": {
-                "reply_prefix": "5ч KPI: переплата 10.00%"
+                "reply_prefix": "Burn guard: переплата 10.00%"
             }
         }
     });
@@ -2659,7 +2727,7 @@ fn shared_client_budget_gate_cache_reuses_fresh_bundle() {
     );
     assert_eq!(
         loaded.gate["client_budget_reply_gate"]["reply_execution_gate"]["reply_prefix"],
-        json!("5ч KPI: переплата 10.00%")
+        json!("Burn guard: переплата 10.00%")
     );
     let _ = fs::remove_dir_all(&temp_root);
 }
@@ -2963,7 +3031,7 @@ fn compact_client_budget_gate_payload_keeps_only_gate_fields() {
     let guard = json!({
         "status": "critical",
         "status_label": "глобальный лимит клиента почти исчерпан",
-        "reply_prefix": "5ч KPI: переплата 2.46%",
+        "reply_prefix": "Burn guard: переплата 2.46%",
         "reason": "heavy human explanation",
         "observed_at_epoch_ms": 1774622949000u64,
         "max_guard_age_seconds": 10,
@@ -2977,7 +3045,7 @@ fn compact_client_budget_gate_payload_keeps_only_gate_fields() {
             "must_rotate_before_reply": false,
             "must_wait_for_budget_recovery_before_reply": true,
             "reply_budget_mode": "compact_high_signal",
-            "reply_prefix": "5ч KPI: переплата 2.46%",
+            "reply_prefix": "Burn guard: переплата 2.46%",
             "reply_budget_contract": {
                 "host_context_compaction_inactive_target_pressure_active": true,
                 "same_meter_pure_burn_turn_active": true,
@@ -3020,11 +3088,11 @@ fn compact_client_budget_gate_payload_keeps_only_gate_fields() {
     );
     assert_eq!(
         payload["reply_prefix"].as_str(),
-        Some("5ч KPI: переплата 2.46%")
+        Some("Burn guard: переплата 2.46%")
     );
     assert_eq!(
         payload["reply_execution_gate"]["reply_prefix"].as_str(),
-        Some("5ч KPI: переплата 2.46%")
+        Some("Burn guard: переплата 2.46%")
     );
     assert_eq!(
         payload["reply_execution_gate"]["preserves_return_obligation"].as_bool(),
@@ -3109,7 +3177,7 @@ fn compact_client_budget_gate_payload_keeps_compact_rotate_action_bundle() {
         "status_label": "сожми текущий чат сейчас",
         "delivery_surface_status_label": "сожми текущий чат сейчас",
         "delivery_surface_status_label": "сожми текущий чат сейчас",
-        "reply_prefix": "5ч KPI: экономия 39.49%",
+        "reply_prefix": "Burn guard: экономия 39.49%",
         "observed_at_epoch_ms": 1774789858128u64,
         "max_guard_age_seconds": 10,
         "reply_execution_gate": {
@@ -3123,7 +3191,7 @@ fn compact_client_budget_gate_payload_keeps_compact_rotate_action_bundle() {
             "reply_budget_mode": "compact_high_signal",
             "delivery_surface_status_label": "сожми текущий чат сейчас",
             "delivery_surface_requires_continuity_startup": true,
-            "reply_prefix": "5ч KPI: экономия 39.49%",
+            "reply_prefix": "Burn guard: экономия 39.49%",
             "preserves_return_obligation": true,
             "action_bundle": {
                 "bundle_version": "rotate-chat-action-bundle-v1",
@@ -3191,7 +3259,7 @@ fn compact_client_budget_gate_payload_keeps_same_thread_wait_metadata() {
         "status": "critical",
         "status_label": "сожми текущий чат сейчас",
         "delivery_surface_status_label": "сожми текущий чат сейчас",
-        "reply_prefix": "5ч KPI: переплата 32.34%",
+        "reply_prefix": "Burn guard: переплата 32.34%",
         "observed_at_epoch_ms": 1774831991851u64,
         "max_guard_age_seconds": 10,
         "reply_execution_gate": {
@@ -3204,7 +3272,7 @@ fn compact_client_budget_gate_payload_keeps_same_thread_wait_metadata() {
             "host_context_compaction_critical_regrowth_active": true,
             "host_context_compaction_preserve_active": true,
             "reply_budget_mode": "compact_high_signal",
-            "reply_prefix": "5ч KPI: переплата 32.34%",
+            "reply_prefix": "Burn guard: переплата 32.34%",
             "preserves_return_obligation": true,
             "action_bundle": {
                 "bundle_version": "rotate-chat-action-bundle-v1",
@@ -3260,7 +3328,7 @@ fn compact_host_control_client_budget_reply_gate_stays_small_and_machine_readabl
     let guard = json!({
         "status": "critical",
         "status_label": "сожми текущий чат сейчас",
-        "reply_prefix": "5ч KPI: переплата 12.34%",
+        "reply_prefix": "Burn guard: переплата 12.34%",
         "host_context_compaction": {
             "stage": "preserve",
             "current_thread_bound": true
@@ -3276,7 +3344,7 @@ fn compact_host_control_client_budget_reply_gate_stays_small_and_machine_readabl
             "host_context_compaction_critical_regrowth_active": false,
             "host_context_compaction_preserve_active": true,
             "reply_budget_mode": "compact_high_signal",
-            "reply_prefix": "5ч KPI: переплата 12.34%",
+            "reply_prefix": "Burn guard: переплата 12.34%",
             "preserves_return_obligation": true,
             "action_bundle": {
                 "bundle_version": "rotate-chat-action-bundle-v1",
@@ -3295,7 +3363,7 @@ fn compact_host_control_client_budget_reply_gate_stays_small_and_machine_readabl
         "long_prose_field": "this should not survive"
     });
     let payload = super::compact_host_control_client_budget_reply_gate(&guard);
-    assert_eq!(payload["reply_prefix"], json!("5ч KPI: переплата 12.34%"));
+    assert_eq!(payload["reply_prefix"], json!("Burn guard: переплата 12.34%"));
     assert_eq!(payload["status_label"], json!("сожми текущий чат сейчас"));
     assert_eq!(
         payload["reply_execution_gate"]["action_kind"],
@@ -3315,7 +3383,7 @@ fn compact_cli_client_budget_gate_payload_trims_same_thread_surface_but_keeps_co
     let guard = json!({
         "status": "critical",
         "status_label": "сожми текущий чат сейчас",
-        "reply_prefix": "5ч KPI: переплата 11.11%",
+        "reply_prefix": "Burn guard: переплата 11.11%",
         "host_context_compaction": {
             "stage": "critical_regrowth",
             "current_thread_bound": true,
@@ -3337,7 +3405,7 @@ fn compact_cli_client_budget_gate_payload_trims_same_thread_surface_but_keeps_co
             "host_context_compaction_critical_regrowth_active": true,
             "host_context_compaction_preserve_active": true,
             "reply_budget_mode": "compact_high_signal",
-            "reply_prefix": "5ч KPI: переплата 11.11%",
+            "reply_prefix": "Burn guard: переплата 11.11%",
             "reply_budget_contract": {
                 "must_prefer_short_paragraphs": true,
                 "must_avoid_commentary_only_updates": true,
@@ -3401,7 +3469,7 @@ fn compact_cli_client_budget_gate_payload_trims_same_thread_surface_but_keeps_co
     );
     assert_eq!(
         payload["reply_execution_gate"]["reply_prefix"],
-        json!("5ч KPI: переплата 11.11%")
+        json!("Burn guard: переплата 11.11%")
     );
     assert_eq!(
         payload["reply_execution_gate"]["must_prefer_short_paragraphs"],
@@ -3441,7 +3509,7 @@ fn compact_cli_client_budget_gate_payload_drops_long_same_thread_details_after_v
     let guard = json!({
         "status": "critical",
         "status_label": "сожми текущий чат сейчас",
-        "reply_prefix": "5ч KPI: переплата 204.20%",
+        "reply_prefix": "Burn guard: переплата 204.20%",
         "host_context_compaction": {
             "stage": "preserve",
             "current_thread_bound": true,
@@ -3462,7 +3530,7 @@ fn compact_cli_client_budget_gate_payload_drops_long_same_thread_details_after_v
             "host_context_compaction_critical_regrowth_active": false,
             "host_context_compaction_preserve_active": true,
             "reply_budget_mode": "compact_high_signal",
-            "reply_prefix": "5ч KPI: переплата 204.20%",
+            "reply_prefix": "Burn guard: переплата 204.20%",
             "preserves_return_obligation": true,
             "action_bundle": {
                 "bundle_version": "rotate-chat-action-bundle-v1",
@@ -3484,7 +3552,7 @@ fn compact_cli_client_budget_gate_payload_drops_long_same_thread_details_after_v
                     "feedback_pending": false,
                     "measurement_pending": false,
                     "retry_allowed": false,
-                    "retry_blocked_reason": "Same-thread compact window локально меняет thread, но полный 5ч burn всё ещё идёт хуже идеального темпа на +12.68 п.п.; rotate fallback should become primary.",
+                    "retry_blocked_reason": "Same-thread compact window локально меняет thread, но полный burn основного окна всё ещё идёт хуже идеального темпа на +12.68 п.п.; rotate fallback should become primary.",
                     "effect_verdict": "full_scale_client_burn_worsened_rotate_fallback_recommended",
                     "effect_summary": "Очень длинный exhausted summary, который больше не должен тащиться в CLI payload после verified failure.",
                     "selection_reason": "protect_recent_host_compaction_gain",
@@ -3524,7 +3592,7 @@ fn compact_cli_client_budget_gate_payload_normalizes_commands_and_deduplicates_p
         "status": "critical",
         "status_label": "сожми текущий чат сейчас",
         "delivery_surface_status_label": "сожми текущий чат сейчас",
-        "reply_prefix": "5ч KPI: переплата 50.00%",
+        "reply_prefix": "Burn guard: переплата 50.00%",
         "host_context_compaction": {
             "stage": "preserve",
             "current_thread_bound": true,
@@ -3547,7 +3615,7 @@ fn compact_cli_client_budget_gate_payload_normalizes_commands_and_deduplicates_p
             "reply_budget_mode": "compact_high_signal",
             "delivery_surface_status_label": "сожми текущий чат сейчас",
             "delivery_surface_requires_continuity_startup": true,
-            "reply_prefix": "5ч KPI: переплата 50.00%",
+            "reply_prefix": "Burn guard: переплата 50.00%",
             "preserves_return_obligation": true,
             "action_bundle": {
                 "bundle_version": "rotate-chat-action-bundle-v1",
@@ -3613,7 +3681,7 @@ fn compact_cli_client_budget_gate_payload_deduplicates_same_thread_primary_comma
     let guard = json!({
         "status": "alert",
         "status_label": "сожми текущий чат сейчас",
-        "reply_prefix": "5ч KPI: переплата 10.00%",
+        "reply_prefix": "Burn guard: переплата 10.00%",
         "host_context_compaction": {
             "stage": "preserve",
             "current_thread_bound": true,
@@ -3634,7 +3702,7 @@ fn compact_cli_client_budget_gate_payload_deduplicates_same_thread_primary_comma
             "host_context_compaction_critical_regrowth_active": false,
             "host_context_compaction_preserve_active": true,
             "reply_budget_mode": "compact_high_signal",
-            "reply_prefix": "5ч KPI: переплата 10.00%",
+            "reply_prefix": "Burn guard: переплата 10.00%",
             "preserves_return_obligation": true,
             "action_bundle": {
                 "bundle_version": "rotate-chat-action-bundle-v1",
@@ -3713,7 +3781,7 @@ fn compact_current_session_budget_guard_payload_drops_prose_and_operator_flow() 
         "requires_global_budget_recovery_before_reply": false,
         "next_action": "rotate now",
         "last_request": "154048 из 258400",
-        "client_limits": "5ч остаётся 69%",
+        "client_limits": "основное окно остаётся 69%",
         "tracked_slice": "экономия 490",
         "tracked_slice_truth": "учтённая часть",
         "client_live_meter_current_thread_bound": true,
@@ -3754,7 +3822,7 @@ fn compact_current_session_budget_guard_payload_drops_prose_and_operator_flow() 
     );
     assert_eq!(payload["full_turn_savings_percent"].as_str(), Some("0.00%"));
     assert_eq!(payload["last_request"].as_str(), Some("154048 из 258400"));
-    assert_eq!(payload["client_limits"].as_str(), Some("5ч остаётся 69%"));
+    assert_eq!(payload["client_limits"].as_str(), Some("основное окно остаётся 69%"));
     assert!(payload.get("status_tooltip").is_none());
     assert!(payload.get("reason").is_none());
     assert!(payload.get("note").is_none());
@@ -3774,7 +3842,7 @@ fn compact_current_session_budget_guard_payload_drops_prose_and_operator_flow() 
 fn compact_client_budget_root_cause_payload_trims_long_same_thread_effect_fields() {
     let payload = json!({
         "status": "observed",
-        "reply_prefix": "5ч KPI: переплата 182.29%",
+        "reply_prefix": "Burn guard: переплата 182.29%",
         "thread_binding_state": "current_thread_bound",
         "current_thread_bound": true,
         "current_live_meter": {
@@ -3850,7 +3918,7 @@ fn compact_client_budget_root_cause_payload_trims_long_same_thread_effect_fields
             "must_rotate_before_reply": false,
             "must_wait_for_budget_recovery_before_reply": false,
             "reply_budget_mode": working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
-            "reply_prefix": "5ч KPI: переплата 182.29%",
+            "reply_prefix": "Burn guard: переплата 182.29%",
             "host_context_compaction_stage": "critical_regrowth",
             "host_context_compaction_preserve_active": true,
             "host_context_compaction_critical_regrowth_active": true,
@@ -4215,7 +4283,7 @@ fn compact_budget_snapshot_preview_payload_trims_hourly_burn_and_alignment_to_es
                 },
                 "client_limit_hourly_burn": {
                     "status": "overspend",
-                    "reply_prefix": "5ч KPI: переплата 12.34%",
+                    "reply_prefix": "Burn guard: переплата 12.34%",
                     "kpi_percent": 12.3456,
                     "actual_used_percent": 67.891,
                     "actual_remaining_percent": 32.109,
@@ -4312,7 +4380,7 @@ fn compact_budget_snapshot_preview_payload_trims_hourly_burn_and_alignment_to_es
     let report = &compact["token_budget_report"]["token_budget_report"];
     assert_eq!(
         report["client_limit_hourly_burn"]["reply_prefix"],
-        json!("5ч KPI: переплата 12.34%")
+        json!("Burn guard: переплата 12.34%")
     );
     assert_eq!(
         report["client_limit_hourly_burn"]["kpi_percent"],
@@ -4398,13 +4466,13 @@ fn compact_cli_client_budget_gate_from_root_cause_payload_extracts_gate() {
             "status_label": "ok",
             "observed_at_epoch_ms": 1234,
             "max_guard_age_seconds": 10,
-            "global_reply_prefix": "5ч KPI: экономия 8.00%",
-            "reply_prefix_source": "personal_agent_5h_kpi",
+            "global_reply_prefix": "Burn guard: экономия 8.00%",
+            "reply_prefix_source": "personal_agent_primary_limit_kpi",
             "reply_execution_gate": {
                 "action_kind": "rotate_chat_for_client_budget",
-                "reply_prefix": "5ч KPI: переплата 1.00%",
-                "global_reply_prefix": "5ч KPI: экономия 8.00%",
-                "reply_prefix_source": "personal_agent_5h_kpi"
+                "reply_prefix": "Burn guard: переплата 1.00%",
+                "global_reply_prefix": "Burn guard: экономия 8.00%",
+                "reply_prefix_source": "personal_agent_primary_limit_kpi"
             }
         }
     });
@@ -4416,16 +4484,16 @@ fn compact_cli_client_budget_gate_from_root_cause_payload_extracts_gate() {
     );
     assert_eq!(
         compact["client_budget_reply_gate"]["reply_execution_gate"]["reply_prefix"],
-        json!("5ч KPI: переплата 1.00%")
+        json!("Burn guard: переплата 1.00%")
     );
-    assert_eq!(compact["reply_prefix"], json!("5ч KPI: переплата 1.00%"));
+    assert_eq!(compact["reply_prefix"], json!("Burn guard: переплата 1.00%"));
     assert_eq!(
         compact["global_reply_prefix"],
-        json!("5ч KPI: экономия 8.00%")
+        Value::Null
     );
     assert_eq!(
         compact["reply_prefix_source"],
-        json!("personal_agent_5h_kpi")
+        json!("personal_agent_primary_limit_kpi")
     );
 }
 
@@ -4436,18 +4504,15 @@ fn front_door_client_budget_gate_payload_surfaces_top_level_reply_prefix_fields(
         "observed_at_epoch_ms": 1234,
         "max_guard_age_seconds": 10,
         "reply_execution_gate": {
-            "reply_prefix": "5ч KPI: переплата 7.00%",
-            "global_reply_prefix": "5ч KPI: переплата 7.00%",
+            "reply_prefix": "Burn guard: переплата 7.00%",
+            "global_reply_prefix": "Burn guard: переплата 7.00%",
             "reply_prefix_source": "global_client_limit_hourly_burn"
         }
     });
 
     let payload = super::front_door_client_budget_gate_payload(gate.clone());
-    assert_eq!(payload["reply_prefix"], json!("5ч KPI: переплата 7.00%"));
-    assert_eq!(
-        payload["global_reply_prefix"],
-        json!("5ч KPI: переплата 7.00%")
-    );
+    assert_eq!(payload["reply_prefix"], json!("Burn guard: переплата 7.00%"));
+    assert!(payload["global_reply_prefix"].is_null());
     assert_eq!(
         payload["reply_prefix_source"],
         json!("global_client_limit_hourly_burn")
@@ -4463,19 +4528,16 @@ fn normalize_front_door_client_budget_gate_payload_shape_backfills_top_level_fie
             "observed_at_epoch_ms": 1234,
             "max_guard_age_seconds": 10,
             "reply_execution_gate": {
-                "reply_prefix": "5ч KPI: переплата 7.00%",
-                "global_reply_prefix": "5ч KPI: переплата 7.00%",
+                "reply_prefix": "Burn guard: переплата 7.00%",
+                "global_reply_prefix": "Burn guard: переплата 7.00%",
                 "reply_prefix_source": "global_client_limit_hourly_burn"
             }
         }
     });
 
     let normalized = super::normalize_front_door_client_budget_gate_payload_shape(payload);
-    assert_eq!(normalized["reply_prefix"], json!("5ч KPI: переплата 7.00%"));
-    assert_eq!(
-        normalized["global_reply_prefix"],
-        json!("5ч KPI: переплата 7.00%")
-    );
+    assert_eq!(normalized["reply_prefix"], json!("Burn guard: переплата 7.00%"));
+    assert!(normalized["global_reply_prefix"].is_null());
     assert_eq!(
         normalized["reply_prefix_source"],
         json!("global_client_limit_hourly_burn")
@@ -4514,7 +4576,7 @@ fn compact_chat_api_summary_drops_heavy_runtime_fields() {
         "operator_notice": {
             "kind": "client_budget_compact_chat_requested",
             "message_text": "message",
-            "reply_prefix": "5ч KPI: переплата 1.00%",
+            "reply_prefix": "Burn guard: переплата 1.00%",
             "exact_chat_command": "компакт_чат",
             "prompt_file": "/tmp/prompt.txt",
             "required_host_action": "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable",
@@ -4671,7 +4733,7 @@ fn client_budget_host_control_launch_api_summary_drops_launch_detail_echo() {
             "status": "opened"
         },
         "client_budget_reply_gate": {
-            "reply_prefix": "5ч KPI: переплата 1.00%",
+            "reply_prefix": "Burn guard: переплата 1.00%",
             "blocking": false
         },
         "operator_notice": {
@@ -4691,7 +4753,7 @@ fn client_budget_host_control_launch_api_summary_drops_launch_detail_echo() {
     );
     assert_eq!(
         compact["client_budget_reply_gate"]["reply_prefix"],
-        json!("5ч KPI: переплата 1.00%")
+        json!("Burn guard: переплата 1.00%")
     );
     assert_eq!(
         compact["operator_notice"]["kind"],
@@ -4732,7 +4794,7 @@ fn thread_bound_host_control_feedback_payload_stays_summary_first() {
                 "warning": "refresh degraded"
             },
             "client_budget_reply_gate": {
-                "reply_prefix": "5ч KPI: переплата 1.00%"
+                "reply_prefix": "Burn guard: переплата 1.00%"
             }
         }
     });
@@ -4746,7 +4808,7 @@ fn thread_bound_host_control_feedback_payload_stays_summary_first() {
     );
     assert_eq!(
         feedback["client_budget_reply_gate"]["reply_prefix"],
-        json!("5ч KPI: переплата 1.00%")
+        json!("Burn guard: переплата 1.00%")
     );
     assert!(payload.get("chat_notice").is_none());
     assert!(feedback.get("operator_notice").is_none());
@@ -4778,7 +4840,7 @@ fn non_thread_host_control_feedback_payload_stays_summary_first() {
                 "warning": "refresh degraded"
             },
             "client_budget_reply_gate": {
-                "reply_prefix": "5ч KPI: переплата 1.00%"
+                "reply_prefix": "Burn guard: переплата 1.00%"
             },
             "operator_notice": {
                 "kind": "host_current_thread_control_feedback_failed",
@@ -4791,7 +4853,7 @@ fn non_thread_host_control_feedback_payload_stays_summary_first() {
             "kind": "host_current_thread_control_feedback_failed",
             "thread_id": null,
             "message_text": "Зафиксировано: same-thread host control не открылся.",
-            "reply_prefix": "5ч KPI: переплата 1.00%",
+            "reply_prefix": "Burn guard: переплата 1.00%",
             "feedback_kind": "failed",
             "command_id": "hotkey-window-open-current"
         }
@@ -4809,7 +4871,7 @@ fn non_thread_host_control_feedback_payload_stays_summary_first() {
     );
     assert_eq!(
         payload["chat_notice"]["reply_prefix"],
-        json!("5ч KPI: переплата 1.00%")
+        json!("Burn guard: переплата 1.00%")
     );
     assert!(feedback.get("message_text").is_none());
     assert!(feedback.get("host_current_thread_control").is_none());
@@ -4827,9 +4889,9 @@ fn non_thread_host_control_feedback_payload_stays_summary_first() {
 fn compact_cli_client_budget_gate_payload_keeps_personal_kpi_metadata() {
     let guard = json!({
         "status_label": "ok",
-        "reply_prefix": "5ч KPI: н/д",
-        "global_reply_prefix": "5ч KPI: экономия 8.00%",
-        "reply_prefix_source": "personal_agent_5h_kpi",
+        "reply_prefix": "Burn guard: н/д",
+        "global_reply_prefix": "Burn guard: экономия 8.00%",
+        "reply_prefix_source": "personal_agent_primary_limit_kpi",
         "observed_at_epoch_ms": 1_000,
         "max_guard_age_seconds": 10,
         "reply_execution_gate": {
@@ -4838,9 +4900,9 @@ fn compact_cli_client_budget_gate_payload_keeps_personal_kpi_metadata() {
             "must_rotate_before_reply": false,
             "must_wait_for_budget_recovery_before_reply": false,
             "reply_budget_mode": "compact_high_signal",
-            "reply_prefix": "5ч KPI: н/д",
-            "global_reply_prefix": "5ч KPI: экономия 8.00%",
-            "reply_prefix_source": "personal_agent_5h_kpi",
+            "reply_prefix": "Burn guard: н/д",
+            "global_reply_prefix": "Burn guard: экономия 8.00%",
+            "reply_prefix_source": "personal_agent_primary_limit_kpi",
             "host_context_compaction_stage": "preserve",
             "host_context_compaction_preserve_active": true,
             "host_context_compaction_critical_regrowth_active": false,
@@ -4859,22 +4921,22 @@ fn compact_cli_client_budget_gate_payload_keeps_personal_kpi_metadata() {
     });
 
     let compact = super::compact_cli_client_budget_gate_payload(&guard);
-    assert_eq!(compact["reply_prefix"], json!("5ч KPI: н/д"));
+    assert_eq!(compact["reply_prefix"], json!("Burn guard: н/д"));
     assert_eq!(
         compact["global_reply_prefix"],
-        json!("5ч KPI: экономия 8.00%")
+        json!("Burn guard: экономия 8.00%")
     );
     assert_eq!(
         compact["reply_prefix_source"],
-        json!("personal_agent_5h_kpi")
+        json!("personal_agent_primary_limit_kpi")
     );
     assert_eq!(
         compact["reply_execution_gate"]["global_reply_prefix"],
-        json!("5ч KPI: экономия 8.00%")
+        json!("Burn guard: экономия 8.00%")
     );
     assert_eq!(
         compact["reply_execution_gate"]["reply_prefix_source"],
-        json!("personal_agent_5h_kpi")
+        json!("personal_agent_primary_limit_kpi")
     );
 }
 

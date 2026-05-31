@@ -321,7 +321,7 @@ pub(super) fn host_current_thread_control_effect_payload_for_command(
             .map(|value| format_signed_percent_points(value as f64))
             .unwrap_or_else(|| "н/д".to_string());
         let mut summary = format!(
-            "Последний {feedback_label} по {surface_label} был {when}: с тех пор giant thread изменился на {turn_delta_text} токенов, context {context_delta_text}, 5ч used {primary_delta_text}."
+            "Последний {feedback_label} по {surface_label} был {when}: с тех пор giant thread изменился на {turn_delta_text} токенов, context {context_delta_text}, основное окно used {primary_delta_text}."
         );
         if let Some(overrun) = primary_limit_used_overrun_percent_points {
             summary.push_str(&format!(
@@ -417,7 +417,7 @@ pub(super) fn host_current_thread_control_effect_payload_for_command(
         )
     } else if full_scale_client_burn_worsened {
         format!(
-            "Same-thread {surface_label} локально меняет thread, но полный 5ч burn всё ещё идёт хуже идеального темпа на {}; rotate fallback should become primary.",
+            "Same-thread {surface_label} локально меняет thread, но полный burn основного окна всё ещё идёт хуже идеального темпа на {}; rotate fallback should become primary.",
             format_signed_percent_points(
                 primary_limit_used_overrun_percent_points.unwrap_or_default()
             )
@@ -489,7 +489,7 @@ pub(super) fn host_current_thread_control_effect_payload_for_command(
         "note": if feedback_kind == working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED {
             "Это observational delta после operator-confirmed open. Он не доказывает причинность, но показывает, насколько giant thread продолжил расти после выбранного same-thread surface."
         } else if full_scale_client_burn_worsened {
-            "Это observational delta от request-side baseline. Даже если thread локально уменьшился, для giant-thread product path surface считается честно неуспешным, если полный 5ч burn после него идёт заметно хуже идеального темпа."
+            "Это observational delta от request-side baseline. Даже если thread локально уменьшился, для giant-thread product path surface считается честно неуспешным, если полный burn основного окна после него идёт заметно хуже идеального темпа."
         } else if measurement_pending {
             "Это ещё слишком свежий same-thread baseline. Не гоняй повторный host-control retry, пока не накопится измеримый effect или хотя бы минимальное окно наблюдения."
         } else {
@@ -908,7 +908,7 @@ pub(super) fn client_budget_target_shortfall_sentence(
     kpi_percent: Option<f64>,
 ) -> String {
     format!(
-        "точный 5ч KPI пока даёт только экономию {} вместо целевых {}%",
+        "точный burn-guard пока даёт только экономию {} вместо целевых {}%",
         format_percent(kpi_percent),
         target_percent
     )
@@ -947,7 +947,7 @@ pub(super) fn global_client_limit_source(client_live_meter: &Value) -> Option<Va
                 "live_turn_rows"
             ],
             "observed_at_epoch_ms": preferred_client_limit_observed_at_epoch_ms(client_live_meter),
-            "summary": "При отсутствии current-thread binding Amai читает exact global rate limits напрямую из codex app-server account/rateLimits/read. Этот source совпадает с VS Code status bar для 5ч/7д окна и годится для честного live client limit surface и hard wait при глобальном исчерпании, но не для thread-local rotate pressure.",
+            "summary": "При отсутствии current-thread binding Amai читает exact global rate limits напрямую из codex app-server account/rateLimits/read. Этот source совпадает с VS Code status bar для основного/расширенного окна окна и годится для честного live client limit surface и hard wait при глобальном исчерпании, но не для thread-local rotate pressure.",
         }));
     }
     if !client_live_meter_is_observed(client_live_meter)
@@ -1010,25 +1010,25 @@ pub(super) fn global_client_limit_guard_note(
         client_limits_value.unwrap_or("последнее observed значение лимита клиента");
     if exact_live_source && guard.severity == "critical" {
         format!(
-            "Current thread binding ещё не materialized, но Amai уже читает live global rate-limit source клиента напрямую из codex app-server: 5ч {}, 7д {}. Этого уже достаточно для fail-closed wait path: новая чистая рабочая поверхность не поможет, нужно дождаться восстановления внешнего клиентского лимита. Текущее live значение: {rendered_limits}.",
+            "Current thread binding ещё не materialized, но Amai уже читает live global rate-limit source клиента напрямую из codex app-server: основное окно {}, 7д {}. Этого уже достаточно для fail-closed wait path: новая чистая рабочая поверхность не поможет, нужно дождаться восстановления внешнего клиентского лимита. Текущее live значение: {rendered_limits}.",
             format_percent(Some(guard.primary_remaining_percent)),
             format_percent(Some(guard.secondary_remaining_percent)),
         )
     } else if exact_live_source {
         format!(
-            "Current thread binding ещё не materialized, но Amai уже читает live global rate-limit source клиента напрямую из codex app-server: 5ч {}, 7д {}. Это пока только global warning hint: rotate gate не включается, но следующий substantive reply стоит делать только после повторной проверки budget. Текущее live значение: {rendered_limits}.",
+            "Current thread binding ещё не materialized, но Amai уже читает live global rate-limit source клиента напрямую из codex app-server: основное окно {}, 7д {}. Это пока только global warning hint: rotate gate не включается, но следующий substantive reply стоит делать только после повторной проверки budget. Текущее live значение: {rendered_limits}.",
             format_percent(Some(guard.primary_remaining_percent)),
             format_percent(Some(guard.secondary_remaining_percent)),
         )
     } else if guard.severity == "critical" {
         format!(
-            "Current thread binding ещё не materialized, поэтому Amai видит только последнее observed значение client limits: 5ч {}, 7д {}. Этого уже достаточно для fail-closed wait path: новая чистая рабочая поверхность не поможет, нужно дождаться восстановления внешнего клиентского лимита. Текущее observed значение: {rendered_limits}.",
+            "Current thread binding ещё не materialized, поэтому Amai видит только последнее observed значение client limits: основное окно {}, 7д {}. Этого уже достаточно для fail-closed wait path: новая чистая рабочая поверхность не поможет, нужно дождаться восстановления внешнего клиентского лимита. Текущее observed значение: {rendered_limits}.",
             format_percent(Some(guard.primary_remaining_percent)),
             format_percent(Some(guard.secondary_remaining_percent)),
         )
     } else {
         format!(
-            "Current thread binding ещё не materialized, поэтому Amai видит только последнее observed значение client limits: 5ч {}, 7д {}. Это пока только global warning hint: rotate gate не включается, но следующий substantive reply стоит делать только после повторной проверки budget. Текущее observed значение: {rendered_limits}.",
+            "Current thread binding ещё не materialized, поэтому Amai видит только последнее observed значение client limits: основное окно {}, 7д {}. Это пока только global warning hint: rotate gate не включается, но следующий substantive reply стоит делать только после повторной проверки budget. Текущее observed значение: {rendered_limits}.",
             format_percent(Some(guard.primary_remaining_percent)),
             format_percent(Some(guard.secondary_remaining_percent)),
         )
@@ -1279,7 +1279,7 @@ pub(super) fn client_turn_pressure_note_sentence_for_preference(
         .hourly_burn_classification
         .map(|classification| match classification {
             "overspend" => format!(
-                "точный 5ч KPI уже показывает переплату {}",
+                "точный burn-guard уже показывает переплату {}",
                 format_percent(guard.hourly_burn_kpi_percent)
             ),
             "saving" if client_budget_target_active(guard.client_budget_target_percent) => {
@@ -1289,23 +1289,23 @@ pub(super) fn client_turn_pressure_note_sentence_for_preference(
                 )
             }
             "saving" => format!(
-                "точный 5ч KPI показывает экономию {}, но текущий live-turn всё равно раздувается быстрее, чем Amai materialized устойчивый exact pair",
+                "точный burn-guard показывает экономию {}, но текущий live-turn всё равно раздувается быстрее, чем Amai materialized устойчивый exact pair",
                 format_percent(guard.hourly_burn_kpi_percent)
             ),
             _ if client_budget_target_active(guard.client_budget_target_percent) => format!(
-                "точный 5ч KPI идёт только 1:1 к сбросу, а не в режим целевой экономии {}%",
+                "точный burn-guard идёт только 1:1 к сбросу, а не в режим целевой экономии {}%",
                 guard.client_budget_target_percent
             ),
-            _ => "точный 5ч KPI идёт только 1:1 к сбросу, а не в safe-saving режим".to_string(),
+            _ => "точный burn-guard идёт только 1:1 к сбросу, а не в safe-saving режим".to_string(),
         })
-        .unwrap_or_else(|| "точный 5ч KPI пока ещё не materialized".to_string());
+        .unwrap_or_else(|| "точный burn-guard пока ещё не materialized".to_string());
     let no_amai_sentence = if guard.no_amai_activity_in_current_live_turn {
         " При этом в текущем live-turn вообще не видно Amai-активности, поэтому burn создаёт сам размер thread/context, а не retrieval-помощь."
     } else {
         ""
     };
     Some(format!(
-        "{} последний observed запрос уже занимает {} из {} окна, по 5ч лимиту остаётся {}, по 7д — {}, {}, а {}.{}",
+        "{} последний observed запрос уже занимает {} из {} окна, по основной лимиту остаётся {}, по 7д — {}, {}, а {}.{}",
         if same_thread_compaction_preferred {
             "Сейчас выгоднее сначала сжать текущий giant thread через same-thread compact window:"
         } else {
@@ -1351,7 +1351,7 @@ pub(super) fn client_turn_pressure_tooltip(
     same_thread_compaction_preferred: bool,
 ) -> String {
     let mut tooltip = format!(
-        "Этот guard показывает, что внешний лимит клиента уже горит быстрее, чем Amai успевает экономить в полном live-turn.\n- Последний observed запрос клиента: {} из {} ({})\n- По лимиту 5ч остаётся {}\n- По лимиту 7д остаётся {}",
+        "Этот guard показывает, что внешний лимит клиента уже горит быстрее, чем Amai успевает экономить в полном live-turn.\n- Последний observed запрос клиента: {} из {} ({})\n- По лимиту основное окно остаётся {}\n- По лимиту расширенное окно остаётся {}",
         format_u64(Some(guard.turn_total_tokens)),
         format_u64(Some(guard.model_context_window)),
         format_percent(Some(guard.context_used_percent)),
@@ -1371,7 +1371,7 @@ pub(super) fn client_turn_pressure_tooltip(
     if let Some(classification) = guard.hourly_burn_classification {
         let line = match classification {
             "overspend" => format!(
-                "\n- Exact 5ч KPI из VS Code toolbar уже показывает переплату {}",
+                "\n- Exact burn-guard из VS Code toolbar уже показывает переплату {}",
                 format_percent(guard.hourly_burn_kpi_percent)
             ),
             "saving" if client_budget_target_active(guard.client_budget_target_percent) => format!(
@@ -1382,22 +1382,21 @@ pub(super) fn client_turn_pressure_tooltip(
                 )
             ),
             "saving" => format!(
-                "\n- Exact 5ч KPI уже показывает экономию {}, но текущий live-turn всё равно раздувается быстрее, чем Amai materialized устойчивый exact pair",
+                "\n- Exact burn-guard уже показывает экономию {}, но текущий live-turn всё равно раздувается быстрее, чем Amai materialized устойчивый exact pair",
                 format_percent(guard.hourly_burn_kpi_percent)
             ),
             _ if client_budget_target_active(guard.client_budget_target_percent) => format!(
-                "\n- Exact 5ч KPI пока идёт лишь 1:1 к reset, а не в режим целевой экономии {}%",
+                "\n- Exact burn-guard пока идёт лишь 1:1 к reset, а не в режим целевой экономии {}%",
                 guard.client_budget_target_percent
             ),
-            _ => {
-                "\n- Exact 5ч KPI пока идёт лишь 1:1 к reset, а не в safe-saving режиме".to_string()
-            }
+            _ => "\n- Exact burn-guard пока идёт лишь 1:1 к reset, а не в safe-saving режиме"
+                .to_string(),
         };
         tooltip.push_str(&line);
     }
     if guard.no_amai_activity_in_current_live_turn {
         tooltip.push_str(
-            "\n- В текущем live-turn нет retrieval_context_pack от Amai: расход сейчас создаёт сам раздутый thread/context, поэтому лучший способ спасти 5ч окно — не раздувать дальше этот thread и удержать same-thread compact surface",
+            "\n- В текущем live-turn нет retrieval_context_pack от Amai: расход сейчас создаёт сам раздутый thread/context, поэтому лучший способ спасти основное окно окно — не раздувать дальше этот thread и удержать same-thread compact surface",
         );
     }
     if same_thread_compaction_preferred {
@@ -1458,6 +1457,51 @@ pub(super) fn client_turn_pressure_tooltip(
     tooltip
 }
 
+fn public_client_limit_window_labels() -> (&'static str, &'static str) {
+    ("основное окно", "расширенное окно")
+}
+
+fn public_client_limit_value_text(
+    primary_remaining_percent: f64,
+    secondary_remaining_percent: f64,
+    observed_suffix: Option<String>,
+    prefix: Option<&str>,
+) -> String {
+    let (primary_label, secondary_label) = public_client_limit_window_labels();
+    let base = format!(
+        "{primary_label} остаётся {}, {secondary_label} остаётся {}",
+        format_percent(Some(primary_remaining_percent)),
+        format_percent(Some(secondary_remaining_percent)),
+    );
+    let with_prefix = prefix
+        .map(|value| format!("{value}: {base}"))
+        .unwrap_or(base);
+    observed_suffix
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("{with_prefix}{value}"))
+        .unwrap_or(with_prefix)
+}
+
+fn public_client_limit_tooltip(
+    primary_remaining_percent: f64,
+    primary_used_percent: Option<f64>,
+    secondary_remaining_percent: f64,
+    secondary_used_percent: Option<f64>,
+    observed_at: &str,
+    note: &str,
+) -> String {
+    let (primary_label, secondary_label) = public_client_limit_window_labels();
+    format!(
+        "Этот ряд показывает текущие клиентские окна расхода.\n- {primary_label}: остаётся {} (использовано {})\n- {secondary_label}: остаётся {} (использовано {})\n- Обновлено: {}\n- {}",
+        format_percent(Some(primary_remaining_percent)),
+        format_percent(primary_used_percent),
+        format_percent(Some(secondary_remaining_percent)),
+        format_percent(secondary_used_percent),
+        observed_at,
+        note,
+    )
+}
+
 pub(super) fn client_live_meter_note_sentence(
     client_live_meter: &Value,
     exact_pair: Option<(u64, u64, i64, f64)>,
@@ -1475,9 +1519,10 @@ pub(super) fn client_live_meter_note_sentence(
         .as_f64()
         .map(|value| 100.0 - value)
         .unwrap_or_default();
+    let (primary_label, secondary_label) = public_client_limit_window_labels();
     let Some((_, _, saved_tokens, _)) = exact_pair else {
         return Some(format!(
-            "Текущий client live meter уже виден напрямую из rollout: последний observed запрос клиента занимает {} из {}, остаётся {}. Live pressure по 5ч и 7д лимитам вынесен в отдельную строку. Exact full-turn delta по Amai здесь ещё нельзя честно посчитать, пока same-meter pair не materialized.",
+            "Текущий клиентский счётчик уже виден напрямую: последний запрос занимает {} из {}, остаётся {}. Давление по {primary_label} и {secondary_label} вынесено в отдельную строку. Точную экономию по полной подтверждённой паре здесь пока ещё нельзя честно посчитать.",
             format_u64(Some(turn_total_tokens)),
             format_u64(Some(model_context_window)),
             format_percent(Some(context_remaining_percent)),
@@ -1494,7 +1539,7 @@ pub(super) fn client_live_meter_note_sentence(
         (saved_tokens as f64 * 100.0) / without_amai_total_tokens as f64
     };
     Some(format!(
-        "В полном live-turn клиента Amai сейчас даёт {}: без Amai было {}, с Amai стало {}. Последний observed запрос клиента сейчас занимает {} из {} окна, остаётся {}. Live pressure по 5ч и 7д лимитам вынесен в отдельную строку. Значит внешний burn сейчас определяется не только Amai-delta, а и общим размером текущего запроса внутри клиентского окна.",
+        "По полной подтверждённой паре текущего запроса Amai сейчас даёт {}: без Amai было {}, с Amai стало {}. Последний запрос сейчас занимает {} из {} окна, остаётся {}. Давление по {primary_label} и {secondary_label} вынесено в отдельную строку. Это значит, что внешний расход сейчас определяется не только эффектом Amai, а и общим размером текущего запроса внутри клиентского окна.",
         format_percent(Some(full_turn_savings_pct)),
         format_u64(Some(without_amai_total_tokens)),
         format_u64(Some(turn_total_tokens)),
@@ -1580,87 +1625,83 @@ pub(super) fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<
         .map(human_timestamp_clock);
     let (label, tooltip, value) = if exact_source {
         let thread_context_note = if current_thread_bound {
-            "Параллельно есть current-thread-bound rollout meter для строки `Последний запрос клиента`, поэтому 5ч/7д лимиты и размер текущего запроса читаются из двух независимых truth-source."
+            "Параллельно строка `Последний запрос клиента` показывает размер текущего запроса, а здесь видны общие клиентские окна расхода."
         } else if rollout_observed {
-            "Current thread binding для rollout meter ещё не materialized, поэтому этот ряд остаётся live global client-limit source, а не pressure текущего thread."
+            "Текущий запрос пока не привязан напрямую, поэтому этот ряд остаётся общим ориентиром по клиентским окнам расхода."
         } else {
-            "Rollout meter для текущего thread пока не materialized, поэтому этот ряд остаётся единственным честным live source для 5ч/7д лимита клиента."
+            "Сейчас это единственный доступный честный источник по клиентским окнам расхода."
         };
         (
             "Лимит клиента сейчас",
-            format!(
-                "Этот ряд показывает live rate-limit contour клиента из codex app-server account/rateLimits/read, тем же upstream path, что использует VS Code status bar.\n- Лимит 5ч: остаётся {} (использовано {})\n- Лимит 7д: остаётся {} (использовано {})\n- Снято из upstream: {}\n- {}",
-                format_percent(Some(primary_remaining_percent)),
-                format_percent(
-                    limit_surface["primary_limit_used_percent"]
-                        .as_f64()
-                        .or_else(|| limit_surface["primary_limit_used_percent"]
+            public_client_limit_tooltip(
+                primary_remaining_percent,
+                limit_surface["primary_limit_used_percent"]
+                    .as_f64()
+                    .or_else(|| {
+                        limit_surface["primary_limit_used_percent"]
                             .as_u64()
-                            .map(|value| value as f64))
-                ),
-                format_percent(Some(secondary_remaining_percent)),
-                format_percent(
-                    limit_surface["secondary_limit_used_percent"]
-                        .as_f64()
-                        .or_else(|| limit_surface["secondary_limit_used_percent"]
+                            .map(|value| value as f64)
+                    }),
+                secondary_remaining_percent,
+                limit_surface["secondary_limit_used_percent"]
+                    .as_f64()
+                    .or_else(|| {
+                        limit_surface["secondary_limit_used_percent"]
                             .as_u64()
-                            .map(|value| value as f64))
-                ),
-                observed_at
+                            .map(|value| value as f64)
+                    }),
+                &observed_at
                     .clone()
                     .unwrap_or_else(|| "ещё нет данных".to_string()),
                 thread_context_note,
             ),
-            format!(
-                "5ч остаётся {}, 7д остаётся {}{}",
-                format_percent(Some(primary_remaining_percent)),
-                format_percent(Some(secondary_remaining_percent)),
+            public_client_limit_value_text(
+                primary_remaining_percent,
+                secondary_remaining_percent,
                 observed_at_short
                     .as_ref()
-                    .map(|stamp| format!(" · live {stamp}"))
-                    .unwrap_or_default()
+                    .map(|stamp| format!(" · live {stamp}")),
+                None,
             ),
         )
     } else if current_thread_bound {
         (
             "Лимит клиента сейчас",
-            format!(
-                "Этот ряд показывает live rate-limit contour клиента из rollout token_count/rate_limits.\n- Лимит 5ч: остаётся {} (использовано {})\n- Лимит 7д: остаётся {} (использовано {})\n- Снято из raw token_count: {}",
-                format_percent(Some(primary_remaining_percent)),
-                format_percent(client_live_meter["primary_limit_used_percent"].as_f64()),
-                format_percent(Some(secondary_remaining_percent)),
-                format_percent(client_live_meter["secondary_limit_used_percent"].as_f64()),
-                observed_at.unwrap_or_else(|| "ещё нет данных".to_string()),
+            public_client_limit_tooltip(
+                primary_remaining_percent,
+                client_live_meter["primary_limit_used_percent"].as_f64(),
+                secondary_remaining_percent,
+                client_live_meter["secondary_limit_used_percent"].as_f64(),
+                &observed_at.unwrap_or_else(|| "ещё нет данных".to_string()),
+                "Текущий запрос уже привязан напрямую, поэтому это лимит именно для этой живой работы.",
             ),
-            format!(
-                "5ч остаётся {}, 7д остаётся {}{}",
-                format_percent(Some(primary_remaining_percent)),
-                format_percent(Some(secondary_remaining_percent)),
+            public_client_limit_value_text(
+                primary_remaining_percent,
+                secondary_remaining_percent,
                 observed_at_short
                     .as_ref()
-                    .map(|stamp| format!(" · raw {stamp}"))
-                    .unwrap_or_default()
+                    .map(|stamp| format!(" · raw {stamp}")),
+                None,
             ),
         )
     } else {
         (
-            "Последний observed лимит клиента",
-            format!(
-                "Этот ряд показывает последнее observed значение клиентского rate-limit contour из rollout token_count/rate_limits.\n- Current thread binding ещё не materialized, поэтому это global client limit hint, а не pressure текущего thread.\n- Лимит 5ч: остаётся {} (использовано {})\n- Лимит 7д: остаётся {} (использовано {})\n- Последнее observed значение снято из raw token_count: {}",
-                format_percent(Some(primary_remaining_percent)),
-                format_percent(client_live_meter["primary_limit_used_percent"].as_f64()),
-                format_percent(Some(secondary_remaining_percent)),
-                format_percent(client_live_meter["secondary_limit_used_percent"].as_f64()),
-                observed_at.unwrap_or_else(|| "ещё нет данных".to_string()),
+            "Последний видимый лимит клиента",
+            public_client_limit_tooltip(
+                primary_remaining_percent,
+                client_live_meter["primary_limit_used_percent"].as_f64(),
+                secondary_remaining_percent,
+                client_live_meter["secondary_limit_used_percent"].as_f64(),
+                &observed_at.unwrap_or_else(|| "ещё нет данных".to_string()),
+                "Текущий запрос пока не привязан напрямую, поэтому это общий ориентир, а не лимит только этой работы.",
             ),
-            format!(
-                "последнее observed: 5ч остаётся {}, 7д остаётся {}{}",
-                format_percent(Some(primary_remaining_percent)),
-                format_percent(Some(secondary_remaining_percent)),
+            public_client_limit_value_text(
+                primary_remaining_percent,
+                secondary_remaining_percent,
                 observed_at_short
                     .as_ref()
-                    .map(|stamp| format!(" · latest observed {stamp}"))
-                    .unwrap_or_default()
+                    .map(|stamp| format!(" · latest observed {stamp}")),
+                Some("последнее видимое значение"),
             ),
         )
     };
@@ -1785,7 +1826,7 @@ pub(super) fn client_limit_hourly_burn_metric_row(
     host_current_thread_control: &Value,
 ) -> Option<Value> {
     let status = hourly_burn["status"].as_str().unwrap_or("missing");
-    let label = "KPI 5ч лимита";
+    let label = "Операционный burn-guard";
     match status {
         "observed" => {
             let projected = hourly_burn["projected_primary_used_per_hour_percent"].as_f64();
@@ -1793,10 +1834,10 @@ pub(super) fn client_limit_hourly_burn_metric_row(
             let classification = hourly_burn["classification"].as_str().unwrap_or("unknown");
             let reply_prefix = hourly_burn["reply_prefix"]
                 .as_str()
-                .unwrap_or("5ч KPI: н/д");
+                .unwrap_or("Burn guard: н/д");
             let kpi_value_text = if classification == "aligned" {
                 reply_prefix
-                    .strip_prefix("5ч KPI: ")
+                    .strip_prefix("Burn guard: ")
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .unwrap_or("1:1")
@@ -1806,15 +1847,15 @@ pub(super) fn client_limit_hourly_burn_metric_row(
             };
             let selector_value_parts = match classification {
                 "saving" => Some((
-                    "5ч KPI: экономия ".to_string(),
+                    "Burn guard: экономия ".to_string(),
                     format!(" · tempo {}", format_percent(projected)),
                 )),
                 "overspend" => Some((
-                    "5ч KPI: переплата ".to_string(),
+                    "Burn guard: переплата ".to_string(),
                     format!(" · tempo {}", format_percent(projected)),
                 )),
                 "aligned" => Some((
-                    "5ч KPI: ".to_string(),
+                    "Burn guard: ".to_string(),
                     format!(" · tempo {}", format_percent(projected)),
                 )),
                 _ => None,
@@ -1892,7 +1933,7 @@ pub(super) fn client_limit_hourly_burn_metric_row(
                     "Экономия к идеальному окну: {}.",
                     format_percent(kpi_percent)
                 ),
-                _ => "Идёт почти 1:1 к идеальному окну 5ч.".to_string(),
+                _ => "Идёт почти 1:1 к идеальному окну основное окно.".to_string(),
             };
             let reset_delta = projected_reset_delta_minutes
                 .map(|value| {
@@ -1914,7 +1955,7 @@ pub(super) fn client_limit_hourly_burn_metric_row(
                     "Точное смещение к моменту сброса пока не вычислено.".to_string()
                 });
             let tooltip = format!(
-                "Этот ряд считает KPI 5ч лимита по тому же upstream source, что и VS Code status bar.\n- Снято из upstream: {}\n- До сброса остаётся {:.2} мин окна\n- Реально остаётся лимита: {}\n- Идеально к этому моменту должно оставаться: {}\n- Текущий темп burn: {}\n- {}\n- {}\n- Это и есть источник для короткого reply-prefix `{}'`.",
+                "Этот ряд считает операционный burn-guard по тому же upstream source, что и VS Code status bar.\n- Снято из upstream: {}\n- До сброса остаётся {:.2} мин окна\n- Реально остаётся лимита: {}\n- Идеально к этому моменту должно оставаться: {}\n- Текущий темп burn: {}\n- {}\n- {}\n- Это и есть источник для короткого reply-prefix `{}'`.",
                 observed_at,
                 remaining_window_minutes,
                 format_percent(actual_remaining_percent),
@@ -2024,21 +2065,25 @@ pub(super) fn client_limit_hourly_burn_metric_row(
             CLIENT_LIMIT_HOURLY_BURN_ROW_KEY,
             label,
             "exact KPI устарел".to_string(),
-            Some("Последний exact sample 5ч лимита устарел, поэтому KPI fail-closed не считается."),
+            Some(
+                "Последний exact sample основного лимита устарел, поэтому KPI fail-closed не считается.",
+            ),
         )),
         "missing_reset" => Some(metric_row_with_key(
             CLIENT_LIMIT_HOURLY_BURN_ROW_KEY,
             label,
             "нет reset time".to_string(),
             Some(
-                "Exact source не дал reset time для 5ч окна, поэтому KPI fail-closed не считается.",
+                "Exact source не дал reset time для основного окна, поэтому KPI fail-closed не считается.",
             ),
         )),
         _ => Some(metric_row_with_key(
             CLIENT_LIMIT_HOURLY_BURN_ROW_KEY,
             label,
             "exact KPI ещё нет".to_string(),
-            Some("Exact source 5ч лимита ещё не materialized, поэтому KPI пока не посчитан."),
+            Some(
+                "Exact source основного лимита ещё не materialized, поэтому KPI пока не посчитан.",
+            ),
         )),
     }
 }
@@ -2064,40 +2109,6 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
     } else {
         &snapshot["token_budget_report"]["current_live_turn"]
     };
-    let nested_hourly_burn = &report["client_limit_hourly_burn"];
-    let client_limit_hourly_burn = if nested_hourly_burn.is_object() {
-        nested_hourly_burn
-    } else {
-        &snapshot["token_budget_report"]["client_limit_hourly_burn"]
-    };
-    let host_context_compaction = latest_host_context_compaction_payload(report, restore_context);
-    let (host_current_thread_control, host_current_thread_control_effect, _) =
-        selected_host_current_thread_control_state(
-            report,
-            restore_context,
-            client_live_meter,
-            &host_context_compaction,
-        );
-    let selected_host_current_thread_control_command_id =
-        host_current_thread_control["command_id"].as_str();
-    let host_feedback_kind = latest_host_current_thread_control_feedback_kind_for_command(
-        restore_context,
-        selected_host_current_thread_control_command_id,
-    );
-    let host_feedback_summary = latest_host_current_thread_control_feedback_summary_for_command(
-        restore_context,
-        selected_host_current_thread_control_command_id,
-    );
-    let host_feedback_pending = host_current_thread_control_feedback_pending_from_effect(
-        host_feedback_kind,
-        &host_current_thread_control_effect,
-    );
-    let host_current_thread_control = decorate_host_current_thread_control_surface(
-        &host_current_thread_control,
-        &host_current_thread_control_effect,
-        host_feedback_pending,
-        host_feedback_summary.as_deref(),
-    );
     let mut rows = Vec::new();
     if let Some(row) = client_full_turn_savings_metric_row(
         client_live_meter,
@@ -2111,16 +2122,6 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
     if let Some(row) = client_live_limit_metric_row(client_live_meter) {
         rows.push(row);
     }
-    if let Some(row) = client_limit_hourly_burn_metric_row(
-        client_limit_hourly_burn,
-        client_budget_target_percent,
-        restore_context,
-        client_live_meter,
-        &host_context_compaction,
-        &host_current_thread_control,
-    ) {
-        rows.push(row);
-    }
     let live_status = if current_session_client_live_meter_available(client_live_meter)
         || preferred_client_limit_meter_surface(client_live_meter).is_some()
     {
@@ -2128,7 +2129,7 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
     } else {
         client_live_meter["status"].as_str().unwrap_or("missing")
     };
-    let (reply_prefix, global_reply_prefix, reply_prefix_source) =
+    let (reply_prefix, _global_reply_prefix, reply_prefix_source) =
         current_agent_reply_prefix_fields(snapshot, report);
     json!({
         "status": live_status,
@@ -2139,7 +2140,6 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
             .map(Value::from)
             .unwrap_or_else(|| client_live_meter["ended_at_epoch_ms"].clone()),
         "reply_prefix": reply_prefix,
-        "global_reply_prefix": global_reply_prefix,
         "reply_prefix_source": Value::from(reply_prefix_source),
         "rows": rows,
     })
@@ -2170,7 +2170,7 @@ mod tests {
             row["value"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("5ч остаётся 31.00%")
+                .contains("основное окно остаётся 31.00%")
         );
         assert!(row["value"].as_str().unwrap_or_default().contains("raw"));
     }
@@ -2204,7 +2204,7 @@ mod tests {
             row["value"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("5ч остаётся 62.00%, 7д остаётся 59.00%")
+                .contains("основное окно остаётся 62.00%, расширенное окно остаётся 59.00%")
         );
         assert!(row["value"].as_str().unwrap_or_default().contains("live"));
         assert!(
@@ -2289,21 +2289,21 @@ mod tests {
                 },
                 "client_limit_hourly_burn": {
                     "status": "insufficient_history",
-                    "reply_prefix": "5ч KPI: н/д"
+                    "reply_prefix": "Burn guard: н/д"
                 }
             }
         });
         let payload = client_budget_live_payload(&snapshot);
         let rows = payload["rows"].as_array().expect("rows array");
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 2);
         assert_eq!(
             rows[0]["key"].as_str(),
             Some(CLIENT_LIVE_FULL_TURN_SAVINGS_ROW_KEY)
         );
         assert_eq!(rows[1]["key"].as_str(), Some(CLIENT_LIVE_LIMIT_ROW_KEY));
-        assert_eq!(
-            rows[2]["key"].as_str(),
-            Some(CLIENT_LIMIT_HOURLY_BURN_ROW_KEY)
+        assert!(
+            rows.iter()
+                .all(|row| { row["key"].as_str() != Some(CLIENT_LIMIT_HOURLY_BURN_ROW_KEY) })
         );
         assert_eq!(
             rows[1]["label"].as_str(),
@@ -2330,25 +2330,25 @@ mod tests {
                 },
                 "client_limit_hourly_burn": {
                     "status": "insufficient_history",
-                    "reply_prefix": "5ч KPI: н/д"
+                    "reply_prefix": "Burn guard: н/д"
                 }
             }
         });
         let payload = client_budget_live_payload(&snapshot);
         let rows = payload["rows"].as_array().expect("rows array");
         assert_eq!(payload["status"], json!("observed"));
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["key"].as_str(), Some(CLIENT_LIVE_LIMIT_ROW_KEY));
         assert_eq!(rows[0]["label"].as_str(), Some("Лимит клиента сейчас"));
         assert!(
             rows[0]["value"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("5ч остаётся 61.00%, 7д остаётся 58.00%")
+                .contains("основное окно остаётся 61.00%, расширенное окно остаётся 58.00%")
         );
-        assert_eq!(
-            rows[1]["key"].as_str(),
-            Some(CLIENT_LIMIT_HOURLY_BURN_ROW_KEY)
+        assert!(
+            rows.iter()
+                .all(|row| { row["key"].as_str() != Some(CLIENT_LIMIT_HOURLY_BURN_ROW_KEY) })
         );
     }
 
@@ -2391,7 +2391,7 @@ mod tests {
     }
 
     #[test]
-    fn client_budget_live_payload_surfaces_hourly_burn_reply_prefix() {
+    fn client_budget_live_payload_exposes_only_amai_reply_prefix() {
         let snapshot = json!({
             "latest_repo_working_state_restore": {
                 "working_state_restore": {
@@ -2428,7 +2428,7 @@ mod tests {
                     "client_limit_hourly_burn": {
                         "status": "observed",
                         "classification": "saving",
-                        "reply_prefix": "5ч KPI: экономия 50.00%",
+                        "reply_prefix": "Burn guard: экономия 50.00%",
                         "projected_primary_used_per_hour_percent": 10.0,
                         "kpi_percent": 50.0,
                         "remaining_window_minutes": 30.0,
@@ -2442,26 +2442,12 @@ mod tests {
         });
 
         let payload = client_budget_live_payload(&snapshot);
-        assert_eq!(
-            payload["reply_prefix"].as_str(),
-            Some("5ч KPI: экономия 50.00%")
-        );
+        assert_eq!(payload["reply_prefix"].as_str(), Some("Amai savings: н/д"));
+        assert!(payload["global_reply_prefix"].is_null());
         let rows = payload["rows"].as_array().expect("rows");
         assert!(
             rows.iter()
-                .any(|row| { row["key"].as_str() == Some(CLIENT_LIMIT_HOURLY_BURN_ROW_KEY) })
-        );
-        let hourly_row = rows
-            .iter()
-            .find(|row| row["key"].as_str() == Some(CLIENT_LIMIT_HOURLY_BURN_ROW_KEY))
-            .expect("hourly burn row");
-        assert_eq!(
-            hourly_row["target_selector"]["current_target_percent"],
-            json!(50)
-        );
-        assert_eq!(
-            hourly_row["target_selector"]["selected_chat_command"],
-            json!("экономия_50%")
+                .all(|row| row["key"].as_str() != Some(CLIENT_LIMIT_HOURLY_BURN_ROW_KEY))
         );
     }
 
@@ -2471,7 +2457,7 @@ mod tests {
             "active_agent_budget": {
                 "aggregate": {
                     "status": "observed",
-                    "reply_prefix": "5ч KPI: экономия 28.49%"
+                    "reply_prefix": "Amai savings: без Amai 1000, с Amai 715, экономия 285 (28.50%)"
                 }
             },
             "latest_repo_working_state_restore": {
@@ -2508,12 +2494,12 @@ mod tests {
                     },
                     "personal_agent_kpi": {
                         "status": "observed",
-                        "reply_prefix": "5ч KPI: экономия 61.25%"
+                        "reply_prefix": "Amai savings: без Amai 240, с Amai 93, экономия 147 (61.25%)"
                     },
                     "client_limit_hourly_burn": {
                         "status": "observed",
                         "classification": "saving",
-                        "reply_prefix": "5ч KPI: экономия 50.00%",
+                        "reply_prefix": "Burn guard: экономия 50.00%",
                         "projected_primary_used_per_hour_percent": 10.0,
                         "kpi_percent": 50.0,
                         "remaining_window_minutes": 30.0,
@@ -2529,15 +2515,12 @@ mod tests {
         let payload = client_budget_live_payload(&snapshot);
         assert_eq!(
             payload["reply_prefix"].as_str(),
-            Some("5ч KPI: экономия 50.00%")
+            Some("Amai savings: без Amai 240, с Amai 93, экономия 147 (61.25%)")
         );
-        assert_eq!(
-            payload["global_reply_prefix"].as_str(),
-            Some("5ч KPI: экономия 50.00%")
-        );
+        assert!(payload["global_reply_prefix"].is_null());
         assert_eq!(
             payload["reply_prefix_source"],
-            json!("global_client_limit_hourly_burn")
+            json!("personal_agent_online_limit_contour")
         );
     }
 
@@ -2838,12 +2821,13 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_rotates_early_when_5h_kpi_overspends_without_amai_activity() {
+    fn client_turn_pressure_guard_rotates_early_when_primary_limit_kpi_overspends_without_amai_activity()
+     {
         let hourly_burn = json!({
             "status": "observed",
             "classification": "overspend",
             "kpi_percent": 2100.0,
-            "reply_prefix": "5ч KPI: переплата 2100.00%"
+            "reply_prefix": "Burn guard: переплата 2100.00%"
         });
         let current_live_turn = json!({
             "status": "no_amai_activity_in_current_live_turn"
@@ -2868,12 +2852,13 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_rotates_now_when_5h_kpi_overspends_with_weak_live_gain() {
+    fn client_turn_pressure_guard_rotates_now_when_primary_limit_kpi_overspends_with_weak_live_gain()
+     {
         let hourly_burn = json!({
             "status": "observed",
             "classification": "overspend",
             "kpi_percent": 180.0,
-            "reply_prefix": "5ч KPI: переплата 180.00%"
+            "reply_prefix": "Burn guard: переплата 180.00%"
         });
         let current_live_turn = json!({
             "status": "exact_pair_materialized",
@@ -2910,7 +2895,7 @@ mod tests {
             "status": "observed",
             "classification": "overspend",
             "kpi_percent": 110.0,
-            "reply_prefix": "5ч KPI: переплата 110.00%"
+            "reply_prefix": "Burn guard: переплата 110.00%"
         });
         let current_live_turn = json!({
             "status": "exact_pair_materialized",
@@ -2948,7 +2933,7 @@ mod tests {
             "status": "observed",
             "classification": "overspend",
             "kpi_percent": 205.0,
-            "reply_prefix": "5ч KPI: переплата 205.00%"
+            "reply_prefix": "Burn guard: переплата 205.00%"
         });
         let current_live_turn = json!({
             "status": "exact_pair_materialized",
@@ -3036,7 +3021,7 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_rotates_for_huge_no_amai_thread_when_exact_5h_kpi_is_below_target_saving()
+    fn client_turn_pressure_guard_rotates_for_huge_no_amai_thread_when_exact_primary_limit_kpi_is_below_target_saving()
      {
         let hourly_burn = json!({
             "status": "observed",
@@ -3066,7 +3051,7 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_rotates_for_large_weak_exact_pair_thread_when_5h_kpi_is_below_target_saving()
+    fn client_turn_pressure_guard_rotates_for_large_weak_exact_pair_thread_when_primary_limit_kpi_is_below_target_saving()
      {
         let hourly_burn = json!({
             "status": "observed",
@@ -3215,7 +3200,7 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_recommends_rotate_on_small_thread_when_exact_pair_and_5h_kpi_are_below_target()
+    fn client_turn_pressure_guard_recommends_rotate_on_small_thread_when_exact_pair_and_primary_limit_kpi_are_below_target()
      {
         let hourly_burn = json!({
             "status": "observed",
@@ -3253,7 +3238,7 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_recommends_rotate_on_moderate_thread_when_exact_pair_and_5h_kpi_are_below_target()
+    fn client_turn_pressure_guard_recommends_rotate_on_moderate_thread_when_exact_pair_and_primary_limit_kpi_are_below_target()
      {
         let hourly_burn = json!({
             "status": "observed",
@@ -3365,7 +3350,7 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_recommends_rotate_for_small_no_amai_thread_when_5h_kpi_is_below_target()
+    fn client_turn_pressure_guard_recommends_rotate_for_small_no_amai_thread_when_primary_limit_kpi_is_below_target()
      {
         let hourly_burn = json!({
             "status": "observed",
@@ -3395,7 +3380,7 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_stays_off_for_huge_no_amai_thread_when_exact_5h_kpi_is_target_saving()
+    fn client_turn_pressure_guard_stays_off_for_huge_no_amai_thread_when_exact_primary_limit_kpi_is_target_saving()
      {
         let hourly_burn = json!({
             "status": "observed",
@@ -3425,7 +3410,7 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_recommends_rotate_for_moderate_no_amai_thread_when_5h_kpi_is_below_target()
+    fn client_turn_pressure_guard_recommends_rotate_for_moderate_no_amai_thread_when_primary_limit_kpi_is_below_target()
      {
         let hourly_burn = json!({
             "status": "observed",
@@ -3455,7 +3440,8 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_rotates_for_early_no_amai_thread_when_5h_kpi_is_below_target() {
+    fn client_turn_pressure_guard_rotates_for_early_no_amai_thread_when_primary_limit_kpi_is_below_target()
+     {
         let hourly_burn = json!({
             "status": "observed",
             "classification": "saving",
@@ -3484,8 +3470,8 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_rotates_for_huge_no_amai_thread_when_exact_5h_kpi_is_one_to_one()
-    {
+    fn client_turn_pressure_guard_rotates_for_huge_no_amai_thread_when_exact_primary_limit_kpi_is_one_to_one()
+     {
         let hourly_burn = json!({
             "status": "observed",
             "classification": "one_to_one",
@@ -3514,7 +3500,8 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_keeps_critical_primary_limit_even_when_exact_5h_kpi_is_saving() {
+    fn client_turn_pressure_guard_keeps_critical_primary_limit_even_when_exact_primary_limit_kpi_is_saving()
+     {
         let hourly_burn = json!({
             "status": "observed",
             "classification": "saving",
@@ -3555,7 +3542,7 @@ mod tests {
             &json!({
                 "status": "observed",
                 "classification": "saving",
-                "reply_prefix": "5ч KPI: экономия 50.00%",
+                "reply_prefix": "Burn guard: экономия 50.00%",
                 "projected_primary_used_per_hour_percent": 10.0,
                 "kpi_percent": 50.0,
                 "remaining_window_minutes": 30.0,
@@ -3639,7 +3626,7 @@ mod tests {
             &json!({
                 "status": "observed",
                 "classification": "saving",
-                "reply_prefix": "5ч KPI: экономия 50.00%",
+                "reply_prefix": "Burn guard: экономия 50.00%",
                 "projected_primary_used_per_hour_percent": 10.0,
                 "kpi_percent": 50.0,
                 "remaining_window_minutes": 30.0,
@@ -3701,7 +3688,7 @@ mod tests {
             &json!({
                 "status": "observed",
                 "classification": "saving",
-                "reply_prefix": "5ч KPI: экономия 50.00%",
+                "reply_prefix": "Burn guard: экономия 50.00%",
                 "projected_primary_used_per_hour_percent": 10.0,
                 "kpi_percent": 50.0,
                 "remaining_window_minutes": 30.0,
@@ -3849,7 +3836,7 @@ mod tests {
             effect["verdict_summary"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("полный 5ч burn")
+                .contains("полный burn основного окна")
         );
     }
 
@@ -4105,7 +4092,7 @@ mod tests {
             effect["verdict_summary"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("полный 5ч burn")
+                .contains("полный burn основного окна")
         );
     }
 
@@ -4115,7 +4102,7 @@ mod tests {
             &json!({
                 "status": "observed",
                 "classification": "overspend",
-                "reply_prefix": "5ч KPI: переплата 10.00%",
+                "reply_prefix": "Burn guard: переплата 10.00%",
                 "projected_primary_used_per_hour_percent": 12.0,
                 "kpi_percent": 10.0,
                 "remaining_window_minutes": 30.0,

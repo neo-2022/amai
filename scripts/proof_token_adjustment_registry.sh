@@ -24,7 +24,7 @@ AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH="$registry" \
 
 AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH="$registry" \
   cargo run --release --quiet -- observe token-report \
-  --budget-profile codex_5h \
+  --budget-profile client_primary_budget \
   --include-verify-events true >/tmp/amai-proof-token-adjustment-report.json
 
 python3 - <<'PY'

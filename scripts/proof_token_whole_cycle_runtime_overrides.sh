@@ -18,7 +18,7 @@ report_path="/tmp/amai-proof-token-whole-cycle-runtime-overrides.json"
   --continuity-restore-tokens 3 >/tmp/amai-proof-token-whole-cycle-runtime-overrides-context-pack.json
 
 ./target/release/amai observe token-report \
-  --budget-profile codex_5h \
+  --budget-profile client_primary_budget \
   --include-verify-events true >"$report_path"
 
 SOURCE_KIND="$source_kind" REPORT_PATH="$report_path" python3 - <<'PY'

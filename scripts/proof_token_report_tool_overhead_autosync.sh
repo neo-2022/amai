@@ -93,7 +93,7 @@ if [[ "$update_count" != "0" ]]; then
 fi
 
 ./target/release/amai observe token-report \
-  --budget-profile codex_5h \
+  --budget-profile client_primary_budget \
   --include-verify-events true >"$report_path"
 
 restored_count="$(PGPASSWORD="$AMI_PG_PASSWORD" psql \

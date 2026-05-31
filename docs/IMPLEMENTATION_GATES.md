@@ -313,7 +313,7 @@ TODO:
 - отдельный debug/control слой для KPI, reply gate, compact mode, same-thread pressure и root-cause анализа.
 
 Когда использовать:
-- если работа касается `5ч KPI`, token cards, compact chat, reply gate или same-thread pressure.
+- если работа касается `Burn guard`, token cards, compact chat, reply gate или same-thread pressure.
 
 ### `scripts/status.sh`
 

@@ -106,10 +106,10 @@ eval_pattern = "retrieval_target"
 [tasks.token_report_live]
 order = 7
 class = "happy_path"
-display_name = "Live token report uses verified headline"
+display_name = "Live token report uses Amai savings headline"
 kind = "token_report_live"
 eval_pattern = "retrieval_target"
-budget_profile = "codex_5h"
+budget_profile = "client_primary_budget"
 
 [tasks.warm_cache]
 order = 8

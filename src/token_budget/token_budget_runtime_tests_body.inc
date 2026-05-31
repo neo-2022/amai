@@ -56,6 +56,7 @@ fn measurement_fixture() -> MeasurementConfig {
         naive_limit_files: 5,
         naive_max_bytes_per_file: 16384,
         include_verify_events_by_default: false,
+        public_savings_window_hours: 24,
         metering_ingest_warning_seconds: 60,
         metering_ingest_slo_seconds: 300,
         late_arrival_grace_minutes: 60,
@@ -67,11 +68,110 @@ fn measurement_fixture() -> MeasurementConfig {
 fn profile_fixture() -> super::ResolvedProfile {
     super::ResolvedProfile {
         code: "local_default".to_string(),
+        requested_code: "local_default".to_string(),
         display_name: "Обычная рабочая машина".to_string(),
         description: "test".to_string(),
         session_gap_minutes: 30,
+        window_mode: super::TokenBudgetWindowMode::FixedDuration,
+        window_label: "Операционное 24-часовое окно".to_string(),
         rolling_window_hours: Some(24),
     }
+}
+
+fn public_savings_window_fixture() -> super::PublicSavingsWindowContract {
+    super::PublicSavingsWindowContract {
+        hours: 24,
+        source: "repo_config",
+    }
+}
+
+#[test]
+fn resolve_public_savings_window_contract_uses_repo_config_metadata() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let config = super::load_config(repo_root).expect("config");
+    let window = super::resolve_public_savings_window_contract(&config, repo_root).expect("window");
+    assert_eq!(window.hours, 24);
+    assert_eq!(window.source, "repo_config");
+}
+
+#[test]
+fn resolve_public_savings_window_contract_fails_closed_for_zero_hours() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut config = super::load_config(repo_root).expect("config");
+    config.measurement.public_savings_window_hours = 0;
+    let error = super::resolve_public_savings_window_contract(&config, repo_root)
+        .expect_err("zero-hour window must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("invalid public_savings_window_hours")
+    );
+}
+
+#[test]
+fn resolve_public_savings_window_contract_fails_closed_when_repo_config_omits_field() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "amai-public-savings-window-missing-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let config_dir = temp_root.join("config");
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        config_dir.join("token_budget_profiles.toml"),
+        r#"
+default_profile = "local_default"
+
+[measurement]
+tokenizer = "o200k_base"
+naive_limit_files = 10
+naive_max_bytes_per_file = 1024
+
+[profiles.local_default]
+display_name = "Temp"
+description = "Temp"
+session_gap_minutes = 30
+window_mode = "fixed_duration"
+window_label = "Temporary test window"
+rolling_window_hours = 24
+"#,
+    )
+    .expect("write config");
+
+    let config = super::load_config(&temp_root).expect("config");
+    let error = super::resolve_public_savings_window_contract(&config, &temp_root)
+        .expect_err("missing repo field must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("missing measurement.public_savings_window_hours")
+    );
+
+    let _ = fs::remove_dir_all(temp_root);
+}
+
+#[test]
+fn resolve_profile_uses_provider_neutral_canonical_profile() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let config = super::load_config(repo_root).expect("config");
+    let profile = super::resolve_profile(&config, Some("client_primary_budget"), repo_root)
+        .expect("profile");
+
+    assert_eq!(profile.code, "client_primary_budget");
+    assert_eq!(profile.requested_code, "client_primary_budget");
+    assert_eq!(profile.window_mode, super::TokenBudgetWindowMode::FixedDuration);
+    assert_eq!(profile.window_label, "Основное клиентское лимитное окно");
+    assert_eq!(profile.rolling_window_hours, Some(5));
+}
+
+#[test]
+fn resolve_profile_rejects_unknown_provider_bound_profile_codes() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let config = super::load_config(repo_root).expect("config");
+    let provider_bound_code = "provider_primary_window_300m";
+    let error = super::resolve_profile(&config, Some(&provider_bound_code), repo_root)
+        .expect_err("provider-shaped profile code must not resolve as input");
+
+    assert!(error.to_string().contains("unknown token budget profile"));
 }
 
 fn unique_temp_path(prefix: &str, extension: &str) -> std::path::PathBuf {
@@ -124,7 +224,7 @@ macro_rules! token_event {
                     agent_scope: "art::continuity::default".to_string(),
                     payload_origin: "context_pack_token_budget".to_string(),
                     session_id: "session-default".to_string(),
-                    rolling_window_profile: "codex_5h".to_string(),
+                    rolling_window_profile: "client_primary_budget".to_string(),
                     timestamp_utc: 0,
                     occurred_at_epoch_ms: 0,
                     ingested_at_epoch_ms: 0,
@@ -540,6 +640,39 @@ fn merge_dashboard_token_events_replaces_stale_live_sibling() {
 }
 
 #[test]
+fn merge_dashboard_token_events_keeps_distinct_live_context_packs() {
+    let first = token_event! {
+        created_at_epoch_ms: 100,
+        ingested_at_epoch_ms: 100,
+        event_id: "live-event-a".to_string(),
+        correlation_id: "".to_string(),
+        context_pack_id: Some("cp-1".to_string()),
+        source_kind: "live_context_pack".to_string(),
+        traffic_class: "live".to_string(),
+        payload_origin: "context_pack_token_budget".to_string(),
+        measurement_scope: "retrieval_lower_bound".to_string(),
+        tool_overhead_tokens: None,
+    };
+    let second = token_event! {
+        created_at_epoch_ms: 200,
+        ingested_at_epoch_ms: 200,
+        event_id: "live-event-b".to_string(),
+        correlation_id: "".to_string(),
+        context_pack_id: Some("cp-2".to_string()),
+        source_kind: "live_context_pack".to_string(),
+        traffic_class: "live".to_string(),
+        payload_origin: "context_pack_token_budget".to_string(),
+        measurement_scope: "retrieval_lower_bound".to_string(),
+        tool_overhead_tokens: Some(33),
+    };
+
+    let merged = super::merge_dashboard_token_events(vec![first.clone()], vec![second.clone()]);
+    assert_eq!(merged.len(), 2);
+    assert!(merged.iter().any(|event| event.event_id == first.event_id));
+    assert!(merged.iter().any(|event| event.event_id == second.event_id));
+}
+
+#[test]
 fn traffic_class_comes_from_source_kind_prefix() {
     assert_eq!(derive_traffic_class("live_context_pack"), "live");
     assert_eq!(derive_traffic_class("operator_continuity_startup"), "live");
@@ -678,6 +811,7 @@ fn build_event_payload_uses_unique_event_id_but_keeps_context_pack_reference() {
         naive_limit_files: 1,
         naive_max_bytes_per_file: 2048,
         include_verify_events_by_default: false,
+        public_savings_window_hours: 24,
         metering_ingest_warning_seconds: 60,
         metering_ingest_slo_seconds: 300,
         late_arrival_grace_minutes: 60,
@@ -904,6 +1038,22 @@ fn build_event_payload_stamps_contract_metadata_and_correlation_id() {
         token_event["contract"]["settlement_status"],
         "unsettled_report_only"
     );
+    assert_eq!(
+        token_event["accounting"]["raw"]["baseline_tokens"],
+        token_event["baseline_tokens"]
+    );
+    assert_eq!(
+        token_event["accounting"]["raw"]["delivered_tokens"],
+        token_event["delivered_tokens"]
+    );
+    assert_eq!(
+        token_event["accounting"]["policy"]["quality"]["quality_method"],
+        token_event["quality"]["quality_method"]
+    );
+    assert_eq!(
+        token_event["accounting"]["projection"]["savings"]["saved_tokens"],
+        token_event["savings"]["saved_tokens"]
+    );
 }
 
 #[test]
@@ -913,7 +1063,7 @@ fn event_json_exposes_canonical_token_ledger_aliases() {
         event_id: "event-1".to_string(),
         correlation_id: "ctx-pack-1".to_string(),
         session_id: "session-1".to_string(),
-        rolling_window_profile: "codex_5h".to_string(),
+        rolling_window_profile: "client_primary_budget".to_string(),
         timestamp_utc: 10,
         occurred_at_epoch_ms: 10,
         ingested_at_epoch_ms: 10,
@@ -975,6 +1125,15 @@ fn event_json_exposes_canonical_token_ledger_aliases() {
         "measured_non_billable"
     );
     assert_eq!(payload["usage_state"]["backfill_status"], "live_ingest");
+    assert_eq!(payload["accounting"]["raw"]["baseline_tokens"], 1000);
+    assert_eq!(
+        payload["accounting"]["policy"]["quality"]["quality_method"],
+        "hybrid_task_success"
+    );
+    assert_eq!(
+        payload["accounting"]["projection"]["savings"]["saved_tokens"],
+        700
+    );
 }
 
 #[test]
@@ -3632,9 +3791,12 @@ fn contractual_evidence_pack_carries_hashes_and_scope_previews() {
     });
     let profile = super::ResolvedProfile {
         code: "local_default".to_string(),
+        requested_code: "local_default".to_string(),
         display_name: "Обычная рабочая машина".to_string(),
         description: "test".to_string(),
         session_gap_minutes: 30,
+        window_mode: super::TokenBudgetWindowMode::FixedDuration,
+        window_label: "Операционное 24-часовое окно".to_string(),
         rolling_window_hours: Some(24),
     };
     let events = vec![
@@ -3939,6 +4101,57 @@ fn parse_snapshot_event_accepts_canonical_alias_fields() {
                     "effective_saved_tokens": 1060,
                     "savings_factor": 3.75,
                     "effective_savings_percent": 70.6666666667
+                },
+                "accounting": {
+                    "raw": {
+                        "baseline_tokens": 2200,
+                        "delivered_tokens": 333,
+                        "recovery_tokens": 44,
+                        "whole_cycle_observed": {
+                            "client_prompt_tokens": 91,
+                            "assistant_generation_tokens": 46,
+                            "tool_overhead_tokens": 11,
+                            "continuity_restore_tokens": 6
+                        },
+                        "recovery": {
+                            "recovery_tokens": 44,
+                            "fallback_triggered": true,
+                            "fallback_count": 2
+                        },
+                        "shape": {
+                            "document_hits": 9,
+                            "symbol_hits": 2,
+                            "file_hits": 8,
+                            "sources_count": 3,
+                            "chunks_count": 5,
+                            "pack_token_count": 333,
+                            "deduped_token_count": 333
+                        }
+                    },
+                    "policy": {
+                        "quality": {
+                            "quality_ok": false,
+                            "quality_score": 0.25,
+                            "quality_method": "canonical_nested",
+                            "quality_tier": "partial",
+                            "head_hit_target": false
+                        },
+                        "followup": {
+                            "needed_followup": true,
+                            "followup_count": 2,
+                            "followup_of_event_id": "event-0",
+                            "resolved_by_event_id": null
+                        }
+                    },
+                    "projection": {
+                        "savings": {
+                            "saved_tokens": 1867,
+                            "effective_saved_tokens": 1823,
+                            "savings_factor": 6.6066066066,
+                            "savings_percent": 84.8636363636,
+                            "effective_savings_percent": 82.8636363636
+                        }
+                    }
                 }
             }
         }),
@@ -3949,11 +4162,16 @@ fn parse_snapshot_event_accepts_canonical_alias_fields() {
         .expect("event should exist");
     assert_eq!(parsed.project, "art");
     assert_eq!(parsed.namespace, "continuity");
-    assert_eq!(parsed.naive_tokens, 1500);
-    assert_eq!(parsed.context_tokens, 400);
-    assert_eq!(parsed.client_prompt_tokens, Some(90));
-    assert_eq!(parsed.assistant_generation_tokens, Some(45));
-    assert_eq!(parsed.savings_percent, 73.3333333333);
+    assert_eq!(parsed.naive_tokens, 2200);
+    assert_eq!(parsed.context_tokens, 333);
+    assert_eq!(parsed.recovery_tokens, 44);
+    assert_eq!(parsed.saved_tokens, 1867);
+    assert_eq!(parsed.effective_saved_tokens, 1823);
+    assert!(!parsed.quality_ok);
+    assert_eq!(parsed.quality_method, "canonical_nested");
+    assert_eq!(parsed.followup_count, 2);
+    assert_eq!(parsed.document_hits, 9);
+    assert_eq!(parsed.client_prompt_tokens, Some(91));
 }
 
 #[test]
@@ -3969,6 +4187,8 @@ fn product_headline_prefers_verified_metric_when_available() {
             "total_effective_saved_tokens": 200000,
             "quality_ok_rate": 96.1,
             "fallback_rate": 3.8,
+            "verified_baseline_tokens": 1000,
+            "verified_observed_whole_cycle_with_amai_tokens": 716,
             "client_limit_meter_alignment": {
                 "alignment_state": "whole_cycle_observed_explicit_boundary_not_meter_equivalent",
                 "baseline_equivalence": {
@@ -3987,13 +4207,24 @@ fn product_headline_prefers_verified_metric_when_available() {
                 }
             }
         }),
-        "окно Codex 5 часов",
+        "окно Основное клиентское окно",
         None,
     );
-    assert_eq!(headline["metric_code"], "verified_effective_savings_pct");
+    assert_eq!(headline["metric_code"], "amai_savings_token_pair");
+    assert_eq!(headline["metric_domain"], "product_tokenonomics");
     assert_eq!(headline["value_percent"], 28.4);
-    assert_eq!(headline["saved_tokens"], 184220);
+    assert_eq!(headline["saved_tokens"], 284);
+    assert_eq!(
+        headline["value_text"].as_str(),
+        Some("Amai savings: без Amai 1000, с Amai 716, экономия 284 (28.40%)")
+    );
     assert_eq!(headline["status"], "pass");
+    assert_eq!(headline["classification"], "saving");
+    assert_eq!(headline["confidence"], "verified_summary_pair");
+    assert_eq!(
+        headline["public_savings_projection"]["pair_source"],
+        "verified_scope_summary_pair"
+    );
     assert_eq!(
         headline["client_limit_boundary_semantics"]["review_state"],
         "strict_slice_plus_observed_amai_continuity_boundary"
@@ -4008,7 +4239,14 @@ fn product_headline_prefers_verified_metric_when_available() {
             .unwrap_or_default()
             .contains("headline не равен клиентскому лимиту")
     );
-    assert_eq!(headline["client_meter_status_bar_correlated"], json!(false));
+    assert_eq!(
+        headline["operator_client_budget_context"]["visibility"],
+        json!("operator_only")
+    );
+    assert_eq!(
+        headline["public_savings_projection"]["same_meter_correlated"],
+        json!(false)
+    );
 }
 
 #[test]
@@ -4024,6 +4262,8 @@ fn product_headline_appends_frozen_gap_review_note_when_required() {
             "total_effective_saved_tokens": 200000,
             "quality_ok_rate": 96.1,
             "fallback_rate": 3.8,
+            "verified_baseline_tokens": 1000,
+            "verified_observed_whole_cycle_with_amai_tokens": 716,
             "client_limit_meter_alignment": {
                 "alignment_state": "whole_cycle_observed_explicit_boundary_not_meter_equivalent",
                 "baseline_equivalence": {
@@ -4045,7 +4285,7 @@ fn product_headline_appends_frozen_gap_review_note_when_required() {
                 }
             }
         }),
-        "окно Codex 5 часов",
+        "окно Основное клиентское окно",
         None,
     );
     assert!(
@@ -4081,27 +4321,41 @@ fn product_headline_prefers_same_meter_exact_pair_and_marks_below_target() {
                 }
             }
         }),
-        "окно Codex 5 часов",
+        "окно Основное клиентское окно",
         None,
     );
-    assert_eq!(headline["metric_code"], "verified_effective_savings_pct");
+    assert_eq!(headline["metric_code"], "amai_savings_token_pair");
     assert_eq!(headline["value_percent"], 75.0);
     assert_eq!(headline["saved_tokens"], 750);
-    assert_eq!(headline["status"], "alert");
-    assert_eq!(headline["client_meter_status_bar_correlated"], json!(true));
-    assert_eq!(headline["client_meter_target_percent"], json!(90.0));
-    assert_eq!(headline["client_meter_target_met"], json!(false));
-    assert!(
-        headline["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("VS Code status bar")
+    assert_eq!(headline["status"], "pass");
+    assert_eq!(headline["classification"], "saving");
+    assert_eq!(
+        headline["public_savings_projection"]["pair_source"],
+        "exact_same_meter_pair"
+    );
+    assert_eq!(
+        headline["operator_client_budget_context"]["same_meter_correlated"],
+        json!(true)
+    );
+    assert_eq!(
+        headline["operator_client_budget_context"]["target_percent"],
+        json!(90.0)
+    );
+    assert_eq!(
+        headline["operator_client_budget_context"]["below_target"],
+        json!(true)
     );
     assert!(
         headline["note"]
             .as_str()
             .unwrap_or_default()
-            .contains("ниже целевой планки 90%")
+            .contains("одной и той же шкале токенов модели пользователя")
+    );
+    assert!(
+        !headline["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("целевой планки")
     );
 }
 
@@ -4130,18 +4384,67 @@ fn product_headline_respects_custom_target_percent() {
                 }
             }
         }),
-        "окно Codex 5 часов",
+        "окно Основное клиентское окно",
         None,
         50,
     );
     assert_eq!(headline["status"], "pass");
-    assert_eq!(headline["client_meter_target_percent"], json!(50.0));
-    assert_eq!(headline["client_meter_target_met"], json!(true));
+    assert_eq!(
+        headline["operator_client_budget_context"]["target_percent"],
+        json!(50.0)
+    );
+    assert_eq!(
+        headline["operator_client_budget_context"]["target_met"],
+        json!(true)
+    );
     assert!(
         !headline["note"]
             .as_str()
             .unwrap_or_default()
-            .contains("ниже целевой планки 90%")
+            .contains("целевой планки")
+    );
+}
+
+#[test]
+fn product_headline_target_percent_does_not_change_public_status_or_projection() {
+    let summary = json!({
+        "events_total": 12,
+        "counted_events": 7,
+        "preliminary": false,
+        "verified_baseline_tokens": 1000,
+        "verified_observed_whole_cycle_with_amai_tokens": 250,
+        "client_limit_meter_alignment": {
+            "same_meter_as_client_limit": true,
+            "strict_client_meter_slice": {
+                "lower_bound_tokens": 1000
+            },
+            "baseline_equivalence": {
+                "measured_baseline_tokens_lower_bound": 1000
+            }
+        }
+    });
+    let headline_50 = super::build_product_headline_with_target(
+        &summary,
+        "окно Основное клиентское окно",
+        None,
+        50,
+    );
+    let headline_90 = super::build_product_headline_with_target(
+        &summary,
+        "окно Основное клиентское окно",
+        None,
+        90,
+    );
+    assert_eq!(headline_50["status"], headline_90["status"]);
+    assert_eq!(headline_50["note"], headline_90["note"]);
+    assert_eq!(headline_50["value_text"], headline_90["value_text"]);
+    assert_eq!(
+        headline_50["public_savings_projection"],
+        headline_90["public_savings_projection"]
+    );
+    assert_ne!(
+        headline_50["operator_client_budget_context"]["target_percent"],
+        headline_90["operator_client_budget_context"]["target_percent"]
     );
 }
 
@@ -4170,13 +4473,112 @@ fn product_headline_zero_target_does_not_force_below_target_alert() {
                 }
             }
         }),
-        "окно Codex 5 часов",
+        "окно Основное клиентское окно",
         None,
         0,
     );
     assert_eq!(headline["status"], "pass");
-    assert_eq!(headline["client_meter_target_percent"], json!(0.0));
-    assert_eq!(headline["client_meter_target_met"], json!(true));
+    assert_eq!(
+        headline["operator_client_budget_context"]["target_percent"],
+        json!(0.0)
+    );
+    assert_eq!(
+        headline["operator_client_budget_context"]["target_met"],
+        json!(true)
+    );
+}
+
+#[test]
+fn product_headline_overspend_pair_returns_alert_without_target_copy() {
+    let headline = build_product_headline(
+        &json!({
+            "events_total": 4,
+            "counted_events": 4,
+            "preliminary": false,
+            "verified_baseline_tokens": 1000,
+            "verified_observed_whole_cycle_with_amai_tokens": 1250,
+            "client_limit_meter_alignment": {
+                "same_meter_as_client_limit": false
+            }
+        }),
+        "окно Обычная рабочая машина",
+        None,
+    );
+    assert_eq!(headline["status"], "alert");
+    assert_eq!(headline["classification"], "overspend");
+    assert_eq!(headline["confidence"], "verified_summary_pair");
+    assert_eq!(headline["saved_tokens"], json!(-250));
+    assert_eq!(headline["value_percent"], json!(-25.0));
+    assert_eq!(
+        headline["value_text"].as_str(),
+        Some("Amai savings: без Amai 1000, с Amai 1250, перерасход 250 (25.00%)")
+    );
+    assert!(
+        !headline["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("целевой планки")
+    );
+}
+
+#[test]
+fn product_headline_missing_pair_returns_unknown_without_division() {
+    let headline = build_product_headline(
+        &json!({
+            "events_total": 4,
+            "counted_events": 0,
+            "preliminary": true,
+            "baseline_tokens": 0,
+            "observed_whole_cycle_with_amai_tokens": 120,
+            "client_limit_meter_alignment": {
+                "same_meter_as_client_limit": false
+            }
+        }),
+        "окно Обычная рабочая машина",
+        None,
+    );
+    assert_eq!(headline["status"], "unknown");
+    assert_eq!(headline["classification"], "missing");
+    assert_eq!(headline["confidence"], "missing");
+    assert!(headline["saved_tokens"].is_null());
+    assert!(headline["value_percent"].is_null());
+    assert_eq!(headline["value_text"].as_str(), Some("Amai savings: н/д"));
+    assert_eq!(headline["public_savings_projection"]["preliminary"], json!(false));
+}
+
+#[test]
+fn product_headline_preliminary_overspend_stays_waiting_and_surfaces_pair_truth() {
+    let headline = build_product_headline(
+        &json!({
+            "events_total": 4,
+            "counted_events": 0,
+            "preliminary": true,
+            "baseline_tokens": 1000,
+            "observed_whole_cycle_with_amai_tokens": 1250,
+            "client_limit_meter_alignment": {
+                "same_meter_as_client_limit": false
+            }
+        }),
+        "окно Обычная рабочая машина",
+        None,
+    );
+    assert_eq!(headline["status"], "waiting");
+    assert_eq!(headline["preliminary"], json!(true));
+    assert_eq!(headline["classification"], "overspend");
+    assert_eq!(headline["confidence"], "preliminary_summary_pair");
+    assert_eq!(headline["saved_tokens"], json!(-250));
+    assert_eq!(headline["value_percent"], json!(-25.0));
+    assert_eq!(headline["public_savings_projection"]["preliminary"], json!(true));
+    assert_eq!(
+        headline["public_savings_projection"]["pair_source"],
+        "measured_scope_summary_pair"
+    );
+    assert!(
+        headline["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("показывает перерасход")
+    );
 }
 
 #[test]
@@ -4297,7 +4699,7 @@ fn dashboard_statement_export_preview_surfaces_reviewed_frozen_debt_export() {
 }
 
 #[test]
-fn product_headline_falls_back_to_preliminary_effective_metric() {
+fn product_headline_returns_unknown_when_only_effective_metric_exists_without_pair() {
     let headline = build_product_headline(
         &json!({
             "events_total": 10,
@@ -4311,18 +4713,18 @@ fn product_headline_falls_back_to_preliminary_effective_metric() {
             "quality_ok_rate": 0.0,
             "fallback_rate": 0.0
         }),
-        "окно Codex 5 часов",
+        "окно Основное клиентское окно",
         None,
     );
-    assert_eq!(headline["metric_code"], "effective_savings_pct_preliminary");
-    assert_eq!(headline["value_percent"], 44.0);
-    assert_eq!(headline["saved_tokens"], 1200);
-    assert_eq!(headline["status"], "alert");
+    assert_eq!(headline["metric_code"], "amai_savings_token_pair");
+    assert!(headline["value_percent"].is_null());
+    assert!(headline["saved_tokens"].is_null());
+    assert_eq!(headline["status"], "unknown");
     assert!(
         headline["note"]
             .as_str()
             .unwrap_or_default()
-            .contains("старым форматом")
+            .contains("честная savings-пара")
     );
 }
 
@@ -4333,6 +4735,7 @@ fn agent_cycle_economics_exposes_partial_lower_bound_and_timelines() {
         naive_limit_files: 5,
         naive_max_bytes_per_file: 16384,
         include_verify_events_by_default: false,
+        public_savings_window_hours: 24,
         metering_ingest_warning_seconds: 60,
         metering_ingest_slo_seconds: 300,
         late_arrival_grace_minutes: 60,
@@ -4345,7 +4748,7 @@ fn agent_cycle_economics_exposes_partial_lower_bound_and_timelines() {
             event_id: "event-1".to_string(),
             correlation_id: "event-1".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 10,
             occurred_at_epoch_ms: 10,
             ingested_at_epoch_ms: 10,
@@ -4396,7 +4799,7 @@ fn agent_cycle_economics_exposes_partial_lower_bound_and_timelines() {
             event_id: "event-2".to_string(),
             correlation_id: "event-2".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 20,
             occurred_at_epoch_ms: 20,
             ingested_at_epoch_ms: 20,
@@ -5424,7 +5827,11 @@ fn current_live_turn_meter_summary_enables_same_meter_pair_without_quality_gate(
         &[],
         Some(&assistant_scope),
     );
-    assert!(super::scope_same_meter_exact_pair(&raw_preview).is_none());
+    let raw_pair = super::scope_same_meter_exact_pair(&raw_preview).expect("raw exact pair");
+    assert_eq!(raw_pair.0, 54);
+    assert_eq!(raw_pair.1, 94);
+    assert_eq!(raw_pair.2, -40);
+    assert!((raw_pair.3 - (-74.074_074_074_074_08)).abs() < 1e-9);
 
     let adjusted_summary = super::current_live_turn_meter_summary(&summary);
     let preview = super::build_dashboard_statement_preview(
@@ -5443,10 +5850,10 @@ fn current_live_turn_meter_summary_enables_same_meter_pair_without_quality_gate(
         preview["client_limit_meter_alignment"]["same_meter_as_client_limit"],
         json!(true)
     );
-    assert_eq!(without_amai, 45);
+    assert_eq!(without_amai, 54);
     assert_eq!(with_amai, 94);
-    assert_eq!(saved_tokens, -49);
-    assert!((saved_pct - (-108.888_888_888_888_89)).abs() < 1e-9);
+    assert_eq!(saved_tokens, -40);
+    assert!((saved_pct - (-74.074_074_074_074_08)).abs() < 1e-9);
 }
 
 #[test]
@@ -6314,6 +6721,24 @@ fn summarize_events_derives_client_prompt_tokens_from_query_when_field_missing()
 }
 
 #[test]
+fn legacy_token_event_repair_noops_on_canonical_payload() {
+    let payload = event_to_json(&token_event! {
+        event_id: "canonical-event".to_string(),
+        query: "token report".to_string(),
+        naive_tokens: 1000,
+        context_tokens: 300,
+        recovery_tokens: 20,
+        saved_tokens: 700,
+        effective_saved_tokens: 680,
+        savings_factor: 3.3333333333333335,
+        savings_percent: 70.0,
+        effective_savings_percent: 68.0,
+    });
+
+    assert!(repair_legacy_token_event_payload(&payload).is_none());
+}
+
+#[test]
 fn legacy_token_event_repair_adds_missing_fields() {
     let repaired = repair_legacy_token_event_payload(&json!({
         "token_budget_event": {
@@ -6322,9 +6747,6 @@ fn legacy_token_event_repair_adds_missing_fields() {
             "naive_scope": { "tokens": 1000 },
             "context_pack_render": { "tokens": 200 },
             "savings": {
-                "saved_tokens": 800,
-                "savings_percent": 80.0,
-                "savings_factor": 5.0
             }
         }
     }))
@@ -6333,9 +6755,369 @@ fn legacy_token_event_repair_adds_missing_fields() {
     let event = &repaired["token_budget_event"];
     assert_eq!(event["traffic_class"], "live");
     assert_eq!(event["query_type"], "onboarding_query");
+    assert_eq!(event["baseline_tokens"], 1000);
+    assert_eq!(event["delivered_tokens"], 200);
+    assert_eq!(event["saved_tokens"], 800);
+    assert_eq!(event["quality_ok"], false);
     assert_eq!(event["quality"]["quality_method"], "legacy_unverified");
+    assert_eq!(event["quality_method"], "legacy_unverified");
+    assert_eq!(event["quality_tier"], "unverified");
+    assert_eq!(event["followup_count"], 0);
+    assert_eq!(event["savings"]["saved_tokens"], 800);
+    assert_eq!(event["savings"]["savings_factor"], 5.0);
+    assert_eq!(event["savings"]["savings_percent"], 80.0);
     assert_eq!(event["savings"]["effective_saved_tokens"], 800);
     assert_eq!(event["savings"]["effective_savings_percent"], 80.0);
+    assert_eq!(event["accounting"]["raw"]["baseline_tokens"], 1000);
+    assert_eq!(
+        event["accounting"]["projection"]["savings"]["saved_tokens"],
+        800
+    );
+    assert_eq!(
+        event["accounting"]["policy"]["followup"]["followup_count"],
+        0
+    );
+}
+
+#[test]
+fn legacy_token_event_repair_rebuilds_stale_nested_accounting_from_flat_aliases() {
+    let repaired = repair_legacy_token_event_payload(&json!({
+        "token_budget_event": {
+            "event_id": "legacy-event",
+            "query": "Как установить Amai и подключить к VS Code?",
+            "source_kind": "live_context_pack",
+            "query_type": "stale_query_type",
+            "baseline_strategy": "stale_strategy",
+            "naive_scope": {
+                "tokens": 9999
+            },
+            "context_pack_render": {
+                "tokens": 777
+            },
+            "baseline_tokens": 1000,
+            "naive_tokens": 1000,
+            "delivered_tokens": 200,
+            "context_tokens": 200,
+            "recovery_tokens": 20,
+            "quality_ok": true,
+            "quality_score": 1.0,
+            "quality_method": "answer_proxy",
+            "quality_tier": "answer_proxy",
+            "head_hit_target": true,
+            "needed_followup": false,
+            "followup_count": 0,
+            "followup_of_event_id": "legacy-event",
+            "resolved_by_event_id": "resolved-1",
+            "fallback_triggered": false,
+            "fallback_count": 0,
+            "quality": {
+                "quality_ok": false,
+                "quality_score": 0.0,
+                "quality_method": "legacy_unverified",
+                "quality_tier": "unverified",
+                "head_hit_target": false
+            },
+            "followup": {
+                "needed_followup": true,
+                "followup_count": 9,
+                "followup_of_event_id": "wrong",
+                "resolved_by_event_id": "bad"
+            },
+            "recovery": {
+                "recovery_tokens": 88,
+                "fallback_triggered": true,
+                "fallback_count": 3
+            },
+            "savings": {
+                "saved_tokens": 1,
+                "effective_saved_tokens": 1,
+                "savings_factor": 1.0,
+                "savings_percent": 1.0,
+                "effective_savings_percent": 1.0
+            },
+            "accounting": {
+                "raw": {
+                    "baseline_tokens": 9999,
+                    "delivered_tokens": 777,
+                    "recovery_tokens": 88,
+                    "whole_cycle_observed": {
+                        "client_prompt_tokens": 1,
+                        "assistant_generation_tokens": 2,
+                        "tool_overhead_tokens": 3,
+                        "continuity_restore_tokens": 4
+                    },
+                    "recovery": {
+                        "recovery_tokens": 88,
+                        "fallback_triggered": true,
+                        "fallback_count": 3
+                    },
+                    "shape": {
+                        "document_hits": 9,
+                        "symbol_hits": 8,
+                        "file_hits": 7,
+                        "sources_count": 6,
+                        "chunks_count": 5,
+                        "pack_token_count": 4,
+                        "deduped_token_count": 3
+                    }
+                },
+                "policy": {
+                    "quality": {
+                        "quality_ok": false,
+                        "quality_score": 0.25,
+                        "quality_method": "stale_nested",
+                        "quality_tier": "partial",
+                        "head_hit_target": false
+                    },
+                    "followup": {
+                        "needed_followup": true,
+                        "followup_count": 9,
+                        "followup_of_event_id": "wrong",
+                        "resolved_by_event_id": "bad"
+                    }
+                },
+                "projection": {
+                    "savings": {
+                        "saved_tokens": 9,
+                        "effective_saved_tokens": 9,
+                        "savings_factor": 1.1,
+                        "savings_percent": 1.0,
+                        "effective_savings_percent": 1.0
+                    }
+                }
+            }
+        }
+    }))
+    .expect("repair should produce patched payload");
+
+    let event = &repaired["token_budget_event"];
+    assert_eq!(event["query_type"], "onboarding_query");
+    assert_eq!(event["baseline_strategy"], "legacy_pre_amai");
+    assert_eq!(event["baseline_tokens"], 1000);
+    assert_eq!(event["naive_tokens"], 1000);
+    assert_eq!(event["delivered_tokens"], 200);
+    assert_eq!(event["context_tokens"], 200);
+    assert_eq!(event["recovery_tokens"], 20);
+    assert_eq!(event["quality"]["quality_ok"], true);
+    assert_eq!(event["quality"]["quality_method"], "answer_proxy");
+    assert_eq!(event["followup"]["followup_count"], 0);
+    assert_eq!(event["followup"]["followup_of_event_id"], "legacy-event");
+    assert_eq!(event["followup"]["resolved_by_event_id"], "resolved-1");
+    assert_eq!(event["recovery"]["recovery_tokens"], 20);
+    assert_eq!(event["recovery"]["fallback_triggered"], false);
+    assert_eq!(event["recovery"]["fallback_count"], 0);
+    assert_eq!(event["savings"]["saved_tokens"], 800);
+    assert_eq!(event["savings"]["effective_saved_tokens"], 780);
+    assert_eq!(event["accounting"]["raw"]["baseline_tokens"], 1000);
+    assert_eq!(event["accounting"]["raw"]["delivered_tokens"], 200);
+    assert_eq!(event["accounting"]["raw"]["recovery_tokens"], 20);
+    assert_eq!(event["accounting"]["policy"]["quality"]["quality_ok"], true);
+    assert_eq!(
+        event["accounting"]["policy"]["followup"]["followup_count"],
+        0
+    );
+    assert_eq!(
+        event["accounting"]["projection"]["savings"]["saved_tokens"],
+        800
+    );
+
+    let parsed = parse_snapshot_event(&ObservabilitySnapshotRecord {
+        snapshot_id: Uuid::new_v4(),
+        snapshot_kind: "token_budget_event".to_string(),
+        created_at_epoch_ms: 12345,
+        payload: repaired,
+    })
+    .expect("parse should succeed")
+    .expect("event should exist");
+    assert_eq!(parsed.query_type, "onboarding_query");
+    assert_eq!(parsed.baseline_strategy, "legacy_pre_amai");
+    assert_eq!(parsed.naive_tokens, 1000);
+    assert_eq!(parsed.context_tokens, 200);
+    assert_eq!(parsed.recovery_tokens, 20);
+    assert_eq!(parsed.saved_tokens, 800);
+    assert_eq!(parsed.effective_saved_tokens, 780);
+    assert!(parsed.quality_ok);
+    assert_eq!(parsed.quality_method, "answer_proxy");
+    assert_eq!(parsed.followup_count, 0);
+}
+
+#[test]
+fn legacy_repair_then_reverification_roundtrips_through_parse_snapshot_event() {
+    let repaired = repair_legacy_token_event_payload(&json!({
+        "token_budget_event": {
+            "event_id": "legacy-event",
+            "query": "Как установить Amai и подключить к VS Code?",
+            "source_kind": "live_context_pack",
+            "naive_scope": { "tokens": 1000 },
+            "context_pack_render": { "tokens": 200 },
+            "savings": {}
+        }
+    }))
+    .expect("repair should produce patched payload");
+
+    let mut rebuilt = json!({
+        "retrieval": {
+            "exact_documents": [{}],
+            "symbol_hits": [],
+            "lexical_chunks": [],
+            "semantic_chunks": []
+        },
+        "token_budget_event": repaired["token_budget_event"].clone()
+    });
+    apply_reverification_metadata(
+        &mut rebuilt,
+        &json!({
+            "event_id": "legacy-event",
+            "timestamp_utc": 12345,
+            "source_kind": "live_context_pack",
+            "quality": {
+                "quality_ok": false,
+                "quality_method": "legacy_unverified"
+            }
+        }),
+        99999,
+    )
+    .expect("reverification metadata should apply");
+
+    let row = ObservabilitySnapshotRecord {
+        snapshot_id: Uuid::new_v4(),
+        snapshot_kind: "token_budget_event".to_string(),
+        created_at_epoch_ms: 12345,
+        payload: rebuilt,
+    };
+    let parsed = parse_snapshot_event(&row)
+        .expect("parse should succeed")
+        .expect("event should exist");
+    assert_eq!(parsed.event_id, "legacy-event");
+    assert_eq!(parsed.naive_tokens, 1000);
+    assert_eq!(parsed.context_tokens, 200);
+    assert_eq!(parsed.saved_tokens, 800);
+    assert_eq!(parsed.quality_method, "reverified_retrieval_miss");
+    assert_eq!(parsed.quality_tier, "partial");
+    assert!(!parsed.quality_ok);
+}
+
+#[test]
+fn set_recovery_penalty_refreshes_canonical_accounting() {
+    let mut payload = json!({
+        "token_budget_event": {
+            "baseline_tokens": 1000,
+            "delivered_tokens": 300,
+            "recovery_tokens": 999,
+            "followup_count": 9,
+            "effective_saved_tokens": 1000,
+            "effective_savings_percent": 45.0,
+            "recovery": {
+                "recovery_tokens": 5,
+                "fallback_triggered": false,
+                "fallback_count": 0
+            },
+            "followup": {
+                "needed_followup": false,
+                "followup_count": 0,
+                "followup_of_event_id": null,
+                "resolved_by_event_id": null
+            },
+            "quality": {
+                "quality_ok": true,
+                "quality_score": 1.0,
+                "quality_method": "retrieval_parity",
+                "quality_tier": "retrieval",
+                "head_hit_target": true
+            },
+            "whole_cycle_observed": {
+                "client_prompt_tokens": 12,
+                "assistant_generation_tokens": 7,
+                "tool_overhead_tokens": 3,
+                "continuity_restore_tokens": 1
+            },
+            "savings": {
+                "saved_tokens": 700,
+                "effective_saved_tokens": 695,
+                "savings_factor": 3.3333333333333335,
+                "savings_percent": 70.0,
+                "effective_savings_percent": 69.5
+            },
+            "accounting": {
+                "raw": {
+                    "baseline_tokens": 2222,
+                    "delivered_tokens": 222,
+                    "recovery_tokens": 999,
+                    "whole_cycle_observed": {
+                        "client_prompt_tokens": 1,
+                        "assistant_generation_tokens": 2,
+                        "tool_overhead_tokens": 3,
+                        "continuity_restore_tokens": 4
+                    },
+                    "recovery": {
+                        "recovery_tokens": 999,
+                        "fallback_triggered": true,
+                        "fallback_count": 9
+                    },
+                    "shape": {
+                        "document_hits": 9,
+                        "symbol_hits": 9,
+                        "file_hits": 9,
+                        "sources_count": 9,
+                        "chunks_count": 9,
+                        "pack_token_count": 222,
+                        "deduped_token_count": 222
+                    }
+                },
+                "policy": {
+                    "quality": {
+                        "quality_ok": false,
+                        "quality_score": 0.0,
+                        "quality_method": "stale_accounting",
+                        "quality_tier": "partial",
+                        "head_hit_target": false
+                    },
+                    "followup": {
+                        "needed_followup": true,
+                        "followup_count": 9,
+                        "followup_of_event_id": "stale",
+                        "resolved_by_event_id": null
+                    }
+                },
+                "projection": {
+                    "savings": {
+                        "saved_tokens": 2000,
+                        "effective_saved_tokens": 1000,
+                        "savings_factor": 10.0,
+                        "savings_percent": 90.0,
+                        "effective_savings_percent": 45.0
+                    }
+                }
+            }
+        }
+    });
+
+    super::set_recovery_penalty(&mut payload, 55, 2).expect("penalty update");
+
+    let event = &payload["token_budget_event"];
+    assert_eq!(event["recovery"]["recovery_tokens"], 55);
+    assert_eq!(event["followup"]["followup_count"], 2);
+    assert_eq!(event["recovery_tokens"], 55);
+    assert_eq!(event["followup_count"], 2);
+    assert_eq!(event["savings"]["effective_saved_tokens"], 645);
+    assert_eq!(event["savings"]["effective_savings_percent"], 64.5);
+    assert_eq!(event["effective_saved_tokens"], 645);
+    assert_eq!(event["effective_savings_percent"], 64.5);
+    assert_eq!(event["accounting"]["raw"]["baseline_tokens"], 1000);
+    assert_eq!(event["accounting"]["raw"]["delivered_tokens"], 300);
+    assert_eq!(event["accounting"]["raw"]["recovery_tokens"], 55);
+    assert_eq!(
+        event["accounting"]["projection"]["savings"]["saved_tokens"],
+        700
+    );
+    assert_eq!(
+        event["accounting"]["policy"]["followup"]["followup_count"],
+        2
+    );
+    assert_eq!(
+        event["accounting"]["projection"]["savings"]["effective_saved_tokens"],
+        645
+    );
 }
 
 #[test]
@@ -6666,7 +7448,7 @@ fn token_ledger_repair_selector_matches_project_prefix_namespace_and_source_kind
         agent_scope: "amai::continuity::default".to_string(),
         payload_origin: "context_pack_token_budget".to_string(),
         session_id: "session-1".to_string(),
-        rolling_window_profile: "codex_5h".to_string(),
+        rolling_window_profile: "client_primary_budget".to_string(),
         timestamp_utc: 1,
         occurred_at_epoch_ms: 1,
         ingested_at_epoch_ms: 1,
@@ -6840,7 +7622,7 @@ fn source_kind_rewrite_updates_usage_state_and_observability_source() {
                 "occurred_at_epoch_ms": 123,
                 "ingested_at_epoch_ms": 123,
                 "session_id": "session-1",
-                "rolling_window_profile": "codex_5h",
+                "rolling_window_profile": "client_primary_budget",
                 "contract": {
                     "usage_event_schema_version": "billing-usage-event-v2",
                     "settlement_statement_version": "settlement-preview-v0",
@@ -6960,6 +7742,11 @@ fn reverification_keeps_identity_and_marks_method() {
         },
         "token_budget_event": {
             "target_kind": "file",
+            "quality_ok": false,
+            "quality_score": 0.0,
+            "quality_method": "legacy_unverified",
+            "quality_tier": "partial",
+            "head_hit_target": false,
             "quality": {
                 "quality_ok": true,
                 "quality_score": 1.0,
@@ -6993,10 +7780,71 @@ fn reverification_keeps_identity_and_marks_method() {
         "reverified_answer_proxy"
     );
     assert_eq!(event["quality"]["quality_tier"], "answer_proxy");
+    assert_eq!(event["quality_ok"], true);
+    assert_eq!(event["quality_score"], 1.0);
+    assert_eq!(event["quality_method"], "reverified_answer_proxy");
+    assert_eq!(event["quality_tier"], "answer_proxy");
+    assert_eq!(event["head_hit_target"], true);
     assert_eq!(
         event["reverification"]["previous_quality_method"],
         "legacy_unverified"
     );
+}
+
+#[test]
+fn reverification_payload_roundtrips_through_parse_snapshot_event() {
+    let mut rebuilt = json!({
+        "retrieval": {
+            "exact_documents": [{}],
+            "symbol_hits": [],
+            "lexical_chunks": [],
+            "semantic_chunks": []
+        },
+        "token_budget_event": {
+            "event_id": "event-1",
+            "target_kind": "file",
+            "quality_ok": false,
+            "quality_score": 0.0,
+            "quality_method": "legacy_unverified",
+            "quality_tier": "partial",
+            "head_hit_target": false,
+            "quality": {
+                "quality_ok": true,
+                "quality_score": 1.0,
+                "quality_method": "retrieval_parity",
+                "quality_tier": "retrieval",
+                "head_hit_target": true
+            }
+        }
+    });
+    apply_reverification_metadata(
+        &mut rebuilt,
+        &json!({
+            "event_id": "existing-event",
+            "timestamp_utc": 12345,
+            "source_kind": "live_context_pack",
+            "quality": {
+                "quality_ok": false,
+                "quality_method": "legacy_unverified"
+            }
+        }),
+        99999,
+    )
+    .expect("reverification metadata should apply");
+
+    let row = ObservabilitySnapshotRecord {
+        snapshot_id: Uuid::new_v4(),
+        snapshot_kind: "token_budget_event".to_string(),
+        created_at_epoch_ms: 12345,
+        payload: rebuilt,
+    };
+    let parsed = parse_snapshot_event(&row)
+        .expect("parse should succeed")
+        .expect("event should exist");
+    assert_eq!(parsed.event_id, "existing-event");
+    assert_eq!(parsed.quality_method, "reverified_answer_proxy");
+    assert_eq!(parsed.quality_tier, "answer_proxy");
+    assert!(parsed.quality_ok);
 }
 
 #[test]
@@ -7006,6 +7854,7 @@ fn preliminary_turns_off_when_token_volume_is_high_enough() {
         naive_limit_files: 5,
         naive_max_bytes_per_file: 16384,
         include_verify_events_by_default: false,
+        public_savings_window_hours: 24,
         metering_ingest_warning_seconds: 60,
         metering_ingest_slo_seconds: 300,
         late_arrival_grace_minutes: 60,
@@ -7018,7 +7867,7 @@ fn preliminary_turns_off_when_token_volume_is_high_enough() {
             event_id: "event-1".to_string(),
             correlation_id: "event-1".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 10,
             occurred_at_epoch_ms: 10,
             ingested_at_epoch_ms: 10,
@@ -7079,6 +7928,7 @@ fn summarize_events_exposes_extended_latency_distribution() {
         naive_limit_files: 5,
         naive_max_bytes_per_file: 16384,
         include_verify_events_by_default: false,
+        public_savings_window_hours: 24,
         metering_ingest_warning_seconds: 60,
         metering_ingest_slo_seconds: 300,
         late_arrival_grace_minutes: 60,
@@ -7091,7 +7941,7 @@ fn summarize_events_exposes_extended_latency_distribution() {
             event_id: "event-1".to_string(),
             correlation_id: "event-1".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 10,
             occurred_at_epoch_ms: 10,
             ingested_at_epoch_ms: 10,
@@ -7138,7 +7988,7 @@ fn summarize_events_exposes_extended_latency_distribution() {
             event_id: "event-2".to_string(),
             correlation_id: "event-2".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 20,
             occurred_at_epoch_ms: 20,
             ingested_at_epoch_ms: 20,
@@ -7200,7 +8050,7 @@ fn summarize_events_exposes_coverage_and_excluded_taxonomy() {
             event_id: "event-1".to_string(),
             correlation_id: "event-1".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 10,
             occurred_at_epoch_ms: 10,
             ingested_at_epoch_ms: 10,
@@ -7222,7 +8072,7 @@ fn summarize_events_exposes_coverage_and_excluded_taxonomy() {
             event_id: "event-2".to_string(),
             correlation_id: "event-2".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 20,
             occurred_at_epoch_ms: 20,
             ingested_at_epoch_ms: 20,
@@ -7323,7 +8173,7 @@ fn latency_slice_breakdown_normalizes_hot_cold_and_mixed() {
             event_id: "event-1".to_string(),
             correlation_id: "event-1".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 10,
             occurred_at_epoch_ms: 10,
             ingested_at_epoch_ms: 10,
@@ -7370,7 +8220,7 @@ fn latency_slice_breakdown_normalizes_hot_cold_and_mixed() {
             event_id: "event-2".to_string(),
             correlation_id: "event-2".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 20,
             occurred_at_epoch_ms: 20,
             ingested_at_epoch_ms: 20,
@@ -7444,7 +8294,7 @@ fn latency_slice_breakdown_ignores_continuity_restore_observed_events() {
             event_id: "retrieval-event".to_string(),
             correlation_id: "retrieval-event".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 10,
             occurred_at_epoch_ms: 10,
             ingested_at_epoch_ms: 10,
@@ -7533,7 +8383,7 @@ fn latency_slice_breakdown_ignores_unconfirmed_live_events() {
             event_id: "excluded-live".to_string(),
             correlation_id: "excluded-live".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 10,
             occurred_at_epoch_ms: 10,
             ingested_at_epoch_ms: 10,
@@ -7581,7 +8431,7 @@ fn latency_slice_breakdown_ignores_unconfirmed_live_events() {
             event_id: "confirmed-live".to_string(),
             correlation_id: "confirmed-live".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 20,
             occurred_at_epoch_ms: 20,
             ingested_at_epoch_ms: 20,
@@ -7647,7 +8497,7 @@ fn latency_slice_breakdown_prefers_v2_live_measurement_when_present() {
             event_id: "legacy-v1".to_string(),
             correlation_id: "legacy-v1".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 10,
             occurred_at_epoch_ms: 10,
             ingested_at_epoch_ms: 10,
@@ -7695,7 +8545,7 @@ fn latency_slice_breakdown_prefers_v2_live_measurement_when_present() {
             event_id: "live-v2".to_string(),
             correlation_id: "live-v2".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 20,
             occurred_at_epoch_ms: 20,
             ingested_at_epoch_ms: 20,
@@ -7760,7 +8610,7 @@ fn latency_slice_breakdown_prefers_v3_live_measurement_when_present() {
             event_id: "legacy-v2".to_string(),
             correlation_id: "legacy-v2".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 10,
             occurred_at_epoch_ms: 10,
             ingested_at_epoch_ms: 10,
@@ -7808,7 +8658,7 @@ fn latency_slice_breakdown_prefers_v3_live_measurement_when_present() {
             event_id: "live-v3".to_string(),
             correlation_id: "live-v3".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 20,
             occurred_at_epoch_ms: 20,
             ingested_at_epoch_ms: 20,
@@ -7873,7 +8723,7 @@ fn latency_slice_breakdown_prefers_v4_live_measurement_when_present() {
             event_id: "legacy-v3".to_string(),
             correlation_id: "legacy-v3".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 10,
             occurred_at_epoch_ms: 10,
             ingested_at_epoch_ms: 10,
@@ -7921,7 +8771,7 @@ fn latency_slice_breakdown_prefers_v4_live_measurement_when_present() {
             event_id: "live-v4".to_string(),
             correlation_id: "live-v4".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 20,
             occurred_at_epoch_ms: 20,
             ingested_at_epoch_ms: 20,
@@ -7986,7 +8836,7 @@ fn latency_slice_breakdown_prefers_v9_live_measurement_when_present() {
             event_id: "legacy-v4".to_string(),
             correlation_id: "legacy-v4".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 10,
             occurred_at_epoch_ms: 10,
             ingested_at_epoch_ms: 10,
@@ -8034,7 +8884,7 @@ fn latency_slice_breakdown_prefers_v9_live_measurement_when_present() {
             event_id: "live-v5".to_string(),
             correlation_id: "live-v5".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 20,
             occurred_at_epoch_ms: 20,
             ingested_at_epoch_ms: 20,
@@ -8082,7 +8932,7 @@ fn latency_slice_breakdown_prefers_v9_live_measurement_when_present() {
             event_id: "live-v6".to_string(),
             correlation_id: "live-v6".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 30,
             occurred_at_epoch_ms: 30,
             ingested_at_epoch_ms: 30,
@@ -8130,7 +8980,7 @@ fn latency_slice_breakdown_prefers_v9_live_measurement_when_present() {
             event_id: "live-v7".to_string(),
             correlation_id: "live-v7".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 40,
             occurred_at_epoch_ms: 40,
             ingested_at_epoch_ms: 40,
@@ -8178,7 +9028,7 @@ fn latency_slice_breakdown_prefers_v9_live_measurement_when_present() {
             event_id: "live-v10".to_string(),
             correlation_id: "live-v10".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 60,
             occurred_at_epoch_ms: 60,
             ingested_at_epoch_ms: 60,
@@ -8226,7 +9076,7 @@ fn latency_slice_breakdown_prefers_v9_live_measurement_when_present() {
             event_id: "live-v8".to_string(),
             correlation_id: "live-v8".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 50,
             occurred_at_epoch_ms: 50,
             ingested_at_epoch_ms: 50,
@@ -8291,7 +9141,7 @@ fn dashboard_same_meter_sync_signature_tracks_missing_whole_cycle_targets() {
             event_id: "event-a".to_string(),
             correlation_id: "ctx-a".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 10,
             occurred_at_epoch_ms: 10,
             ingested_at_epoch_ms: 10,
@@ -8340,7 +9190,7 @@ fn dashboard_same_meter_sync_signature_tracks_missing_whole_cycle_targets() {
             event_id: "event-b".to_string(),
             correlation_id: "ctx-b".to_string(),
             session_id: "session-1".to_string(),
-            rolling_window_profile: "codex_5h".to_string(),
+            rolling_window_profile: "client_primary_budget".to_string(),
             timestamp_utc: 20,
             occurred_at_epoch_ms: 20,
             ingested_at_epoch_ms: 20,
@@ -8468,7 +9318,7 @@ fn dashboard_report_signature_ignores_wall_clock_when_inputs_match() {
         event_id: "event-a".to_string(),
         correlation_id: "ctx-a".to_string(),
         session_id: "session-1".to_string(),
-        rolling_window_profile: "codex_5h".to_string(),
+        rolling_window_profile: "client_primary_budget".to_string(),
         timestamp_utc: 10,
         occurred_at_epoch_ms: 10,
         ingested_at_epoch_ms: 10,
@@ -8517,6 +9367,7 @@ fn dashboard_report_signature_ignores_wall_clock_when_inputs_match() {
         &events,
         None,
         &events,
+        &public_savings_window_fixture(),
         &scope,
         Some(&scope),
         &scope,
@@ -8532,6 +9383,7 @@ fn dashboard_report_signature_ignores_wall_clock_when_inputs_match() {
         &events,
         None,
         &events,
+        &public_savings_window_fixture(),
         &scope,
         Some(&scope),
         &scope,
@@ -8552,7 +9404,7 @@ fn dashboard_report_signature_changes_when_assistant_scope_changes() {
         event_id: "event-a".to_string(),
         correlation_id: "ctx-a".to_string(),
         session_id: "session-1".to_string(),
-        rolling_window_profile: "codex_5h".to_string(),
+        rolling_window_profile: "client_primary_budget".to_string(),
         timestamp_utc: 10,
         occurred_at_epoch_ms: 10,
         ingested_at_epoch_ms: 10,
@@ -8606,6 +9458,7 @@ fn dashboard_report_signature_changes_when_assistant_scope_changes() {
         &events,
         None,
         &events,
+        &public_savings_window_fixture(),
         &base_scope,
         Some(&base_scope),
         &base_scope,
@@ -8621,6 +9474,7 @@ fn dashboard_report_signature_changes_when_assistant_scope_changes() {
         &events,
         None,
         &events,
+        &public_savings_window_fixture(),
         &changed_scope,
         Some(&base_scope),
         &base_scope,
@@ -8641,7 +9495,7 @@ fn dashboard_report_signature_changes_when_exact_client_limits_change() {
         event_id: "event-a".to_string(),
         correlation_id: "ctx-a".to_string(),
         session_id: "session-1".to_string(),
-        rolling_window_profile: "codex_5h".to_string(),
+        rolling_window_profile: "client_primary_budget".to_string(),
         timestamp_utc: 10,
         occurred_at_epoch_ms: 10,
         ingested_at_epoch_ms: 10,
@@ -8720,6 +9574,7 @@ fn dashboard_report_signature_changes_when_exact_client_limits_change() {
         &events,
         None,
         &events,
+        &public_savings_window_fixture(),
         &scope,
         Some(&scope),
         &scope,
@@ -8735,6 +9590,7 @@ fn dashboard_report_signature_changes_when_exact_client_limits_change() {
         &events,
         None,
         &events,
+        &public_savings_window_fixture(),
         &scope,
         Some(&scope),
         &scope,
@@ -8755,7 +9611,7 @@ fn dashboard_report_signature_changes_when_live_response_latency_changes() {
         event_id: "event-a".to_string(),
         correlation_id: "ctx-a".to_string(),
         session_id: "session-1".to_string(),
-        rolling_window_profile: "codex_5h".to_string(),
+        rolling_window_profile: "client_primary_budget".to_string(),
         timestamp_utc: 10,
         occurred_at_epoch_ms: 10,
         ingested_at_epoch_ms: 10,
@@ -8804,6 +9660,7 @@ fn dashboard_report_signature_changes_when_live_response_latency_changes() {
         &events,
         None,
         &events,
+        &public_savings_window_fixture(),
         &scope,
         Some(&scope),
         &scope,
@@ -8819,6 +9676,7 @@ fn dashboard_report_signature_changes_when_live_response_latency_changes() {
         &events,
         None,
         &events,
+        &public_savings_window_fixture(),
         &scope,
         Some(&scope),
         &scope,
@@ -9213,7 +10071,7 @@ fn followup_recovery_is_attributed_to_successful_followup_event() {
                 event_id: "event-1".to_string(),
                 correlation_id: "event-1".to_string(),
                 session_id: "session-1".to_string(),
-                rolling_window_profile: "codex_5h".to_string(),
+                rolling_window_profile: "client_primary_budget".to_string(),
                 timestamp_utc: 1000,
                 occurred_at_epoch_ms: 1000,
                 ingested_at_epoch_ms: 1000,
@@ -9260,7 +10118,7 @@ fn followup_recovery_is_attributed_to_successful_followup_event() {
                 event_id: "event-2".to_string(),
                 correlation_id: "event-2".to_string(),
                 session_id: "session-1".to_string(),
-                rolling_window_profile: "codex_5h".to_string(),
+                rolling_window_profile: "client_primary_budget".to_string(),
                 timestamp_utc: 2000,
                 occurred_at_epoch_ms: 2000,
                 ingested_at_epoch_ms: 2000,
@@ -9657,7 +10515,7 @@ fn dashboard_report_signature_changes_when_client_live_meter_binding_hint_change
         event_id: "event-a".to_string(),
         correlation_id: "ctx-a".to_string(),
         session_id: "session-1".to_string(),
-        rolling_window_profile: "codex_5h".to_string(),
+        rolling_window_profile: "client_primary_budget".to_string(),
         timestamp_utc: 10,
         occurred_at_epoch_ms: 10,
         ingested_at_epoch_ms: 10,
@@ -9730,6 +10588,7 @@ fn dashboard_report_signature_changes_when_client_live_meter_binding_hint_change
         &events,
         None,
         &events,
+        &public_savings_window_fixture(),
         &scope,
         Some(&scope),
         &scope,
@@ -9745,6 +10604,7 @@ fn dashboard_report_signature_changes_when_client_live_meter_binding_hint_change
         &events,
         None,
         &events,
+        &public_savings_window_fixture(),
         &scope,
         Some(&scope),
         &scope,
@@ -9764,7 +10624,7 @@ fn dashboard_report_signature_changes_when_client_budget_target_changes() {
         event_id: "event-a".to_string(),
         correlation_id: "ctx-a".to_string(),
         session_id: "session-1".to_string(),
-        rolling_window_profile: "codex_5h".to_string(),
+        rolling_window_profile: "client_primary_budget".to_string(),
         timestamp_utc: 10,
         occurred_at_epoch_ms: 10,
         ingested_at_epoch_ms: 10,
@@ -9813,6 +10673,7 @@ fn dashboard_report_signature_changes_when_client_budget_target_changes() {
         &events,
         None,
         &events,
+        &public_savings_window_fixture(),
         &scope,
         Some(&scope),
         &scope,
@@ -9828,6 +10689,7 @@ fn dashboard_report_signature_changes_when_client_budget_target_changes() {
         &events,
         None,
         &events,
+        &public_savings_window_fixture(),
         &scope,
         Some(&scope),
         &scope,
@@ -9837,6 +10699,160 @@ fn dashboard_report_signature_changes_when_client_budget_target_changes() {
         &json!({}),
         50,
     ));
+    assert_ne!(left, right);
+}
+
+#[test]
+fn dashboard_report_signature_components_pin_public_headline_contract_versions() {
+    let events = vec![token_event! {
+        created_at_epoch_ms: 10,
+        event_id: "event-a".to_string(),
+        correlation_id: "ctx-a".to_string(),
+        session_id: "session-1".to_string(),
+        rolling_window_profile: "client_primary_budget".to_string(),
+        timestamp_utc: 10,
+        occurred_at_epoch_ms: 10,
+        ingested_at_epoch_ms: 10,
+        query: "q-a".to_string(),
+        query_hash: "hash-a".to_string(),
+        query_type: "code_lookup".to_string(),
+        target_kind: "file".to_string(),
+        baseline_hit_target: true,
+        amai_hit_target: true,
+        cold_warm_state: "warm".to_string(),
+        baseline_strategy: "naive_top_files".to_string(),
+        retrieval_mode: Some("local_strict".to_string()),
+        tokenizer: "o200k_base".to_string(),
+        latency_ms: 1.0,
+        saved_tokens: 10,
+        naive_tokens: 20,
+        context_tokens: 10,
+        recovery_tokens: 0,
+        effective_saved_tokens: 10,
+        savings_factor: 2.0,
+        savings_percent: 50.0,
+        effective_savings_percent: 50.0,
+        quality_ok: true,
+        quality_score: 1.0,
+        quality_method: "retrieval_parity".to_string(),
+        quality_tier: "retrieval".to_string(),
+        head_hit_target: true,
+        needed_followup: false,
+        followup_count: 0,
+        followup_of_event_id: None,
+        resolved_by_event_id: None,
+        fallback_triggered: false,
+        fallback_count: 0,
+        document_hits: 1,
+        symbol_hits_count: 0,
+        file_hits: 1,
+        sources_count: 1,
+        chunks_count: 1,
+        pack_token_count: 10,
+        deduped_token_count: 10,
+    }];
+    let scope = AssistantGenerationScopeObservation::default();
+    let components = dashboard_report_signature_components(
+        &events,
+        &events,
+        &events,
+        None,
+        &events,
+        &public_savings_window_fixture(),
+        &scope,
+        Some(&scope),
+        &scope,
+        None,
+        None,
+        None,
+        &json!({}),
+        90,
+    );
+
+    assert_eq!(
+        components.public_savings_projection_contract_version,
+        "public-savings-projection-v2"
+    );
+    assert_eq!(
+        components.public_product_headline_contract_version,
+        "public-product-headline-v3"
+    );
+    assert_eq!(
+        components.operator_client_budget_context_contract_version,
+        "operator-client-budget-context-v1"
+    );
+}
+
+#[test]
+fn dashboard_report_signature_changes_when_operator_context_contract_version_changes() {
+    let events = vec![token_event! {
+        created_at_epoch_ms: 10,
+        event_id: "event-a".to_string(),
+        correlation_id: "ctx-a".to_string(),
+        session_id: "session-1".to_string(),
+        rolling_window_profile: "client_primary_budget".to_string(),
+        timestamp_utc: 10,
+        occurred_at_epoch_ms: 10,
+        ingested_at_epoch_ms: 10,
+        query: "q-a".to_string(),
+        query_hash: "hash-a".to_string(),
+        query_type: "code_lookup".to_string(),
+        target_kind: "file".to_string(),
+        baseline_hit_target: true,
+        amai_hit_target: true,
+        cold_warm_state: "warm".to_string(),
+        baseline_strategy: "naive_top_files".to_string(),
+        retrieval_mode: Some("local_strict".to_string()),
+        tokenizer: "o200k_base".to_string(),
+        latency_ms: 1.0,
+        saved_tokens: 10,
+        naive_tokens: 20,
+        context_tokens: 10,
+        recovery_tokens: 0,
+        effective_saved_tokens: 10,
+        savings_factor: 2.0,
+        savings_percent: 50.0,
+        effective_savings_percent: 50.0,
+        quality_ok: true,
+        quality_score: 1.0,
+        quality_method: "retrieval_parity".to_string(),
+        quality_tier: "retrieval".to_string(),
+        head_hit_target: true,
+        needed_followup: false,
+        followup_count: 0,
+        followup_of_event_id: None,
+        resolved_by_event_id: None,
+        fallback_triggered: false,
+        fallback_count: 0,
+        document_hits: 1,
+        symbol_hits_count: 0,
+        file_hits: 1,
+        sources_count: 1,
+        chunks_count: 1,
+        pack_token_count: 10,
+        deduped_token_count: 10,
+    }];
+    let scope = AssistantGenerationScopeObservation::default();
+    let mut components = dashboard_report_signature_components(
+        &events,
+        &events,
+        &events,
+        None,
+        &events,
+        &public_savings_window_fixture(),
+        &scope,
+        Some(&scope),
+        &scope,
+        None,
+        None,
+        None,
+        &json!({}),
+        90,
+    );
+    let left = dashboard_report_signature(&components);
+    components.operator_client_budget_context_contract_version =
+        "operator-client-budget-context-v999".to_string();
+    let right = dashboard_report_signature(&components);
     assert_ne!(left, right);
 }
 
@@ -9981,7 +10997,7 @@ fn exact_client_limit_hourly_burn_value_classifies_saving() {
     assert_eq!(value["classification"].as_str(), Some("saving"));
     assert_eq!(
         value["reply_prefix"].as_str(),
-        Some("5ч KPI: экономия 50.00%")
+        Some("Burn guard: экономия 50.00%")
     );
 }
 
@@ -9997,7 +11013,7 @@ fn exact_client_limit_hourly_burn_value_classifies_one_to_one() {
     let value = super::exact_client_limit_hourly_burn_value(&samples, 1_800_000, 60, 10, 0);
     assert_eq!(value["status"].as_str(), Some("observed"));
     assert_eq!(value["classification"].as_str(), Some("one_to_one"));
-    assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: 1:1"));
+    assert_eq!(value["reply_prefix"].as_str(), Some("Burn guard: 1:1"));
 }
 
 #[test]
@@ -10014,7 +11030,7 @@ fn exact_client_limit_hourly_burn_value_classifies_overspend() {
     assert_eq!(value["classification"].as_str(), Some("overspend"));
     assert_eq!(
         value["reply_prefix"].as_str(),
-        Some("5ч KPI: переплата 50.00%")
+        Some("Burn guard: переплата 50.00%")
     );
 }
 
@@ -10032,7 +11048,7 @@ fn exact_client_limit_hourly_burn_value_damps_before_min_history_span() {
     assert_eq!(value["window_progress_state"].as_str(), Some("preliminary"));
     assert_eq!(
         value["reply_prefix"].as_str(),
-        Some("5ч KPI: переплата 50.91%")
+        Some("Burn guard: переплата 50.91%")
     );
     assert_eq!(value["minimum_elapsed_window_minutes"].as_u64(), Some(55));
     assert!(
@@ -10208,9 +11224,7 @@ fn shared_dashboard_exact_client_limits_cache_rejects_fresh_missing_entry() {
     };
     super::write_shared_dashboard_exact_client_limits_cache(&cache_path, &entry)
         .expect("write shared missing cache");
-    assert!(
-        super::load_shared_dashboard_exact_client_limits_cache(&cache_path, 7_500).is_none()
-    );
+    assert!(super::load_shared_dashboard_exact_client_limits_cache(&cache_path, 7_500).is_none());
     let _ = fs::remove_dir_all(&temp_root);
 }
 
@@ -10218,9 +11232,10 @@ fn shared_dashboard_exact_client_limits_cache_rejects_fresh_missing_entry() {
 fn fresh_dashboard_exact_client_limits_cache_entry_rejects_missing_observation() {
     crate::token_budget::dashboard_exact_client_limits::set_dashboard_exact_client_limits_cache(
         super::DashboardExactClientLimitsCache {
-        fetched_at_epoch_ms: 5_000,
-        observation: None,
-    });
+            fetched_at_epoch_ms: 5_000,
+            observation: None,
+        },
+    );
     assert!(
         crate::token_budget::dashboard_exact_client_limits::fresh_dashboard_exact_client_limits_cache_entry(7_500)
             .is_none()

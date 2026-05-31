@@ -1380,7 +1380,7 @@ pub(super) fn compact_cli_client_budget_gate_payload(guard: &Value) -> Value {
 pub(super) fn front_door_client_budget_gate_payload(gate: Value) -> Value {
     json!({
         "reply_prefix": gate["reply_execution_gate"]["reply_prefix"].clone(),
-        "global_reply_prefix": gate["reply_execution_gate"]["global_reply_prefix"].clone(),
+        "global_reply_prefix": Value::Null,
         "reply_prefix_source": gate["reply_execution_gate"]["reply_prefix_source"].clone(),
         "status_label": gate["status_label"].clone(),
         "observed_at_epoch_ms": gate["observed_at_epoch_ms"].clone(),
@@ -1474,6 +1474,21 @@ pub(super) fn compact_host_control_client_budget_reply_gate(guard: &Value) -> Va
     let compact_gate = compact_client_budget_gate_payload(guard);
     let host_context_compaction =
         compact_host_context_compaction_for_cli(&compact_gate["host_context_compaction"]);
+    let reply_prefix = if compact_gate["reply_prefix"].is_null() {
+        compact_gate["reply_execution_gate"]["reply_prefix"].clone()
+    } else {
+        compact_gate["reply_prefix"].clone()
+    };
+    let global_reply_prefix = if compact_gate["global_reply_prefix"].is_null() {
+        compact_gate["reply_execution_gate"]["global_reply_prefix"].clone()
+    } else {
+        compact_gate["global_reply_prefix"].clone()
+    };
+    let reply_prefix_source = if compact_gate["reply_prefix_source"].is_null() {
+        compact_gate["reply_execution_gate"]["reply_prefix_source"].clone()
+    } else {
+        compact_gate["reply_prefix_source"].clone()
+    };
     let compact_operator_flow = json!({
         "primary_command_kind":
             compact_gate["reply_execution_gate"]["action_bundle"]["operator_flow"]["primary_command_kind"].clone(),
@@ -1505,9 +1520,9 @@ pub(super) fn compact_host_control_client_budget_reply_gate(guard: &Value) -> Va
     });
     json!({
         "status_label": compact_gate["status_label"].clone(),
-        "reply_prefix": compact_gate["reply_prefix"].clone(),
-        "global_reply_prefix": compact_gate["global_reply_prefix"].clone(),
-        "reply_prefix_source": compact_gate["reply_prefix_source"].clone(),
+        "reply_prefix": reply_prefix,
+        "global_reply_prefix": global_reply_prefix,
+        "reply_prefix_source": reply_prefix_source,
         "host_context_compaction": host_context_compaction,
         "reply_execution_gate": {
             "action_kind": compact_gate["reply_execution_gate"]["action_kind"].clone(),

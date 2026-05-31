@@ -8,26 +8,26 @@ fn active_agent_budget_card_status(surface: &Value) -> (&'static str, &'static s
     match (status, classification) {
         ("observed", "overspend") => (
             "alert",
-            "активные агенты жгут лимит",
-            "Среднее по активным агентам сейчас в переплате, поэтому карточка требует внимания."
+            "активным агентам нужна проверка",
+            "Суммарная Amai savings по активным агентам сейчас в перерасходе, поэтому карточка требует внимания."
                 .to_string(),
         ),
         ("observed", _) => (
             "pass",
             "только активные агенты",
-            "Карточка показывает только личный 5ч KPI и текущий лимит клиента для реально активных агентов."
+            "Карточка показывает только личную Amai savings и текущий лимит клиента для реально активных агентов."
                 .to_string(),
         ),
         ("partial", _) => (
             "waiting",
-            "не у всех KPI materialized",
-            "Не у каждого активного агента уже есть measured личный 5ч KPI, поэтому среднее fail-closed не посчитано."
+            "не у всех ещё есть подтверждённая пара",
+            "Не у каждого активного агента уже есть полная подтверждённая пара без Amai / с Amai, поэтому суммарная величина пока не посчитана."
                 .to_string(),
         ),
         _ => (
             "waiting",
             "активных агентов сейчас нет",
-            "Сейчас нет active lease, поэтому карточка не показывает персональные KPI."
+            "Сейчас нет активных агентов, поэтому карточка не показывает персональную экономию."
                 .to_string(),
         ),
     }
@@ -39,7 +39,7 @@ fn reviewed_frozen_debt_export_note_sentence(alignment: &Value) -> Option<&'stat
         return None;
     }
     Some(
-        "Исторический frozen debt уже вынесен в отдельный report-only export contour: его можно review-ить отдельно, но он не имеет права притворяться raw exact history.",
+        "Старый исторический хвост уже вынесен в отдельный отчёт для ручной сверки: его можно смотреть отдельно, но он не считается точной полной историей.",
     )
 }
 
@@ -54,7 +54,7 @@ fn historical_frozen_debt_note_sentence(
         lifetime_alignment,
     )?;
     Some(
-        "Текущая сессия и рабочее окно уже exact: frozen debt сейчас остался только в историческом lifetime-хвосте и не выглядит как новый live drift.",
+        "По текущей сессии и рабочему окну точная пара уже собрана. Старый исторический хвост остался только в накопительной истории и не выглядит как новый расход.",
     )
 }
 
@@ -84,7 +84,7 @@ fn historical_frozen_debt_metric_row(
             .as_u64()
             .unwrap_or(0);
     let tooltip = format!(
-        "Этот ряд показывает, что frozen debt сейчас уже не растёт в активных live scopes.\n- Current session: exact pair materialized\n- Working window: exact pair materialized\n- Lifetime blocker: {}\n- Lifetime irrecoverable rows: {}\n- Значит irrecoverable debt сейчас выглядит как исторический хвост, а не как новый live drift.",
+        "Этот ряд показывает, что старый исторический хвост больше не растёт в текущих запросах.\n- Текущая сессия: точная пара уже собрана\n- Рабочее окно: точная пара уже собрана\n- Что ещё мешает накопительной истории: {}\n- Строк без восстановления: {}\n- Значит проблема остаётся только в старом историческом хвосте.",
         blocker_code,
         format_u64(Some(irrecoverable_missing_live_events)),
     );
@@ -150,7 +150,7 @@ fn reviewed_frozen_debt_export_metric_row(alignment: &Value) -> Option<Value> {
         .as_str()
         .unwrap_or_default();
     let tooltip = format!(
-        "Этот ряд показывает отдельный report-only export contour для irrecoverable historical debt.\n- Surface kind: {}\n- Blocker component: {}\n- Irrecoverable rows: {}\n- Allowed claims: {}\n- Forbidden claims: {}\n- Propagated surfaces: {}\n- Review bundle command: {}\n- Evidence pack command: {}\n- Этот contour не чинит lifetime exactness и не имеет права притворяться raw exact history.",
+        "Этот ряд показывает отдельный отчёт для ручной сверки старого исторического хвоста.\n- Вид отчёта: {}\n- Что мешает восстановлению: {}\n- Строк без восстановления: {}\n- Что можно подтверждать этим отчётом: {}\n- Что этим отчётом подтверждать нельзя: {}\n- Куда он передаётся дальше: {}\n- Команда для сверки: {}\n- Команда для пакета доказательств: {}\n- Этот отчёт не превращает старый хвост в точную полную историю.",
         surface_kind,
         blocker_code,
         format_u64(Some(irrecoverable_missing_live_events)),
@@ -171,6 +171,27 @@ fn reviewed_frozen_debt_export_metric_row(alignment: &Value) -> Option<Value> {
     ))
 }
 
+struct RollingWindowCopy {
+    noun_phrase: String,
+    locative_phrase: String,
+    inside_phrase: String,
+}
+
+fn rolling_window_copy(report: &Value) -> RollingWindowCopy {
+    match report["profile"]["rolling_window_hours"].as_u64() {
+        Some(hours) if hours > 0 => RollingWindowCopy {
+            noun_phrase: format!("окно на {} ч.", format_u64(Some(hours))),
+            locative_phrase: format!("окне на {} ч.", format_u64(Some(hours))),
+            inside_phrase: format!("внутри окна на {} ч.", format_u64(Some(hours))),
+        },
+        _ => RollingWindowCopy {
+            noun_phrase: "рабочее окно".to_string(),
+            locative_phrase: "рабочем окне".to_string(),
+            inside_phrase: "внутри рабочего окна".to_string(),
+        },
+    }
+}
+
 pub(crate) fn build_active_agent_budget_session_card_from_surface(
     surface: &Value,
 ) -> Option<Value> {
@@ -179,7 +200,7 @@ pub(crate) fn build_active_agent_budget_session_card_from_surface(
     let aggregate_value = surface["aggregate"]["reply_prefix"]
         .as_str()
         .filter(|value| !value.is_empty())
-        .unwrap_or("5ч KPI: н/д")
+        .unwrap_or("Amai savings: н/д")
         .to_string();
     let mut agent_blocks = Vec::new();
     for agent in agents {
@@ -187,46 +208,16 @@ pub(crate) fn build_active_agent_budget_session_card_from_surface(
             compact_dashboard_text(agent["agent_label"].as_str(), 72, "Активный агент");
         let kpi_prefix = agent["personal_agent_kpi"]["reply_prefix"]
             .as_str()
-            .unwrap_or("5ч KPI: н/д");
-        let agent_tooltip = agent["thread_title"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .map(|thread_title| {
-                format!(
-                    "{}\n- {}\n- {}",
-                    agent["agent_scope"]
-                        .as_str()
-                        .unwrap_or("scope ещё нет данных"),
-                    compact_dashboard_text(Some(thread_title), 88, thread_title),
-                    agent["cwd"].as_str().unwrap_or("cwd ещё нет данных"),
-                )
-            })
-            .unwrap_or_else(|| {
-                agent["agent_scope"]
-                    .as_str()
-                    .unwrap_or("scope ещё нет данных")
-                    .to_string()
-            });
+            .unwrap_or("Amai savings: н/д");
         let limit_label = active_agent_online_limit_label(agent);
         let (limit_value, limit_tooltip) = active_agent_online_limit_field(agent);
-        let (pressure_value, pressure_tooltip) = active_agent_live_pressure_field(agent)
-            .map(|(value, tooltip)| (Some(value), Some(tooltip)))
-            .unwrap_or((None, None));
-        let kpi_tooltip = agent["personal_agent_kpi"]["summary"]
-            .as_str()
-            .map(str::to_string);
+        let kpi_tooltip = public_active_agent_kpi_tooltip_text(Some(kpi_prefix));
         agent_blocks.push(json!({
-            "agent_scope": agent["agent_scope"].clone(),
             "agent_label": agent_label,
-            "agent_tooltip": agent_tooltip,
+            "agent_tooltip": Value::Null,
             "limit_label": limit_label,
             "limit_value": limit_value,
             "limit_tooltip": limit_tooltip,
-            "pressure_label": pressure_value
-                .as_ref()
-                .map(|_| "Последний запрос:"),
-            "pressure_value": pressure_value,
-            "pressure_tooltip": pressure_tooltip,
             "kpi_value": kpi_prefix,
             "kpi_tooltip": kpi_tooltip,
         }));
@@ -252,7 +243,7 @@ pub(crate) fn build_active_agent_budget_session_card_from_surface(
                 .as_str()
                 .unwrap_or("Активный агент")
                 .to_string(),
-            block["agent_tooltip"].as_str(),
+            None,
         ));
         if let Some(limit_value) = block["limit_value"].as_str() {
             legacy_rows.push(metric_row(
@@ -264,22 +255,13 @@ pub(crate) fn build_active_agent_budget_session_card_from_surface(
             ));
         }
         legacy_rows.push(metric_row(
-            "KPI:",
+            "Экономия:",
             block["kpi_value"]
                 .as_str()
-                .unwrap_or("5ч KPI: н/д")
+                .unwrap_or("Amai savings: н/д")
                 .to_string(),
             block["kpi_tooltip"].as_str(),
         ));
-        if let Some(pressure_value) = block["pressure_value"].as_str() {
-            legacy_rows.push(metric_row(
-                block["pressure_label"]
-                    .as_str()
-                    .unwrap_or("Последний запрос:"),
-                pressure_value.to_string(),
-                block["pressure_tooltip"].as_str(),
-            ));
-        }
     }
     let mut card = card_with_rows(
         "Экономия токенов за текущую сессию",
@@ -314,78 +296,48 @@ pub(crate) fn build_active_agent_budget_session_card(snapshot: &Value) -> Option
     build_active_agent_budget_session_card_from_surface(&snapshot["active_agent_budget"])
 }
 
+fn public_active_agent_limit_tooltip(label: &str, value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value == "н/д" {
+        return Some(
+            "Для этой работы точный лимит по основному и расширенному окну пока ещё не подтверждён."
+                .to_string(),
+        );
+    }
+    Some(match label {
+        "Лимит клиента сейчас:" => {
+            "Этот ряд показывает текущий лимит клиента по двум окнам: основному и расширенному."
+                .to_string()
+        }
+        "Лимит этой работы сейчас:" => {
+            "Этот ряд показывает текущий лимит именно этой работы по двум окнам: основному и расширенному."
+                .to_string()
+        }
+        _ => "Этот ряд показывает текущий лимит по основному и расширенному окну."
+            .to_string(),
+    })
+}
+
 fn active_agent_online_limit_field(agent: &Value) -> (String, Option<String>) {
+    let label = active_agent_online_limit_label(agent);
     let value = agent["personal_client_limit"]["value_text"]
         .as_str()
         .filter(|value| !value.is_empty())
         .unwrap_or("н/д")
         .to_string();
-    let tooltip = agent["personal_client_limit"]["tooltip"]
-        .as_str()
-        .map(str::to_string)
-        .or_else(|| {
-            Some("Личный online limit surface для этого агента ещё не materialized.".to_string())
-        });
+    let tooltip = public_active_agent_limit_tooltip(label, &value);
     (value, tooltip)
 }
 
 fn active_agent_online_limit_label(agent: &Value) -> &str {
-    agent["personal_client_limit"]["label_text"]
+    match agent["personal_client_limit"]["label_text"]
         .as_str()
         .filter(|value| !value.is_empty())
-        .unwrap_or("Лимит клиента сейчас:")
-}
-
-fn active_agent_live_pressure_field(agent: &Value) -> Option<(String, String)> {
-    let client_live_meter = &agent["client_live_meter"];
-    if !current_session_client_live_meter_available(client_live_meter) {
-        return None;
+    {
+        Some("Личный thread-limit агента:") => "Лимит этой работы сейчас:",
+        Some(label) => label,
+        None => "Лимит клиента сейчас:",
     }
-    let turn_total_tokens = client_live_meter["client_turn_total_tokens"]
-        .as_u64()
-        .filter(|value| *value > 0)?;
-    let model_context_window = client_live_meter["latest_model_context_window"]
-        .as_u64()
-        .filter(|value| *value > 0)?;
-    let context_used_percent = client_live_meter["context_used_percent"]
-        .as_f64()
-        .unwrap_or_else(|| (turn_total_tokens as f64 * 100.0) / model_context_window as f64);
-    let observed_at = client_live_meter["ended_at_epoch_ms"]
-        .as_u64()
-        .filter(|value| *value > 0)
-        .map(human_timestamp);
-    let observed_at_short = client_live_meter["ended_at_epoch_ms"]
-        .as_u64()
-        .filter(|value| *value > 0)
-        .map(human_timestamp_clock);
-    let pressure_note = if context_used_percent >= 70.0 {
-        "Это giant-thread pressure: почти всё окно клиента уже занято одним live-turn, поэтому 5ч burn сейчас идёт главным образом размером самого запроса."
-    } else if context_used_percent >= 50.0 {
-        "Это тяжёлый live-turn: заметная часть burn сейчас приходит от размера текущего клиентского запроса, а не только от Amai-side delta."
-    } else {
-        "Это текущий observed client turn этого агента. Он помогает отличить реальный burn от UI/агрегационного drift."
-    };
-    let tooltip = format!(
-        "Этот ряд показывает последний observed client turn именно этого active agent из rollout token_count.\n- Последний запрос: {} из {}\n- Окно занято: {}\n- Источник: rollout token_count.last_token_usage.total_tokens / model_context_window{}\n- {}\n- Снято из raw token_count: {}",
-        format_u64(Some(turn_total_tokens)),
-        format_u64(Some(model_context_window)),
-        format_percent(Some(context_used_percent)),
-        observed_at_short
-            .as_ref()
-            .map(|stamp| format!(" ({stamp})"))
-            .unwrap_or_default(),
-        pressure_note,
-        observed_at.unwrap_or_else(|| "ещё нет данных".to_string()),
-    );
-    Some((
-        format!(
-            "{} из {} · окно занято {}",
-            format_u64(Some(turn_total_tokens)),
-            format_u64(Some(model_context_window)),
-            format_percent(Some(context_used_percent)),
-        ),
-        tooltip,
-    ))
 }
 
 fn shared_active_agent_limit(agent_blocks: &[Value]) -> Option<(String, String, Option<String>)> {
@@ -413,6 +365,112 @@ fn shared_active_agent_limit(agent_blocks: &[Value]) -> Option<(String, String, 
     Some((label.to_string(), value.to_string(), tooltip))
 }
 
+fn active_agent_budget_public_row_allowed(label: &str) -> bool {
+    matches!(
+        label,
+        "Агент:"
+            | "Лимит клиента сейчас:"
+            | "Лимит этой работы сейчас:"
+            | "Личный thread-limit агента:"
+            | "Экономия:"
+    )
+}
+
+fn public_active_agent_kpi_tooltip_text(kpi_value: Option<&str>) -> Option<String> {
+    let value = kpi_value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Amai savings: н/д");
+    Some(match value {
+        "Amai savings: н/д" => {
+            "Для этого активного агента пока нет полной подтверждённой пары без Amai / с Amai."
+                .to_string()
+        }
+        _ => {
+            "Для этого активного агента показана та же честная пара без Amai / с Amai.".to_string()
+        }
+    })
+}
+
+fn strip_public_row_operator_controls(row: &mut Value) {
+    if let Some(root) = row.as_object_mut() {
+        root.remove("target_selector");
+    }
+}
+
+fn sanitize_public_active_agent_limit_row(row: &mut Value, public_label: &str) {
+    let value = row["value"].as_str().unwrap_or_default().to_string();
+    row["label"] = Value::from(public_label);
+    row["tooltip"] = public_active_agent_limit_tooltip(public_label, &value)
+        .map(Value::from)
+        .unwrap_or(Value::Null);
+}
+
+fn compact_active_agent_budget_card(mut card: Value) -> Value {
+    if let Some(rows) = card["rows"].as_array_mut() {
+        rows.retain(|row| {
+            row["label"]
+                .as_str()
+                .is_some_and(active_agent_budget_public_row_allowed)
+        });
+        for row in rows.iter_mut() {
+            strip_public_row_operator_controls(row);
+            match row["label"].as_str() {
+                Some("Агент:") => {
+                    row["tooltip"] = Value::Null;
+                }
+                Some("Лимит клиента сейчас:") => {
+                    sanitize_public_active_agent_limit_row(row, "Лимит клиента сейчас:");
+                }
+                Some("Лимит этой работы сейчас:") => {
+                    sanitize_public_active_agent_limit_row(row, "Лимит этой работы сейчас:");
+                }
+                Some("Личный thread-limit агента:") => {
+                    sanitize_public_active_agent_limit_row(row, "Лимит этой работы сейчас:");
+                }
+                Some("Экономия:") => {
+                    row["tooltip"] = public_active_agent_kpi_tooltip_text(row["value"].as_str())
+                        .map(Value::from)
+                        .unwrap_or(Value::Null);
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(blocks) = card["agent_blocks"].as_array_mut() {
+        for block in blocks.iter_mut() {
+            if let Some(root) = block.as_object_mut() {
+                root.remove("agent_scope");
+                root.insert("agent_tooltip".to_string(), Value::Null);
+                root.insert("kpi_label".to_string(), Value::from("Экономия:"));
+                root.insert(
+                    "kpi_tooltip".to_string(),
+                    public_active_agent_kpi_tooltip_text(
+                        root.get("kpi_value").and_then(Value::as_str),
+                    )
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+                );
+                root.remove("pressure_label");
+                root.remove("pressure_value");
+                root.remove("pressure_tooltip");
+            }
+        }
+    }
+    card["status_label"] = Value::from(String::new());
+    card["status_tooltip"] = Value::Null;
+    card["note"] = Value::from(String::new());
+    if let Some(title_tooltip) =
+        truth_only_token_card_title_tooltip(card["title"].as_str().unwrap_or_default())
+    {
+        card["title_tooltip"] = Value::String(title_tooltip);
+    }
+    if let Some(source_label) = truth_only_token_card_source_label(&card) {
+        card["source_label"] = Value::String(source_label);
+    }
+    card
+}
+
 pub(crate) fn compact_token_hero_card(mut card: Value) -> Value {
     if matches!(
         card["presentation_variant"].as_str(),
@@ -422,7 +480,7 @@ pub(crate) fn compact_token_hero_card(mut card: Value) -> Value {
                 | "active_agent_budget_grouped_v3"
         )
     ) {
-        return card;
+        return compact_active_agent_budget_card(card);
     }
     let title = card["title"].as_str().unwrap_or_default().to_string();
     if let Some(rows) = card["rows"].as_array_mut() {
@@ -433,19 +491,28 @@ pub(crate) fn compact_token_hero_card(mut card: Value) -> Value {
                 .is_some_and(|label| allowed.iter().any(|allowed_label| label == *allowed_label))
         });
         for row in rows {
+            strip_public_row_operator_controls(row);
             if let Some(label) = row["label"].as_str() {
                 row["label"] =
                     Value::String(humanize_token_card_row_label(&title, label).to_string());
             }
             if let (Some(label), Some(value)) = (row["label"].as_str(), row["value"].as_str()) {
-                row["value"] =
-                    Value::String(humanize_token_card_row_value(&title, label, value).to_string());
+                let label = label.to_string();
+                let value = value.to_string();
+                row["value"] = Value::String(
+                    humanize_token_card_row_value(&title, &label, &value).to_string(),
+                );
+                row["tooltip"] = truth_only_token_card_row_tooltip(&title, &label, &value)
+                    .map(Value::from)
+                    .unwrap_or(Value::Null);
             }
         }
     }
     if let Some(source_label) = truth_only_token_card_source_label(&card) {
         card["source_label"] = Value::String(source_label);
     }
+    apply_truth_only_token_card_status(&mut card);
+    ensure_truth_only_status_tooltip(&mut card);
     card["note"] = Value::String(truth_only_token_card_note(&card));
     if let Some(title_tooltip) = truth_only_token_card_title_tooltip(&title) {
         card["title_tooltip"] = Value::String(title_tooltip);
@@ -460,24 +527,111 @@ fn truth_only_token_card_labels(title: &str) -> &'static [&'static str] {
             "Экономия токенов модели",
             "Главный драйвер exact-пары",
             "Совпадение с реальным лимитом",
+            "Токены continuity boundary",
             "Последний запрос клиента",
             "Лимит клиента сейчас",
             "Последний observed лимит клиента",
-            "Следующее действие",
         ],
         "Экономия токенов за рабочее окно" => &[
             "Экономия токенов модели",
             "Совпадение с реальным лимитом",
+            "Токены continuity boundary",
             "Исторический startup-хвост",
-            "Следующее действие",
         ],
         "Экономия токенов за всё время записи" => &[
             "Экономия токенов модели",
             "Совпадение с реальным лимитом",
+            "Токены continuity boundary",
             "Исторический frozen debt",
             "Review-only export",
         ],
         _ => &[],
+    }
+}
+
+fn compact_public_card_value_is_undetermined(card: &Value) -> bool {
+    card["value"].as_str().map(str::trim) == Some("не доказано")
+}
+
+fn compact_public_card_value_is_negative(card: &Value) -> bool {
+    card["value"]
+        .as_str()
+        .map(str::trim)
+        .is_some_and(|value| value.starts_with('-'))
+}
+
+fn compact_public_card_status_label(card: &Value) -> Option<&str> {
+    card["status_label"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn compact_public_card_operator_only_status(label: &str) -> bool {
+    matches!(
+        label,
+        "новый чат нужен сейчас"
+            | "новый чат рекомендован"
+            | "сожми текущий чат"
+            | "сожми текущий чат сейчас"
+    ) || (label.starts_with("цель ") && label.ends_with("% не достигнута"))
+}
+
+fn apply_truth_only_token_card_status(card: &mut Value) {
+    let title = card["title"].as_str().unwrap_or_default();
+    let Some(status_label) = compact_public_card_status_label(card).map(str::to_string) else {
+        return;
+    };
+    match title {
+        "Экономия токенов за текущую сессию" => {
+            if compact_public_card_operator_only_status(&status_label) {
+                if compact_public_card_value_is_undetermined(card) {
+                    card["status"] = Value::from("waiting");
+                    card["status_label"] = Value::from("реальная экономия ещё не доказана");
+                    card["status_tooltip"] = Value::from(
+                        "Публичная карточка показывает только честную пару «обычный путь / путь через Amai» и уже подтверждённую часть расхода. Пока полная пара для текущего запроса ещё не собрана, точную экономию на полной шкале показать нельзя.",
+                    );
+                } else if compact_public_card_value_is_negative(card) {
+                    card["status"] = Value::from("alert");
+                    card["status_label"] = Value::from("на полной шкале сейчас перерасход");
+                    card["status_tooltip"] = Value::from(
+                        "На полной шкале текущего запроса Amai пока уже в перерасходе.",
+                    );
+                } else {
+                    card["status"] = Value::from("pass");
+                    card["status_label"] = Value::from("экономия на полной шкале подтверждена");
+                    card["status_tooltip"] = Value::from(
+                        "На полной шкале текущего запроса уже есть подтверждённая положительная экономия Amai.",
+                    );
+                }
+            } else if status_label == "burn в continuity startup" {
+                card["status"] = Value::from("alert");
+                card["status_label"] = Value::from("расход ушёл в подготовку контекста");
+                card["status_tooltip"] = Value::from(
+                    "В текущей сессии заметная часть расхода ушла на подготовку контекста, а не на полезный результат.",
+                );
+            } else if status_label == "реальная экономия не доказана" {
+                card["status_tooltip"] = Value::from(
+                    "Публичная карточка пока не может честно показать реальную экономию на полной шкале клиента, потому что полная пара ещё не подтверждена.",
+                );
+            }
+        }
+        "Экономия токенов за рабочее окно" => {
+            if status_label == "burn в continuity startup" {
+                card["status"] = Value::from("alert");
+                card["status_label"] = Value::from("окно уходит в подготовку контекста");
+                card["status_tooltip"] = Value::from(
+                    "В этом рабочем окне заметная часть расхода ушла на подготовку контекста. Поэтому итог окна пока слабый или отрицательный.",
+                );
+            } else if status_label == "исторический startup drag" {
+                card["status"] = Value::from("alert");
+                card["status_label"] = Value::from("тянется хвост прошлых стартов");
+                card["status_tooltip"] = Value::from(
+                    "Негативный итог окна сейчас в основном тянется от хвоста прошлых стартов, а не от текущих запросов.",
+                );
+            }
+        }
+        _ => {}
     }
 }
 
@@ -495,9 +649,10 @@ fn humanize_token_card_row_label<'a>(title: &str, label: &'a str) -> &'a str {
             "Что именно посчитано"
         }
         (_, "Совпадение с реальным лимитом") => "Точность учтённой части",
+        (_, "Токены continuity boundary") => "Подготовка контекста",
         (_, "Последний запрос клиента") => "Последний запрос в модель",
         (_, "Исторический startup-хвост") => "Хвост от прошлых стартов",
-        (_, "Исторический frozen debt") => "Исторический долг точности",
+        (_, "Исторический frozen debt") => "Старый исторический хвост",
         (_, "Review-only export") => "Отчёт для ручной сверки",
         _ => label,
     }
@@ -516,7 +671,8 @@ fn humanize_token_card_row_value(title: &str, label: &str, value: &str) -> Strin
         (_, "Точность учтённой части") => {
             humanize_tracked_slice_exactness_value(value)
         }
-        (_, "Исторический долг точности") => {
+        (_, "Подготовка контекста") => humanize_service_startup_row_value(value),
+        (_, "Старый исторический хвост") => {
             if let Some((_, rows)) = value.rsplit_once(", ") {
                 return format!(
                     "старый исторический хвост: {}",
@@ -598,16 +754,152 @@ fn humanize_review_row_count(value: &str) -> String {
         .replace(" rows", " строк")
 }
 
+fn truth_only_token_card_row_tooltip(title: &str, label: &str, _value: &str) -> Option<String> {
+    let text = match (title, label) {
+        ("Экономия токенов за текущую сессию", "Экономия на реальной шкале") => {
+            "Полная подтверждённая пара «обычный путь / путь через Amai» для текущего запроса."
+        }
+        (_, "Экономия на учтённой части") => {
+            "Уже подтверждённая часть расхода, которую можно честно сравнить на одной шкале."
+        }
+        (_, "Что именно посчитано") => {
+            "Показывает, какая часть расхода уже вошла в честный расчёт."
+        }
+        (_, "Точность учтённой части") => {
+            "Показывает, насколько подтверждённая часть уже сведена с реальной шкалой клиента."
+        }
+        (_, "Подготовка контекста") => {
+            "Показывает, сколько токенов ушло на подготовку контекста и восстановление рабочего состояния."
+        }
+        (_, "Последний запрос в модель") => {
+            "Последний полностью увиденный запрос в модель на той же шкале клиента."
+        }
+        (_, "Лимит клиента сейчас") | (_, "Последний observed лимит клиента") => {
+            "Текущий лимит клиента по основной и расширенной шкале."
+        }
+        (_, "Хвост от прошлых стартов") => {
+            "Показывает, какая часть окна тянется от прошлых запусков, а не от текущих запросов."
+        }
+        (_, "Старый исторический хвост") => {
+            "Старый исторический хвост, который пока нельзя восстановить до точной полной истории."
+        }
+        (_, "Отчёт для ручной сверки") => {
+            "Отдельный отчёт для ручной сверки старого исторического хвоста."
+        }
+        _ => return None,
+    };
+    Some(text.to_string())
+}
+
+fn humanize_service_startup_row_value(value: &str) -> String {
+    if let Some((_, tokens)) = value.split_once(':') {
+        return format!("на подготовку контекста: {}", tokens.trim());
+    }
+    value
+        .replace("continuity-restore", "подготовка контекста")
+        .replace("continuity startup", "подготовка контекста")
+}
+
+fn public_status_tooltip_contains_internal_terms(text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+    [
+        "continuity boundary",
+        "retrieval/workflow",
+        "live-turn",
+        "same-meter",
+        "materialized",
+        "verified",
+        "startup drag",
+        "frozen debt",
+        "burn-guard",
+        "operator",
+        "target ",
+        "rotate",
+        "thread-limit",
+        "active thread",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn truth_only_status_tooltip(card: &Value) -> Option<String> {
+    let title = card["title"].as_str().unwrap_or_default();
+    let status = card["status"].as_str().unwrap_or_default();
+    let status_label = card["status_label"].as_str().unwrap_or_default();
+    let value = card["value"].as_str().unwrap_or_default().trim();
+    let text = match title {
+        "Экономия токенов за текущую сессию" => {
+            if status_label == "расход ушёл в подготовку контекста" {
+                "В текущей сессии заметная часть расхода ушла на подготовку контекста, а не на полезный результат."
+            } else if status_label == "реальная экономия ещё не доказана"
+                || compact_public_card_value_is_undetermined(card)
+            {
+                "Для текущей сессии пока нет полной подтверждённой пары «обычный путь / путь через Amai», поэтому точную экономию на полной шкале клиента ещё нельзя честно показать."
+            } else if status_label == "на полной шкале сейчас перерасход" || value.starts_with('-')
+            {
+                "На полной шкале текущего запроса Amai пока добавляет расход, а не экономит его."
+            } else if status == "pass" || status_label == "экономия на полной шкале подтверждена"
+            {
+                "На полной шкале текущего запроса уже есть подтверждённая экономия без дополнительных подсказок."
+            } else {
+                "Карточка показывает только проверяемые цифры по текущей сессии без дополнительных подсказок."
+            }
+        }
+        "Экономия токенов за рабочее окно" => {
+            if status_label == "окно уходит в подготовку контекста" {
+                "В этом рабочем окне заметная часть расхода ушла на подготовку контекста. Поэтому итог окна пока слабый или отрицательный."
+            } else if status_label == "тянется хвост прошлых стартов" {
+                "Негативный итог окна сейчас в основном тянется от хвоста прошлых стартов, а не от текущих запросов."
+            } else if status == "alert" && value.starts_with('-') {
+                "По подтверждённой части рабочего окна Amai пока выходит в перерасход."
+            } else if status == "waiting" {
+                "По рабочему окну пока не набралась подтверждённая выборка для честного итогового процента."
+            } else if status == "pass" {
+                "По подтверждённой части рабочего окна Amai сейчас экономит токены."
+            } else {
+                "Карточка показывает только проверяемые цифры по рабочему окну."
+            }
+        }
+        "Экономия токенов за всё время записи" => {
+            if status == "alert" && value.starts_with('-') {
+                "По подтверждённой части всей истории Amai пока выходит в перерасход."
+            } else if status == "waiting" {
+                "По всей истории пока не набралась подтверждённая выборка для честного накопительного итога."
+            } else if status == "pass" {
+                "По подтверждённой части всей истории Amai сейчас экономит токены."
+            } else {
+                "Карточка показывает только подтверждённые цифры за всё время записи."
+            }
+        }
+        _ => return None,
+    };
+    Some(text.to_string())
+}
+
+fn ensure_truth_only_status_tooltip(card: &mut Value) {
+    let should_replace = card["status_tooltip"]
+        .as_str()
+        .map(|value| {
+            value.trim().is_empty() || public_status_tooltip_contains_internal_terms(value)
+        })
+        .unwrap_or(true);
+    if should_replace {
+        card["status_tooltip"] = truth_only_status_tooltip(card)
+            .map(Value::from)
+            .unwrap_or(Value::Null);
+    }
+}
+
 fn truth_only_token_card_title_tooltip(title: &str) -> Option<String> {
     let text = match title {
         "Экономия токенов за текущую сессию" => {
-            "Показывает только проверяемые цифры по текущей сессии: реальную долю Amai на полной живой шкале turn, текущий лимит клиента и точность учтённой части."
+            "Показывает только проверяемые цифры по текущей сессии: итоговую экономию, текущий лимит клиента и уже подтверждённую часть расхода."
         }
         "Экономия токенов за рабочее окно" => {
-            "Показывает только проверяемые цифры по рабочему окну. Процент здесь относится к подтверждённой учтённой части, а не ко всему полному расходу модели за окно."
+            "Показывает только проверяемые цифры по рабочему окну. Процент здесь относится к уже подтверждённой части, а не ко всему расходу клиента за окно."
         }
         "Экономия токенов за всё время записи" => {
-            "Показывает только подтверждённые цифры за всё время записи. Процент здесь относится к подтверждённой учтённой части, а старый исторический хвост вынесен отдельно."
+            "Показывает только подтверждённые цифры за всё время записи. Процент здесь относится к уже подтверждённой части, а старый исторический хвост вынесен отдельно."
         }
         _ => return None,
     };
@@ -618,13 +910,13 @@ fn truth_only_token_card_source_label(card: &Value) -> Option<String> {
     let title = card["title"].as_str()?;
     let source = match title {
         "Экономия токенов за текущую сессию" => {
-            "Источник: живая шкала клиента из rollout token_count и отдельно сведённая учтённая часть Amai по strict same-meter компонентам."
+            "Источник: текущая шкала клиента и отдельно подтверждённая часть уже проверенных запросов."
         }
         "Экономия токенов за рабочее окно" => {
-            "Источник: подтверждённая учтённая часть окна и подтверждённый хвост прошлых стартов. Это не весь полный расход клиента за окно."
+            "Источник: подтверждённая часть рабочего окна и отдельно отмеченный хвост прошлых стартов. Это не весь расход клиента за окно."
         }
         "Экономия токенов за всё время записи" => {
-            "Источник: подтверждённая учтённая история плюс отдельно отмеченный старый долг точности. Это не полный raw spend всей истории."
+            "Источник: подтверждённая история плюс отдельно отмеченный старый исторический хвост. Это не весь расход за всё время."
         }
         _ => return None,
     };
@@ -640,21 +932,21 @@ fn truth_only_token_card_note(card: &Value) -> String {
         "Экономия токенов за текущую сессию" => {
             match card["value"].as_str() {
                 Some("не доказано") => format!(
-                    "Короткая карточка только с проверяемыми цифрами по текущей сессии: реальная экономия на полной шкале клиента пока не доказана, ниже остаётся только точная учтённая часть. Единственный процент, который должен напрямую совпадать с замедлением шкалы VS Code, живёт в строке «Экономия на реальной шкале» и показывается только после exact full-turn pair. Строка «Экономия на учтённой части» относится только к strict same-meter срезу уже учтённых компонентов; если она помечена как preliminary, это ещё не вся сессия. Статус: {status_label}."
+                    "Короткая карточка показывает только проверяемые цифры по текущей сессии: общая экономия появится после полного подтверждения, а строка «Экономия на учтённой части» до этого показывает только уже проверенную часть. Поэтому до полного подтверждения эти цифры могут различаться. Подсказки управления вынесены отдельно. Статус: {status_label}."
                 ),
                 _ => format!(
-                    "Короткая карточка только с проверяемыми цифрами по текущей сессии: сверху реальная доля Amai на полной шкале текущего turn, ниже точность учтённой части. Единственный процент, который должен напрямую совпадать с замедлением шкалы VS Code, живёт в строке «Экономия на реальной шкале». Строка «Экономия на учтённой части» относится только к strict same-meter срезу уже учтённых компонентов; если она помечена как preliminary, это ещё не вся сессия. Статус: {status_label}."
+                    "Короткая карточка показывает только проверяемые цифры по текущей сессии: сверху общий подтверждённый итог, ниже уже проверенная часть. Если нижняя строка ещё предварительная, это значит, что полное подтверждение сессии ещё не закончено. Подсказки управления вынесены отдельно. Статус: {status_label}."
                 ),
             }
         }
         "Экономия токенов за рабочее окно" => {
             format!(
-                "Короткая карточка только с проверяемыми цифрами по рабочему окну. Процент здесь относится к подтверждённой учтённой части, а не ко всему полному расходу модели за окно. Статус: {status_label}."
+                "Короткая карточка только с проверяемыми цифрами по рабочему окну. Процент здесь относится к подтверждённой части, а не ко всему расходу клиента за окно. Подсказки управления вынесены отдельно. Статус: {status_label}."
             )
         }
         "Экономия токенов за всё время записи" => {
             format!(
-                "Короткая карточка только с подтверждёнными цифрами за всё время записи. Процент здесь относится к подтверждённой учтённой части, а старый долг точности вынесен отдельно. Статус: {status_label}."
+                "Короткая карточка только с подтверждёнными цифрами за всё время записи. Процент здесь относится к подтверждённой части, а старый исторический хвост вынесен отдельно. Подсказки управления вынесены отдельно. Статус: {status_label}."
             )
         }
         _ => card["note"].as_str().unwrap_or_default().to_string(),
@@ -896,11 +1188,7 @@ fn build_current_session_hero_card(snapshot: &Value) -> Value {
         );
         session_card = with_status_tooltip(
             session_card,
-            &client_turn_pressure_tooltip(
-                guard,
-                session_rotate_bundle.as_ref(),
-                same_thread_compaction_preferred,
-            ),
+            "Публичная карточка показывает только проверяемую пару и уже подтверждённую часть расхода. Отдельные подсказки по размеру текущего запроса вынесены за пределы этой карточки.",
         );
     } else if session_full_turn_savings_pct.is_none()
         && current_session_client_live_meter_available(client_live_meter)
@@ -909,9 +1197,7 @@ fn build_current_session_hero_card(snapshot: &Value) -> Value {
         session_card = with_status_label(session_card, "реальная экономия не доказана");
         session_card = with_status_tooltip(
             session_card,
-            &format!(
-                "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- Для текущего живого turn ещё нет доказанной same-turn пары `без Amai / с Amai`.\n- Значит реальную экономию на полной шкале клиента пока нельзя честно показать числом.\n- Пока эта пара не materialized, нижняя строка про учтённую часть остаётся внутренним Amai-срезом, а не полным client spend.\n- Чтобы получить реальную экономию, нужно быстрее фиксировать exact pair на коротком live turn и для этого сначала сжать текущий giant thread через same-thread compact window, а не расширять его новыми ходами."
-            ),
+            "Для текущего запроса пока нет полной подтверждённой пары «обычный путь / путь через Amai». Поэтому реальную экономию на полной шкале клиента пока нельзя честно показать числом.",
         );
     } else if let Some(full_turn_savings_pct) = session_full_turn_savings_pct
         .filter(|value| client_budget_target_active && *value < client_budget_target_percent_f64)
@@ -923,7 +1209,7 @@ fn build_current_session_hero_card(snapshot: &Value) -> Value {
         session_card = with_status_tooltip(
             session_card,
             &format!(
-                "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- Реальная экономия на полной шкале клиента сейчас всего {}.\n- {}\n- Значит текущий thread пока жжёт почти весь полный client turn/context, а Amai экономит только малую долю.\n- Чтобы реально улучшить картину без потери точности, нужно дальше уменьшать полный размер turn и жёстко удерживать same-thread compact surface, чтобы следующий exact pair materialized на коротком live turn.",
+                "Реальная экономия на полной шкале клиента сейчас всего {}.\n- {}\n- Это значит, что на полной шкале клиента экономия пока остаётся ограниченной.",
                 format_percent(Some(full_turn_savings_pct)),
                 client_budget_target_sentence(client_budget_target_percent)
             ),
@@ -933,11 +1219,11 @@ fn build_current_session_hero_card(snapshot: &Value) -> Value {
             continuity_boundary_pressure_is_alert(session_saved, *boundary_tokens, *strict_tokens)
         })
     {
-        session_card = with_status_label(session_card, "burn в continuity startup");
+        session_card = with_status_label(session_card, "расход ушёл в подготовку контекста");
         session_card = with_status_tooltip(
             session_card,
             &format!(
-                "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- В этой сессии savings-KPI пока не показывает положительную подтверждённую экономию.\n- При этом observed continuity startup уже сжёг {} токенов.\n- Strict same-meter slice по клиентскому запросу пока даёт только {} токенов.\n- Значит лимит сейчас уходит главным образом в continuity restore, а не в retrieval/workflow effect.",
+                "В этой сессии подтверждённая экономия пока не вышла в плюс.\n- На подготовку контекста уже ушло {} токенов.\n- Подтверждённая полезная часть клиентского запроса пока даёт только {} токенов.\n- Значит заметная часть расхода сейчас уходит в подготовку контекста, а не в полезный результат.",
                 format_u64(Some(boundary_tokens)),
                 format_u64(Some(strict_tokens))
             ),
@@ -1012,6 +1298,7 @@ pub(super) fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     let rolling_window_label = report["profile"]["display_name"]
         .as_str()
         .unwrap_or("рабочее окно");
+    let rolling_window_copy = rolling_window_copy(report);
     let rolling_recovery = rolling_window["median_recovery_tokens"].as_f64();
     let lifetime_recovery = lifetime["median_recovery_tokens"].as_f64();
     let rolling_answer_rate = rolling_window["answer_like_rate"].as_f64();
@@ -1027,8 +1314,9 @@ pub(super) fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
 
     let mut rolling_note = if rolling_events > 0 {
         format!(
-            "{} — это скользящее окно последних 5 часов работы за {}. В главный итог уже вошли {} из {} живых запросов. Проверенная экономия по ним: {}. {}",
+            "{} — это скользящее {} за {}. В главный итог уже вошли {} из {} живых запросов. Проверенная экономия по ним: {}. {}",
             rolling_window_label,
+            rolling_window_copy.noun_phrase,
             elapsed_since_epoch_label(rolling_started, rolling_ended),
             format_u64(Some(rolling_events)),
             format_u64(Some(rolling_events_total)),
@@ -1046,11 +1334,15 @@ pub(super) fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         }
     } else if rolling_events_total > 0 {
         format!(
-            "В окне последних 5 часов уже было {} Amai-запросов, но пока ни один случай ещё не подтвердился как полезный без потери качества. Поэтому verified итог окна ещё не накоплен.",
+            "В {} уже было {} Amai-запросов, но пока ни один случай ещё не подтвердился как полезный без потери качества. Поэтому verified итог окна ещё не накоплен.",
+            rolling_window_copy.locative_phrase,
             format_u64(Some(rolling_events_total)),
         )
     } else {
-        "В окне последних 5 часов пока нет ни одного учтённого Amai-запроса, поэтому verified экономия по рабочему окну ещё не считается.".to_string()
+        format!(
+            "В {} пока нет ни одного учтённого Amai-запроса, поэтому verified экономия по рабочему окну ещё не считается.",
+            rolling_window_copy.locative_phrase
+        )
     };
     if let Some(sentence) = client_limit_alignment_note_sentence(rolling_window_alignment) {
         rolling_note.push(' ');
@@ -1121,8 +1413,8 @@ pub(super) fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         savings_status(rolling_saved, rolling_events, rolling_events_total),
         None,
         Some(format!(
-            "Эта карточка показывает verified-экономию по рабочему окну {}. Это не лимит клиента и не накопление за все времена, а только подтверждённые живые запросы внутри текущего 5-часового окна.",
-            rolling_window_label
+            "Эта карточка показывает verified-экономию по рабочему окну {}. Это не лимит клиента и не накопление за все времена, а только подтверждённые живые запросы {}.",
+            rolling_window_label, rolling_window_copy.inside_phrase
         )),
         rolling_rows,
     );
@@ -1137,11 +1429,11 @@ pub(super) fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         })
     {
         rolling_card = with_status(rolling_card, "alert");
-        rolling_card = with_status_label(rolling_card, "burn в continuity startup");
+        rolling_card = with_status_label(rolling_card, "окно уходит в подготовку контекста");
         rolling_card = with_status_tooltip(
             rolling_card,
             &format!(
-                "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- В verified рабочем окне экономия сейчас не положительная: {}.\n- При этом observed continuity startup уже сжёг {} токенов.\n- Strict same-meter slice по клиентскому запросу пока даёт только {} токенов.\n- Значит окно сейчас горит главным образом в continuity restore, а не даёт устойчивый retrieval/workflow effect.",
+                "В рабочем окне экономия сейчас не положительная: {}.\n- На подготовку контекста уже ушло {} токенов.\n- Подтверждённая полезная часть пока даёт только {} токенов.\n- Значит заметная часть расхода окна сейчас уходит в подготовку контекста, а не в полезный результат.",
                 format_signed_count(rolling_saved),
                 format_u64(Some(boundary_tokens)),
                 format_u64(Some(strict_tokens))
@@ -1155,8 +1447,9 @@ pub(super) fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         rolling_card = with_status_tooltip(
             rolling_card,
             &format!(
-                "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- В verified рабочем окне экономия сейчас отрицательная: {}.\n- При этом текущая сессия уже в плюсе, значит отрицательный итог окна в основном идёт от старого startup-хвоста внутри 5-часового окна.\n- Этот хвост вынесен в отдельную строку ниже, чтобы не смешивать его с текущим live-turn effect.",
-                format_signed_count(rolling_saved)
+                "{CLIENT_BUDGET_ADVISORY_STATUS_PREFIX}\n- В verified рабочем окне экономия сейчас отрицательная: {}.\n- При этом текущая сессия уже в плюсе, значит отрицательный итог окна в основном идёт от старого startup-хвоста {}.\n- Этот хвост вынесен в отдельную строку ниже, чтобы не смешивать его с текущим live-turn effect.",
+                format_signed_count(rolling_saved),
+                rolling_window_copy.inside_phrase
             ),
         );
     } else if rolling_events > 0 && rolling_saved.unwrap_or_default() < 0 {
@@ -1316,7 +1609,7 @@ mod tests {
                 "aggregate": {
                     "status": "observed",
                     "classification": "saving",
-                    "reply_prefix": "5ч KPI: экономия 40.00%"
+                    "reply_prefix": "Amai savings: без Amai 2000, с Amai 1200, экономия 800 (40.00%)"
                 },
                 "agents": [
                     {
@@ -1324,12 +1617,12 @@ mod tests {
                         "agent_scope": "amai::continuity::default",
                         "thread_title": "compact dashboard rewrite",
                         "personal_agent_kpi": {
-                            "reply_prefix": "5ч KPI: экономия 60.00%",
+                            "reply_prefix": "Amai savings: без Amai 1000, с Amai 400, экономия 600 (60.00%)",
                             "summary": "agent one"
                         },
                         "personal_client_limit": {
                             "label_text": "Лимит клиента сейчас:",
-                            "value_text": "5ч остаётся 43.00%, 7д остаётся 23.00%",
+                            "value_text": "основное окно остаётся 43.00%, расширенное окно остаётся 23.00%",
                             "tooltip": "personal limit one"
                         },
                         "client_live_meter": {
@@ -1356,12 +1649,12 @@ mod tests {
                         "agent_label": "Hunter",
                         "agent_scope": "bug_bounty::continuity::default",
                         "personal_agent_kpi": {
-                            "reply_prefix": "5ч KPI: экономия 20.00%",
+                            "reply_prefix": "Amai savings: без Amai 1000, с Amai 800, экономия 200 (20.00%)",
                             "summary": "agent two"
                         },
                         "personal_client_limit": {
                             "label_text": "Личный thread-limit агента:",
-                            "value_text": "5ч остаётся 88.00%, 7д остаётся 91.00%",
+                            "value_text": "основное окно остаётся 88.00%, расширенное окно остаётся 91.00%",
                             "tooltip": "personal limit two"
                         },
                         "client_live_meter": {
@@ -1388,7 +1681,10 @@ mod tests {
             }
         });
         let card = build_active_agent_budget_session_card(&snapshot).expect("card");
-        assert_eq!(card["value"].as_str(), Some("5ч KPI: экономия 40.00%"));
+        assert_eq!(
+            card["value"].as_str(),
+            Some("Amai savings: без Amai 2000, с Amai 1200, экономия 800 (40.00%)")
+        );
         assert_eq!(
             card["presentation_variant"].as_str(),
             Some("active_agent_budget_grouped_v3")
@@ -1399,24 +1695,21 @@ mod tests {
         assert_eq!(rows.len(), 6);
         assert_eq!(rows[0]["label"].as_str(), Some("Агент:"));
         assert_eq!(rows[1]["label"].as_str(), Some("Лимит клиента сейчас:"));
-        assert_eq!(rows[2]["label"].as_str(), Some("KPI:"));
+        assert_eq!(rows[2]["label"].as_str(), Some("Экономия:"));
         let blocks = card["agent_blocks"].as_array().expect("agent blocks");
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0]["agent_label"].as_str(), Some("Amai"));
-        assert!(
-            blocks[0]["agent_tooltip"]
-                .as_str()
-                .is_some_and(|value| value.contains("amai::continuity::default"))
-        );
+        assert!(blocks[0]["agent_tooltip"].is_null());
+        assert!(blocks[0].get("agent_scope").is_none());
         assert!(
             blocks[0]["limit_value"]
                 .as_str()
-                .is_some_and(|value| value.contains("5ч остаётся 43.00%"))
+                .is_some_and(|value| value.contains("основное окно остаётся 43.00%"))
         );
         assert!(
             blocks[0]["limit_tooltip"]
                 .as_str()
-                .is_some_and(|value| value.contains("personal limit one"))
+                .is_some_and(|value| value.contains("текущий лимит клиента"))
         );
         assert_eq!(
             blocks[0]["limit_label"].as_str(),
@@ -1424,26 +1717,33 @@ mod tests {
         );
         assert_eq!(
             blocks[0]["kpi_value"].as_str(),
-            Some("5ч KPI: экономия 60.00%")
+            Some("Amai savings: без Amai 1000, с Amai 400, экономия 600 (60.00%)")
         );
         assert!(
             blocks[0]["kpi_tooltip"]
                 .as_str()
-                .is_some_and(|value| value.contains("agent one"))
+                .is_some_and(|value| value.contains("честная пара без Amai / с Amai"))
         );
         assert_eq!(blocks[1]["agent_label"].as_str(), Some("Hunter"));
+        assert!(blocks[1]["agent_tooltip"].is_null());
+        assert!(blocks[1].get("agent_scope").is_none());
         assert!(
             blocks[1]["limit_value"]
                 .as_str()
-                .is_some_and(|value| value.contains("5ч остаётся 88.00%"))
+                .is_some_and(|value| value.contains("основное окно остаётся 88.00%"))
         );
         assert_eq!(
             blocks[1]["limit_label"].as_str(),
-            Some("Личный thread-limit агента:")
+            Some("Лимит этой работы сейчас:")
+        );
+        assert!(
+            blocks[1]["limit_tooltip"]
+                .as_str()
+                .is_some_and(|value| value.contains("текущий лимит именно этой работы"))
         );
         assert_eq!(
             blocks[1]["kpi_value"].as_str(),
-            Some("5ч KPI: экономия 20.00%")
+            Some("Amai savings: без Amai 1000, с Amai 800, экономия 200 (20.00%)")
         );
     }
 
@@ -1454,19 +1754,19 @@ mod tests {
                 "aggregate": {
                     "status": "observed",
                     "classification": "overspend",
-                    "reply_prefix": "5ч KPI: переплата 33.00%"
+                    "reply_prefix": "Amai savings: без Amai 2000, с Amai 2660, перерасход 660 (33.00%)"
                 },
                 "agents": [
                     {
                         "agent_label": "Amai",
                         "agent_scope": "amai::continuity::default",
                         "personal_agent_kpi": {
-                            "reply_prefix": "5ч KPI: переплата 44.00%",
+                            "reply_prefix": "Amai savings: без Amai 1000, с Amai 1440, перерасход 440 (44.00%)",
                             "summary": "agent one"
                         },
                         "personal_client_limit": {
                             "label_text": "Лимит клиента сейчас:",
-                            "value_text": "5ч остаётся 12.00%, 7д остаётся 89.00%",
+                            "value_text": "основное окно остаётся 12.00%, расширенное окно остаётся 89.00%",
                             "tooltip": "same exact global limit"
                         }
                     },
@@ -1474,12 +1774,12 @@ mod tests {
                         "agent_label": "Bug Bounty",
                         "agent_scope": "bug_bounty::continuity::default",
                         "personal_agent_kpi": {
-                            "reply_prefix": "5ч KPI: переплата 22.00%",
+                            "reply_prefix": "Amai savings: без Amai 1000, с Amai 1220, перерасход 220 (22.00%)",
                             "summary": "agent two"
                         },
                         "personal_client_limit": {
                             "label_text": "Лимит клиента сейчас:",
-                            "value_text": "5ч остаётся 12.00%, 7д остаётся 89.00%",
+                            "value_text": "основное окно остаётся 12.00%, расширенное окно остаётся 89.00%",
                             "tooltip": "same exact global limit"
                         }
                     }
@@ -1493,7 +1793,12 @@ mod tests {
         );
         assert_eq!(
             card["shared_limit_value"].as_str(),
-            Some("5ч остаётся 12.00%, 7д остаётся 89.00%")
+            Some("основное окно остаётся 12.00%, расширенное окно остаётся 89.00%")
+        );
+        assert!(
+            card["shared_limit_tooltip"]
+                .as_str()
+                .is_some_and(|value| value.contains("текущий лимит клиента"))
         );
         let rows = card["rows"].as_array().expect("rows");
         assert_eq!(rows.len(), 5);
@@ -1507,13 +1812,13 @@ mod tests {
     }
 
     #[test]
-    fn build_active_agent_budget_session_card_surfaces_live_turn_pressure_per_agent() {
+    fn build_active_agent_budget_session_card_keeps_live_turn_pressure_out_of_public_card() {
         let snapshot = json!({
             "active_agent_budget": {
                 "aggregate": {
                     "status": "observed",
                     "classification": "overspend",
-                    "reply_prefix": "5ч KPI: переплата 120.00%"
+                    "reply_prefix": "Amai savings: без Amai 1000, с Amai 2200, перерасход 1200 (120.00%)"
                 },
                 "agents": [
                     {
@@ -1522,12 +1827,12 @@ mod tests {
                         "thread_title": "Авито дальше",
                         "cwd": "/home/art/Bug-Bounty",
                         "personal_agent_kpi": {
-                            "reply_prefix": "5ч KPI: переплата 197.79%",
-                            "summary": "Личный 5ч KPI текущего active thread идёт в переплате 197.79%."
+                            "reply_prefix": "Amai savings: без Amai 1000, с Amai 2978, перерасход 1978 (197.80%)",
+                            "summary": "Личная Amai savings текущего active thread идёт в перерасходе 197.80%."
                         },
                         "personal_client_limit": {
                             "label_text": "Лимит клиента сейчас:",
-                            "value_text": "5ч остаётся 16.00%, 7д остаётся 90.00%",
+                            "value_text": "основное окно остаётся 16.00%, расширенное окно остаётся 90.00%",
                             "tooltip": "same exact global limit"
                         },
                         "client_live_meter": {
@@ -1550,26 +1855,51 @@ mod tests {
 
         let card = build_active_agent_budget_session_card(&snapshot).expect("card");
         let rows = card["rows"].as_array().expect("rows");
-        assert_eq!(rows.len(), 4);
-        assert_eq!(rows[3]["label"].as_str(), Some("Последний запрос:"));
-        assert_eq!(
-            rows[3]["value"].as_str(),
-            Some("222596 из 258400 · окно занято 86.14%")
-        );
-        assert!(
-            rows[3]["tooltip"]
-                .as_str()
-                .is_some_and(|value| value.contains("giant-thread pressure"))
-        );
+        assert_eq!(rows.len(), 3);
         let blocks = card["agent_blocks"].as_array().expect("agent blocks");
+        assert!(blocks[0]["agent_tooltip"].is_null());
+        assert!(blocks[0].get("agent_scope").is_none());
+        assert!(blocks[0].get("pressure_value").is_none());
+        assert!(blocks[0].get("pressure_tooltip").is_none());
+    }
+
+    #[test]
+    fn build_active_agent_budget_session_card_uses_public_tooltip_for_missing_limit_value() {
+        let snapshot = json!({
+            "active_agent_budget": {
+                "aggregate": {
+                    "status": "partial",
+                    "classification": "saving",
+                    "reply_prefix": "Amai savings: н/д"
+                },
+                "agents": [
+                    {
+                        "agent_label": "Amai",
+                        "agent_scope": "amai::continuity::default",
+                        "personal_agent_kpi": {
+                            "reply_prefix": "Amai savings: н/д"
+                        },
+                        "personal_client_limit": {
+                            "label_text": "Личный thread-limit агента:",
+                            "value_text": ""
+                        }
+                    }
+                ]
+            }
+        });
+
+        let card = build_active_agent_budget_session_card(&snapshot).expect("card");
+        let blocks = card["agent_blocks"].as_array().expect("agent blocks");
+        assert_eq!(blocks.len(), 1);
         assert_eq!(
-            blocks[0]["pressure_value"].as_str(),
-            Some("222596 из 258400 · окно занято 86.14%")
+            blocks[0]["limit_label"].as_str(),
+            Some("Лимит этой работы сейчас:")
         );
+        assert_eq!(blocks[0]["limit_value"].as_str(), Some("н/д"));
         assert!(
-            blocks[0]["pressure_tooltip"]
+            blocks[0]["limit_tooltip"]
                 .as_str()
-                .is_some_and(|value| value.contains("Окно занято: 86.14%"))
+                .is_some_and(|value| value.contains("точный лимит"))
         );
     }
 
@@ -1598,13 +1928,143 @@ mod tests {
 
         let cards = build_hero_cards(&snapshot);
         let note = cards[0]["note"].as_str().unwrap_or_default();
-        assert!(note.contains("Короткая карточка только с проверяемыми цифрами по текущей сессии"));
-        assert!(note.contains("реальная экономия на полной шкале клиента пока не доказана"));
+        assert!(
+            note.contains(
+                "Короткая карточка показывает только проверяемые цифры по текущей сессии"
+            )
+        );
+        assert!(note.contains("общая экономия появится после полного подтверждения"));
         let rows = cards[0]["rows"].as_array().expect("rows");
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0]["label"].as_str(),
             Some("Экономия на учтённой части")
+        );
+    }
+
+    #[test]
+    fn build_hero_cards_drops_target_selector_from_real_client_burn_path() {
+        let snapshot = json!({
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project": {
+                        "code": "amai",
+                        "repo_root": "/home/art/agent-memory-index"
+                    },
+                    "namespace": {
+                        "code": "continuity"
+                    },
+                    "execctl_resume_state": "clear",
+                    "current_goal": "audit public tokenonomics hero cards",
+                    "next_step": "keep operator controls out of public cards"
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "events_total": 1,
+                        "counted_events": 1,
+                        "verified_effective_saved_tokens": 1500,
+                        "verified_effective_savings_pct": 10.0,
+                        "started_at_epoch_ms": 1,
+                        "ended_at_epoch_ms": 2,
+                        "median_recovery_tokens": 0.0,
+                        "answer_like_rate": 100.0,
+                        "answer_like_counted_events": 1,
+                        "verified_answer_like_savings_pct": 10.0
+                    },
+                    "rolling_window": {
+                        "events_total": 0,
+                        "counted_events": 0
+                    },
+                    "lifetime": {
+                        "events_total": 0,
+                        "counted_events": 0
+                    },
+                    "current_live_turn": {
+                        "status": "exact_pair_materialized",
+                        "exact_pair_available": true,
+                        "exact_pair": {
+                            "without_amai_tokens": 15000,
+                            "with_amai_tokens": 13500,
+                            "saved_tokens": 1500,
+                            "saved_pct": 10.0
+                        }
+                    },
+                    "client_live_meter": {
+                        "status": "observed",
+                        "client_turn_total_tokens": 13500,
+                        "latest_model_context_window": 258400,
+                        "context_used_percent": 5.22,
+                        "primary_limit_remaining_percent": 93.0,
+                        "secondary_limit_remaining_percent": 99.0
+                    },
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "classification": "saving",
+                        "reply_prefix": "Burn guard: экономия 50.00%",
+                        "projected_primary_used_per_hour_percent": 10.0,
+                        "kpi_percent": 50.0,
+                        "remaining_window_minutes": 30.0,
+                        "actual_remaining_percent": 75.0,
+                        "ideal_remaining_percent": 50.0,
+                        "latest_observed_at_epoch_ms": 2000,
+                        "projected_reset_delta_minutes": 30.0
+                    },
+                    "statement_previews": {
+                        "current_session": {
+                            "verified_without_amai_measured_tokens": 15000,
+                            "verified_with_amai_measured_tokens": 13500,
+                            "verified_measured_saved_tokens": 1500,
+                            "verified_measured_saved_pct": 10.0,
+                            "client_limit_meter_alignment": {
+                                "same_meter_as_client_limit": true,
+                                "exact_pair_status": {
+                                    "exact_pair_available": true,
+                                    "exact_pair": {
+                                        "without_amai_tokens": 15000,
+                                        "with_amai_tokens": 13500,
+                                        "saved_tokens": 1500,
+                                        "saved_pct": 10.0
+                                    }
+                                }
+                            }
+                        },
+                        "rolling_window": {
+                            "client_limit_meter_alignment": {}
+                        },
+                        "lifetime": {
+                            "client_limit_meter_alignment": {}
+                        }
+                    },
+                    "profile": {
+                        "display_name": "Обычная рабочая машина"
+                    }
+                }
+            }
+        });
+
+        let cards = build_hero_cards(&snapshot);
+        let session_card = &cards[0];
+        assert!(
+            session_card["rows"]
+                .as_array()
+                .expect("rows")
+                .iter()
+                .all(|row| row.get("target_selector").is_none())
+        );
+        assert!(
+            session_card["rows"]
+                .as_array()
+                .expect("rows")
+                .iter()
+                .all(|row| row["label"].as_str() != Some("Операционный burn-guard"))
+        );
+        assert!(
+            !session_card["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Burn guard")
         );
     }
 
@@ -1674,7 +2134,7 @@ mod tests {
         assert_eq!(
             cards[0]["title_tooltip"].as_str(),
             Some(
-                "Показывает только проверяемые цифры по текущей сессии: реальную долю Amai на полной живой шкале turn, текущий лимит клиента и точность учтённой части."
+                "Показывает только проверяемые цифры по текущей сессии: итоговую экономию, текущий лимит клиента и уже подтверждённую часть расхода."
             )
         );
         assert!(cards[1]["title_tooltip"].as_str().is_some_and(|value| {
@@ -1687,13 +2147,13 @@ mod tests {
             cards[1]["source_label"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("подтверждённый хвост прошлых стартов")
+                .contains("отдельно отмеченный хвост прошлых стартов")
         );
         assert!(
             cards[2]["source_label"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("старый долг точности")
+                .contains("старый исторический хвост")
         );
     }
 
@@ -1752,10 +2212,9 @@ mod tests {
                 .contains("ни один из них ещё не подтвердился")
         );
         assert!(
-            cards[0]["note"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии")
+            cards[0]["note"].as_str().unwrap_or_default().contains(
+                "Короткая карточка показывает только проверяемые цифры по текущей сессии"
+            )
         );
     }
 
@@ -1855,7 +2314,7 @@ mod tests {
             cards[0]["source_label"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("живая шкала клиента")
+                .contains("текущая шкала клиента")
         );
     }
 
@@ -1999,13 +2458,12 @@ mod tests {
         assert_eq!(cards[0]["status"].as_str(), Some("alert"));
         assert_eq!(
             cards[0]["status_label"].as_str(),
-            Some("burn в continuity startup")
+            Some("расход ушёл в подготовку контекста")
         );
         assert!(
-            cards[0]["note"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии")
+            cards[0]["note"].as_str().unwrap_or_default().contains(
+                "Короткая карточка показывает только проверяемые цифры по текущей сессии"
+            )
         );
         let model_row = cards[0]["rows"]
             .as_array()
@@ -2197,7 +2655,8 @@ mod tests {
                         }
                     },
                     "profile": {
-                        "display_name": "Обычная рабочая машина"
+                        "display_name": "Обычная рабочая машина",
+                        "rolling_window_hours": 24
                     }
                 }
             }
@@ -2207,7 +2666,7 @@ mod tests {
         assert_eq!(cards[1]["status"].as_str(), Some("alert"));
         assert_eq!(
             cards[1]["status_label"].as_str(),
-            Some("исторический startup drag")
+            Some("тянется хвост прошлых стартов")
         );
         assert!(
             cards[1]["note"]
@@ -2225,27 +2684,181 @@ mod tests {
             row["value"].as_str(),
             Some("вне текущей сессии: без Amai 9154, с Amai 9600, +446 к расходу")
         );
-        assert!(row["tooltip"].as_str().unwrap_or_default().contains("9544"));
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("тянется от прошлых запусков")
+        );
     }
 
     #[test]
-    fn compact_token_hero_card_leaves_active_agent_budget_minimal_card_unchanged() {
+    fn rolling_window_card_uses_dynamic_window_copy() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "events_total": 1,
+                        "counted_events": 1,
+                        "verified_effective_saved_tokens": 10,
+                        "verified_effective_savings_pct": 10.0,
+                        "started_at_epoch_ms": 1,
+                        "ended_at_epoch_ms": 2,
+                        "median_recovery_tokens": 0.0,
+                        "answer_like_rate": 0.0,
+                        "answer_like_counted_events": 0,
+                        "verified_answer_like_savings_pct": 0.0
+                    },
+                    "rolling_window": {
+                        "events_total": 2,
+                        "counted_events": 1,
+                        "verified_effective_saved_tokens": 20,
+                        "verified_effective_savings_pct": 20.0,
+                        "started_at_epoch_ms": 10,
+                        "ended_at_epoch_ms": 20,
+                        "median_recovery_tokens": 0.0,
+                        "answer_like_rate": 0.0,
+                        "answer_like_counted_events": 0,
+                        "verified_answer_like_savings_pct": 0.0
+                    },
+                    "lifetime": {
+                        "events_total": 2,
+                        "counted_events": 1,
+                        "verified_effective_saved_tokens": 20,
+                        "verified_effective_savings_pct": 20.0,
+                        "started_at_epoch_ms": 10,
+                        "ended_at_epoch_ms": 20,
+                        "median_recovery_tokens": 0.0,
+                        "answer_like_rate": 0.0,
+                        "answer_like_counted_events": 0,
+                        "verified_answer_like_savings_pct": 0.0
+                    },
+                    "statement_previews": {
+                        "current_session": {
+                            "client_limit_meter_alignment": {}
+                        },
+                        "rolling_window": {
+                            "client_limit_meter_alignment": {}
+                        },
+                        "lifetime": {
+                            "client_limit_meter_alignment": {}
+                        }
+                    },
+                    "statement_export_previews": {
+                        "lifetime": {}
+                    },
+                    "profile": {
+                        "display_name": "Обычная рабочая машина",
+                        "rolling_window_hours": 24
+                    }
+                }
+            }
+        });
+
+        let cards = build_hero_cards(&snapshot);
+        assert!(
+            !cards[1]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("duration-shaped profile")
+        );
+        assert!(
+            cards[1]["title_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("только проверяемые цифры по рабочему окну")
+        );
+        assert!(
+            cards[1]["source_label"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("окна")
+        );
+    }
+
+    #[test]
+    fn compact_token_hero_card_sanitizes_active_agent_budget_grouped_card() {
         let card = json!({
             "title": "Экономия токенов за текущую сессию",
             "presentation_variant": "active_agent_budget_grouped_v3",
             "status": "pass",
             "status_label": "",
-            "rows": [],
+            "rows": [
+                {"label": "Агент:", "value": "Amai", "tooltip": "amai::continuity::default\n- Dashboard\n- /home/art/agent-memory-index"},
+                {"label": "Экономия:", "value": "Amai savings: без Amai 1000, с Amai 400, экономия 600 (60.00%)", "tooltip": "Личный burn-guard active thread"},
+                {"label": "Последний запрос:", "value": "222596 из 258400 · окно занято 86.14%", "tooltip": "giant-thread pressure"}
+            ],
             "agent_blocks": [
                 {
                     "agent_label": "Amai",
-                    "limit_value": "5ч остаётся 43.00%",
-                    "kpi_value": "5ч KPI: экономия 60.00%"
+                    "agent_tooltip": "amai::continuity::default\n- Dashboard\n- /home/art/agent-memory-index",
+                    "limit_value": "основное окно остаётся 43.00%, расширенное окно остаётся 72.00%",
+                    "kpi_value": "Amai savings: без Amai 1000, с Amai 400, экономия 600 (60.00%)",
+                    "kpi_tooltip": "Личный burn-guard текущего active thread идёт в экономии 60.00%.",
+                    "pressure_value": "222596 из 258400 · окно занято 86.14%",
+                    "pressure_tooltip": "giant-thread pressure"
                 }
             ]
         });
-        let compact = compact_token_hero_card(card.clone());
-        assert_eq!(compact, card);
+        let compact = compact_token_hero_card(card);
+        let rows = compact["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["label"].as_str(), Some("Агент:"));
+        assert!(rows[0]["tooltip"].is_null());
+        assert_eq!(rows[1]["label"].as_str(), Some("Экономия:"));
+        assert!(
+            rows[1]["tooltip"]
+                .as_str()
+                .is_some_and(|value| value.contains("честная пара без Amai / с Amai"))
+        );
+        let blocks = compact["agent_blocks"].as_array().expect("agent blocks");
+        assert!(blocks[0]["agent_tooltip"].is_null());
+        assert!(blocks[0].get("agent_scope").is_none());
+        assert_eq!(blocks[0]["kpi_label"].as_str(), Some("Экономия:"));
+        assert!(
+            blocks[0]["kpi_tooltip"]
+                .as_str()
+                .is_some_and(|value| value.contains("честная пара без Amai / с Amai"))
+        );
+        assert!(blocks[0].get("pressure_value").is_none());
+        assert!(blocks[0].get("pressure_tooltip").is_none());
+        assert_eq!(compact["note"].as_str(), Some(""));
+        assert!(
+            compact["source_label"]
+                .as_str()
+                .is_some_and(|value| value.contains("текущая шкала клиента"))
+        );
+    }
+
+    #[test]
+    fn compact_token_hero_card_rewrites_legacy_thread_limit_row_and_drops_target_selector() {
+        let card = json!({
+            "title": "Экономия токенов за текущую сессию",
+            "presentation_variant": "active_agent_budget_grouped_v3",
+            "status": "pass",
+            "status_label": "",
+            "rows": [
+                {
+                    "label": "Личный thread-limit агента:",
+                    "value": "н/д",
+                    "tooltip": "internal thread-limit detail",
+                    "target_selector": {
+                        "kpi_value_text": "Burn guard 75.00%"
+                    }
+                }
+            ],
+            "agent_blocks": []
+        });
+        let compact = compact_token_hero_card(card);
+        let rows = compact["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["label"].as_str(), Some("Лимит этой работы сейчас:"));
+        assert!(
+            rows[0]["tooltip"]
+                .as_str()
+                .is_some_and(|value| value.contains("точный лимит"))
+        );
+        assert!(rows[0].get("target_selector").is_none());
     }
 
     #[test]
@@ -2261,6 +2874,7 @@ mod tests {
                 {"label": "Экономия токенов модели", "value": "y"},
                 {"label": "Главный драйвер exact-пары", "value": "continuity-restore overhead вне retrieval: 636 -> 95 (экономия 541)"},
                 {"label": "Совпадение с реальным лимитом", "value": "z"},
+                {"label": "Токены continuity boundary", "value": "continuity-restore: 541 токен"},
                 {"label": "Лимит клиента сейчас", "value": "l"},
                 {"label": "Следующее действие", "value": "n"},
                 {"label": "Строгий same-meter срез", "value": "drop"}
@@ -2280,27 +2894,56 @@ mod tests {
                 "Экономия на учтённой части",
                 "Что именно посчитано",
                 "Точность учтённой части",
+                "Подготовка контекста",
                 "Лимит клиента сейчас",
-                "Следующее действие"
             ]
+        );
+        assert_eq!(compact["status"].as_str(), Some("pass"));
+        assert_eq!(
+            compact["status_label"].as_str(),
+            Some("экономия на полной шкале подтверждена")
         );
         assert_eq!(
             compact["source_label"].as_str(),
             Some(
-                "Источник: живая шкала клиента из rollout token_count и отдельно сведённая учтённая часть Amai по strict same-meter компонентам."
+                "Источник: текущая шкала клиента и отдельно подтверждённая часть уже проверенных запросов."
+            )
+        );
+        assert!(
+            compact["note"].as_str().unwrap_or_default().contains(
+                "Короткая карточка показывает только проверяемые цифры по текущей сессии"
             )
         );
         assert!(
             compact["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии")
+                .contains("ниже уже проверенная часть")
         );
         assert!(
             compact["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("strict same-meter срезу")
+                .contains("Подсказки управления вынесены отдельно")
+        );
+        assert!(
+            !compact["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Operator burn-guard")
+        );
+        assert!(
+            !compact["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("target")
+        );
+        assert!(
+            compact["rows"]
+                .as_array()
+                .expect("rows")
+                .iter()
+                .all(|row| row.get("target_selector").is_none())
         );
     }
 
@@ -2332,14 +2975,98 @@ mod tests {
                 "Экономия на учтённой части",
                 "Точность учтённой части",
                 "Отчёт для ручной сверки",
-                "Исторический долг точности"
+                "Старый исторический хвост"
             ]
         );
         assert_eq!(
             compact["source_label"].as_str(),
             Some(
-                "Источник: подтверждённая учтённая история плюс отдельно отмеченный старый долг точности. Это не полный raw spend всей истории."
+                "Источник: подтверждённая история плюс отдельно отмеченный старый исторический хвост. Это не весь расход за всё время."
             )
+        );
+    }
+
+    #[test]
+    fn compact_token_hero_card_rewrites_target_shortfall_to_public_truth_status() {
+        let card = json!({
+            "title": "Экономия токенов за текущую сессию",
+            "value": "75.00%",
+            "status": "alert",
+            "status_label": "цель 90% не достигнута",
+            "status_tooltip": "operator-only target alert",
+            "rows": [
+                {"label": "Amai в полном live-turn", "value": "75.00%: без Amai 1000, с Amai 250, delta 750"},
+                {"label": "Экономия токенов модели", "value": "Учтённый same-meter срез: 75.00%"},
+                {"label": "Совпадение с реальным лимитом", "value": "цифра точная: полностью совпадает со шкалой лимита модели"}
+            ]
+        });
+        let compact = compact_token_hero_card(card);
+        assert_eq!(compact["status"].as_str(), Some("pass"));
+        assert_eq!(
+            compact["status_label"].as_str(),
+            Some("экономия на полной шкале подтверждена")
+        );
+        assert!(
+            !compact["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("цель 90%")
+        );
+    }
+
+    #[test]
+    fn compact_token_hero_card_rewrites_same_thread_rotate_label_to_public_waiting_status() {
+        let card = json!({
+            "title": "Экономия токенов за текущую сессию",
+            "value": "не доказано",
+            "status": "critical",
+            "status_label": "сожми текущий чат сейчас",
+            "status_tooltip": "operator rotate guidance",
+            "rows": [
+                {"label": "Экономия токенов модели", "value": "Предварительный учтённый same-meter срез: 12.00%"},
+                {"label": "Совпадение с реальным лимитом", "value": "цифра пока предварительная: current same-meter pair ещё не собрана"}
+            ]
+        });
+        let compact = compact_token_hero_card(card);
+        assert_eq!(compact["status"].as_str(), Some("waiting"));
+        assert_eq!(
+            compact["status_label"].as_str(),
+            Some("реальная экономия ещё не доказана")
+        );
+        assert!(
+            !compact["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("сожми текущий чат")
+        );
+    }
+
+    #[test]
+    fn compact_token_hero_card_keeps_continuity_boundary_row_for_public_surface() {
+        let card = json!({
+            "title": "Экономия токенов за рабочее окно",
+            "value": "-12.00%",
+            "status": "alert",
+            "status_label": "burn в continuity startup",
+            "rows": [
+                {"label": "Экономия токенов модели", "value": "a"},
+                {"label": "Токены continuity boundary", "value": "continuity-restore: 817 токенов"},
+                {"label": "Следующее действие", "value": "rotate"},
+                {"label": "Исторический startup-хвост", "value": "b"}
+            ]
+        });
+        let compact = compact_token_hero_card(card);
+        let labels = compact["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .filter_map(|row| row["label"].as_str())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"Подготовка контекста"));
+        assert!(!labels.contains(&"Следующее действие"));
+        assert_eq!(
+            compact["status_label"].as_str(),
+            Some("окно уходит в подготовку контекста")
         );
     }
 
@@ -2378,7 +3105,7 @@ mod tests {
             row["tooltip"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("Current session: exact pair materialized")
+                .contains("Текущая сессия: точная пара уже собрана")
         );
     }
 
@@ -2418,13 +3145,13 @@ mod tests {
             row["tooltip"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("claim_raw_exact_history")
+                .contains("Что этим отчётом подтверждать нельзя")
         );
         assert!(
             row["tooltip"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("token-statement-export --scope lifetime")
+                .contains("observe token-statement-export --scope lifetime")
         );
     }
 }

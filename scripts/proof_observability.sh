@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "${SCRIPT_DIR}/.."
 source ./scripts/load_env.sh
 
 mkdir -p tmp
@@ -55,6 +56,28 @@ step "proof load"
 step "proof token benchmark"
 ./scripts/proof_token_benchmark.sh
 
+clear_workspace_restore_pack_rows() {
+  psql "$AMI_POSTGRES_DSN" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+DELETE FROM ami.restore_packs rp
+USING ami.projects p, ami.namespaces n
+WHERE rp.project_id = p.project_id
+  AND rp.namespace_id = n.namespace_id
+  AND p.code = 'amai'
+  AND n.code = 'continuity'
+  AND rp.pack_kind = 'workspace_restore_pack';
+SQL
+}
+
+clear_workspace_restore_pack_rows
+
+postgres_deadlocks_total() {
+  psql "$AMI_POSTGRES_DSN" -Atqc "
+    SELECT COALESCE(deadlocks, 0)::bigint
+    FROM pg_stat_database
+    WHERE datname = current_database()
+  "
+}
+
 export AMI_OBSERVE_BIND="0.0.0.0:$(pick_free_port)"
 observe_port="${AMI_OBSERVE_BIND##*:}"
 export AMI_PROMETHEUS_PORT="$(pick_free_port)"
@@ -65,6 +88,21 @@ step "build release binary"
 cargo build --release --quiet
 step "prove observability guardrails"
 cargo run --release --quiet -- observe guardrails
+step "persist fresh system snapshot baseline for exporter deadlock delta"
+rm -f tmp/proof_observability_baseline_snapshot.json
+cargo run --release --quiet -- observe snapshot > tmp/proof_observability_baseline_snapshot.json
+baseline_deadlocks_total="$(jq -r '.postgres.deadlocks_total' tmp/proof_observability_baseline_snapshot.json)"
+if [[ -z "${baseline_deadlocks_total}" || "${baseline_deadlocks_total}" == "null" ]]; then
+  echo "proof_observability: baseline snapshot did not expose postgres.deadlocks_total" >&2
+  exit 1
+fi
+proof_window_deadlocks_before="$(postgres_deadlocks_total)"
+if [[ "${proof_window_deadlocks_before}" != "${baseline_deadlocks_total}" ]]; then
+  echo "proof_observability: baseline snapshot deadlocks_total drifted from live postgres counter" >&2
+  echo "baseline snapshot deadlocks_total=${baseline_deadlocks_total}" >&2
+  echo "live postgres deadlocks_total=${proof_window_deadlocks_before}" >&2
+  exit 1
+fi
 rm -f tmp/observe-exporter.log
 step "start observe exporter on ${AMI_OBSERVE_BIND}"
 ./scripts/run_observe_exporter.sh > tmp/observe-exporter.log 2>&1 &
@@ -182,7 +220,7 @@ printf '%s' "$dashboard_json" | jq -e '
 ' >/dev/null
 curl -fsS "http://127.0.0.1:${observe_port}/api/dashboard-live-summary" | rg '"headline"|"active_agent_card"|"top_cards"' >/dev/null
 api_reply_prefix="$(curl -fsS "http://127.0.0.1:${observe_port}/api/client-limit-hourly-burn" | jq -r '.reply_prefix')"
-script_reply_prefix="$(AMI_OBSERVE_BIND="${AMI_OBSERVE_BIND}" /home/art/.codex/skills/vscode-5h-kpi-prefix/scripts/read_kpi_prefix.sh)"
+script_reply_prefix="$("${SCRIPT_DIR}/client_budget_system_markers.sh" | jq -r '.economic_markers.repo_owned_burn_guard_prefix')"
 python3 - "$api_reply_prefix" "$script_reply_prefix" <<'PY'
 import re
 import sys
@@ -190,11 +228,13 @@ import sys
 api = sys.argv[1]
 script = sys.argv[2]
 
-pattern = re.compile(r"^5ч KPI: (экономия|переплата) ([0-9]+(?:\.[0-9]+)?)%$")
+pattern = re.compile(r"^Burn guard: (экономия|переплата) ([0-9]+(?:\.[0-9]+)?)%$")
 
 def parse(prefix: str):
     prefix = prefix.strip()
-    if prefix == "5ч KPI: 1:1":
+    if prefix == "Burn guard: н/д":
+        return ("missing", None)
+    if prefix == "Burn guard: 1:1":
         return ("aligned", 0.0)
     match = pattern.match(prefix)
     if match:
@@ -205,22 +245,29 @@ api_class, api_value = parse(api)
 script_class, script_value = parse(script)
 
 if api_class is None or script_class is None:
-    print("5h KPI prefix script produced unreadable value", file=sys.stderr)
+    print("Burn guard prefix script produced unreadable value", file=sys.stderr)
     print(f"api:    {api}", file=sys.stderr)
     print(f"script: {script}", file=sys.stderr)
     raise SystemExit(1)
 
 if api_class != script_class:
-    print("5h KPI prefix script classification drifted from /api/client-limit-hourly-burn", file=sys.stderr)
+    print("Burn guard prefix script classification drifted from /api/client-limit-hourly-burn", file=sys.stderr)
     print(f"api:    {api}", file=sys.stderr)
     print(f"script: {script}", file=sys.stderr)
     raise SystemExit(1)
 
-if abs(api_value - script_value) > 10.0:
-    print("5h KPI prefix script drifted from /api/client-limit-hourly-burn", file=sys.stderr)
-    print(f"api:    {api}", file=sys.stderr)
-    print(f"script: {script}", file=sys.stderr)
-    raise SystemExit(1)
+if api_class == "missing":
+    if api != "Burn guard: н/д" or script != "Burn guard: н/д":
+        print("Burn guard missing state drifted from /api/client-limit-hourly-burn", file=sys.stderr)
+        print(f"api:    {api}", file=sys.stderr)
+        print(f"script: {script}", file=sys.stderr)
+        raise SystemExit(1)
+else:
+    if abs(api_value - script_value) > 10.0:
+        print("Burn guard prefix script drifted from /api/client-limit-hourly-burn", file=sys.stderr)
+        print(f"api:    {api}", file=sys.stderr)
+        print(f"script: {script}", file=sys.stderr)
+        raise SystemExit(1)
 PY
 snapshot_json="$(curl -fsS "http://127.0.0.1:${observe_port}/api/snapshot")"
 printf '%s' "$snapshot_json" | rg '"sla"|"postgres"|"token_budget_report"' >/dev/null
@@ -275,6 +322,14 @@ step "start monitoring profile"
 step "verify prometheus and grafana health"
 curl -fsS "http://127.0.0.1:${AMI_PROMETHEUS_PORT}/api/v1/query?query=amai_qdrant_index_optimize_queue" | rg '"status":"success"' >/dev/null
 curl -fsS "http://127.0.0.1:${AMI_GRAFANA_PORT}/api/health" | rg '"database"[[:space:]]*:[[:space:]]*"ok"' >/dev/null
+
+proof_window_deadlocks_after="$(postgres_deadlocks_total)"
+if [[ "${proof_window_deadlocks_after}" != "${proof_window_deadlocks_before}" ]]; then
+  echo "proof_observability: postgres deadlocks increased during exporter proof window" >&2
+  echo "baseline deadlocks_total=${proof_window_deadlocks_before}" >&2
+  echo "after exporter proof window deadlocks_total=${proof_window_deadlocks_after}" >&2
+  exit 1
+fi
 
 step "build live snapshot"
 cargo run --release --quiet -- observe snapshot
