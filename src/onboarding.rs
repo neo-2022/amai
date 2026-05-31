@@ -3712,6 +3712,34 @@ fn render_hermes_compact_startup_body(
         tool_runtime_reconcile["transport_error_detail_contains"]
             .as_str()
             .unwrap_or("Transport closed");
+    let stale_success = &tool_runtime_reconcile["success_payload_stale_runtime_artifact"];
+    let stale_success_detect_after_any_success = stale_success["detect_after_any_success"]
+        .as_bool()
+        .unwrap_or(false);
+    let stale_success_local_cli_reconcile_required = stale_success["local_cli_reconcile_required"]
+        .as_bool()
+        .unwrap_or(false);
+    let stale_success_local_cli_unavailable_blocks_report =
+        stale_success["local_cli_unavailable_blocks_report"]
+            .as_bool()
+            .unwrap_or(false);
+    let stale_success_replaces_mcp_success =
+        stale_success["local_cli_success_replaces_stale_mcp_success"]
+            .as_bool()
+            .unwrap_or(false);
+    let stale_success_conditions = stale_success["stale_conditions"]
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            "startup_contract_sha_mismatch, missing_agent_workflow_guard, missing_workflow_promotion_state, workflow_promotion_source_event_mismatch, gate_semantics_inconsistent".to_string()
+        });
     let reconnect_helper = &tool_runtime_reconcile["reconnect_helper"];
     let reconnect_helper_shell_relative_path = reconnect_helper["shell_helper_relative_path"]
         .as_str()
@@ -3828,7 +3856,7 @@ fn render_hermes_compact_startup_body(
         .unwrap_or("reply_prefix");
     let client_budget_required_reply_prefix_source = live_budget["required_reply_prefix_source"]
         .as_str()
-        .unwrap_or("personal_agent_online_limit_contour");
+        .unwrap_or("disabled_by_project_policy");
     let fail_closed_conditions = contract["fail_closed_conditions"]
         .as_array()
         .map(|values| {
@@ -3853,10 +3881,11 @@ fn render_hermes_compact_startup_body(
 1. Workspace = `{repo_root_display}`. Прочитай compact agent contract `{agent_contract_path_display}` и machine-readable startup contract `{contract_path_display}`. Startup contract остаётся pinned source-of-truth; до MCP tool call проверь `{startup_contract_sha256_field} = \"{startup_contract_sha256}\"`, `workspace_contract_required_before_tool_call = {startup_contract_required_before_tool_call}`, `missing_or_unreadable_fail_closed = {startup_contract_missing_or_unreadable_fail_closed}`, `sha256_mismatch_fail_closed = {startup_contract_sha256_mismatch_fail_closed}`.\n\
 2. Затем вызови MCP tool `{tool}` с `repo_root = \"{repo_root_display}\"` и `namespace = \"{namespace}\"` до любого другого Amai шага.\n\
 3. Если tool вернул `{reconcile_error_class}` с detail `{reconcile_error_detail_contains}` или transport error с detail `{reconcile_transport_error_detail_contains}`, немедленно делай local reconcile: `{reconcile_local_cli_shell_command} --repo-root \"{repo_root_display}\" --namespace \"{namespace}\" --json`. Если он успешен, продолжай от локального startup payload и требуй reconnect exact front-door-ом: `{reconnect_shell_command}` или `{reconnect_bootstrap_command}`.\n\
-4. После startup прочитай runtime artifact `{runtime_state_relative_path}` и obey fail-closed только по полям `{startup_execution_gate_field}`, `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}`, `{active_lease_field}`. `{gate_semantics_consistent_field}` должен быть `true`; если resume требует `{required_action_kind}`, follow startup_next_action first. No silent drop.\n\
-5. Перед каждым содержательным ответом обновляй `{client_budget_guard_shell_command} --enforce-reply-gate` и работай только по `client_budget_reply_gate.{client_budget_reply_execution_gate_field}`. Начинать user-visible reply можно только с exact non-empty `client_budget_reply_gate.{client_budget_reply_prefix_field}` из `{client_budget_required_reply_prefix_source}`.\n\
-6. Fallback для runtime-state inspection: `{startup_state_fallback_shell_command} --repo-root \"{repo_root_display}\" --json`.\n\
-7. Любой fail-closed scenario ({fail_closed_conditions}) сообщай как блокер и не угадывай continuity."
+4. После любого успешного MCP startup прочитай runtime artifact `{runtime_state_relative_path}`. Если stale-success проверка включена (`detect_after_any_success = {stale_success_detect_after_any_success}`) и найдено `{stale_success_conditions}`, делай local reconcile (`local_cli_reconcile_required = {stale_success_local_cli_reconcile_required}`, `local_cli_unavailable_blocks_report = {stale_success_local_cli_unavailable_blocks_report}`, `local_cli_success_replaces_stale_mcp_success = {stale_success_replaces_mcp_success}`), продолжай только от локального payload и требуй reconnect exact front-door-ом.\n\
+5. Obey fail-closed только по полям `{startup_execution_gate_field}`, `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}`, `{active_lease_field}`. `{gate_semantics_consistent_field}` должен быть `true`; если resume требует `{required_action_kind}`, follow startup_next_action first. No silent drop.\n\
+6. Перед каждым содержательным ответом обновляй `{client_budget_guard_shell_command} --enforce-reply-gate` и работай только по `client_budget_reply_gate.{client_budget_reply_execution_gate_field}`. Начинать user-visible reply можно только с exact non-empty `client_budget_reply_gate.{client_budget_reply_prefix_field}` из `{client_budget_required_reply_prefix_source}`.\n\
+7. Fallback для runtime-state inspection: `{startup_state_fallback_shell_command} --repo-root \"{repo_root_display}\" --json`.\n\
+8. Любой fail-closed scenario ({fail_closed_conditions}) сообщай как блокер и не угадывай continuity."
     ))
 }
 
@@ -3911,6 +3940,18 @@ fn render_startup_instruction_body(
             .unwrap_or("Transport closed");
     let reconcile_transport_error_case_insensitive =
         tool_runtime_reconcile["transport_error_detail_case_insensitive"]
+            .as_bool()
+            .unwrap_or(false);
+    let stale_success = &tool_runtime_reconcile["success_payload_stale_runtime_artifact"];
+    let stale_success_detect_after_any_success = stale_success["detect_after_any_success"]
+        .as_bool()
+        .unwrap_or(false);
+    let stale_success_local_cli_unavailable_blocks_report =
+        stale_success["local_cli_unavailable_blocks_report"]
+            .as_bool()
+            .unwrap_or(false);
+    let stale_success_replaces_mcp_success =
+        stale_success["local_cli_success_replaces_stale_mcp_success"]
             .as_bool()
             .unwrap_or(false);
     let reconcile_local_cli_command = tool_runtime_reconcile["local_cli"]["command"]
@@ -4123,7 +4164,7 @@ fn render_startup_instruction_body(
     let client_budget_required_reply_prefix_source =
         client_budget_enforcement["required_reply_prefix_source"]
             .as_str()
-            .unwrap_or("personal_agent_online_limit_contour");
+            .unwrap_or("disabled_by_project_policy");
     let client_budget_required_reply_prefix_non_empty =
         client_budget_enforcement["required_reply_prefix_non_empty"]
             .as_bool()
@@ -4135,7 +4176,7 @@ fn render_startup_instruction_body(
     let client_budget_output_prefix_enforcement_mode =
         client_budget_enforcement["output_prefix_enforcement_mode"]
             .as_str()
-            .unwrap_or("instruction_preflight_fail_closed");
+            .unwrap_or("disabled_by_project_policy");
     let client_budget_output_prefix_host_enforced =
         client_budget_enforcement["output_prefix_host_enforced"]
             .as_bool()
@@ -4559,6 +4600,22 @@ fn render_startup_instruction_body(
         } else {
             "false"
         };
+    let stale_success_detect_after_any_success_text = if stale_success_detect_after_any_success {
+        "true"
+    } else {
+        "false"
+    };
+    let stale_success_local_cli_unavailable_blocks_report_text =
+        if stale_success_local_cli_unavailable_blocks_report {
+            "true"
+        } else {
+            "false"
+        };
+    let stale_success_replaces_mcp_success_text = if stale_success_replaces_mcp_success {
+        "true"
+    } else {
+        "false"
+    };
     let reconcile_local_cli_success_replaces_transport_failure_text =
         if reconcile_local_cli_success_replaces_transport_failure {
             "true"
@@ -4583,6 +4640,33 @@ fn render_startup_instruction_body(
         } else {
             "false"
         };
+    let client_budget_prefix_preflight_instruction =
+        if !client_budget_required_reply_prefix_non_empty
+            && !client_budget_reply_prefix_preflight_blocks_substantive_reply
+            && client_budget_required_reply_prefix_source == "disabled_by_project_policy"
+            && client_budget_output_prefix_enforcement_mode == "disabled_by_project_policy"
+        {
+            format!(
+                "KPI/reply prefix сейчас отключён как обязательный startup-law; `{client_budget_reply_prefix_enforcement_flag}` остаётся diagnostic helper, а не report/reply blocker (`required_reply_prefix_source = {client_budget_required_reply_prefix_source}`, `required_reply_prefix_non_empty = {client_budget_required_reply_prefix_non_empty_text}`, `reply_prefix_preflight_blocks_substantive_reply = {client_budget_reply_prefix_preflight_blocks_substantive_reply_text}`, `output_prefix_enforcement_mode = {client_budget_output_prefix_enforcement_mode}`, `output_prefix_host_enforced = {client_budget_output_prefix_host_enforced_text}`)."
+            )
+        } else {
+            format!(
+                "Prefix preflight: `{client_budget_reply_prefix_enforcement_flag}` (`required_reply_prefix_source = {client_budget_required_reply_prefix_source}`, `required_reply_prefix_non_empty = {client_budget_required_reply_prefix_non_empty_text}`, `reply_prefix_preflight_blocks_substantive_reply = {client_budget_reply_prefix_preflight_blocks_substantive_reply_text}`, `output_prefix_enforcement_mode = {client_budget_output_prefix_enforcement_mode}`, `output_prefix_host_enforced = {client_budget_output_prefix_host_enforced_text}`)."
+            )
+        };
+    let client_budget_reply_prefix_instruction = if !client_budget_required_reply_prefix_non_empty
+        && !client_budget_reply_prefix_preflight_blocks_substantive_reply
+        && client_budget_required_reply_prefix_source == "disabled_by_project_policy"
+        && client_budget_output_prefix_enforcement_mode == "disabled_by_project_policy"
+    {
+        format!(
+            "7. Gate version pinned: `{client_budget_reply_execution_gate_version}`. Поле `{client_budget_reply_execution_gate_field}.{client_budget_reply_prefix_field}` может по-прежнему materialize-иться для диагностики, но начинать user-visible reply с KPI-prefix больше не требуется и fail-closed preflight по нему отключён. Если `{client_budget_reply_budget_mode_field} == \"{client_budget_compact_reply_mode_value}\"`, отвечай по `{client_budget_reply_budget_contract_field}` с `contract_version = \"{client_budget_compact_reply_contract_version}\"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing. Target switch: matching `{client_budget_target_command_pattern}` -> `{client_budget_target_shell_command} --repo-root \"{repo_root_display}\" {client_budget_target_namespace_argument} \"{namespace}\" {client_budget_target_percent_argument} N` (`repo_root_argument_required = {client_budget_target_repo_root_argument_required_text}`, `switch_immediately_on_exact_chat_command = {client_budget_target_switch_immediately_text}`, `reply_with_confirmation_after_switch = {client_budget_target_reply_with_confirmation_text}`). Пример exact chat-команды: `{client_budget_target_example_command}`. Huge-chat rebase: точную команду `{client_budget_compact_chat_exact_command}` обработай через `{client_budget_compact_chat_shell_command} --repo-root \"{repo_root_display}\" {client_budget_compact_chat_namespace_argument} \"{namespace}\" --json` (`repo_root_argument_required = {client_budget_compact_chat_repo_root_argument_required}`, `switch_immediately_on_exact_chat_command = {client_budget_compact_chat_switch_immediately}`, `reply_with_confirmation_after_prepare = {client_budget_compact_chat_reply_with_confirmation}`, `prompt_text_required_for_rebase = {client_budget_compact_chat_prompt_text_required}`), верни `prompt_text` и `operator_notice`, требуй host action `{client_budget_compact_chat_required_host_action}`."
+        )
+    } else {
+        format!(
+            "7. Gate version pinned: `{client_budget_reply_execution_gate_version}`. Начинать user-visible reply можно только если `{client_budget_reply_execution_gate_field}.{client_budget_reply_prefix_field}` не пустой и источник равен `{client_budget_required_reply_prefix_source}`; иначе сначала нужен `{client_budget_reply_prefix_enforcement_flag}`. Если `{client_budget_reply_budget_mode_field} == \"{client_budget_compact_reply_mode_value}\"`, отвечай по `{client_budget_reply_budget_contract_field}` с `contract_version = \"{client_budget_compact_reply_contract_version}\"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing. Target switch: matching `{client_budget_target_command_pattern}` -> `{client_budget_target_shell_command} --repo-root \"{repo_root_display}\" {client_budget_target_namespace_argument} \"{namespace}\" {client_budget_target_percent_argument} N` (`repo_root_argument_required = {client_budget_target_repo_root_argument_required_text}`, `switch_immediately_on_exact_chat_command = {client_budget_target_switch_immediately_text}`, `reply_with_confirmation_after_switch = {client_budget_target_reply_with_confirmation_text}`). Пример exact chat-команды: `{client_budget_target_example_command}`. Huge-chat rebase: точную команду `{client_budget_compact_chat_exact_command}` обработай через `{client_budget_compact_chat_shell_command} --repo-root \"{repo_root_display}\" {client_budget_compact_chat_namespace_argument} \"{namespace}\" --json` (`repo_root_argument_required = {client_budget_compact_chat_repo_root_argument_required}`, `switch_immediately_on_exact_chat_command = {client_budget_compact_chat_switch_immediately}`, `reply_with_confirmation_after_prepare = {client_budget_compact_chat_reply_with_confirmation}`, `prompt_text_required_for_rebase = {client_budget_compact_chat_prompt_text_required}`), верни `prompt_text` и `operator_notice`, требуй host action `{client_budget_compact_chat_required_host_action}`."
+        )
+    };
 
     let instructions = [
         "Перед первым содержательным ответом в новом или resumed чате и дальше перед каждым следующим содержательным ответом:".to_string(),
@@ -4590,10 +4674,10 @@ fn render_startup_instruction_body(
             "1. Workspace = `{repo_root_display}`. Прочитай compact agent contract `{agent_contract_path_display}` и machine-readable startup contract `{contract_path_display}`; startup contract остаётся pinned source-of-truth. До MCP tool call проверь `{startup_contract_sha256_field} = \"{startup_contract_sha256}\"`, `workspace_contract_required_before_tool_call = {startup_contract_required_before_tool_call_text}`, `missing_or_unreadable_fail_closed = {startup_contract_missing_or_unreadable_fail_closed_text}`, `sha256_mismatch_fail_closed = {startup_contract_sha256_mismatch_fail_closed_text}`."
         ),
         format!(
-            "2. Затем вызови MCP tool `{tool}` с `repo_root = \"{repo_root_display}\"` и `namespace = \"{namespace}\"`; `project` передавай только при exact binding по repo_root. До `continuity_startup_summary` не переходи к `amai_context_pack` и новым действиям. Если tool вернул `{reconcile_error_class}` и detail содержит `{reconcile_error_detail_contains}`, немедленно сделай reconcile через `{reconcile_local_cli_shell_command} --repo-root \"{repo_root_display}\" --namespace \"{namespace}\" --json` (`requires_repo_root_argument = {reconcile_local_cli_requires_repo_root}`, `requires_namespace_argument = {reconcile_local_cli_requires_namespace}`, `json_required = {reconcile_local_cli_json_required}`). Если embedded MCP tool call упал на transport error с detail `{reconcile_transport_error_detail_contains}` (`transport_error_detail_case_insensitive = {reconcile_transport_error_case_insensitive_text}`), делай тот же local CLI reconcile. Если local CLI startup succeeds, классифицируй это как `{reconcile_local_cli_success_classification}` (`local_cli_success_replaces_mcp_failure = {reconcile_local_cli_success_replaces_mcp_failure}`, `local_cli_success_replaces_transport_failure = {reconcile_local_cli_success_replaces_transport_failure_text}`, `must_request_mcp_reconnect_after_local_success = {reconcile_must_request_mcp_reconnect}`, `must_continue_from_local_startup_payload = {reconcile_must_continue_from_local_payload}`), продолжай от локального startup payload и требуй reconnect exact front-door-ом: `{reconnect_shell_command}` или `{reconnect_bootstrap_command}`. Только если и MCP, и local CLI fallback провалились, объявляй continuity реально unavailable."
+            "2. Затем вызови MCP tool `{tool}` с `repo_root = \"{repo_root_display}\"` и `namespace = \"{namespace}\"`; `project` передавай только при exact binding по repo_root. До `continuity_startup_summary` не переходи к `amai_context_pack`. При `{reconcile_error_class}` с detail `{reconcile_error_detail_contains}` или transport `{reconcile_transport_error_detail_contains}` (`transport_error_detail_case_insensitive = {reconcile_transport_error_case_insensitive_text}`) запускай `{reconcile_local_cli_shell_command} --repo-root \"{repo_root_display}\" --namespace \"{namespace}\" --json` (`requires_repo_root_argument = {reconcile_local_cli_requires_repo_root}`, `requires_namespace_argument = {reconcile_local_cli_requires_namespace}`, `json_required = {reconcile_local_cli_json_required}`). Если local CLI startup succeeds, классифицируй как `{reconcile_local_cli_success_classification}` (`local_cli_success_replaces_mcp_failure = {reconcile_local_cli_success_replaces_mcp_failure}`, `local_cli_success_replaces_transport_failure = {reconcile_local_cli_success_replaces_transport_failure_text}`, `must_request_mcp_reconnect_after_local_success = {reconcile_must_request_mcp_reconnect}`, `must_continue_from_local_startup_payload = {reconcile_must_continue_from_local_payload}`), продолжай от локального payload и требуй reconnect: `{reconnect_shell_command}` или `{reconnect_bootstrap_command}`. Если оба пути провалились, continuity unavailable."
         ),
         format!(
-            "3. После startup прочитай runtime artifact `{runtime_state_relative_path}`: `workspace_runtime_state_artifact_version` должен быть `{runtime_state_artifact_version}`, его пишет `{runtime_state_written_by_tool}`, он обязан нести `{runtime_state_source_summary_field}`. Fallback: `{startup_state_fallback_shell_command} --repo-root \"{repo_root_display}\" --json`."
+            "3. После startup проверь runtime artifact `{runtime_state_relative_path}`: `workspace_runtime_state_artifact_version` должен быть `{runtime_state_artifact_version}`, его пишет `{runtime_state_written_by_tool}`, он обязан нести `{runtime_state_source_summary_field}`. Fallback: `{startup_state_fallback_shell_command} --repo-root \"{repo_root_display}\" --json`. Stale-success guard (`detect_after_any_success = {stale_success_detect_after_any_success_text}`, `local_cli_unavailable_blocks_report = {stale_success_local_cli_unavailable_blocks_report_text}`, `local_cli_success_replaces_stale_mcp_success = {stale_success_replaces_mcp_success_text}`): при SHA/`agent_workflow_guard`/`workflow_promotion_state`/event-match/`gate_semantics_consistent` drift = `stale_embedded_mcp_session`; use local payload + reconnect."
         ),
         format!(
             "4. В runtime artifact смотри только `{startup_execution_gate_field}`, `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}`, `{active_lease_field}`. Restore бери из `required_summary_fields`, obligations из `restored_obligations`. Fail-closed, если `{gate_semantics_consistent_field} != true` (`gate_semantics_consistent_true_required = {gate_semantics_consistent_true_required_text}`), `{startup_execution_gate_field}.{gate_must_follow_field} != true`, `{startup_execution_gate_field}.{gate_unrelated_work_allowed_field} != false`, `{startup_execution_gate_field}.{gate_prompt_read_field} != true` или `{startup_execution_gate_field}.{gate_no_silent_drop_field} != true`."
@@ -4601,14 +4685,16 @@ fn render_startup_instruction_body(
         format!(
             "5. Resume law: если `{startup_execution_gate_field}.{gate_required_action_kind_field} == \"{required_action_kind}\"`, `{startup_next_action_field}.action_kind == \"{required_action_kind}\"` (`must_resume_required_return_task_before_unrelated_work = {must_resume_before_unrelated_text}`) или `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"` (`previous_session_owner_must_follow_startup_next_action = {previous_session_owner_must_follow_startup_next_action_text}`), follow startup_next_action first. `no_silent_drop = {no_silent_drop_text}`. Для resume смотри `execctl_active_lease_summary`, `required_return_task`, `required_task_set`, `required_task_set_summary`, `project_task_tree`, `project_task_tree_summary`, `project_task_ledger`, `project_task_ledger_summary`."
         ),
+        "5a. Если пользователь явно переключил задачу, это новый active workline немедленно: сначала materialize `continuity_handoff` для новой линии, затем продолжай только от неё; старую незавершённую линию, если она ещё не закрыта, паркуй в `pending_return_queue`, не продолжай её по инерции и не проси пользователя повторять указание."
+            .to_string(),
+        "5b. Agent workflow guard: `agent_workflow_guard.guard_version = \"agent-workflow-guard-v1\"`; `workflow_promotion_state.source_event_match = true` + fresh `workflow_promotion_event_id`; external refs official/primary + local corroboration; per-item specialist consensus + bughunter-review; signoff: `./scripts/provision_specialist_signoff_trust.sh`, `./scripts/materialize_specialist_signoff.sh`, `./scripts/proof_workflow_before_report.sh`, `./scripts/proof_before_report.sh`, `./scripts/proof_specialist_signoff.sh`; subagents веди на английском."
+            .to_string(),
         format!(
-            "6. Перед каждым содержательным ответом обновляй guard `{client_budget_guard_shell_command}` и работай только по `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}`. `must_check_before_each_substantive_reply = {client_budget_must_check_before_each_reply_text}`; stale старше `{client_budget_max_guard_age_seconds_text}` секунд запрещён (`stale_guard_requires_refresh = {client_budget_stale_guard_requires_refresh_text}`). Hard gate automation: `{client_budget_guard_enforcement_flag}` (`guard_enforcement_exit_on_blocking = {client_budget_guard_enforcement_exit_on_blocking_text}`). Prefix preflight: `{client_budget_reply_prefix_enforcement_flag}` (`required_reply_prefix_source = {client_budget_required_reply_prefix_source}`, `required_reply_prefix_non_empty = {client_budget_required_reply_prefix_non_empty_text}`, `reply_prefix_preflight_blocks_substantive_reply = {client_budget_reply_prefix_preflight_blocks_substantive_reply_text}`, `output_prefix_enforcement_mode = {client_budget_output_prefix_enforcement_mode}`, `output_prefix_host_enforced = {client_budget_output_prefix_host_enforced_text}`). Continuity write-side maintenance в Amai ({client_budget_continuity_write_operations}) не блокируется reply guard (`continuity_write_exempt_from_reply_guard = {client_budget_continuity_write_exempt_from_reply_guard_text}`) и при rotate/advisory pressure остаётся обязательным перед уходом (`continuity_write_required_before_rotate = {client_budget_continuity_write_required_before_rotate_text}`). Для KPI/guard/exact-pair root-cause сначала используй `{client_budget_compact_diagnostics_shell_command}`; `must_prefer_compact_diagnostics_over_full_snapshot = {client_budget_prefer_compact_diagnostics_text}`."
+            "6. Перед каждым содержательным ответом обновляй guard `{client_budget_guard_shell_command}` и работай только по `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}`. `must_check_before_each_substantive_reply = {client_budget_must_check_before_each_reply_text}`; stale старше `{client_budget_max_guard_age_seconds_text}` секунд запрещён (`stale_guard_requires_refresh = {client_budget_stale_guard_requires_refresh_text}`). Enforce `{client_budget_guard_enforcement_flag}` (`guard_enforcement_exit_on_blocking = {client_budget_guard_enforcement_exit_on_blocking_text}`). {client_budget_prefix_preflight_instruction} Amai continuity writes ({client_budget_continuity_write_operations}) exempt: `continuity_write_exempt_from_reply_guard = {client_budget_continuity_write_exempt_from_reply_guard_text}`; before rotate: `continuity_write_required_before_rotate = {client_budget_continuity_write_required_before_rotate_text}`. Root-cause first: `{client_budget_compact_diagnostics_shell_command}`; `must_prefer_compact_diagnostics_over_full_snapshot = {client_budget_prefer_compact_diagnostics_text}`."
         ),
+        client_budget_reply_prefix_instruction,
         format!(
-            "7. Gate version pinned: `{client_budget_reply_execution_gate_version}`. Начинать user-visible reply можно только если `{client_budget_reply_execution_gate_field}.{client_budget_reply_prefix_field}` не пустой и источник равен `{client_budget_required_reply_prefix_source}`; иначе substantive reply запрещён и сначала нужен новый guard-check через `{client_budget_reply_prefix_enforcement_flag}`. Если prefix готов, начинай reply с этой exact строки. Если `{client_budget_reply_budget_mode_field} == \"{client_budget_compact_reply_mode_value}\"`, substantive reply разрешён только по `{client_budget_reply_budget_contract_field}` с `contract_version = \"{client_budget_compact_reply_contract_version}\"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing. Exact operator-switch для target режима: matching `{client_budget_target_command_pattern}` -> `{client_budget_target_shell_command} --repo-root \"{repo_root_display}\" {client_budget_target_namespace_argument} \"{namespace}\" {client_budget_target_percent_argument} N` (`repo_root_argument_required = {client_budget_target_repo_root_argument_required_text}`, `switch_immediately_on_exact_chat_command = {client_budget_target_switch_immediately_text}`, `reply_with_confirmation_after_switch = {client_budget_target_reply_with_confirmation_text}`). Пример exact chat-команды: `{client_budget_target_example_command}`. Exact operator-switch для huge-chat rebase: точную команду `{client_budget_compact_chat_exact_command}` обработай через `{client_budget_compact_chat_shell_command} --repo-root \"{repo_root_display}\" {client_budget_compact_chat_namespace_argument} \"{namespace}\" --json` (`repo_root_argument_required = {client_budget_compact_chat_repo_root_argument_required}`, `switch_immediately_on_exact_chat_command = {client_budget_compact_chat_switch_immediately}`, `reply_with_confirmation_after_prepare = {client_budget_compact_chat_reply_with_confirmation}`, `prompt_text_required_for_rebase = {client_budget_compact_chat_prompt_text_required}`), верни `prompt_text` и `operator_notice`, и требуй host action `{client_budget_compact_chat_required_host_action}`."
-        ),
-        format!(
-            "8. Client-budget blocked reply mechanism removed: `reply_blocking_removed = {client_budget_reply_blocking_removed_text}`. Tool-turn blocked mechanism removed too: `tool_turn_blocking_removed = {client_budget_tool_turn_blocking_removed_text}`. Если `{client_budget_reply_execution_gate_field}.must_rotate_before_reply = true`, `{client_budget_reply_execution_gate_field}.must_wait_for_budget_recovery_before_reply = true`, `{client_budget_rotate_now_field} = true`, `{client_budget_status_label_field}` равен одному из current normalized same-thread advisory labels [{client_budget_rotate_status_labels}], `same_meter_pure_burn_turn_active = true`, `must_avoid_new_tool_turn_without_specific_delta_goal = true` или `max_tool_roundtrips_soft = 0`, считай это только advisory/compact pressure signal. Этот список в startup instructions является non-binding human-readable snapshot канонического shared advisory source, а не отдельным policy-list. User-visible blocked wait template использовать запрещено; `amai_context_pack`, continuity write и другие Amai tools не блокируй только из-за этих полей. `save_handoff_before_rotate = {client_budget_save_handoff_before_rotate_text}` и `fresh_chat_requires_continuity_startup = {client_budget_fresh_chat_requires_startup_text}` остаются operator guidance."
+            "8. Client-budget blocked reply mechanism removed: `reply_blocking_removed = {client_budget_reply_blocking_removed_text}`; `tool_turn_blocking_removed = {client_budget_tool_turn_blocking_removed_text}`. Rotate/wait/`{client_budget_rotate_now_field}`/`{client_budget_status_label_field}` in current normalized same-thread advisory labels [{client_budget_rotate_status_labels}], `same_meter_pure_burn_turn_active`, `must_avoid_new_tool_turn_without_specific_delta_goal` or `max_tool_roundtrips_soft = 0` are only advisory/compact pressure signal. This is a non-binding human-readable snapshot канонического shared advisory source. User-visible blocked wait template использовать запрещено; `amai_context_pack`, continuity write и другие Amai tools не блокируй из-за этих полей. `save_handoff_before_rotate = {client_budget_save_handoff_before_rotate_text}`, `fresh_chat_requires_continuity_startup = {client_budget_fresh_chat_requires_startup_text}`."
         ),
         format!(
             "9. Не подменяй полную клиентскую шкалу внутренним Amai-slice: `full_scale_client_truth_required = {client_budget_full_scale_truth_required_text}`. Любой fail-closed scenario ({fail_closed}) сообщай как блокер и не угадывай continuity."
@@ -4691,6 +4777,7 @@ fn render_startup_agent_contract_artifact(
             "inspection_fallback_cli_command": contract["runtime_state_artifact"]["inspection_fallback_cli"]["command"].clone(),
             "inspection_fallback_cli_shell_command": contract["runtime_state_artifact"]["inspection_fallback_cli"]["shell_command"].clone()
         },
+        "agent_workflow_guard": contract["agent_workflow_guard"].clone(),
         "required_summary_fields": contract["required_summary_fields"].clone(),
         "restored_obligations": contract["restored_obligations"].clone(),
         "compact_runtime_pointers": {
@@ -4702,6 +4789,11 @@ fn render_startup_agent_contract_artifact(
             "previous_session_owner_value": contract["resume_enforcement"]["previous_session_owner_value"].clone(),
             "required_action_kind_when_resume_required": contract["resume_enforcement"]["required_action_kind_when_resume_required"].clone(),
             "reconcile_local_cli_shell_command": contract["tool_runtime_reconcile"]["local_cli"]["shell_command"].clone(),
+            "stale_success_detect_after_any_success": contract["tool_runtime_reconcile"]["success_payload_stale_runtime_artifact"]["detect_after_any_success"].clone(),
+            "stale_success_conditions": contract["tool_runtime_reconcile"]["success_payload_stale_runtime_artifact"]["stale_conditions"].clone(),
+            "stale_success_local_cli_reconcile_required": contract["tool_runtime_reconcile"]["success_payload_stale_runtime_artifact"]["local_cli_reconcile_required"].clone(),
+            "stale_success_local_cli_unavailable_blocks_report": contract["tool_runtime_reconcile"]["success_payload_stale_runtime_artifact"]["local_cli_unavailable_blocks_report"].clone(),
+            "stale_success_replaces_mcp_success": contract["tool_runtime_reconcile"]["success_payload_stale_runtime_artifact"]["local_cli_success_replaces_stale_mcp_success"].clone(),
             "guard_command": contract["live_client_budget_enforcement"]["guard_command"].clone(),
             "guard_shell_command": contract["live_client_budget_enforcement"]["guard_shell_command"].clone(),
             "compact_diagnostics_command": contract["live_client_budget_enforcement"]["compact_diagnostics_command"].clone(),
@@ -5837,6 +5929,18 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(
             text.contains("startup_next_action.action_kind == \"resume_required_return_task\"")
         );
+        assert!(text.contains("materialize `continuity_handoff`"));
+        assert!(text.contains("pending_return_queue"));
+        assert!(text.contains("не продолжай её по инерции"));
+        assert!(text.contains("agent_workflow_guard.guard_version = \"agent-workflow-guard-v1\""));
+        assert!(text.contains("workflow_promotion_state.source_event_match = true"));
+        assert!(text.contains("specialist consensus"));
+        assert!(text.contains("bughunter-review"));
+        assert!(text.contains("./scripts/proof_workflow_before_report.sh"));
+        assert!(text.contains("./scripts/proof_specialist_signoff.sh"));
+        assert!(text.contains("official/primary"));
+        assert!(text.contains("local corroboration"));
+        assert!(text.contains("subagents веди на английском"));
         assert!(text.contains("gate_semantics_consistent != true"));
         assert!(text.contains("gate_semantics_consistent_true_required = true"));
         assert!(text.contains("./scripts/continuity_startup_state.sh --repo-root"));
@@ -5845,6 +5949,15 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("Transport closed"));
         assert!(text.contains("./scripts/continuity_startup.sh --repo-root"));
         assert!(text.contains("requires_namespace_argument = true"));
+        assert!(text.contains("Stale-success guard"));
+        assert!(text.contains("detect_after_any_success = true"));
+        assert!(text.contains("local_cli_unavailable_blocks_report = true"));
+        assert!(text.contains("при SHA"));
+        assert!(text.contains("agent_workflow_guard"));
+        assert!(text.contains("workflow_promotion_state"));
+        assert!(text.contains("event-match"));
+        assert!(text.contains("gate_semantics_consistent"));
+        assert!(text.contains("local_cli_success_replaces_stale_mcp_success = true"));
         assert!(text.contains("stale_embedded_mcp_session"));
         assert!(text.contains("local_cli_success_replaces_transport_failure = true"));
         assert!(text.contains("must_request_mcp_reconnect_after_local_success = true"));
@@ -5866,21 +5979,19 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("--enforce-reply-gate"));
         assert!(text.contains("--enforce-online-reply-prefix"));
         assert!(text.contains("guard_enforcement_exit_on_blocking = true"));
-        assert!(
-            text.contains("required_reply_prefix_source = personal_agent_online_limit_contour")
-        );
-        assert!(text.contains("required_reply_prefix_non_empty = true"));
-        assert!(text.contains("reply_prefix_preflight_blocks_substantive_reply = true"));
-        assert!(
-            text.contains("output_prefix_enforcement_mode = instruction_preflight_fail_closed")
-        );
+        assert!(text.contains("required_reply_prefix_source = disabled_by_project_policy"));
+        assert!(text.contains("required_reply_prefix_non_empty = false"));
+        assert!(text.contains("reply_prefix_preflight_blocks_substantive_reply = false"));
+        assert!(text.contains("output_prefix_enforcement_mode = disabled_by_project_policy"));
+        assert!(text.contains("KPI-prefix больше не требуется"));
+        assert!(text.contains("fail-closed preflight по нему отключён"));
         assert!(text.contains("output_prefix_host_enforced = false"));
         assert!(text.contains("./scripts/client_budget_root_cause.sh"));
         assert!(text.contains("must_prefer_compact_diagnostics_over_full_snapshot = true"));
         assert!(text.contains("client_budget_reply_gate.reply_execution_gate"));
         assert!(text.contains("Gate version pinned: `client-reply-budget-gate-v1`"));
         assert!(text.contains("reply_execution_gate.reply_prefix"));
-        assert!(text.contains("Начинать user-visible reply можно только если"));
+        assert!(text.contains("diagnostic helper, а не report/reply blocker"));
         assert!(text.contains("matching `^экономия_(0|10|20|30|40|50|60|70|80|90)%$`"));
         assert!(text.contains("./scripts/continuity_client_budget_target.sh --repo-root"));
         assert!(text.contains("Пример exact chat-команды: `экономия_50%`"));
@@ -5916,7 +6027,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("advisory/compact pressure signal"));
         assert!(text.contains("full_scale_client_truth_required = true"));
         assert!(text.contains("внутренним Amai-slice"));
-        assert!(text.len() < 9000);
+        assert!(text.len() < 9500);
     }
 
     #[test]
@@ -5934,6 +6045,38 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert_eq!(
             payload["startup_contract"]["artifact_enforcement"]["workspace_contract_relative_path"],
             json!(".amai/onboarding/project-chat-startup-contract.json")
+        );
+        assert_eq!(
+            payload["startup_contract"]["agent_workflow_guard"]["guard_version"],
+            json!("agent-workflow-guard-v1")
+        );
+        assert_eq!(
+            payload["startup_contract"]["agent_workflow_guard"]["planning"]["specialist_consensus_required_before_implementation"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["startup_contract"]["agent_workflow_guard"]["promotion_identity"]["runtime_state_field"],
+            json!("workflow_promotion_state")
+        );
+        assert_eq!(
+            payload["startup_contract"]["agent_workflow_guard"]["promotion_identity"]["source_event_match_required"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["startup_contract"]["agent_workflow_guard"]["promotion_identity"]["workflow_promotion_event_id_field"],
+            json!("workflow_promotion_event_id")
+        );
+        assert_eq!(
+            payload["startup_contract"]["agent_workflow_guard"]["report_gate"]["workflow_before_report_guard_command"],
+            json!("./scripts/proof_workflow_before_report.sh")
+        );
+        assert_eq!(
+            payload["startup_contract"]["agent_workflow_guard"]["report_gate"]["specialist_signoff_materialize_command"],
+            json!("./scripts/materialize_specialist_signoff.sh")
+        );
+        assert_eq!(
+            payload["startup_contract"]["agent_workflow_guard"]["report_gate"]["specialist_signoff_trust_provision_command"],
+            json!("./scripts/provision_specialist_signoff_trust.sh")
         );
         assert_eq!(
             payload["startup_contract"]["artifact_enforcement"]["missing_or_unreadable_fail_closed"],
@@ -6045,7 +6188,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             payload["startup_contract"]["contract_version"],
-            json!("continuity-startup-contract-v19")
+            json!("continuity-startup-contract-v20")
         );
         assert_eq!(
             payload["startup_contract"]["tool_runtime_reconcile"]["error_class"],
@@ -6058,6 +6201,37 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert_eq!(
             payload["startup_contract"]["tool_runtime_reconcile"]["transport_error_detail_contains"],
             json!("Transport closed")
+        );
+        assert_eq!(
+            payload["startup_contract"]["tool_runtime_reconcile"]["success_payload_stale_runtime_artifact"]
+                ["detect_after_any_success"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["startup_contract"]["tool_runtime_reconcile"]["success_payload_stale_runtime_artifact"]
+                ["local_cli_success_replaces_stale_mcp_success"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["startup_contract"]["tool_runtime_reconcile"]["success_payload_stale_runtime_artifact"]
+                ["local_cli_unavailable_blocks_report"],
+            json!(true)
+        );
+        assert!(
+            payload["startup_contract"]["tool_runtime_reconcile"]
+                ["success_payload_stale_runtime_artifact"]["stale_conditions"]
+                .as_array()
+                .is_some_and(|items| items
+                    .iter()
+                    .any(|item| item == "missing_agent_workflow_guard"))
+        );
+        assert!(
+            payload["startup_contract"]["tool_runtime_reconcile"]
+                ["success_payload_stale_runtime_artifact"]["stale_conditions"]
+                .as_array()
+                .is_some_and(|items| items
+                    .iter()
+                    .any(|item| item == "missing_working_state_lineage_event_id"))
         );
         assert_eq!(
             payload["startup_contract"]["tool_runtime_reconcile"]["local_cli"]["command"],
@@ -6115,19 +6289,19 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["required_reply_prefix_source"],
-            json!("personal_agent_online_limit_contour")
+            json!("disabled_by_project_policy")
         );
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["required_reply_prefix_non_empty"],
-            json!(true)
+            json!(false)
         );
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["reply_prefix_preflight_blocks_substantive_reply"],
-            json!(true)
+            json!(false)
         );
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["output_prefix_enforcement_mode"],
-            json!("instruction_preflight_fail_closed")
+            json!("disabled_by_project_policy")
         );
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["output_prefix_host_enforced"],
@@ -6250,6 +6424,18 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             json!("workspace-startup-runtime-state-v4")
         );
         assert_eq!(
+            payload["agent_workflow_guard"]["guard_version"],
+            json!("agent-workflow-guard-v1")
+        );
+        assert_eq!(
+            payload["agent_workflow_guard"]["report_gate"]["workflow_before_report_guard_command"],
+            json!("./scripts/proof_workflow_before_report.sh")
+        );
+        assert_eq!(
+            payload["agent_workflow_guard"]["promotion_identity"]["runtime_state_field"],
+            json!("workflow_promotion_state")
+        );
+        assert_eq!(
             payload["compact_runtime_pointers"]["compact_diagnostics_command"],
             json!("observe client-budget-root-cause")
         );
@@ -6260,6 +6446,25 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert_eq!(
             payload["compact_runtime_pointers"]["reconcile_local_cli_shell_command"],
             json!("./scripts/continuity_startup.sh")
+        );
+        assert_eq!(
+            payload["compact_runtime_pointers"]["stale_success_detect_after_any_success"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["compact_runtime_pointers"]["stale_success_replaces_mcp_success"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["compact_runtime_pointers"]["stale_success_local_cli_unavailable_blocks_report"],
+            json!(true)
+        );
+        assert!(
+            payload["compact_runtime_pointers"]["stale_success_conditions"]
+                .as_array()
+                .is_some_and(|items| items
+                    .iter()
+                    .any(|item| item == "missing_agent_workflow_guard"))
         );
         assert_eq!(
             payload["compact_runtime_pointers"]["startup_state_fallback_shell_command"],
@@ -6283,7 +6488,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             payload["compact_runtime_pointers"]["required_reply_prefix_source"],
-            json!("personal_agent_online_limit_contour")
+            json!("disabled_by_project_policy")
         );
         assert_eq!(
             payload["compact_runtime_pointers"]["client_budget_target_exact_chat_command_pattern"],

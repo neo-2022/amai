@@ -10,6 +10,7 @@ fi
 
 repo_root="$(pwd)"
 status_value="ok"
+startup_contract_path=".amai/onboarding/project-chat-startup-contract.json"
 
 canonical_doc_paths=(
   "README.md"
@@ -40,7 +41,7 @@ missing_exec_scripts="$(
   done < <(find scripts -type f | sort)
 )"
 
-startup_status_raw="$(./target/debug/amai status 2>/dev/null || true)"
+startup_status_raw="$(./scripts/amai_exec.sh status 2>/dev/null || true)"
 startup_status_line="$(printf '%s\n' "$startup_status_raw" | grep -m 1 '^startup_artifacts:' || true)"
 startup_runtime_line="$(printf '%s\n' "$startup_status_raw" | grep -m 1 '^startup_runtime_state:' || true)"
 if [[ -z "$startup_status_line" ]]; then
@@ -78,6 +79,75 @@ security_hardening_output=""
 if ! security_hardening_output="$(./scripts/proof_security_hardening_contract.sh 2>&1)"; then
   security_hardening_status="failed"
 fi
+
+required_report_gate_scripts="$(
+  if [[ -f "${startup_contract_path}" ]]; then
+    jq -r '
+      [
+        .startup_contract.agent_workflow_guard.report_gate.before_report_bundle_command,
+        .startup_contract.agent_workflow_guard.report_gate.workflow_before_report_guard_command,
+        .startup_contract.agent_workflow_guard.report_gate.specialist_signoff_guard_command,
+        .startup_contract.agent_workflow_guard.report_gate.specialist_signoff_materialize_command,
+        .startup_contract.agent_workflow_guard.report_gate.specialist_signoff_trust_provision_command
+      ]
+      | map(select(type == "string" and startswith("./scripts/")))
+      | unique[]
+    ' "${startup_contract_path}" 2>/dev/null || true
+  fi
+)"
+
+collect_report_gate_script_closure() {
+  local roots="$1"
+  local -a queue=()
+  local current_script script_ref script_rel
+  local -A seen=()
+
+  while IFS= read -r script_ref; do
+    [[ -n "$script_ref" ]] || continue
+    queue+=("${script_ref#./}")
+  done <<<"${roots}"
+
+  while ((${#queue[@]} > 0)); do
+    current_script="${queue[0]}"
+    queue=("${queue[@]:1}"
+    )
+    [[ -n "$current_script" ]] || continue
+    if [[ -n "${seen[$current_script]:-}" ]]; then
+      continue
+    fi
+    seen["$current_script"]=1
+    printf './%s\n' "$current_script"
+    [[ -f "$current_script" ]] || continue
+    while IFS= read -r script_ref; do
+      [[ -n "$script_ref" ]] || continue
+      script_rel="${script_ref#./}"
+      if [[ -z "${seen[$script_rel]:-}" ]]; then
+        queue+=("$script_rel")
+      fi
+    done < <(grep -Eho '\./scripts/[A-Za-z0-9._/-]+\.sh' "$current_script" | sort -u)
+  done
+}
+
+required_report_gate_script_closure="$(
+  collect_report_gate_script_closure "${required_report_gate_scripts}" | sort -u
+)"
+
+missing_report_gate_scripts="$(
+  while IFS= read -r script_path; do
+    [[ -n "$script_path" ]] || continue
+    script_rel="${script_path#./}"
+    [[ -f "$script_rel" ]] || printf '%s\n' "$script_path"
+  done <<<"${required_report_gate_script_closure}"
+)"
+
+untracked_report_gate_scripts="$(
+  while IFS= read -r script_path; do
+    [[ -n "$script_path" ]] || continue
+    script_rel="${script_path#./}"
+    [[ -f "$script_rel" ]] || continue
+    git ls-files --error-unmatch -- "$script_rel" >/dev/null 2>&1 || printf '%s\n' "$script_path"
+  done <<<"${required_report_gate_script_closure}"
+)"
 
 issues=()
 
@@ -126,8 +196,22 @@ if [[ "$security_hardening_status" != "ok" ]]; then
   issues+=("security_hardening_contract_failed")
 fi
 
+if [[ -n "$missing_report_gate_scripts" ]]; then
+  status_value="drift_detected"
+  issues+=("report_gate_scripts_missing")
+fi
+
+if [[ -n "$untracked_report_gate_scripts" ]]; then
+  status_value="drift_detected"
+  issues+=("report_gate_scripts_untracked")
+fi
+
 portable_absolute_repo_refs_json="$(printf '%s\n' "$portable_absolute_repo_refs" | jq -R -s 'split("\n") | map(select(length > 0))')"
 missing_exec_scripts_json="$(printf '%s\n' "$missing_exec_scripts" | jq -R -s 'split("\n") | map(select(length > 0))')"
+required_report_gate_scripts_json="$(printf '%s\n' "$required_report_gate_scripts" | jq -R -s 'split("\n") | map(select(length > 0))')"
+required_report_gate_script_closure_json="$(printf '%s\n' "$required_report_gate_script_closure" | jq -R -s 'split("\n") | map(select(length > 0))')"
+missing_report_gate_scripts_json="$(printf '%s\n' "$missing_report_gate_scripts" | jq -R -s 'split("\n") | map(select(length > 0))')"
+untracked_report_gate_scripts_json="$(printf '%s\n' "$untracked_report_gate_scripts" | jq -R -s 'split("\n") | map(select(length > 0))')"
 issues_json="$(printf '%s\n' "${issues[@]-}" | jq -R -s 'split("\n") | map(select(length > 0))')"
 fmt_excerpt_json="$(printf '%s\n' "$fmt_output" | sed -n '1,80p' | jq -R -s '.')"
 ops_security_defaults_excerpt_json="$(printf '%s\n' "$ops_security_defaults_output" | sed -n '1,80p' | jq -R -s '.')"
@@ -144,9 +228,15 @@ payload="$(jq -n \
   --arg ops_security_defaults_status "$ops_security_defaults_status" \
   --arg nats_auth_render_status "$nats_auth_render_status" \
   --arg security_hardening_status "$security_hardening_status" \
+  --arg report_gate_scripts_present_status "$([[ -z "$missing_report_gate_scripts" ]] && printf ok || printf failed)" \
+  --arg report_gate_scripts_tracked_status "$([[ -z "$untracked_report_gate_scripts" ]] && printf ok || printf failed)" \
   --argjson issues "$issues_json" \
   --argjson portable_absolute_repo_refs "$portable_absolute_repo_refs_json" \
   --argjson missing_exec_scripts "$missing_exec_scripts_json" \
+  --argjson required_report_gate_scripts "$required_report_gate_scripts_json" \
+  --argjson required_report_gate_script_closure "$required_report_gate_script_closure_json" \
+  --argjson missing_report_gate_scripts "$missing_report_gate_scripts_json" \
+  --argjson untracked_report_gate_scripts "$untracked_report_gate_scripts_json" \
   --argjson fmt_excerpt "$fmt_excerpt_json" \
   --argjson ops_security_defaults_excerpt "$ops_security_defaults_excerpt_json" \
   --argjson nats_auth_render_excerpt "$nats_auth_render_excerpt_json" \
@@ -161,11 +251,17 @@ payload="$(jq -n \
       cargo_fmt_check: $fmt_status,
       ops_security_defaults: $ops_security_defaults_status,
       nats_auth_render: $nats_auth_render_status,
-      security_hardening_contract: $security_hardening_status
+      security_hardening_contract: $security_hardening_status,
+      report_gate_scripts_present: $report_gate_scripts_present_status,
+      report_gate_scripts_tracked: $report_gate_scripts_tracked_status
     },
     issues: $issues,
     portable_absolute_repo_refs: $portable_absolute_repo_refs,
     missing_executable_scripts: $missing_exec_scripts,
+    required_report_gate_scripts: $required_report_gate_scripts,
+    required_report_gate_script_closure: $required_report_gate_script_closure,
+    missing_report_gate_scripts: $missing_report_gate_scripts,
+    untracked_report_gate_scripts: $untracked_report_gate_scripts,
     cargo_fmt_excerpt: $fmt_excerpt,
     ops_security_defaults_excerpt: $ops_security_defaults_excerpt,
     nats_auth_render_excerpt: $nats_auth_render_excerpt,

@@ -75,6 +75,15 @@
    - debug/fix;
    - retest;
    - update `IMPLEMENTATION_STATUS.md`;
+   - keep the mandatory specialist-team workflow from `AGENTS.md` materialized through
+     `agent_workflow_guard` and `workflow_promotion_state`;
+   - if embedded MCP startup succeeds but the runtime state has a stale startup-contract SHA or
+     misses `agent_workflow_guard` / `workflow_promotion_state`, treat that success as
+     `stale_embedded_mcp_session`, run local `./scripts/continuity_startup.sh`, and request reconnect;
+     if local reconcile is unavailable, treat it as a report blocker;
+   - before any final/report-style answer, make sure every plan item has specialist consensus and
+     bughunter-style review;
+   - before any substantive user-facing report, run `./scripts/proof_before_report.sh` and do not report while it fails; this guard also checks startup redirect freshness, so the newest promoted workline must already be reflected in the runtime state before you speak;
    - write continuity handoff.
 
 Простое правило:

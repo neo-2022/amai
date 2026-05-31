@@ -193,6 +193,22 @@ Maintainability gate обязателен, если изменение:
 - если поменялся workflow, поменялись ли onboarding/status/gates документы;
 - не появились ли конкурирующие “почти канонические” объяснения.
 
+### 6. Before-report deep verification
+
+Перед любым содержательным отчётом пользователю обязательно прогнать:
+- `./scripts/proof_workflow_before_report.sh`
+- `./scripts/proof_before_report.sh`
+
+`proof_workflow_before_report.sh` проверяет, что startup/runtime state несёт
+`agent_workflow_guard` и `workflow_promotion_state`, а значит mandatory specialist-team workflow и
+fresh redirect promotion не остались только prose-rule.
+Он также должен ловить stale-success embedded MCP scenario: tool call мог завершиться успешно, но
+перезаписать runtime-state старым контрактом без workflow guard. В таком случае отчёт запрещён до
+local CLI reconcile и reconnect. Если local CLI reconcile недоступен, это не degraded-success, а
+report blocker.
+
+Если этот bundle не прошёл, отчёт нельзя выпускать: сначала устранить замечания и повторить deep verification.
+
 ## Как этот gate использовать в проекте
 
 Для значимого изменения порядок такой:
