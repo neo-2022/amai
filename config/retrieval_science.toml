@@ -1,0 +1,276 @@
+modified_at = "2026-03-23 21:33 MSK"
+"Ручная сверка guide/docs" = "2026-03-23 21:33 MSK"
+
+[science]
+methodology_version = "retrieval-science-v1"
+scoring_rules_version = "retrieval-scoring-v1"
+degradation_policy_version = "retrieval-degradation-v1"
+execution_state_model_version = "execution-state-v1"
+lineage_model_version = "lineage-v2"
+workspace_graph_model_version = "workspace-graph-v10"
+artifact_lineage_model_version = "artifact-lineage-v1"
+eval_verdict_model_version = "memory-eval-verdict-v1"
+same_input_same_verdict_required = true
+machine_variance_policy = "Latency and throughput may vary by machine, but scope correctness, scoring rules and verdict semantics must stay stable for the same input contour."
+truth_ranking = [
+  "continuity_handoff",
+  "working_state_restore",
+  "live_context_pack",
+  "continuity_thread_index",
+  "continuity_rendered_transcript",
+]
+fail_closed_classes = [
+  "cross_project_scope",
+  "cross_namespace_scope",
+  "cross_agent_scope",
+  "corrupt_scope_metadata",
+  "partial_refresh",
+]
+graceful_fallback_classes = [
+  "qdrant_unavailable",
+  "stale_cache",
+  "partial_thread_index",
+  "empty_embeddings",
+  "working_state_conflict",
+  "stale_handoff",
+]
+execution_states = ["planned", "attempted", "succeeded", "superseded", "stale"]
+
+[science.eval_verdict_classes.hit_correct_target]
+title = "Попали в нужную цель"
+summary = "Amai принёс именно тот факт или контекст, который нужен задаче, без конфликтующего лишнего содержимого."
+
+[science.eval_verdict_classes.hit_wrong_target]
+title = "Попали не в ту цель"
+summary = "Amai вернул чужой, конфликтующий или запрещённый контекст вместо нужной цели."
+
+[science.eval_verdict_classes.stale_target]
+title = "Притащили устаревшую цель"
+summary = "Amai вернул старую или уже заменённую версию факта вместо текущей authoritative версии."
+
+[science.eval_verdict_classes.under_retrieved]
+title = "Недодали контекст"
+summary = "Нужная цель не подтянулась вовсе или ответ оказался слишком пустым для полезного восстановления."
+
+[science.eval_verdict_classes.over_included]
+title = "Притащили лишнее"
+summary = "В ответе есть нужная цель, но вместе с ней приехал лишний или конфликтующий контекст."
+
+[science.eval_verdict_classes.recovered_useful]
+title = "Полезно восстановили"
+summary = "Amai не просто попал в цель, а восстановил рабочее состояние или актуальный следующий шаг в полезном для агента виде."
+
+[science.eval_verdict_classes.not_useful]
+title = "Пользы не дали"
+summary = "Ответ не дал достаточно полезного результата и не тянет ни на один из более точных положительных verdict-классов."
+
+[science.degradation_matrix.cross_project_scope]
+title = "Чужой проект"
+mode = "fail_closed"
+summary = "Запрос не должен вытаскивать файлы, символы и сниппеты из чужого проекта."
+expected_behavior = "Если область запроса смешана или враждебна, Amai должен оставить только свой проект или вернуть пустой безопасный результат."
+user_signal = "В ответе не должно быть путей и фрагментов из другого проекта."
+evidence_source = "verify accuracy: strict local, hostile mixed query"
+runbook = "Запустить retrieval accuracy / isolation verification и проверить zero leakage."
+
+[science.degradation_matrix.cross_namespace_scope]
+title = "Чужой namespace"
+mode = "fail_closed"
+summary = "Даже внутри одного проекта ответ не должен перескакивать в чужой namespace."
+expected_behavior = "Если namespace не совпадает, retrieval обязан отфильтровать чужие попадания или вернуть пустой безопасный результат."
+user_signal = "В ответе не должно быть файлов и символов из соседнего namespace."
+evidence_source = "verify accuracy: namespace strict proof"
+runbook = "Запустить retrieval accuracy verification с namespace strict contour и проверить zero leakage."
+
+[science.degradation_matrix.cross_agent_scope]
+title = "Чужой рабочий контур агента"
+mode = "fail_closed"
+summary = "Restore и continuity не должны смешивать рабочие линии разных agent scope."
+expected_behavior = "Если у запроса другой agent scope, restore-path должен выбрать только свой контур или честно не дать результат."
+user_signal = "Amai не должен подсовывать задачи и handoff другой рабочей линии."
+evidence_source = "isolated agent-scope restore proof"
+runbook = "Запустить isolated agent-scope restore suite и проверить fail-closed выбор событий."
+
+[science.degradation_matrix.corrupt_scope_metadata]
+title = "Битые scope-метаданные"
+mode = "fail_closed"
+summary = "Если project / namespace / agent scope повреждены, retrieval не должен угадывать ближайший похожий контур."
+expected_behavior = "При битых метаданных система должна остановиться на безопасной ошибке, а не вытаскивать чужой контекст."
+user_signal = "Вместо случайного ответа должен быть честный отказ или пустой безопасный результат."
+evidence_source = "fault-injection scope corruption proof"
+runbook = "Запустить hostile scope-corruption suite и проверить fail-closed поведение."
+
+[science.degradation_matrix.partial_refresh]
+title = "Неполный refresh"
+mode = "fail_closed"
+summary = "Частично обновлённый continuity-контур не должен выглядеть как целиком свежий."
+expected_behavior = "Если refresh неполный, система должна честно показать пробел или вернуть отказ, а не маскировать устаревшие данные под свежие."
+user_signal = "Amai должен явно сообщать о неполном обновлении, а не притворяться точным."
+evidence_source = "temporal / continuity partial refresh proof"
+runbook = "Запустить continuity temporal hostile suite и проверить fail-closed при неполном refresh."
+
+[science.degradation_matrix.qdrant_unavailable]
+title = "Qdrant недоступен"
+mode = "graceful_fallback"
+summary = "При недоступном векторном слое Amai должен сохранить безопасный ответный путь, не ломая изоляцию."
+expected_behavior = "Система должна перейти на более грубый безопасный путь, честно отметить деградацию и не смешать чужой контекст."
+user_signal = "Ответ может стать беднее, но не должен стать чужим или небезопасным."
+evidence_source = "degradation suite: vector layer unavailable"
+runbook = "Запустить degradation suite с отключённым Qdrant и проверить безопасный fallback."
+
+[science.degradation_matrix.stale_cache]
+title = "Устаревший cache"
+mode = "graceful_fallback"
+summary = "Старый cache не должен ломать смысл ответа и не должен выдавать видимость свежего результата."
+expected_behavior = "Система должна либо переобновить данные, либо честно показать, что ответ строится по устаревшему слою."
+user_signal = "Ответ может стать медленнее, но не должен притворяться свежим, если данные устарели."
+evidence_source = "degradation suite: stale cache path"
+runbook = "Запустить degradation suite со старым cache и проверить честный fallback или refresh."
+
+[science.degradation_matrix.partial_thread_index]
+title = "Неполный thread index"
+mode = "graceful_fallback"
+summary = "Если индекс переписки неполный, temporal lookup не должен выдумывать ближайший похожий чат."
+expected_behavior = "Система должна дать точный ответ по имеющемуся индексу или честно сказать, что точного совпадения нет."
+user_signal = "Не должно быть подмены нужного чата случайным соседним."
+evidence_source = "temporal lookup fail-closed proof"
+runbook = "Запустить temporal lookup suite и проверить отсутствие fake fallback."
+
+[science.degradation_matrix.empty_embeddings]
+title = "Пустые embeddings"
+mode = "graceful_fallback"
+summary = "При пустом семантическом слое retrieval не должен падать целиком."
+expected_behavior = "Система должна опереться на exact / symbols / lexical fallback и честно показать, что семантика недоступна."
+user_signal = "Ответ может стать менее полным, но базовый безопасный результат должен остаться."
+evidence_source = "degradation suite: empty embeddings"
+runbook = "Запустить degradation suite с пустыми embeddings и проверить безопасный lexical fallback."
+
+[science.degradation_matrix.working_state_conflict]
+title = "Конфликт рабочего состояния"
+mode = "graceful_fallback"
+summary = "Если несколько рабочих событий спорят друг с другом, restore не должен выдавать ложную однозначность."
+expected_behavior = "Система должна понизить уверенность, показать конфликт и оставить источник истины прозрачным."
+user_signal = "Пользователь должен видеть, что рабочий снимок спорный, а не окончательный."
+evidence_source = "working-state conflict proof"
+runbook = "Запустить working-state conflict suite и проверить честное понижение confidence."
+
+[science.degradation_matrix.stale_handoff]
+title = "Устаревший handoff"
+mode = "graceful_fallback"
+summary = "Старый handoff не должен маскироваться под текущую рабочую линию."
+expected_behavior = "Система должна показать устаревание handoff и опереться на более свежий слой истины, если он есть."
+user_signal = "Пользователь должен видеть, что handoff старый, а не принимать его за свежий статус."
+evidence_source = "working-state freshness proof"
+runbook = "Проверить restore freshness contour и hostile stale-handoff suite."
+
+[science.suites.retrieval_benchmark_hot]
+suite_version = "retrieval-benchmark-hot-v1"
+dataset_version = "caller-scoped-runtime-v1"
+query_suite_version = "single-query-runtime-v1"
+manifest_path = "cli: verify benchmark --disable-cache=false"
+reproducibility_contract = "Same input query, limits and cache mode must produce the same verdict class on the same indexed state."
+
+[science.suites.retrieval_benchmark_cold]
+suite_version = "retrieval-benchmark-cold-v1"
+dataset_version = "caller-scoped-runtime-v1"
+query_suite_version = "single-query-runtime-v1"
+manifest_path = "cli: verify benchmark --disable-cache=true"
+reproducibility_contract = "Same input query, limits and cache mode must produce the same verdict class on the same indexed state."
+
+[science.suites.retrieval_load_hot]
+suite_version = "retrieval-load-hot-v1"
+dataset_version = "caller-scoped-hot-cache-v1"
+query_suite_version = "single-query-load-v1"
+manifest_path = "cli: verify load --disable-cache=false"
+reproducibility_contract = "Scope correctness must stay identical across workers; only latency and wall-clock throughput may vary by machine."
+
+[science.suites.retrieval_load_cold]
+suite_version = "retrieval-load-cold-v1"
+dataset_version = "caller-scoped-cold-cache-v1"
+query_suite_version = "single-query-load-v1"
+manifest_path = "cli: verify load --disable-cache=true"
+reproducibility_contract = "Scope correctness must stay identical across workers; only latency and wall-clock throughput may vary by machine."
+
+[science.suites.retrieval_accuracy]
+suite_version = "retrieval-accuracy-isolation-v3"
+dataset_version = "fixtures-project-alpha-beta-v1"
+query_suite_version = "red-team-retrieval-isolation-v1"
+manifest_path = "config/red_team_retrieval_isolation.toml"
+reproducibility_contract = "Cross-project and cross-namespace leakage must stay zero; hostile visible/hit invariants and precision checks must remain exact on the fixed fixture contour."
+
+[science.suites.memory_benchmark_score]
+suite_version = "external-memory-score-v1"
+dataset_version = "external-memory-benchmarks-v1"
+query_suite_version = "memory-benchmark-score-v1"
+manifest_path = "docs/MEMORY_BENCH_RUNBOOK.md"
+reproducibility_contract = "For the same cases and predictions inputs, the baseline scorer (exact/contains + abstention) must produce the same score summary."
+
+[science.suites.degradation_verification]
+suite_version = "degradation-verification-v2"
+dataset_version = "synthetic-degradation-matrix-v2"
+query_suite_version = "degradation-scenarios-v2"
+manifest_path = "built-in synthetic degradation probes"
+reproducibility_contract = "The same synthetic degradation probes must produce the same pass/fail verdicts for scope corruption, partial continuity refresh, temporal gap handling, vector-layer fallback, cache expiry handling and working-state lineage handling."
+
+[science.suites.continuity_verification]
+suite_version = "continuity-verification-v2"
+dataset_version = "continuity-verification-v2"
+query_suite_version = "continuity-verification-v2"
+manifest_path = "scripts/proof_art_continuity_migration.sh"
+reproducibility_contract = "The same continuity import, handoff, startup and direct temporal chat-lookup contour must produce the same continuity recovery and fail-closed verdict classes."
+
+[science.suites.continuity_answer]
+suite_version = "continuity-answer-v1"
+dataset_version = "continuity-answer-v1"
+query_suite_version = "continuity-answer-v1"
+manifest_path = "scripts/proof_art_continuity_answer.sh"
+reproducibility_contract = "The same read-only continuity answer input must produce the same answer-level verdict class and the same fail-closed behavior for last_chat, previous_chat and exact-time lookup."
+
+[science.suites.continuity_restore]
+suite_version = "continuity-restore-v1"
+dataset_version = "continuity-restore-v1"
+query_suite_version = "continuity-restore-v1"
+manifest_path = "scripts/proof_art_continuity_restore.sh"
+reproducibility_contract = "The same read-only continuity restore input must produce the same restore-level verdict classes for chat-start prompt recovery and working-state recovery."
+
+[science.suites.continuity_startup]
+suite_version = "continuity-startup-v1"
+dataset_version = "continuity-startup-v1"
+query_suite_version = "continuity-startup-v1"
+manifest_path = "scripts/proof_art_continuity_startup.sh"
+reproducibility_contract = "The same read-only continuity startup input must produce the same startup-level verdict classes for startup summary, chat-start prompt recovery and working-state recovery."
+
+[science.suites.cold_path_benchmark]
+suite_version = "cold-path-benchmark-v3"
+dataset_version = "local-real-repos-manifest-v2"
+query_suite_version = "cold-query-slices-v2"
+manifest_path = "config/cold_benchmark_manifest.toml"
+reproducibility_contract = "The same manifest must produce the same canonical eval verdict layer and the same measured correctness contour, with machine-dependent latency variance called out explicitly."
+
+[science.suites.token_benchmark_suite]
+suite_version = "token-benchmark-suite-v1"
+dataset_version = "caller-scoped-token-v1"
+query_suite_version = "token-query-list-v1"
+manifest_path = "cli: verify token-benchmark-suite"
+reproducibility_contract = "Savings math must stay deterministic for the same retrieval payload and tokenizer."
+
+[science.suites.memory_task_matrix]
+suite_version = "memory-task-matrix-v2"
+dataset_version = "memory-task-fixtures-v2"
+query_suite_version = "memory-task-cases-v2"
+manifest_path = "config/memory_task_matrix.toml"
+reproducibility_contract = "The same memory task cases on the same indexed state must produce the same canonical eval verdict classes, even when latency differs by machine."
+
+[science.suites.text_compare]
+suite_version = "text-compare-v2"
+dataset_version = "text-compare-cases-v1"
+query_suite_version = "text-compare-cases-v1"
+manifest_path = "fixtures/text_compare_cases.jsonl"
+reproducibility_contract = "The same cases file must produce the same per-strategy canonical eval verdict classes for the same indexed state."
+
+[science.suites.mcp_task_matrix]
+suite_version = "mcp-task-matrix-v1"
+dataset_version = "mcp-task-matrix-v1"
+query_suite_version = "mcp-task-matrix-v1"
+manifest_path = "config/mcp_task_matrix.toml"
+reproducibility_contract = "The same MCP task matrix on the same indexed state must produce the same task-level canonical eval verdict classes and fail-closed statuses."

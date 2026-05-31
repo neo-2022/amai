@@ -233,6 +233,19 @@ mod tests {
     }
 
     #[test]
+    fn suite_metadata_loads_memory_benchmark_score_suite() {
+        let suite = suite_metadata("memory_benchmark_score").expect("suite metadata");
+        assert_eq!(
+            suite["suite_version"].as_str(),
+            Some("external-memory-score-v1")
+        );
+        assert_eq!(
+            suite["manifest_path"].as_str(),
+            Some("docs/MEMORY_BENCH_RUNBOOK.md")
+        );
+    }
+
+    #[test]
     fn suite_metadata_loads_degradation_verification_suite() {
         let suite = suite_metadata("degradation_verification").expect("suite metadata");
         assert_eq!(
