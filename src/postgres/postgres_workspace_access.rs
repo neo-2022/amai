@@ -827,7 +827,7 @@ pub async fn get_access_policy(
 pub(super) async fn find_transfer_policy_by_code(
     client: &Client,
     code: &str,
-) -> Result<Option<TransferPolicyRecord>> {
+) -> Result<TransferPolicyRecord> {
     let rows = client
         .query(
             r#"
@@ -851,17 +851,14 @@ pub(super) async fn find_transfer_policy_by_code(
         .await
         .with_context(|| format!("failed to lookup transfer policy {code}"))?;
     if rows.is_empty() {
-        return Ok(None);
+        return Err(anyhow!("transfer policy not found: {code}"));
     }
     if rows.len() > 1 {
         return Err(anyhow!(
             "transfer policy code is ambiguous across workspaces: {code}"
         ));
     }
-    Ok(rows
-        .into_iter()
-        .next()
-        .map(|row| transfer_policy_record_from_row(&row)))
+    Ok(transfer_policy_record_from_row(&rows[0]))
 }
 
 pub(super) async fn find_agent_id_by_code(client: &Client, code: &str) -> Result<Option<Uuid>> {
@@ -910,7 +907,7 @@ pub(super) async fn ensure_autonomous_quarantine_governor_agent(
         None,
         &code,
         &display_name,
-        "workspace_private",
+        "agent_private",
         "active",
     )
     .await?;

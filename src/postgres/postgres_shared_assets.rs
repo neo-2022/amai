@@ -24,7 +24,7 @@ pub async fn ensure_shared_asset(
         None => None,
     };
     let transfer_policy = match transfer_policy_code {
-        Some(code) => find_transfer_policy_by_code(client, code).await?,
+        Some(code) => Some(find_transfer_policy_by_code(client, code).await?),
         None => None,
     };
     let source_event_ids_value = source_event_ids.cloned().unwrap_or_else(|| json!([]));

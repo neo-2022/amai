@@ -362,36 +362,6 @@ pub async fn project_allows_cross_project_read(
     .await
 }
 
-pub(super) async fn find_project_link_context(
-    client: &Client,
-    source_project_id: Uuid,
-    target_project_id: Uuid,
-) -> Result<Option<(Uuid, String, bool, Option<Uuid>, Uuid)>> {
-    let row = client
-        .query_opt(
-            r#"
-            SELECT
-                r.relation_id,
-                r.project_link_type,
-                r.requires_approval,
-                r.transfer_policy_id,
-                source.workspace_id
-            FROM ami.project_relations r
-            INNER JOIN ami.projects source ON source.project_id = r.source_project_id
-            WHERE r.source_project_id = $1
-              AND r.target_project_id = $2
-              AND r.relation_status = 'active'
-              AND r.project_link_type <> 'forbidden_transfer'
-            ORDER BY r.created_at DESC
-            LIMIT 1
-            "#,
-            &[&source_project_id, &target_project_id],
-        )
-        .await
-        .context("failed to lookup project link context")?;
-    Ok(row.map(|row| (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4))))
-}
-
 pub(super) fn string_array_json(items: &[String]) -> Value {
     Value::Array(items.iter().cloned().map(Value::String).collect())
 }
@@ -2275,7 +2245,7 @@ pub async fn add_relation(
     let source = get_project_by_code(client, source_code).await?;
     let target = get_project_by_code(client, target_code).await?;
     let transfer_policy = match transfer_policy_code {
-        Some(code) => find_transfer_policy_by_code(client, code).await?,
+        Some(code) => Some(find_transfer_policy_by_code(client, code).await?),
         None => None,
     };
     let project_link_type = project_link_type.unwrap_or(relation_type);
@@ -2349,7 +2319,7 @@ pub async fn update_relation(client: &Client, update: RelationUpdate<'_>) -> Res
     let source = get_project_by_code(client, update.source_code).await?;
     let target = get_project_by_code(client, update.target_code).await?;
     let transfer_policy = match update.transfer_policy_code {
-        Some(code) => find_transfer_policy_by_code(client, code).await?,
+        Some(code) => Some(find_transfer_policy_by_code(client, code).await?),
         None => None,
     };
     let actor_agent_id = match update.actor_agent_code {

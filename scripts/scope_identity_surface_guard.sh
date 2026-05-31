@@ -14,6 +14,7 @@ dsn="$(grep '^AMI_POSTGRES_DSN=' .env | cut -d= -f2-)"
 readarray -t direct_insert_hits < <(
   rg -n "INSERT INTO ami\\.memory_items" src scripts sql 2>/dev/null \
     | grep -v '^src/postgres.rs:' \
+    | grep -v '^src/postgres/postgres_memory_runtime.rs:' \
     | grep -v '^scripts/proof_scope_identity_control_plane.sh:' \
     | grep -v '^scripts/proof_typed_memory_envelope_contract.sh:' \
     | grep -v '^scripts/proof_runtime_sufficiency_router.sh:'

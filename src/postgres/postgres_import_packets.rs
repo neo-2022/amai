@@ -26,20 +26,12 @@ pub async fn create_import_packet(
     let source = get_project_by_code(client, source_project_code).await?;
     let target = get_project_by_code(client, target_project_code).await?;
     let workspace_id = get_project_workspace_id(client, source.project_id).await?;
-    let relation = find_project_link_context(client, source.project_id, target.project_id).await?;
-    let (project_link_present, requires_approval, relation_transfer_policy_id) = match relation {
-        Some((
-            _,
-            _project_link_type,
-            requires_approval,
-            relation_transfer_policy_id,
-            _workspace_id,
-        )) => (true, requires_approval, relation_transfer_policy_id),
-        None => (false, false, None),
-    };
+    let relation_policy_gate =
+        load_import_packet_relation_policy_gate(client, source.project_id, target.project_id)
+            .await?;
     let transfer_policy = match transfer_policy_code {
-        Some(code) => find_transfer_policy_by_code(client, code).await?,
-        None => match relation_transfer_policy_id {
+        Some(code) => Some(find_transfer_policy_by_code(client, code).await?),
+        None => match relation_policy_gate.latest_transfer_policy_id {
             Some(policy_id) => {
                 let row = client
                     .query_one(
@@ -71,9 +63,14 @@ pub async fn create_import_packet(
         Some(code) => find_agent_id_by_code(client, code).await?,
         None => None,
     };
-    let transfer_policy_allows_import = transfer_policy
-        .as_ref()
-        .is_none_or(|policy| policy.allow_import);
+    let transfer_policy_set = load_import_packet_writeback_policy_set(
+        client,
+        &get_workspace_by_id(client, workspace_id).await?.code,
+        transfer_policy.as_ref().map(|item| item.transfer_policy_id),
+        &relation_policy_gate.transfer_policy_ids,
+    )
+    .await?;
+    let transfer_policy_allows_import = transfer_policy_set.allows_import();
     let access_policy_import_granted = ensure_cross_project_policy_access(
         client,
         workspace_id,
@@ -88,16 +85,18 @@ pub async fn create_import_packet(
     let policy_filter = ImportPacketPolicyScopeFilter {
         source_project_code: source.code.clone(),
         target_project_code: target.code.clone(),
-        project_link_present,
+        project_link_present: relation_policy_gate.present,
         transfer_policy_code: transfer_policy.as_ref().map(|item| item.code.clone()),
+        transfer_policy_label: transfer_policy_set.label(),
         transfer_policy_allows_import,
         access_policy_import_granted,
-        approval_required: requires_approval,
-        verified_import_blocked_until_approval: requires_approval && status == "verified",
-        scope_allowed: project_link_present
+        approval_required: relation_policy_gate.requires_approval,
+        verified_import_blocked_until_approval: relation_policy_gate.requires_approval
+            && status == "verified",
+        scope_allowed: relation_policy_gate.present
             && transfer_policy_allows_import
             && access_policy_import_granted
-            && !(requires_approval && status == "verified"),
+            && !(relation_policy_gate.requires_approval && status == "verified"),
     };
     validate_import_packet_policy_scope_filter(&policy_filter)?;
     let transfer_policy_id = transfer_policy.as_ref().map(|item| item.transfer_policy_id);
@@ -152,6 +151,20 @@ pub async fn create_import_packet(
                     .is_some_and(|span| !span.is_empty())),
     };
     validate_import_packet_verification_conflict_check(&verification_check)?;
+    let promotion_requested = status == "verified" || borrowed_status == "verified_local_copy";
+    validate_import_packet_writeback_gate(
+        client,
+        workspace_id,
+        source.project_id,
+        target.project_id,
+        transfer_policy.as_ref().map(|item| item.transfer_policy_id),
+        promotion_requested,
+        can_promote_after_verification,
+        verification_state,
+        trust_state,
+        "import packet create",
+    )
+    .await?;
     let stored_evidence_span = augment_import_packet_evidence_span_with_stage2_preflight(
         &evidence_span_value,
         &policy_filter,
@@ -417,37 +430,259 @@ pub struct ImportPacketUpdate<'a> {
     pub actor_agent_code: Option<&'a str>,
 }
 
-async fn load_import_packet_transfer_policy_for_writeback(
+#[derive(Debug, Clone)]
+struct ImportPacketWritebackPolicySet {
+    packet: Option<TransferPolicyRecord>,
+    relation: Vec<TransferPolicyRecord>,
+}
+
+impl ImportPacketWritebackPolicySet {
+    fn allows_import(&self) -> bool {
+        self.packet
+            .as_ref()
+            .is_none_or(|policy| policy.allow_import)
+            && self.relation.iter().all(|policy| policy.allow_import)
+    }
+
+    fn allows_verified_writeback(&self) -> bool {
+        self.packet
+            .as_ref()
+            .is_none_or(|policy| policy.allow_verified_writeback)
+            && self
+                .relation
+                .iter()
+                .all(|policy| policy.allow_verified_writeback)
+    }
+
+    fn requires_human_approval(&self) -> bool {
+        self.packet
+            .as_ref()
+            .is_some_and(|policy| policy.requires_human_approval)
+            || self
+                .relation
+                .iter()
+                .any(|policy| policy.requires_human_approval)
+    }
+
+    fn label(&self) -> String {
+        let mut labels = Vec::new();
+        if let Some(policy) = &self.packet {
+            labels.push(format!("packet={}", policy.code));
+        }
+        for policy in &self.relation {
+            if self
+                .packet
+                .as_ref()
+                .is_none_or(|packet| packet.transfer_policy_id != policy.transfer_policy_id)
+            {
+                labels.push(format!("relation={}", policy.code));
+            }
+        }
+        if labels.is_empty() {
+            "none".to_string()
+        } else {
+            labels.join(", ")
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ImportPacketRelationPolicyGate {
+    present: bool,
+    requires_approval: bool,
+    latest_transfer_policy_id: Option<Uuid>,
+    transfer_policy_ids: Vec<Uuid>,
+}
+
+async fn load_import_packet_relation_policy_gate(
     client: &Client,
-    packet_transfer_policy_id: Option<Uuid>,
-    relation_transfer_policy_id: Option<Uuid>,
-) -> Result<Option<TransferPolicyRecord>> {
-    let policy_id = packet_transfer_policy_id.or(relation_transfer_policy_id);
-    let Some(policy_id) = policy_id else {
-        return Ok(None);
-    };
-    let row = client
-        .query_one(
+    source_project_id: Uuid,
+    target_project_id: Uuid,
+) -> Result<ImportPacketRelationPolicyGate> {
+    let rows = client
+        .query(
             r#"
             SELECT
-                tp.transfer_policy_id,
-                w.code,
-                tp.code,
-                tp.display_name,
-                tp.default_decision,
-                tp.allow_cross_project_read,
-                tp.allow_import,
-                tp.allow_verified_writeback,
-                tp.requires_human_approval
-            FROM ami.transfer_policies tp
-            INNER JOIN ami.workspaces w ON w.workspace_id = tp.workspace_id
-            WHERE tp.transfer_policy_id = $1
+                r.requires_approval,
+                r.transfer_policy_id
+            FROM ami.project_relations r
+            WHERE r.source_project_id = $1
+              AND r.target_project_id = $2
+              AND r.relation_status = 'active'
+              AND r.project_link_type <> 'forbidden_transfer'
+            ORDER BY r.created_at DESC
             "#,
-            &[&policy_id],
+            &[&source_project_id, &target_project_id],
         )
         .await
-        .with_context(|| format!("failed to load transfer policy {}", policy_id))?;
-    Ok(Some(transfer_policy_record_from_row(&row)))
+        .context("failed to lookup project relation policy gate")?;
+    let present = !rows.is_empty();
+    let requires_approval = rows.iter().any(|row| row.get::<_, bool>(0));
+    let latest_transfer_policy_id = rows.first().and_then(|row| row.get::<_, Option<Uuid>>(1));
+    let mut transfer_policy_ids = Vec::new();
+    for row in rows {
+        if let Some(policy_id) = row.get::<_, Option<Uuid>>(1)
+            && !transfer_policy_ids.contains(&policy_id)
+        {
+            transfer_policy_ids.push(policy_id);
+        }
+    }
+    Ok(ImportPacketRelationPolicyGate {
+        present,
+        requires_approval,
+        latest_transfer_policy_id,
+        transfer_policy_ids,
+    })
+}
+
+async fn load_import_packet_writeback_policy_set(
+    client: &Client,
+    workspace_code: &str,
+    packet_transfer_policy_id: Option<Uuid>,
+    relation_transfer_policy_ids: &[Uuid],
+) -> Result<ImportPacketWritebackPolicySet> {
+    let packet_transfer_policy = match packet_transfer_policy_id {
+        Some(policy_id) => {
+            let policy = get_transfer_policy(client, policy_id).await?;
+            if policy.workspace_code != workspace_code {
+                return Err(anyhow!(
+                    "packet transfer policy {} belongs to workspace {}, expected {}",
+                    policy.code,
+                    policy.workspace_code,
+                    workspace_code
+                ));
+            }
+            Some(policy)
+        }
+        None => None,
+    };
+    let mut relation_transfer_policies = Vec::new();
+    for policy_id in relation_transfer_policy_ids {
+        if relation_transfer_policies
+            .iter()
+            .any(|policy: &TransferPolicyRecord| policy.transfer_policy_id == *policy_id)
+        {
+            continue;
+        }
+        if Some(*policy_id) == packet_transfer_policy_id {
+            if let Some(policy) = &packet_transfer_policy {
+                relation_transfer_policies.push(policy.clone());
+            }
+        } else {
+            let policy = get_transfer_policy(client, *policy_id).await?;
+            if policy.workspace_code != workspace_code {
+                return Err(anyhow!(
+                    "relation transfer policy {} belongs to workspace {}, expected {}",
+                    policy.code,
+                    policy.workspace_code,
+                    workspace_code
+                ));
+            }
+            relation_transfer_policies.push(policy);
+        }
+    }
+    Ok(ImportPacketWritebackPolicySet {
+        packet: packet_transfer_policy,
+        relation: relation_transfer_policies,
+    })
+}
+
+async fn validate_import_packet_writeback_gate(
+    client: &Client,
+    workspace_id: Uuid,
+    source_project_id: Uuid,
+    target_project_id: Uuid,
+    packet_transfer_policy_id: Option<Uuid>,
+    promotion_requested: bool,
+    can_promote_after_verification: bool,
+    verification_state: &str,
+    trust_state: &str,
+    packet_label: &str,
+) -> Result<()> {
+    if !promotion_requested {
+        return Ok(());
+    }
+    if !can_promote_after_verification {
+        return Err(anyhow!(
+            "{} cannot be promoted without can_promote_after_verification",
+            packet_label
+        ));
+    }
+    if verification_state != "verified" {
+        return Err(anyhow!(
+            "{} cannot be promoted without verification_state=verified",
+            packet_label
+        ));
+    }
+    if trust_state != "verified" {
+        return Err(anyhow!(
+            "{} cannot be promoted without trust_state=verified",
+            packet_label
+        ));
+    }
+    let relation_policy_gate =
+        load_import_packet_relation_policy_gate(client, source_project_id, target_project_id)
+            .await?;
+    if !relation_policy_gate.present {
+        return Err(anyhow!(
+            "{} cannot be promoted after project_link revoke",
+            packet_label
+        ));
+    }
+    if relation_policy_gate.requires_approval {
+        return Err(anyhow!(
+            "{} cannot be promoted while relation still requires approval",
+            packet_label
+        ));
+    }
+    if packet_transfer_policy_id.is_none() && relation_policy_gate.transfer_policy_ids.is_empty() {
+        return Err(anyhow!(
+            "{} cannot be promoted without transfer policy",
+            packet_label
+        ));
+    }
+    let writeback_policies = load_import_packet_writeback_policy_set(
+        client,
+        &get_workspace_by_id(client, workspace_id).await?.code,
+        packet_transfer_policy_id,
+        &relation_policy_gate.transfer_policy_ids,
+    )
+    .await?;
+    if !writeback_policies.allows_verified_writeback() {
+        return Err(anyhow!(
+            "{} cannot be promoted because transfer policy set [{}] blocks verified writeback",
+            packet_label,
+            writeback_policies.label()
+        ));
+    }
+    if writeback_policies.requires_human_approval() {
+        return Err(anyhow!(
+            "{} cannot be promoted because transfer policy set [{}] still requires human approval",
+            packet_label,
+            writeback_policies.label()
+        ));
+    }
+    ensure_cross_project_policy_access(
+        client,
+        workspace_id,
+        source_project_id,
+        "fact",
+        &["cross_project_linked", "imported", "org_global"],
+        AccessPolicyAction::Promote,
+        &format!("promote {}", packet_label),
+    )
+    .await?;
+    ensure_cross_project_policy_access(
+        client,
+        workspace_id,
+        source_project_id,
+        "fact",
+        &["cross_project_linked", "imported", "org_global"],
+        AccessPolicyAction::ApproveTransfer,
+        &format!("approve transfer for {}", packet_label),
+    )
+    .await?;
+    Ok(())
 }
 
 pub async fn update_import_packet(
@@ -473,7 +708,8 @@ pub async fn update_import_packet(
                 ) AS workspace_id,
                 transfer_policy_id,
                 can_promote_after_verification,
-                verification_state
+                verification_state,
+                trust_state
             FROM ami.import_packets
             WHERE import_packet_id = $1
             "#,
@@ -487,89 +723,28 @@ pub async fn update_import_packet(
     let packet_transfer_policy_id: Option<Uuid> = context.get(3);
     let current_can_promote: bool = context.get(4);
     let current_verification_state: String = context.get(5);
-    if update.status == Some("verified") || update.borrowed_status == Some("verified_local_copy") {
+    let current_trust_state: String = context.get(6);
+    let promotion_requested =
+        update.status == Some("verified") || update.borrowed_status == Some("verified_local_copy");
+    if promotion_requested {
         let effective_can_promote = update
             .can_promote_after_verification
             .unwrap_or(current_can_promote);
         let effective_verification_state = update
             .verification_state
             .unwrap_or(current_verification_state.as_str());
-        if !effective_can_promote {
-            return Err(anyhow!(
-                "import packet {} cannot be promoted without can_promote_after_verification",
-                update.import_packet_id
-            ));
-        }
-        if effective_verification_state != "verified" {
-            return Err(anyhow!(
-                "import packet {} cannot be promoted without verification_state=verified",
-                update.import_packet_id
-            ));
-        }
-        let link = find_project_link_context(client, source_project_id, target_project_id).await?;
-        let Some((
-            _relation_type,
-            _project_link_type,
-            requires_approval,
-            relation_transfer_policy_id,
-            _workspace_id,
-        )) = link
-        else {
-            return Err(anyhow!(
-                "import packet {} cannot be promoted after project_link revoke",
-                update.import_packet_id
-            ));
-        };
-        if requires_approval {
-            return Err(anyhow!(
-                "import packet {} cannot be promoted while relation still requires approval",
-                update.import_packet_id
-            ));
-        }
-        let transfer_policy = load_import_packet_transfer_policy_for_writeback(
+        let effective_trust_state = update.trust_state.unwrap_or(current_trust_state.as_str());
+        validate_import_packet_writeback_gate(
             client,
+            workspace_id,
+            source_project_id,
+            target_project_id,
             packet_transfer_policy_id,
-            relation_transfer_policy_id,
-        )
-        .await?;
-        if transfer_policy
-            .as_ref()
-            .is_some_and(|policy| !policy.allow_verified_writeback)
-        {
-            return Err(anyhow!(
-                "import packet {} cannot be promoted because transfer policy {:?} blocks verified writeback",
-                update.import_packet_id,
-                transfer_policy.as_ref().map(|policy| policy.code.as_str())
-            ));
-        }
-        if transfer_policy
-            .as_ref()
-            .is_some_and(|policy| policy.requires_human_approval)
-        {
-            return Err(anyhow!(
-                "import packet {} cannot be promoted because transfer policy {:?} still requires human approval",
-                update.import_packet_id,
-                transfer_policy.as_ref().map(|policy| policy.code.as_str())
-            ));
-        }
-        ensure_cross_project_policy_access(
-            client,
-            workspace_id,
-            source_project_id,
-            "fact",
-            &["cross_project_linked", "imported", "org_global"],
-            AccessPolicyAction::Promote,
-            &format!("promote import packet {}", update.import_packet_id),
-        )
-        .await?;
-        ensure_cross_project_policy_access(
-            client,
-            workspace_id,
-            source_project_id,
-            "fact",
-            &["cross_project_linked", "imported", "org_global"],
-            AccessPolicyAction::ApproveTransfer,
-            &format!("approve import packet {}", update.import_packet_id),
+            promotion_requested,
+            effective_can_promote,
+            effective_verification_state,
+            effective_trust_state,
+            &format!("import packet {}", update.import_packet_id),
         )
         .await?;
     }
@@ -814,6 +989,7 @@ async fn list_active_import_packet_quarantine_candidates(
                 ip.target_project_id,
                 source_project.code,
                 target_project.code,
+                ip.transfer_policy_id,
                 tp.code,
                 COALESCE(tp.allow_import, TRUE),
                 COALESCE(tp.allow_verified_writeback, TRUE),
@@ -857,18 +1033,19 @@ async fn list_active_import_packet_quarantine_candidates(
             target_project_id: row.get(5),
             source_project_code: row.get(6),
             target_project_code: row.get(7),
-            transfer_policy_allows_import: row.get(9),
-            transfer_policy_allow_verified_writeback: row.get(10),
-            transfer_policy_requires_human_approval: row.get(11),
-            status: row.get(12),
-            allowed_by_project_link: row.get(13),
-            imported_by_agent_scope: row.get(14),
-            evidence_span: row.get(15),
-            derivation_kind: row.get(16),
-            source_event_ids: row.get(17),
-            artifact_refs: row.get(18),
-            message_refs: row.get(19),
-            quarantine_reason: row.get(20),
+            transfer_policy_id: row.get(8),
+            transfer_policy_allows_import: row.get(10),
+            transfer_policy_allow_verified_writeback: row.get(11),
+            transfer_policy_requires_human_approval: row.get(12),
+            status: row.get(13),
+            allowed_by_project_link: row.get(14),
+            imported_by_agent_scope: row.get(15),
+            evidence_span: row.get(16),
+            derivation_kind: row.get(17),
+            source_event_ids: row.get(18),
+            artifact_refs: row.get(19),
+            message_refs: row.get(20),
+            quarantine_reason: row.get(21),
         })
         .collect())
 }
@@ -889,34 +1066,41 @@ pub async fn reconcile_import_packet_quarantines(
     };
 
     for candidate in candidates {
-        let relation = find_project_link_context(
+        let relation_policy_gate = load_import_packet_relation_policy_gate(
             client,
             candidate.source_project_id,
             candidate.target_project_id,
         )
         .await?;
-        let relation_present = relation.is_some();
-        let relation_requires_approval = relation
-            .as_ref()
-            .map(|(_, _, requires_approval, _, _)| *requires_approval)
-            .unwrap_or(false);
-        let relation_transfer_policy_id = relation
-            .as_ref()
-            .and_then(|(_, _, _, transfer_policy_id, _)| *transfer_policy_id);
-        let transfer_policy = load_import_packet_transfer_policy_for_writeback(
+        let relation_present = relation_policy_gate.present;
+        let relation_requires_approval = relation_policy_gate.requires_approval;
+        let transfer_policy_set_result = load_import_packet_writeback_policy_set(
             client,
-            None,
-            relation_transfer_policy_id,
+            &candidate.workspace_code,
+            candidate.transfer_policy_id,
+            &relation_policy_gate.transfer_policy_ids,
         )
-        .await?;
-        let policy_allows_verified_writeback = candidate.transfer_policy_allow_verified_writeback
-            && transfer_policy
+        .await;
+        let policy_load_error = transfer_policy_set_result
+            .as_ref()
+            .err()
+            .map(|error| error.to_string());
+        let transfer_policy_present = candidate.transfer_policy_id.is_some()
+            || !relation_policy_gate.transfer_policy_ids.is_empty();
+        let packet_policy_allows_import =
+            candidate.transfer_policy_id.is_none() || candidate.transfer_policy_allows_import;
+        let packet_policy_allows_verified_writeback = candidate.transfer_policy_id.is_none()
+            || candidate.transfer_policy_allow_verified_writeback;
+        let policy_allows_verified_writeback = transfer_policy_present
+            && packet_policy_allows_verified_writeback
+            && transfer_policy_set_result
                 .as_ref()
-                .is_none_or(|policy| policy.allow_verified_writeback);
+                .is_ok_and(|set| set.allows_verified_writeback());
         let policy_requires_human_approval = candidate.transfer_policy_requires_human_approval
-            || transfer_policy
-                .as_ref()
-                .is_some_and(|policy| policy.requires_human_approval);
+            || match transfer_policy_set_result.as_ref() {
+                Ok(set) => set.requires_human_approval(),
+                Err(_) => true,
+            };
         let evidence_present = import_packet_quarantine_candidate_evidence_present(&candidate);
         let poisoned = import_packet_marks_poisoned(&candidate.evidence_span);
         let same_project = candidate.source_project_id == candidate.target_project_id;
@@ -989,7 +1173,10 @@ pub async fn reconcile_import_packet_quarantines(
             if relation_requires_approval {
                 blockers.push("relation_requires_approval".to_string());
             }
-            if !candidate.transfer_policy_allows_import {
+            if !transfer_policy_present {
+                blockers.push("transfer_policy_missing".to_string());
+            }
+            if !packet_policy_allows_import {
                 blockers.push("transfer_policy_disallows_import".to_string());
             }
             if !policy_allows_verified_writeback {
@@ -997,6 +1184,9 @@ pub async fn reconcile_import_packet_quarantines(
             }
             if policy_requires_human_approval {
                 blockers.push("transfer_policy_requires_human_approval".to_string());
+            }
+            if let Some(error) = &policy_load_error {
+                blockers.push(format!("transfer_policy_load_failed={error}"));
             }
             if !import_access_granted {
                 blockers.push("access_policy_import_denied".to_string());
@@ -1157,6 +1347,7 @@ struct ImportPacketPolicyScopeFilter {
     target_project_code: String,
     project_link_present: bool,
     transfer_policy_code: Option<String>,
+    transfer_policy_label: String,
     transfer_policy_allows_import: bool,
     access_policy_import_granted: bool,
     approval_required: bool,
@@ -1182,6 +1373,7 @@ struct ImportPacketQuarantineCandidate {
     target_project_id: Uuid,
     source_project_code: String,
     target_project_code: String,
+    transfer_policy_id: Option<Uuid>,
     transfer_policy_allows_import: bool,
     transfer_policy_allow_verified_writeback: bool,
     transfer_policy_requires_human_approval: bool,
@@ -1221,8 +1413,8 @@ fn validate_import_packet_policy_scope_filter(
     }
     if !filter.transfer_policy_allows_import {
         return Err(anyhow!(
-            "transfer policy {:?} blocks import for {} -> {}",
-            filter.transfer_policy_code,
+            "transfer policy set [{}] blocks import for {} -> {}",
+            filter.transfer_policy_label,
             filter.source_project_code,
             filter.target_project_code
         ));
@@ -1298,6 +1490,7 @@ fn augment_import_packet_evidence_span_with_stage2_preflight(
                 "target_project_code": policy_filter.target_project_code,
                 "project_link_present": policy_filter.project_link_present,
                 "transfer_policy_code": policy_filter.transfer_policy_code,
+                "transfer_policy_set": policy_filter.transfer_policy_label,
                 "transfer_policy_allows_import": policy_filter.transfer_policy_allows_import,
                 "access_policy_import_granted": policy_filter.access_policy_import_granted,
                 "approval_required": policy_filter.approval_required,

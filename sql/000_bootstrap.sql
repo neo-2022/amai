@@ -651,6 +651,185 @@ EXCEPTION
 END
 $$;
 
+CREATE OR REPLACE FUNCTION ami.enforce_import_packet_writeback_gate()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    relation_count BIGINT;
+    relation_requires_approval BOOLEAN;
+    relation_transfer_policy_ids UUID[];
+    packet_policy_match_count BIGINT;
+    packet_policy_allow_verified_writeback BOOLEAN;
+    packet_policy_requires_human_approval BOOLEAN;
+    relation_policy_match_count BIGINT;
+    relation_policy_allow_verified_writeback BOOLEAN;
+    relation_policy_requires_human_approval BOOLEAN;
+    source_workspace_id UUID;
+    promote_access_granted BOOLEAN;
+    approve_transfer_access_granted BOOLEAN;
+BEGIN
+    IF NEW.status <> 'verified'
+       AND NEW.borrowed_status <> 'verified_local_copy' THEN
+        RETURN NEW;
+    END IF;
+
+    IF NEW.can_promote_after_verification <> TRUE THEN
+        RAISE EXCEPTION 'import packet cannot be promoted without can_promote_after_verification';
+    END IF;
+
+    IF NEW.verification_state <> 'verified' THEN
+        RAISE EXCEPTION 'import packet cannot be promoted without verification_state=verified';
+    END IF;
+
+    IF NEW.trust_state <> 'verified' THEN
+        RAISE EXCEPTION 'import packet cannot be promoted without trust_state=verified';
+    END IF;
+
+    SELECT p.workspace_id
+    INTO source_workspace_id
+    FROM ami.projects p
+    WHERE p.project_id = NEW.source_project_id;
+
+    IF source_workspace_id IS NULL THEN
+        RAISE EXCEPTION 'import packet cannot be promoted without source project workspace';
+    END IF;
+
+    SELECT
+        COUNT(*),
+        COALESCE(BOOL_OR(r.requires_approval), FALSE),
+        ARRAY_REMOVE(ARRAY_AGG(DISTINCT r.transfer_policy_id), NULL)
+    INTO
+        relation_count,
+        relation_requires_approval,
+        relation_transfer_policy_ids
+    FROM ami.project_relations r
+    WHERE r.source_project_id = NEW.source_project_id
+      AND r.target_project_id = NEW.target_project_id
+      AND r.relation_status = 'active'
+      AND r.project_link_type <> 'forbidden_transfer';
+
+    IF relation_count = 0 THEN
+        RAISE EXCEPTION 'import packet cannot be promoted after project_link revoke';
+    END IF;
+
+    IF relation_requires_approval THEN
+        RAISE EXCEPTION 'import packet cannot be promoted while relation still requires approval';
+    END IF;
+
+    IF NEW.transfer_policy_id IS NULL
+       AND COALESCE(array_length(relation_transfer_policy_ids, 1), 0) = 0 THEN
+        RAISE EXCEPTION 'import packet cannot be promoted without transfer policy';
+    END IF;
+
+    IF NEW.transfer_policy_id IS NOT NULL THEN
+        SELECT
+            COUNT(tp.transfer_policy_id),
+            BOOL_AND(tp.allow_verified_writeback),
+            BOOL_OR(tp.requires_human_approval)
+        INTO
+            packet_policy_match_count,
+            packet_policy_allow_verified_writeback,
+            packet_policy_requires_human_approval
+        FROM ami.transfer_policies tp
+        WHERE tp.transfer_policy_id = NEW.transfer_policy_id
+          AND tp.workspace_id = source_workspace_id;
+
+        IF packet_policy_match_count <> 1 THEN
+            RAISE EXCEPTION 'import packet cannot be promoted because packet transfer policy is not in source workspace';
+        END IF;
+
+        IF COALESCE(packet_policy_allow_verified_writeback, FALSE) <> TRUE THEN
+            RAISE EXCEPTION 'import packet cannot be promoted because packet transfer policy blocks verified writeback';
+        END IF;
+
+        IF COALESCE(packet_policy_requires_human_approval, TRUE) THEN
+            RAISE EXCEPTION 'import packet cannot be promoted because packet transfer policy still requires human approval';
+        END IF;
+    END IF;
+
+    IF COALESCE(array_length(relation_transfer_policy_ids, 1), 0) > 0 THEN
+        SELECT
+            COUNT(tp.transfer_policy_id),
+            BOOL_AND(tp.allow_verified_writeback),
+            BOOL_OR(tp.requires_human_approval)
+        INTO
+            relation_policy_match_count,
+            relation_policy_allow_verified_writeback,
+            relation_policy_requires_human_approval
+        FROM UNNEST(relation_transfer_policy_ids) AS relation_policy_id
+        LEFT JOIN ami.transfer_policies tp
+            ON tp.transfer_policy_id = relation_policy_id
+           AND tp.workspace_id = source_workspace_id;
+
+        IF relation_policy_match_count <> COALESCE(array_length(relation_transfer_policy_ids, 1), 0) THEN
+            RAISE EXCEPTION 'import packet cannot be promoted because relation transfer policy is not in source workspace';
+        END IF;
+
+        IF COALESCE(relation_policy_allow_verified_writeback, FALSE) <> TRUE THEN
+            RAISE EXCEPTION 'import packet cannot be promoted because relation transfer policy blocks verified writeback';
+        END IF;
+
+        IF COALESCE(relation_policy_requires_human_approval, TRUE) THEN
+            RAISE EXCEPTION 'import packet cannot be promoted because relation transfer policy still requires human approval';
+        END IF;
+    END IF;
+
+    SELECT ap.can_promote
+    INTO promote_access_granted
+    FROM ami.access_policies ap
+    WHERE ap.workspace_id = source_workspace_id
+      AND ap.status = 'active'
+      AND ap.object_class = 'fact'
+      AND ap.scope_type = ANY(ARRAY['cross_project_linked', 'imported', 'org_global'])
+      AND (ap.project_id = NEW.source_project_id OR ap.project_id IS NULL)
+    ORDER BY
+        CASE WHEN ap.project_id = NEW.source_project_id THEN 0 ELSE 1 END,
+        ap.precedence DESC,
+        ap.created_at DESC
+    LIMIT 1;
+
+    IF COALESCE(promote_access_granted, FALSE) <> TRUE THEN
+        RAISE EXCEPTION 'import packet cannot be promoted because access policy does not grant can_promote';
+    END IF;
+
+    SELECT ap.can_approve_transfer
+    INTO approve_transfer_access_granted
+    FROM ami.access_policies ap
+    WHERE ap.workspace_id = source_workspace_id
+      AND ap.status = 'active'
+      AND ap.object_class = 'fact'
+      AND ap.scope_type = ANY(ARRAY['cross_project_linked', 'imported', 'org_global'])
+      AND (ap.project_id = NEW.source_project_id OR ap.project_id IS NULL)
+    ORDER BY
+        CASE WHEN ap.project_id = NEW.source_project_id THEN 0 ELSE 1 END,
+        ap.precedence DESC,
+        ap.created_at DESC
+    LIMIT 1;
+
+    IF COALESCE(approve_transfer_access_granted, FALSE) <> TRUE THEN
+        RAISE EXCEPTION 'import packet cannot be promoted because access policy does not grant can_approve_transfer';
+    END IF;
+
+    RETURN NEW;
+END
+$$;
+
+DROP TRIGGER IF EXISTS import_packets_enforce_writeback_gate_trigger ON ami.import_packets;
+CREATE TRIGGER import_packets_enforce_writeback_gate_trigger
+    BEFORE INSERT OR UPDATE OF
+        source_project_id,
+        target_project_id,
+        transfer_policy_id,
+        status,
+        trust_state,
+        verification_state,
+        borrowed_status,
+        can_promote_after_verification
+    ON ami.import_packets
+    FOR EACH ROW
+    EXECUTE FUNCTION ami.enforce_import_packet_writeback_gate();
+
 CREATE TABLE IF NOT EXISTS ami.skill_cards (
     skill_card_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     workspace_id UUID NOT NULL REFERENCES ami.workspaces(workspace_id) ON DELETE CASCADE,
@@ -2673,7 +2852,7 @@ CREATE TABLE IF NOT EXISTS ami.policy_rules (
         )
     ),
     schema_version TEXT NOT NULL DEFAULT 'policy-rule-envelope-v1',
-    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    rule_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -2685,7 +2864,31 @@ ALTER TABLE ami.policy_rules
     ADD COLUMN IF NOT EXISTS message_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
     ADD COLUMN IF NOT EXISTS evidence_span JSONB NOT NULL DEFAULT '{}'::jsonb,
     ADD COLUMN IF NOT EXISTS derivation_kind TEXT NOT NULL DEFAULT 'operator_write',
-    ADD COLUMN IF NOT EXISTS schema_version TEXT NOT NULL DEFAULT 'policy-rule-envelope-v1';
+    ADD COLUMN IF NOT EXISTS schema_version TEXT NOT NULL DEFAULT 'policy-rule-envelope-v1',
+    ADD COLUMN IF NOT EXISTS rule_payload JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_policy_rules_workspace_rule_code
+    ON ami.policy_rules(workspace_id, rule_code);
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'ami'
+          AND table_name = 'policy_rules'
+          AND column_name = 'payload'
+    ) THEN
+        EXECUTE $policy_rule_payload_backfill$
+            UPDATE ami.policy_rules
+            SET rule_payload = payload
+            WHERE rule_payload = '{}'::jsonb
+              AND payload IS NOT NULL
+              AND payload <> '{}'::jsonb
+        $policy_rule_payload_backfill$;
+    END IF;
+END
+$$;
 
 UPDATE ami.policy_rules
 SET derivation_kind = 'operator_write'
@@ -2764,7 +2967,74 @@ ALTER TABLE ami.quarantine_items
     ADD COLUMN IF NOT EXISTS message_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
     ADD COLUMN IF NOT EXISTS evidence_span JSONB NOT NULL DEFAULT '{}'::jsonb,
     ADD COLUMN IF NOT EXISTS derivation_kind TEXT NOT NULL DEFAULT 'extract',
-    ADD COLUMN IF NOT EXISTS schema_version TEXT NOT NULL DEFAULT 'quarantine-item-envelope-v1';
+    ADD COLUMN IF NOT EXISTS schema_version TEXT NOT NULL DEFAULT 'quarantine-item-envelope-v1',
+    ADD COLUMN IF NOT EXISTS quarantine_state TEXT NOT NULL DEFAULT 'active',
+    ADD COLUMN IF NOT EXISTS evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS quarantined_at_epoch_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS released_at_epoch_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'ami'
+          AND table_name = 'quarantine_items'
+          AND column_name = 'payload'
+    ) THEN
+        EXECUTE $quarantine_payload_backfill$
+            UPDATE ami.quarantine_items
+            SET evidence = payload
+            WHERE evidence = '{}'::jsonb
+              AND payload IS NOT NULL
+              AND payload <> '{}'::jsonb
+        $quarantine_payload_backfill$;
+    END IF;
+END
+$$;
+
+UPDATE ami.quarantine_items
+SET quarantined_at_epoch_ms = (EXTRACT(EPOCH FROM created_at) * 1000)::bigint
+WHERE quarantined_at_epoch_ms IS NULL;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'ami'
+          AND table_name = 'quarantine_items'
+          AND column_name = 'entity_id'
+          AND data_type <> 'uuid'
+    ) THEN
+        IF EXISTS (
+            SELECT 1
+            FROM ami.quarantine_items
+            WHERE entity_id IS NOT NULL
+              AND entity_id !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        ) THEN
+            RAISE EXCEPTION 'ami.quarantine_items.entity_id contains non-UUID legacy values; manual migration required before bootstrap can continue';
+        END IF;
+        ALTER TABLE ami.quarantine_items
+            ALTER COLUMN entity_id DROP NOT NULL,
+            ALTER COLUMN entity_id TYPE UUID USING NULLIF(entity_id, '')::uuid;
+    END IF;
+END
+$$;
+
+UPDATE ami.quarantine_items
+SET quarantine_state = 'active'
+WHERE quarantine_state IS NULL
+   OR quarantine_state NOT IN ('active', 'released', 'rejected', 'archived');
+
+ALTER TABLE ami.quarantine_items
+    DROP CONSTRAINT IF EXISTS quarantine_items_quarantine_state_check;
+
+ALTER TABLE ami.quarantine_items
+    ADD CONSTRAINT quarantine_items_quarantine_state_check CHECK (
+        quarantine_state IN ('active', 'released', 'rejected', 'archived')
+    );
 
 UPDATE ami.quarantine_items
 SET derivation_kind = 'extract'

@@ -112,8 +112,8 @@ pub use self::postgres_policy_rules::*;
 pub use self::postgres_project_namespace::*;
 pub use self::postgres_project_support::*;
 use self::postgres_project_support::{
-    ensure_cross_project_policy_access, find_project_link_context, get_bound_project_for_repo_root,
-    get_project_workspace_id, record_scope_override_event, sync_project_repo_roots,
+    ensure_cross_project_policy_access, get_bound_project_for_repo_root, get_project_workspace_id,
+    record_scope_override_event, sync_project_repo_roots,
 };
 pub use self::postgres_quarantine::*;
 pub use self::postgres_records::*;

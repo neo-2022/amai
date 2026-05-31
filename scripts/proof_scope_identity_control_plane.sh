@@ -20,6 +20,7 @@ memory_item_id=""
 imported_memory_item_id=""
 promoted_packet_id=""
 promoted_memory_item_id=""
+verified_create_output=""
 
 canonical_path() {
   local path="$1"
@@ -42,6 +43,9 @@ cleanup() {
   psql "${dsn}" -v ON_ERROR_STOP=1 -qc "DELETE FROM ami.teams WHERE code = '${team_code}'" >/dev/null 2>&1 || true
   psql "${dsn}" -v ON_ERROR_STOP=1 -qc "DELETE FROM ami.transfer_policies WHERE code = '${policy_code}'" >/dev/null 2>&1 || true
   psql "${dsn}" -v ON_ERROR_STOP=1 -qc "DELETE FROM ami.workspaces WHERE code = '${workspace_code}'" >/dev/null 2>&1 || true
+  if [ -n "${verified_create_output}" ]; then
+    rm -f "${verified_create_output}"
+  fi
   rm -rf "${source_root}" "${target_root}"
 }
 trap cleanup EXIT
@@ -53,7 +57,7 @@ cd "${repo_root}"
 
 ./scripts/scope_identity_surface_guard.sh --json >/dev/null
 
-psql "${dsn}" -v ON_ERROR_STOP=1 -f "${repo_root}/sql/000_bootstrap.sql" >/dev/null
+cargo run --release --quiet -- bootstrap schema >/dev/null
 cargo build --quiet --release
 
 ./target/release/amai workspace ensure \
@@ -201,6 +205,33 @@ if [ "${post_policy_target_visible}" != "true" ]; then
   printf 'expected linked project to become visible only after explicit access policy\n' >&2
   exit 1
 fi
+
+verified_create_output="$(mktemp)"
+if ./target/release/amai import-packet create \
+  --source-project "${source_project}" \
+  --target-project "${target_project}" \
+  --transfer-policy "${policy_code}" \
+  --requested-by-agent "${agent_code}" \
+  --status verified \
+  --summary "stage1 scope proof ${suffix} verified create gate" \
+  --reason "stage1 scope proof ${suffix} verified create gate" \
+  --imported-by-agent-scope cross_project_linked \
+  --trust-state verified \
+  --verification-state verified \
+  --borrowed-status verified_local_copy \
+  --can-promote-after-verification \
+  --memory-object-id "memory::verified::${suffix}" \
+  --source-kind "stage1_scope_proof" \
+  --source-event-id "event:stage1-import-verified:${suffix}" \
+  --artifact-ref "artifact://stage1/import-verified/${suffix}" \
+  --message-ref "message:stage1-import-verified:${suffix}" \
+  --evidence-span-json "{\"surface\":\"stage1_scope_proof\",\"case\":\"import_packet_verified_create_gate\",\"suffix\":\"${suffix}\"}" \
+  >"${verified_create_output}" 2>&1; then
+  printf 'expected verified import create before relation approval to fail-closed\n' >&2
+  exit 1
+fi
+
+grep -q 'requires approval before verified import' "${verified_create_output}"
 
 ./target/release/amai shared-asset ensure \
   --workspace "${workspace_code}" \
@@ -624,6 +655,41 @@ promoted_packet_output="$(./target/release/amai import-packet create \
 
 promoted_packet_id="$(printf '%s\n' "${promoted_packet_output}" | awk '{print $4}')"
 
+if ./target/release/amai import-packet update \
+  --import-packet-id "${promoted_packet_id}" \
+  --status verified \
+  --borrowed-status verified_local_copy \
+  --verification-state verified \
+  --trust-state verified \
+  --actor-agent "${agent_code}" \
+  --reason "stage1 scope proof ${suffix} promote before approval must fail" >/dev/null 2>&1; then
+  printf 'expected verified local copy promotion to fail before explicit relation and transfer-policy approval\n' >&2
+  exit 1
+fi
+
+./target/release/amai transfer-policy ensure \
+  --workspace "${workspace_code}" \
+  --code "${policy_code}" \
+  --display-name "Borrow Guard ${suffix}" \
+  --default-decision verified_writeback \
+  --allow-cross-project-read \
+  --allow-import \
+  --allow-verified-writeback \
+  --no-requires-human-approval >/dev/null
+
+./target/release/amai relation update \
+  --source "${source_project}" \
+  --target "${target_project}" \
+  --relation-type depends_on \
+  --shared-contour stage1_scope_proof \
+  --visibility-scope cross_project_linked \
+  --relation-status active \
+  --requires-approval false \
+  --transfer-policy "${policy_code}" \
+  --access-mode local_plus_related \
+  --actor-agent "${agent_code}" \
+  --override-reason "stage1 scope proof ${suffix} explicit approval before promote" >/dev/null
+
 ./target/release/amai import-packet update \
   --import-packet-id "${promoted_packet_id}" \
   --status verified \
@@ -826,7 +892,9 @@ test "$(psql "${dsn}" -Atqc "SELECT visibility_scope FROM ami.agents WHERE code 
 test "$(psql "${dsn}" -Atqc "SELECT role_id IS NOT NULL FROM ami.agents WHERE code = '${agent_code}'")" = "t"
 test "$(psql "${dsn}" -Atqc "SELECT visibility_scope FROM ami.projects WHERE code = '${source_project}'")" = "project_shared"
 test "$(psql "${dsn}" -Atqc "SELECT visibility_scope FROM ami.projects WHERE code = '${target_project}'")" = "cross_project_linked"
-test "$(psql "${dsn}" -Atqc "SELECT default_decision FROM ami.transfer_policies WHERE code = '${policy_code}'")" = "borrowed_unverified"
+test "$(psql "${dsn}" -Atqc "SELECT default_decision FROM ami.transfer_policies WHERE code = '${policy_code}'")" = "verified_writeback"
+test "$(psql "${dsn}" -Atqc "SELECT allow_verified_writeback::text FROM ami.transfer_policies WHERE code = '${policy_code}'")" = "true"
+test "$(psql "${dsn}" -Atqc "SELECT requires_human_approval::text FROM ami.transfer_policies WHERE code = '${policy_code}'")" = "false"
 test "$(psql "${dsn}" -Atqc "SELECT can_import::text FROM ami.access_policies WHERE code = '${policy_bind_code}'")" = "true"
 test "$(psql "${dsn}" -Atqc "SELECT can_promote::text FROM ami.access_policies WHERE code = '${policy_bind_code}'")" = "true"
 test "$(psql "${dsn}" -Atqc "SELECT precedence::text FROM ami.access_policies WHERE code = '${policy_bind_code}'")" = "250"
@@ -886,6 +954,10 @@ test "$(psql "${dsn}" -Atqc "SELECT visibility_scope FROM ami.memory_items WHERE
 test "$(psql "${dsn}" -Atqc "SELECT truth_state FROM ami.memory_items WHERE memory_item_id = '${promoted_memory_item_id}'")" = "current"
 test "$(psql "${dsn}" -Atqc "SELECT verification_state FROM ami.memory_items WHERE memory_item_id = '${promoted_memory_item_id}'")" = "verified"
 test "$(psql "${dsn}" -Atqc "SELECT visibility_scope FROM ami.memory_items WHERE memory_item_id = '${memory_item_id}'")" = "cross_project_linked"
-test "$(psql "${dsn}" -Atqc "SELECT count(*)::text FROM ami.scope_override_events WHERE reason LIKE 'stage1 scope proof ${suffix}%'")" = "3"
+test "$(psql "${dsn}" -Atqc "SELECT count(*)::text FROM ami.scope_override_events WHERE reason LIKE 'stage1 scope proof ${suffix}%'")" = "4"
+test "$(psql "${dsn}" -Atqc "SELECT count(*)::text FROM ami.scope_override_events WHERE reason = 'stage1 scope proof ${suffix} explicit approval before promote' AND entity_kind = 'project_relation' AND event_kind = 'rescope'")" = "1"
+test "$(psql "${dsn}" -Atqc "SELECT count(*)::text FROM ami.scope_override_events WHERE reason = 'stage1 scope proof ${suffix} promote verified local copy' AND entity_kind = 'import_packet' AND event_kind = 'approve_transfer'")" = "1"
+test "$(psql "${dsn}" -Atqc "SELECT count(*)::text FROM ami.scope_override_events WHERE reason = 'stage1 scope proof ${suffix} relation revoked' AND entity_kind = 'project_relation' AND event_kind = 'revoke'")" = "1"
+test "$(psql "${dsn}" -Atqc "SELECT count(*)::text FROM ami.scope_override_events WHERE reason = 'stage1 scope proof ${suffix} packet revoked' AND entity_kind = 'import_packet' AND event_kind = 'revoke'")" = "1"
 
 printf 'proof_scope_identity_control_plane: PASS\n'

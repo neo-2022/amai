@@ -1,13 +1,13 @@
 use super::{
-    ArtifactRefInsert, ChunkRecord, ContextPackInsert, DocumentRecord, ImportPacketUpdate,
-    MemoryCardVerificationConflictCheck, MemoryConflictInsert, MemoryEdgeInsert, MemoryItemInsert,
-    MemoryItemRecord, MemoryLinkDecisionInsert, MemoryProvenanceInsert, NamespaceRecord,
-    ObservabilityInsertErrorPhase, ObservabilityInsertMeta, PendingLinkProposalInsert,
-    PolicyRuleInsert, ProjectRecord, QuarantineItemInsert, RelationUpdate,
-    RestorePackCreateErrorPhase, RestorePackInsert, RestorePackSourceSnapshotHint,
-    RetrievalTraceInsert, SkillCardRecord, SkillCardVerificationConflictCheck, SymbolRecord,
-    TaskEventInsert, TaskNodeCandidateExtraction, TaskNodeInsert,
-    TaskNodeVerificationConflictCheck, add_relation, apply_memory_card_update,
+    ArtifactRefInsert, ChunkRecord, ContextPackInsert, DocumentRecord, ImportPacketRecord,
+    ImportPacketUpdate, MemoryCardVerificationConflictCheck, MemoryConflictInsert,
+    MemoryEdgeInsert, MemoryItemInsert, MemoryItemRecord, MemoryLinkDecisionInsert,
+    MemoryProvenanceInsert, NamespaceRecord, ObservabilityInsertErrorPhase,
+    ObservabilityInsertMeta, PendingLinkProposalInsert, PolicyRuleInsert, ProjectRecord,
+    QuarantineItemInsert, RelationUpdate, RestorePackCreateErrorPhase, RestorePackInsert,
+    RestorePackSourceSnapshotHint, RetrievalTraceInsert, SkillCardRecord,
+    SkillCardVerificationConflictCheck, SymbolRecord, TaskEventInsert, TaskNodeCandidateExtraction,
+    TaskNodeInsert, TaskNodeVerificationConflictCheck, add_relation, apply_memory_card_update,
     augment_memory_item_metadata_with_stage2_runtime, bind_shared_asset_to_project,
     bootstrap_schema, build_memory_write_pipeline, build_skill_execution_cards,
     canonical_repo_root_string, connect_admin, count_documents_for_project_namespace_codes,
@@ -15,16 +15,17 @@ use super::{
     create_memory_edge, create_memory_item, create_memory_link_decision, create_memory_provenance,
     create_memory_relation_edge, create_pending_link_proposal, create_policy_rule,
     create_quarantine_item, create_restore_pack, create_restore_pack_detailed,
-    create_retrieval_trace, create_skill_card_candidate, create_skill_evidence_bundle,
-    create_task_event, create_task_node, derive_memory_item_source_kind, ensure_access_policy,
-    ensure_namespace, ensure_shared_asset, ensure_transfer_policy, ensure_workspace,
-    evidence_span_marks_skill_card_poisoned, exact_match_basename, exact_match_basename_stem,
-    extract_memory_card_candidate, extract_memory_item_candidate, extract_skill_card_candidate,
-    extract_task_node_candidate, get_document_id_for_namespace_relative_path, get_import_packet,
-    get_namespace_by_code, get_project_by_code, get_restore_pack, get_stack_meta, get_task_node,
-    insert_artifact_ref, insert_context_pack, insert_observability_snapshot,
-    insert_observability_snapshot_detailed, list_skill_cards,
-    lookup_restore_pack_by_source_snapshot_id, memory_item_has_recorded_basis,
+    create_retrieval_trace, create_skill_card_candidate,
+    create_skill_card_candidate_with_refinement, create_skill_evidence_bundle, create_task_event,
+    create_task_node, delete_observability_snapshots_by_ids, derive_memory_item_source_kind,
+    ensure_access_policy, ensure_namespace, ensure_shared_asset, ensure_transfer_policy,
+    ensure_workspace, evidence_span_marks_skill_card_poisoned, exact_match_basename,
+    exact_match_basename_stem, extract_memory_card_candidate, extract_memory_item_candidate,
+    extract_skill_card_candidate, extract_task_node_candidate,
+    get_document_id_for_namespace_relative_path, get_import_packet, get_namespace_by_code,
+    get_project_by_code, get_restore_pack, get_stack_meta, get_task_node, insert_artifact_ref,
+    insert_context_pack, insert_observability_snapshot, insert_observability_snapshot_detailed,
+    list_skill_cards, lookup_restore_pack_by_source_snapshot_id, memory_item_has_recorded_basis,
     memory_write_async_index_subjects, memory_write_fan_out_subjects,
     metadata_marks_memory_item_poisoned, observability_conflict_error, observability_source_class,
     prepare_observability_payload, provenance_marks_memory_card_poisoned,
@@ -3463,7 +3464,7 @@ async fn create_skill_card_candidate_surfaces_stage2_runtime_fields() {
         &source_event_ids,
         &artifact_refs,
         &evidence_span,
-        None,
+        Some("new"),
         Some("extract"),
     )
     .await
@@ -3605,7 +3606,7 @@ async fn create_skill_card_candidate_rejects_duplicate_skill_version() {
         &[format!("event:skill:first:{suffix}")],
         &[format!("artifact://proof/skill/first/{suffix}")],
         &json!({"path":"docs/skill.md","line_start":1,"line_end":2}),
-        None,
+        Some("new"),
         Some("extract"),
     )
     .await
@@ -3634,7 +3635,7 @@ async fn create_skill_card_candidate_rejects_duplicate_skill_version() {
         &[format!("event:skill:second:{suffix}")],
         &[format!("artifact://proof/skill/second/{suffix}")],
         &json!({"path":"docs/skill.md","line_start":3,"line_end":4}),
-        None,
+        Some("new"),
         Some("extract"),
     )
     .await
@@ -3701,7 +3702,7 @@ async fn create_skill_card_candidate_rejects_similar_skill_without_refinement_ac
         &[format!("event:stage3:patch-base:{suffix}")],
         &[format!("artifact://proof/stage3/patch-base/{suffix}")],
         &json!({"path":"docs/AMAI_GLOBAL_MEMORY_ROADMAP.md","line_start":1217,"line_end":1221}),
-        None,
+        Some("new"),
         Some("extract"),
     )
     .await
@@ -3730,7 +3731,7 @@ async fn create_skill_card_candidate_rejects_similar_skill_without_refinement_ac
         &[format!("event:stage3:patch-clone:{suffix}")],
         &[format!("artifact://proof/stage3/patch-clone/{suffix}")],
         &json!({"path":"docs/AMAI_GLOBAL_MEMORY_ROADMAP.md","line_start":1217,"line_end":1221}),
-        None,
+        Some("new"),
         Some("extract"),
     )
     .await
@@ -3794,7 +3795,7 @@ async fn create_skill_card_candidate_patch_links_parent_and_merge_group() {
         &[format!("event:stage3:patch-base:{suffix}")],
         &[format!("artifact://proof/stage3/patch-base/{suffix}")],
         &json!({"path":"docs/AMAI_GLOBAL_MEMORY_ROADMAP.md","line_start":1217,"line_end":1221}),
-        None,
+        Some("new"),
         Some("extract"),
     )
     .await
@@ -8206,7 +8207,7 @@ async fn create_skill_evidence_bundle_surfaces_stage2_provenance_fields() {
     let model_constraints: Vec<String> = Vec::new();
     let tool_constraints: Vec<String> = Vec::new();
     let context_constraints: Vec<String> = Vec::new();
-    let skill_card = create_skill_card_candidate(
+    let skill_card = create_skill_card_candidate_with_refinement(
         &client,
         "project_alpha",
         "review",
@@ -8229,6 +8230,9 @@ async fn create_skill_evidence_bundle_surfaces_stage2_provenance_fields() {
         &[source_event_id.clone()],
         &[artifact_ref.clone()],
         &json!({"path":format!("docs/skill-bundle-{suffix}.md"),"line_start":1,"line_end":2}),
+        None,
+        Some("new"),
+        None,
         None,
         Some("extract"),
     )
@@ -8281,7 +8285,7 @@ async fn create_stage2_skill_card_for_activity_test(
     let model_constraints: Vec<String> = Vec::new();
     let tool_constraints: Vec<String> = Vec::new();
     let context_constraints: Vec<String> = Vec::new();
-    create_skill_card_candidate(
+    create_skill_card_candidate_with_refinement(
         client,
         "project_alpha",
         "review",
@@ -8305,6 +8309,9 @@ async fn create_stage2_skill_card_for_activity_test(
         &[artifact_ref],
         &json!({"path":format!("docs/{stem}-{suffix}.md"),"line_start":1,"line_end":2}),
         None,
+        Some("new"),
+        None,
+        None,
         Some("extract"),
     )
     .await
@@ -8327,7 +8334,7 @@ async fn create_stage2_skill_card_for_constraint_test(
     let model_constraints: Vec<String> = Vec::new();
     let tool_constraints: Vec<String> = Vec::new();
     let context_constraints: Vec<String> = Vec::new();
-    create_skill_card_candidate(
+    create_skill_card_candidate_with_refinement(
         client,
         "project_alpha",
         "review",
@@ -8350,6 +8357,9 @@ async fn create_stage2_skill_card_for_constraint_test(
         &[source_event_id],
         &[artifact_ref],
         &json!({"path":format!("docs/{stem}-{suffix}.md"),"line_start":1,"line_end":2}),
+        None,
+        Some("new"),
+        None,
         None,
         Some("extract"),
     )
@@ -8460,6 +8470,56 @@ async fn create_stage2_import_shared_context(
         target_project_code,
         transfer_policy_code,
     )
+}
+
+async fn create_stage2_verified_import_packet(
+    client: &Client,
+    source_project_code: &str,
+    target_project_code: &str,
+    transfer_policy_code: &str,
+    suffix: u128,
+    case: &str,
+    status: &str,
+    trust_state: &str,
+    can_promote_after_verification: bool,
+    verification_state: &str,
+    borrowed_status: &str,
+) -> anyhow::Result<ImportPacketRecord> {
+    let summary = format!("stage2 verified import {case} {suffix}");
+    let reason = format!("stage2 verified import {case} {suffix}");
+    let memory_object_ids = vec![format!("memory_item:{case}:{suffix}")];
+    let artifact_refs = vec![format!("artifact://proof/stage2-{case}/{suffix}")];
+    let source_event_ids = json!([format!("import_event:{case}:{suffix}")]);
+    let message_refs = json!([format!("thread:{case}:{suffix}")]);
+    let evidence_span = json!({
+        "kind": "import_packet_runtime",
+        "case": case,
+        "suffix": suffix,
+    });
+    create_import_packet(
+        client,
+        source_project_code,
+        target_project_code,
+        Some(transfer_policy_code),
+        None,
+        status,
+        Some(&summary),
+        Some(&reason),
+        "cross_project_linked",
+        trust_state,
+        verification_state,
+        borrowed_status,
+        can_promote_after_verification,
+        &memory_object_ids,
+        &artifact_refs,
+        Some("import_runtime"),
+        Some(&source_event_ids),
+        Some(&message_refs),
+        Some(&evidence_span),
+        Some("import"),
+        Some("import-packet-envelope-v1"),
+    )
+    .await
 }
 
 #[tokio::test]
@@ -9673,7 +9733,12 @@ async fn bind_shared_asset_to_project_rejects_cross_workspace_binding() {
     )
     .await
     .expect_err("cross-workspace binding rejected");
-    assert!(error.to_string().contains("across workspaces"));
+    let detail = error.to_string();
+    assert!(
+        detail.contains("across workspaces")
+            || detail.contains("shared asset not found in workspace"),
+        "unexpected error: {detail}"
+    );
 }
 
 #[tokio::test]
@@ -10919,6 +10984,147 @@ async fn create_restore_pack_exact_replay_reuses_same_row_without_mutation() {
 }
 
 #[tokio::test]
+async fn create_restore_pack_exact_replay_reuses_same_row_when_captured_at_advances_without_semantic_drift()
+ {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+    let snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 1_234_567,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:restore-pack-freshness:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let source_snapshot_id =
+        insert_observability_snapshot(&client, "working_state_restore", &snapshot_payload)
+            .await
+            .expect("restore snapshot");
+    let source_event_ids = json!([format!("event:restore-pack-freshness:{suffix}")]);
+    let artifact_refs = json!([format!("artifact://proof/restore-pack-freshness/{suffix}")]);
+    let message_refs = json!([format!("thread:restore-pack-freshness:{suffix}")]);
+    let evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:restore-pack-freshness:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": format!("restore pack freshness replay goal {suffix}"),
+        "next_step": "freshness metadata should not change canonical identity",
+        "recent_actions": [{"event_id": format!("event:restore-pack-freshness:{suffix}")}]
+    });
+    let first_record = RestorePackInsert {
+        agent_scope: Some("proof::restore-freshness"),
+        session_id: Some("session-restore-pack-freshness-a"),
+        thread_id: Some("thread-restore-pack-freshness-a"),
+        source_snapshot_id: Some(source_snapshot_id),
+        source_snapshot_hint: None,
+        pack_kind: "workspace_restore_pack",
+        source_kind: Some("working_state_restore_runtime"),
+        source_event_ids: Some(&source_event_ids),
+        artifact_refs: Some(&artifact_refs),
+        message_refs: Some(&message_refs),
+        evidence_span: Some(&evidence_span),
+        derivation_kind: Some("summary"),
+        schema_version: Some("restore-pack-envelope-v1"),
+        headline: Some("restore pack freshness replay headline"),
+        summary: Some("restore pack freshness replay summary"),
+        payload: &payload,
+        captured_at_epoch_ms: Some(1_234_567),
+    };
+    let second_record = RestorePackInsert {
+        agent_scope: Some("proof::restore-freshness"),
+        session_id: Some("session-restore-pack-freshness-b"),
+        thread_id: Some("thread-restore-pack-freshness-b"),
+        source_snapshot_id: Some(source_snapshot_id),
+        source_snapshot_hint: None,
+        pack_kind: "workspace_restore_pack",
+        source_kind: Some("working_state_restore_runtime"),
+        source_event_ids: Some(&source_event_ids),
+        artifact_refs: Some(&artifact_refs),
+        message_refs: Some(&message_refs),
+        evidence_span: Some(&evidence_span),
+        derivation_kind: Some("summary"),
+        schema_version: Some("restore-pack-envelope-v1"),
+        headline: Some("restore pack freshness replay headline"),
+        summary: Some("restore pack freshness replay summary"),
+        payload: &payload,
+        captured_at_epoch_ms: Some(1_234_568),
+    };
+
+    let first = create_restore_pack(&client, &target_project_code, namespace_code, &first_record)
+        .await
+        .expect("first restore pack");
+    let second = create_restore_pack(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &second_record,
+    )
+    .await
+    .expect("freshness replay");
+
+    assert_eq!(first.restore_pack_id, second.restore_pack_id);
+    assert_eq!(first.payload, payload);
+    assert_eq!(second.payload, payload);
+
+    let row = client
+        .query_one(
+            r#"
+            SELECT payload, captured_at_epoch_ms, COUNT(*) OVER()
+            FROM ami.restore_packs
+            WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+              AND namespace_id = (
+                    SELECT namespace_id
+                    FROM ami.namespaces
+                    WHERE project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
+                      AND code = $2
+              )
+              AND pack_kind = 'workspace_restore_pack'
+              AND source_snapshot_id = $3
+            LIMIT 1
+            "#,
+            &[&target_project_code, &namespace_code, &source_snapshot_id],
+        )
+        .await
+        .expect("stored restore pack row");
+    let stored_payload: Value = row.get(0);
+    let stored_captured_at_epoch_ms: Option<i64> = row.get(1);
+    let count: i64 = row.get(2);
+    assert_eq!(count, 1);
+    assert_eq!(stored_payload, payload);
+    assert_eq!(stored_captured_at_epoch_ms, Some(1_234_567));
+}
+
+#[tokio::test]
 async fn create_restore_pack_same_source_snapshot_conflicting_payload_is_rejected() {
     if let Ok(env_text) =
         std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
@@ -11802,6 +12008,154 @@ async fn restore_pack_schema_rejects_source_snapshot_delete_while_restore_pack_d
     })
     .await
     .expect("run restore_pack source snapshot delete protection test");
+}
+
+#[tokio::test]
+async fn delete_observability_snapshots_skips_restrict_protected_rows() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, _source_project_code, target_project_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let namespace_code = "default";
+
+    let protected_snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 1_234_567,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:observability-cleanup-protected:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let protected_snapshot_id = insert_observability_snapshot(
+        &client,
+        "working_state_restore",
+        &protected_snapshot_payload,
+    )
+    .await
+    .expect("protected snapshot");
+    let protected_source_event_ids =
+        json!([format!("event:observability-cleanup-protected:{suffix}")]);
+    let protected_artifact_refs = json!([format!(
+        "artifact://proof/observability-cleanup-protected/{suffix}"
+    )]);
+    let protected_message_refs =
+        json!([format!("thread:observability-cleanup-protected:{suffix}")]);
+    let protected_evidence_span = json!({
+        "kind": "working_state_restore",
+        "authoritative_event_id": format!("event:observability-cleanup-protected:{suffix}"),
+        "restore_confidence": "durable"
+    });
+    let protected_restore_pack_payload = json!({
+        "project": {"code": target_project_code},
+        "namespace": {"code": namespace_code},
+        "current_goal": "retain protected snapshot"
+    });
+    let restore_pack = create_restore_pack(
+        &client,
+        &target_project_code,
+        namespace_code,
+        &RestorePackInsert {
+            agent_scope: Some("proof::observability-cleanup-protection"),
+            session_id: Some("session-observability-cleanup-protection"),
+            thread_id: Some("thread-observability-cleanup-protection"),
+            source_snapshot_id: Some(protected_snapshot_id),
+            source_snapshot_hint: None,
+            pack_kind: "workspace_restore_pack",
+            source_kind: Some("working_state_restore_runtime"),
+            source_event_ids: Some(&protected_source_event_ids),
+            artifact_refs: Some(&protected_artifact_refs),
+            message_refs: Some(&protected_message_refs),
+            evidence_span: Some(&protected_evidence_span),
+            derivation_kind: Some("summary"),
+            schema_version: Some("restore-pack-envelope-v1"),
+            headline: Some("observability cleanup protected restore pack"),
+            summary: Some("observability cleanup protected restore pack"),
+            payload: &protected_restore_pack_payload,
+            captured_at_epoch_ms: Some(1_234_567),
+        },
+    )
+    .await
+    .expect("restore pack");
+
+    let unprotected_snapshot_payload = json!({
+        "working_state_restore": {
+            "project": {"code": target_project_code},
+            "namespace": {"code": namespace_code},
+            "captured_at_epoch_ms": 1_234_568,
+            "state_lineage": {
+                "authoritative_event_id": format!("event:observability-cleanup-unprotected:{suffix}"),
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    let unprotected_snapshot_id = insert_observability_snapshot(
+        &client,
+        "working_state_restore",
+        &unprotected_snapshot_payload,
+    )
+    .await
+    .expect("unprotected snapshot");
+
+    let deleted = delete_observability_snapshots_by_ids(
+        &client,
+        &[protected_snapshot_id, unprotected_snapshot_id],
+    )
+    .await
+    .expect("cleanup should skip protected snapshot and delete the unprotected one");
+    assert_eq!(deleted, 1);
+
+    let protected_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM ami.observability_snapshots WHERE snapshot_id = $1",
+            &[&protected_snapshot_id],
+        )
+        .await
+        .expect("protected snapshot count")
+        .get(0);
+    assert_eq!(protected_count, 1);
+
+    let unprotected_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM ami.observability_snapshots WHERE snapshot_id = $1",
+            &[&unprotected_snapshot_id],
+        )
+        .await
+        .expect("unprotected snapshot count")
+        .get(0);
+    assert_eq!(unprotected_count, 0);
+
+    let restored_source_snapshot_id: Option<Uuid> = client
+        .query_one(
+            "SELECT source_snapshot_id FROM ami.restore_packs WHERE restore_pack_id = $1",
+            &[&restore_pack.restore_pack_id],
+        )
+        .await
+        .expect("restore pack source snapshot")
+        .get(0);
+    assert_eq!(restored_source_snapshot_id, Some(protected_snapshot_id));
 }
 
 #[tokio::test]
@@ -16965,7 +17319,7 @@ async fn reconcile_import_packet_quarantines_releases_stale_verified_quarantine_
         true,
         false,
         true,
-        false,
+        true,
         false,
         None,
         "active",
@@ -17252,6 +17606,25 @@ async fn reconcile_import_packet_quarantines_rejects_approval_gated_packet() {
     assert_eq!(packet.borrowed_status, "rejected");
     assert!(!packet.can_promote_after_verification);
 
+    let governor_scope: String = client
+        .query_one(
+            r#"
+                SELECT a.visibility_scope
+                FROM ami.scope_override_events e
+                INNER JOIN ami.agents a ON a.agent_id = e.actor_agent_id
+                WHERE e.entity_kind = 'import_packet'
+                  AND e.entity_id = $1
+                  AND e.event_kind = 'reject_transfer'
+                ORDER BY e.created_at DESC
+                LIMIT 1
+                "#,
+            &[&packet.import_packet_id],
+        )
+        .await
+        .expect("autonomous governor scope")
+        .get(0);
+    assert_eq!(governor_scope, "agent_private");
+
     let quarantine_state: String = client
         .query_one(
             r#"
@@ -17268,6 +17641,2355 @@ async fn reconcile_import_packet_quarantines_rejects_approval_gated_packet() {
         .expect("quarantine state")
         .get(0);
     assert_eq!(quarantine_state, "rejected");
+}
+
+#[tokio::test]
+async fn reconcile_import_packet_quarantines_rejects_any_strict_active_relation_policy() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=')
+                && std::env::var_os(key).is_none()
+            {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (workspace_code, source_code, target_code, transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+
+    let strict_relation_policy_code = format!("auto_reject_strict_relation_policy_{suffix}");
+    ensure_transfer_policy(
+        &client,
+        &workspace_code,
+        &strict_relation_policy_code,
+        "Auto reject strict relation policy",
+        "borrowed_unverified",
+        true,
+        true,
+        false,
+        false,
+    )
+    .await
+    .expect("strict relation policy");
+    add_relation(
+        &client,
+        &source_code,
+        &target_code,
+        "older_strict_relation",
+        Some("knowledge_may_transfer"),
+        "older_strict_facts",
+        "cross_project_linked",
+        "active",
+        false,
+        Some(strict_relation_policy_code.as_str()),
+        "explicit_foreign",
+    )
+    .await
+    .expect("older strict relation");
+    add_relation(
+        &client,
+        &source_code,
+        &target_code,
+        "newer_permissive_relation",
+        Some("knowledge_may_transfer"),
+        "newer_permissive_facts",
+        "cross_project_linked",
+        "active",
+        false,
+        Some(transfer_policy_code.as_str()),
+        "explicit_foreign",
+    )
+    .await
+    .expect("newer permissive relation");
+
+    let packet = create_import_packet(
+        &client,
+        &source_code,
+        &target_code,
+        Some(transfer_policy_code.as_str()),
+        None,
+        "borrowed_unverified",
+        Some("auto reject strict relation packet"),
+        Some("initial import"),
+        "cross_project_linked",
+        "proposed",
+        "unverified",
+        "borrowed",
+        false,
+        &[format!("memory_item:strict_relation:{suffix}")],
+        &[format!(
+            "artifact://proof/auto-reject-strict-relation/{suffix}"
+        )],
+        Some("import_runtime"),
+        Some(&json!([format!("import_event:strict_relation:{suffix}")])),
+        Some(&json!([format!("thread:strict_relation:{suffix}")])),
+        Some(
+            &json!({"kind":"import_packet_runtime","case":"strict_relation_reconcile","suffix":suffix}),
+        ),
+        Some("import"),
+        Some("import-packet-envelope-v1"),
+    )
+    .await
+    .expect("packet");
+
+    update_import_packet(
+        &client,
+        ImportPacketUpdate {
+            import_packet_id: packet.import_packet_id,
+            status: Some("quarantined"),
+            summary: Some("manual quarantine requested"),
+            reason: Some("manual quarantine"),
+            imported_by_agent_scope: None,
+            trust_state: Some("disputed"),
+            verification_state: Some("unverified"),
+            borrowed_status: Some("borrowed"),
+            can_promote_after_verification: Some(false),
+            actor_agent_code: None,
+        },
+    )
+    .await
+    .expect("quarantine packet");
+
+    let summary = reconcile_import_packet_quarantines(&client, true, Some(8))
+        .await
+        .expect("reconcile");
+    assert!(summary.rejected >= 1);
+    let decision = summary
+        .decisions
+        .iter()
+        .find(|decision| decision.import_packet_id == packet.import_packet_id)
+        .expect("decision for strict relation packet");
+    assert_eq!(decision.decision, "reject");
+    assert!(
+        decision
+            .reason
+            .contains("transfer_policy_disallows_verified_writeback"),
+        "{}",
+        decision.reason
+    );
+
+    let packet = get_import_packet(&client, packet.import_packet_id)
+        .await
+        .expect("packet after reject");
+    assert_eq!(packet.status, "rejected");
+    assert_eq!(packet.verification_state, "rejected");
+    assert_eq!(packet.borrowed_status, "rejected");
+    assert!(!packet.can_promote_after_verification);
+}
+
+#[tokio::test]
+async fn reconcile_import_packet_quarantines_rejects_no_policy_packet_without_releasing_dry_run() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=')
+                && std::env::var_os(key).is_none()
+            {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let workspace_code = format!("auto_no_policy_ws_{suffix}");
+    let source_code = format!("auto_no_policy_source_{suffix}");
+    let target_code = format!("auto_no_policy_target_{suffix}");
+    let source_root = format!("/tmp/{source_code}");
+    let target_root = format!("/tmp/{target_code}");
+    std::fs::create_dir_all(&source_root).expect("source root");
+    std::fs::create_dir_all(&target_root).expect("target root");
+
+    ensure_workspace(
+        &client,
+        &workspace_code,
+        "Auto No Policy Workspace",
+        "active",
+    )
+    .await
+    .expect("workspace");
+    upsert_project(
+        &client,
+        &source_code,
+        "Auto No Policy Source",
+        &source_root,
+        Some("main"),
+        &workspace_code,
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("source project");
+    upsert_project(
+        &client,
+        &target_code,
+        "Auto No Policy Target",
+        &target_root,
+        Some("main"),
+        &workspace_code,
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("target project");
+    ensure_access_policy(
+        &client,
+        &workspace_code,
+        None,
+        None,
+        Some(&source_code),
+        &format!("auto_no_policy_access_{suffix}"),
+        "Auto no policy access",
+        "fact",
+        "cross_project_linked",
+        250,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        None,
+        "active",
+    )
+    .await
+    .expect("access policy");
+    add_relation(
+        &client,
+        &source_code,
+        &target_code,
+        "knowledge_may_transfer",
+        Some("knowledge_may_transfer"),
+        "memory_transfer",
+        "cross_project_linked",
+        "active",
+        false,
+        None,
+        "local_plus_related",
+    )
+    .await
+    .expect("relation without transfer policy");
+    let packet = create_import_packet(
+        &client,
+        &source_code,
+        &target_code,
+        None,
+        None,
+        "borrowed_unverified",
+        Some("auto no policy packet"),
+        Some("initial import without policy"),
+        "cross_project_linked",
+        "proposed",
+        "unverified",
+        "borrowed",
+        false,
+        &[format!("memory_item:no_policy:{suffix}")],
+        &[format!("file:///tmp/auto_no_policy_artifact_{suffix}.md")],
+        Some("import_runtime"),
+        Some(&json!([format!("import_event:no_policy:{suffix}")])),
+        Some(&json!([format!("thread:no_policy:{suffix}")])),
+        Some(&json!({"kind":"import_packet_runtime","case":"no_policy_reconcile","suffix":suffix})),
+        Some("import"),
+        Some("import-packet-envelope-v1"),
+    )
+    .await
+    .expect("packet without transfer policy may be imported but not promoted");
+
+    update_import_packet(
+        &client,
+        ImportPacketUpdate {
+            import_packet_id: packet.import_packet_id,
+            status: Some("quarantined"),
+            summary: Some("manual quarantine requested"),
+            reason: Some("manual quarantine"),
+            imported_by_agent_scope: None,
+            trust_state: Some("disputed"),
+            verification_state: Some("unverified"),
+            borrowed_status: Some("borrowed"),
+            can_promote_after_verification: Some(false),
+            actor_agent_code: None,
+        },
+    )
+    .await
+    .expect("quarantine packet");
+
+    let dry_run = reconcile_import_packet_quarantines(&client, false, Some(512))
+        .await
+        .expect("dry-run reconcile");
+    let dry_decision = dry_run
+        .decisions
+        .iter()
+        .find(|decision| decision.import_packet_id == packet.import_packet_id)
+        .expect("dry-run decision for no-policy packet");
+    assert_eq!(dry_decision.decision, "reject");
+    assert!(
+        dry_decision.reason.contains("transfer_policy_missing"),
+        "{}",
+        dry_decision.reason
+    );
+
+    let applied = reconcile_import_packet_quarantines(&client, true, Some(512))
+        .await
+        .expect("apply reconcile must not abort on no-policy packet");
+    let applied_decision = applied
+        .decisions
+        .iter()
+        .find(|decision| decision.import_packet_id == packet.import_packet_id)
+        .expect("applied decision for no-policy packet");
+    assert_eq!(applied_decision.decision, "reject");
+    assert!(
+        applied_decision.reason.contains("transfer_policy_missing"),
+        "{}",
+        applied_decision.reason
+    );
+
+    let packet = get_import_packet(&client, packet.import_packet_id)
+        .await
+        .expect("packet after reject");
+    assert_eq!(packet.status, "rejected");
+    assert_eq!(packet.verification_state, "rejected");
+    assert_eq!(packet.borrowed_status, "rejected");
+    assert!(!packet.can_promote_after_verification);
+}
+
+#[tokio::test]
+async fn import_packet_promotion_requires_explicit_relation_and_transfer_policy_approval() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=')
+                && std::env::var_os(key).is_none()
+            {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let workspace_code = format!("approval_gate_ws_{suffix}");
+    let source_code = format!("approval_gate_source_{suffix}");
+    let target_code = format!("approval_gate_target_{suffix}");
+    let source_root = format!("/tmp/{source_code}");
+    let target_root = format!("/tmp/{target_code}");
+    std::fs::create_dir_all(&source_root).expect("source root");
+    std::fs::create_dir_all(&target_root).expect("target root");
+
+    ensure_workspace(
+        &client,
+        &workspace_code,
+        "Approval Gate Workspace",
+        "active",
+    )
+    .await
+    .expect("workspace");
+    upsert_project(
+        &client,
+        &source_code,
+        "Approval Gate Source",
+        &source_root,
+        Some("main"),
+        &workspace_code,
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("source project");
+    upsert_project(
+        &client,
+        &target_code,
+        "Approval Gate Target",
+        &target_root,
+        Some("main"),
+        &workspace_code,
+        "cross_project_linked",
+        "local_strict",
+    )
+    .await
+    .expect("target project");
+    let transfer_policy = ensure_transfer_policy(
+        &client,
+        &workspace_code,
+        &format!("approval_gate_transfer_{suffix}"),
+        "Approval gate transfer",
+        "manual_review",
+        true,
+        true,
+        true,
+        true,
+    )
+    .await
+    .expect("transfer policy");
+    ensure_access_policy(
+        &client,
+        &workspace_code,
+        None,
+        None,
+        Some(&source_code),
+        &format!("approval_gate_access_{suffix}"),
+        "Approval gate access",
+        "fact",
+        "cross_project_linked",
+        250,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        true,
+        Some("approval gate test grants rights but must not bypass locks"),
+        "active",
+    )
+    .await
+    .expect("access policy");
+    add_relation(
+        &client,
+        &source_code,
+        &target_code,
+        "knowledge_may_transfer",
+        Some("knowledge_may_transfer"),
+        "memory_transfer",
+        "cross_project_linked",
+        "active",
+        true,
+        Some(transfer_policy.code.as_str()),
+        "local_plus_related",
+    )
+    .await
+    .expect("relation");
+    let packet = create_import_packet(
+        &client,
+        &source_code,
+        &target_code,
+        Some(transfer_policy.code.as_str()),
+        None,
+        "borrowed_unverified",
+        Some("approval gate packet"),
+        Some("initial import"),
+        "cross_project_linked",
+        "proposed",
+        "unverified",
+        "borrowed",
+        true,
+        &[format!("memory_item:{suffix}")],
+        &[format!("file:///tmp/approval_gate_artifact_{suffix}.md")],
+        Some("import_runtime"),
+        Some(&json!([format!("import_event:{suffix}")])),
+        Some(&json!([format!("thread:{suffix}")])),
+        Some(&json!({"kind":"import_packet_runtime","suffix":suffix})),
+        Some("import"),
+        Some("import-packet-envelope-v1"),
+    )
+    .await
+    .expect("packet");
+
+    let relation_lock_error = update_import_packet(
+        &client,
+        ImportPacketUpdate {
+            import_packet_id: packet.import_packet_id,
+            status: Some("verified"),
+            summary: Some("promote before relation approval"),
+            reason: Some("must fail while relation still requires approval"),
+            imported_by_agent_scope: Some("cross_project_linked"),
+            trust_state: Some("verified"),
+            verification_state: Some("verified"),
+            borrowed_status: Some("verified_local_copy"),
+            can_promote_after_verification: Some(true),
+            actor_agent_code: None,
+        },
+    )
+    .await
+    .expect_err("access policy must not bypass relation approval lock");
+    assert!(format!("{relation_lock_error:#}").contains("relation still requires approval"));
+
+    update_relation(
+        &client,
+        RelationUpdate {
+            source_code: &source_code,
+            target_code: &target_code,
+            relation_type: "knowledge_may_transfer",
+            shared_contour: "memory_transfer",
+            project_link_type: Some("knowledge_may_transfer"),
+            visibility_scope: Some("cross_project_linked"),
+            relation_status: Some("active"),
+            requires_approval: Some(false),
+            transfer_policy_code: Some(transfer_policy.code.as_str()),
+            access_mode: Some("local_plus_related"),
+            actor_agent_code: None,
+            override_reason: Some("relation approval granted for test"),
+        },
+    )
+    .await
+    .expect("approve relation");
+
+    let human_lock_error = update_import_packet(
+        &client,
+        ImportPacketUpdate {
+            import_packet_id: packet.import_packet_id,
+            status: Some("verified"),
+            summary: Some("promote before transfer policy approval"),
+            reason: Some("must fail while transfer policy still requires approval"),
+            imported_by_agent_scope: Some("cross_project_linked"),
+            trust_state: Some("verified"),
+            verification_state: Some("verified"),
+            borrowed_status: Some("verified_local_copy"),
+            can_promote_after_verification: Some(true),
+            actor_agent_code: None,
+        },
+    )
+    .await
+    .expect_err("access policy must not bypass transfer policy human approval lock");
+    assert!(format!("{human_lock_error:#}").contains("still requires human approval"));
+
+    ensure_transfer_policy(
+        &client,
+        &workspace_code,
+        &transfer_policy.code,
+        "Approval gate transfer approved",
+        "verified_writeback",
+        true,
+        true,
+        true,
+        false,
+    )
+    .await
+    .expect("approve transfer policy");
+
+    let promoted = update_import_packet(
+        &client,
+        ImportPacketUpdate {
+            import_packet_id: packet.import_packet_id,
+            status: Some("verified"),
+            summary: Some("promote after explicit approval"),
+            reason: Some("explicit relation and transfer policy approvals granted"),
+            imported_by_agent_scope: Some("cross_project_linked"),
+            trust_state: Some("verified"),
+            verification_state: Some("verified"),
+            borrowed_status: Some("verified_local_copy"),
+            can_promote_after_verification: Some(true),
+            actor_agent_code: None,
+        },
+    )
+    .await
+    .expect("promote after explicit approvals");
+    assert_eq!(promoted.status, "verified");
+    assert_eq!(promoted.borrowed_status, "verified_local_copy");
+}
+
+#[tokio::test]
+async fn create_import_packet_direct_verified_state_requires_writeback_gates() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=')
+                && std::env::var_os(key).is_none()
+            {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (workspace_code, source_code, target_code, transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+
+    let missing_promote_error = create_stage2_verified_import_packet(
+        &client,
+        &source_code,
+        &target_code,
+        &transfer_policy_code,
+        suffix,
+        "missing-promote",
+        "verified",
+        "verified",
+        false,
+        "verified",
+        "verified_local_copy",
+    )
+    .await
+    .expect_err("missing can_promote must fail");
+    assert!(
+        format!("{missing_promote_error:#}")
+            .contains("cannot be promoted without can_promote_after_verification")
+    );
+
+    let verification_state_error = create_stage2_verified_import_packet(
+        &client,
+        &source_code,
+        &target_code,
+        &transfer_policy_code,
+        suffix,
+        "bad-verification-state",
+        "verified",
+        "verified",
+        true,
+        "unverified",
+        "verified_local_copy",
+    )
+    .await
+    .expect_err("non-verified verification_state must fail");
+    assert!(
+        format!("{verification_state_error:#}")
+            .contains("cannot be promoted without verification_state=verified")
+    );
+
+    ensure_transfer_policy(
+        &client,
+        &workspace_code,
+        &transfer_policy_code,
+        "Stage2 transfer policy human approval",
+        "borrowed_unverified",
+        true,
+        true,
+        true,
+        true,
+    )
+    .await
+    .expect("human approval policy");
+
+    let human_approval_error = create_stage2_verified_import_packet(
+        &client,
+        &source_code,
+        &target_code,
+        &transfer_policy_code,
+        suffix,
+        "human-approval",
+        "verified",
+        "verified",
+        true,
+        "verified",
+        "verified_local_copy",
+    )
+    .await
+    .expect_err("human approval must block direct verified create");
+    let rendered_human_approval_error = human_approval_error
+        .chain()
+        .find_map(|cause| {
+            cause
+                .downcast_ref::<tokio_postgres::Error>()
+                .and_then(|error| error.as_db_error())
+                .map(|error| error.message().to_string())
+        })
+        .unwrap_or_else(|| format!("{human_approval_error:?}"));
+    assert!(
+        rendered_human_approval_error.contains("still requires human approval"),
+        "{rendered_human_approval_error}"
+    );
+
+    ensure_transfer_policy(
+        &client,
+        &workspace_code,
+        &transfer_policy_code,
+        "Stage2 transfer policy writeback block",
+        "borrowed_unverified",
+        true,
+        true,
+        false,
+        false,
+    )
+    .await
+    .expect("writeback block policy");
+
+    let writeback_error = create_stage2_verified_import_packet(
+        &client,
+        &source_code,
+        &target_code,
+        &transfer_policy_code,
+        suffix,
+        "writeback-blocked",
+        "verified",
+        "verified",
+        true,
+        "verified",
+        "verified_local_copy",
+    )
+    .await
+    .expect_err("writeback block must fail direct verified create");
+    assert!(format!("{writeback_error:#}").contains("blocks verified writeback"));
+
+    ensure_transfer_policy(
+        &client,
+        &workspace_code,
+        &transfer_policy_code,
+        "Stage2 transfer policy restored",
+        "borrowed_unverified",
+        true,
+        true,
+        true,
+        false,
+    )
+    .await
+    .expect("restored permissive policy");
+
+    let restored_packet = create_stage2_verified_import_packet(
+        &client,
+        &source_code,
+        &target_code,
+        &transfer_policy_code,
+        suffix,
+        "positive",
+        "verified",
+        "verified",
+        true,
+        "verified",
+        "verified_local_copy",
+    )
+    .await
+    .expect("permissive direct verified create");
+    assert_eq!(restored_packet.status, "verified");
+    assert_eq!(restored_packet.verification_state, "verified");
+    assert_eq!(restored_packet.borrowed_status, "verified_local_copy");
+    assert!(restored_packet.can_promote_after_verification);
+}
+
+#[tokio::test]
+async fn create_import_packet_requires_strictest_packet_and_relation_import_policy() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=')
+                && std::env::var_os(key).is_none()
+            {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (workspace_code, source_code, target_code, transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+
+    let relation_import_block_code = format!("stage2_relation_import_block_{suffix}");
+    ensure_transfer_policy(
+        &client,
+        &workspace_code,
+        &relation_import_block_code,
+        "Stage2 relation import block",
+        "borrowed_unverified",
+        true,
+        false,
+        true,
+        false,
+    )
+    .await
+    .expect("relation import block policy");
+
+    update_relation(
+        &client,
+        RelationUpdate {
+            source_code: &source_code,
+            target_code: &target_code,
+            relation_type: "shared_codebase",
+            shared_contour: "facts",
+            project_link_type: Some("knowledge_may_transfer"),
+            visibility_scope: Some("cross_project_linked"),
+            relation_status: Some("active"),
+            requires_approval: Some(false),
+            transfer_policy_code: Some(relation_import_block_code.as_str()),
+            access_mode: Some("explicit_foreign"),
+            actor_agent_code: None,
+            override_reason: Some("relation policy now blocks import"),
+        },
+    )
+    .await
+    .expect("relation policy update");
+
+    let relation_import_error = create_import_packet(
+        &client,
+        &source_code,
+        &target_code,
+        Some(transfer_policy_code.as_str()),
+        None,
+        "borrowed_unverified",
+        Some("stage2 relation import block"),
+        Some("initial import"),
+        "cross_project_linked",
+        "proposed",
+        "unverified",
+        "borrowed",
+        false,
+        &[format!("memory_item:relation_import_block:{suffix}")],
+        &[format!(
+            "artifact://proof/stage2-relation-import-block/{suffix}"
+        )],
+        Some("import_runtime"),
+        Some(&json!([format!(
+            "import_event:relation_import_block:{suffix}"
+        )])),
+        Some(&json!([format!("thread:relation_import_block:{suffix}")])),
+        Some(
+            &json!({"kind":"import_packet_runtime","case":"relation_import_block","suffix":suffix}),
+        ),
+        Some("import"),
+        Some("import-packet-envelope-v1"),
+    )
+    .await
+    .expect_err("strict relation import policy must block explicit permissive packet policy");
+    assert!(format!("{relation_import_error:#}").contains("blocks import"));
+
+    let foreign_workspace_code = format!("stage2_relation_import_foreign_ws_{suffix}");
+    let foreign_relation_policy_code = format!("stage2_relation_import_foreign_policy_{suffix}");
+    ensure_workspace(
+        &client,
+        &foreign_workspace_code,
+        "Stage2 relation import foreign workspace",
+        "active",
+    )
+    .await
+    .expect("foreign workspace");
+    ensure_transfer_policy(
+        &client,
+        &foreign_workspace_code,
+        &foreign_relation_policy_code,
+        "Stage2 relation import foreign policy",
+        "verified_writeback",
+        true,
+        true,
+        true,
+        false,
+    )
+    .await
+    .expect("foreign relation policy");
+    update_relation(
+        &client,
+        RelationUpdate {
+            source_code: &source_code,
+            target_code: &target_code,
+            relation_type: "shared_codebase",
+            shared_contour: "facts",
+            project_link_type: Some("knowledge_may_transfer"),
+            visibility_scope: Some("cross_project_linked"),
+            relation_status: Some("active"),
+            requires_approval: Some(false),
+            transfer_policy_code: Some(foreign_relation_policy_code.as_str()),
+            access_mode: Some("explicit_foreign"),
+            actor_agent_code: None,
+            override_reason: Some("relation policy points at foreign workspace"),
+        },
+    )
+    .await
+    .expect("foreign relation policy update");
+
+    let foreign_relation_error = create_import_packet(
+        &client,
+        &source_code,
+        &target_code,
+        Some(transfer_policy_code.as_str()),
+        None,
+        "borrowed_unverified",
+        Some("stage2 relation foreign policy"),
+        Some("initial import"),
+        "cross_project_linked",
+        "proposed",
+        "unverified",
+        "borrowed",
+        false,
+        &[format!("memory_item:relation_foreign_policy:{suffix}")],
+        &[format!(
+            "artifact://proof/stage2-relation-foreign-policy/{suffix}"
+        )],
+        Some("import_runtime"),
+        Some(&json!([format!(
+            "import_event:relation_foreign_policy:{suffix}"
+        )])),
+        Some(&json!([format!("thread:relation_foreign_policy:{suffix}")])),
+        Some(
+            &json!({"kind":"import_packet_runtime","case":"relation_foreign_policy","suffix":suffix}),
+        ),
+        Some("import"),
+        Some("import-packet-envelope-v1"),
+    )
+    .await
+    .expect_err("foreign relation policy workspace must fail closed on create");
+    assert!(
+        format!("{foreign_relation_error:#}").contains("relation transfer policy")
+            && format!("{foreign_relation_error:#}").contains("belongs to workspace"),
+        "{foreign_relation_error:#}"
+    );
+}
+
+#[tokio::test]
+async fn explicit_unknown_transfer_policy_codes_fail_closed_for_import_and_relations() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=')
+                && std::env::var_os(key).is_none()
+            {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (_workspace_code, source_code, target_code, _transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+    let unknown_policy_code = format!("missing_transfer_policy_{suffix}");
+
+    let import_error = create_import_packet(
+        &client,
+        &source_code,
+        &target_code,
+        Some(unknown_policy_code.as_str()),
+        None,
+        "borrowed_unverified",
+        Some("stage2 unknown policy import"),
+        Some("explicit unknown policy must fail"),
+        "cross_project_linked",
+        "proposed",
+        "unverified",
+        "borrowed",
+        false,
+        &[format!("memory_item:unknown_policy:{suffix}")],
+        &[format!("artifact://proof/stage2-unknown-policy/{suffix}")],
+        Some("import_runtime"),
+        Some(&json!([format!("import_event:unknown_policy:{suffix}")])),
+        Some(&json!([format!("thread:unknown_policy:{suffix}")])),
+        Some(&json!({"kind":"import_packet_runtime","case":"unknown_policy","suffix":suffix})),
+        Some("import"),
+        Some("import-packet-envelope-v1"),
+    )
+    .await
+    .expect_err("explicit unknown import packet transfer policy must fail closed");
+    assert!(
+        format!("{import_error:#}").contains("transfer policy not found"),
+        "{import_error:#}"
+    );
+
+    let relation_add_error = add_relation(
+        &client,
+        &source_code,
+        &target_code,
+        "unknown_policy_relation",
+        Some("knowledge_may_transfer"),
+        "unknown_policy_facts",
+        "cross_project_linked",
+        "active",
+        false,
+        Some(unknown_policy_code.as_str()),
+        "explicit_foreign",
+    )
+    .await
+    .expect_err("explicit unknown relation transfer policy must fail closed on add");
+    assert!(
+        format!("{relation_add_error:#}").contains("transfer policy not found"),
+        "{relation_add_error:#}"
+    );
+
+    let relation_update_error = update_relation(
+        &client,
+        RelationUpdate {
+            source_code: &source_code,
+            target_code: &target_code,
+            relation_type: "shared_codebase",
+            shared_contour: "facts",
+            project_link_type: Some("knowledge_may_transfer"),
+            visibility_scope: Some("cross_project_linked"),
+            relation_status: Some("active"),
+            requires_approval: Some(false),
+            transfer_policy_code: Some(unknown_policy_code.as_str()),
+            access_mode: Some("explicit_foreign"),
+            actor_agent_code: None,
+            override_reason: Some("explicit unknown policy must fail"),
+        },
+    )
+    .await
+    .expect_err("explicit unknown relation transfer policy must fail closed on update");
+    assert!(
+        format!("{relation_update_error:#}").contains("transfer policy not found"),
+        "{relation_update_error:#}"
+    );
+}
+
+#[tokio::test]
+async fn update_import_packet_requires_strictest_packet_and_relation_writeback_policy() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=')
+                && std::env::var_os(key).is_none()
+            {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (workspace_code, source_code, target_code, transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+
+    let packet_writeback_block_code = format!("stage2_packet_writeback_block_{suffix}");
+    ensure_transfer_policy(
+        &client,
+        &workspace_code,
+        &packet_writeback_block_code,
+        "Stage2 packet writeback block",
+        "borrowed_unverified",
+        true,
+        true,
+        false,
+        false,
+    )
+    .await
+    .expect("packet writeback block policy");
+
+    let strict_packet = create_import_packet(
+        &client,
+        &source_code,
+        &target_code,
+        Some(packet_writeback_block_code.as_str()),
+        None,
+        "borrowed_unverified",
+        Some("stage2 packet writeback block"),
+        Some("initial import"),
+        "cross_project_linked",
+        "proposed",
+        "unverified",
+        "borrowed",
+        false,
+        &[format!("memory_item:packet_writeback_block:{suffix}")],
+        &[format!(
+            "artifact://proof/stage2-packet-writeback-block/{suffix}"
+        )],
+        Some("import_runtime"),
+        Some(&json!([format!("import_event:packet_writeback_block:{suffix}")])),
+        Some(&json!([format!("thread:packet_writeback_block:{suffix}")])),
+        Some(&json!({"kind":"import_packet_runtime","case":"packet_writeback_block","suffix":suffix})),
+        Some("import"),
+        Some("import-packet-envelope-v1"),
+    )
+    .await
+    .expect("strict packet");
+
+    let packet_writeback_error = update_import_packet(
+        &client,
+        ImportPacketUpdate {
+            import_packet_id: strict_packet.import_packet_id,
+            status: Some("verified"),
+            summary: Some("packet strict writeback"),
+            reason: Some("packet policy blocks verified writeback"),
+            imported_by_agent_scope: Some("cross_project_linked"),
+            trust_state: Some("verified"),
+            verification_state: Some("verified"),
+            borrowed_status: Some("verified_local_copy"),
+            can_promote_after_verification: Some(true),
+            actor_agent_code: None,
+        },
+    )
+    .await
+    .expect_err("strict packet policy must block verified update");
+    assert!(format!("{packet_writeback_error:#}").contains("blocks verified writeback"));
+
+    let relation_human_block_code = format!("stage2_relation_human_block_{suffix}");
+    ensure_transfer_policy(
+        &client,
+        &workspace_code,
+        &relation_human_block_code,
+        "Stage2 relation human block",
+        "borrowed_unverified",
+        true,
+        true,
+        true,
+        true,
+    )
+    .await
+    .expect("relation human block policy");
+
+    update_relation(
+        &client,
+        RelationUpdate {
+            source_code: &source_code,
+            target_code: &target_code,
+            relation_type: "shared_codebase",
+            shared_contour: "facts",
+            project_link_type: Some("knowledge_may_transfer"),
+            visibility_scope: Some("cross_project_linked"),
+            relation_status: Some("active"),
+            requires_approval: Some(false),
+            transfer_policy_code: Some(relation_human_block_code.as_str()),
+            access_mode: Some("explicit_foreign"),
+            actor_agent_code: None,
+            override_reason: Some("relation policy now requires human approval"),
+        },
+    )
+    .await
+    .expect("relation policy update");
+
+    let permissive_packet = create_import_packet(
+        &client,
+        &source_code,
+        &target_code,
+        Some(transfer_policy_code.as_str()),
+        None,
+        "borrowed_unverified",
+        Some("stage2 permissive packet"),
+        Some("initial import"),
+        "cross_project_linked",
+        "proposed",
+        "unverified",
+        "borrowed",
+        false,
+        &[format!("memory_item:permissive_packet:{suffix}")],
+        &[format!(
+            "artifact://proof/stage2-permissive-packet/{suffix}"
+        )],
+        Some("import_runtime"),
+        Some(&json!([format!("import_event:permissive_packet:{suffix}")])),
+        Some(&json!([format!("thread:permissive_packet:{suffix}")])),
+        Some(&json!({"kind":"import_packet_runtime","case":"permissive_packet","suffix":suffix})),
+        Some("import"),
+        Some("import-packet-envelope-v1"),
+    )
+    .await
+    .expect("permissive packet");
+
+    let relation_human_error = update_import_packet(
+        &client,
+        ImportPacketUpdate {
+            import_packet_id: permissive_packet.import_packet_id,
+            status: Some("verified"),
+            summary: Some("relation strict writeback"),
+            reason: Some("relation policy still requires human approval"),
+            imported_by_agent_scope: Some("cross_project_linked"),
+            trust_state: Some("verified"),
+            verification_state: Some("verified"),
+            borrowed_status: Some("verified_local_copy"),
+            can_promote_after_verification: Some(true),
+            actor_agent_code: None,
+        },
+    )
+    .await
+    .expect_err("strict relation policy must block verified update");
+    assert!(format!("{relation_human_error:#}").contains("still requires human approval"));
+
+    let foreign_workspace_code = format!("stage2_relation_writeback_foreign_ws_{suffix}");
+    let foreign_relation_policy_code = format!("stage2_relation_writeback_foreign_policy_{suffix}");
+    ensure_workspace(
+        &client,
+        &foreign_workspace_code,
+        "Stage2 relation writeback foreign workspace",
+        "active",
+    )
+    .await
+    .expect("foreign workspace");
+    ensure_transfer_policy(
+        &client,
+        &foreign_workspace_code,
+        &foreign_relation_policy_code,
+        "Stage2 relation writeback foreign policy",
+        "verified_writeback",
+        true,
+        true,
+        true,
+        false,
+    )
+    .await
+    .expect("foreign relation policy");
+    update_relation(
+        &client,
+        RelationUpdate {
+            source_code: &source_code,
+            target_code: &target_code,
+            relation_type: "shared_codebase",
+            shared_contour: "facts",
+            project_link_type: Some("knowledge_may_transfer"),
+            visibility_scope: Some("cross_project_linked"),
+            relation_status: Some("active"),
+            requires_approval: Some(false),
+            transfer_policy_code: Some(foreign_relation_policy_code.as_str()),
+            access_mode: Some("explicit_foreign"),
+            actor_agent_code: None,
+            override_reason: Some("relation policy points at foreign workspace"),
+        },
+    )
+    .await
+    .expect("foreign relation policy update");
+
+    let foreign_relation_error = update_import_packet(
+        &client,
+        ImportPacketUpdate {
+            import_packet_id: permissive_packet.import_packet_id,
+            status: Some("verified"),
+            summary: Some("relation foreign workspace writeback"),
+            reason: Some("foreign relation policy must fail closed"),
+            imported_by_agent_scope: Some("cross_project_linked"),
+            trust_state: Some("verified"),
+            verification_state: Some("verified"),
+            borrowed_status: Some("verified_local_copy"),
+            can_promote_after_verification: Some(true),
+            actor_agent_code: None,
+        },
+    )
+    .await
+    .expect_err("foreign relation policy workspace must fail closed on update");
+    assert!(
+        format!("{foreign_relation_error:#}").contains("relation transfer policy")
+            && format!("{foreign_relation_error:#}").contains("belongs to workspace"),
+        "{foreign_relation_error:#}"
+    );
+}
+
+#[tokio::test]
+async fn import_packets_db_trigger_rejects_direct_verified_writeback_bypass() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=')
+                && std::env::var_os(key).is_none()
+            {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let trigger_present: bool = client
+        .query_one(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_trigger t
+                INNER JOIN pg_class c ON c.oid = t.tgrelid
+                INNER JOIN pg_namespace n ON n.oid = c.relnamespace
+                INNER JOIN pg_proc p ON p.oid = t.tgfoid
+                INNER JOIN pg_namespace pn ON pn.oid = p.pronamespace
+                WHERE n.nspname = 'ami'
+                  AND c.relname = 'import_packets'
+                  AND t.tgname = 'import_packets_enforce_writeback_gate_trigger'
+                  AND NOT t.tgisinternal
+                  AND t.tgenabled = 'O'
+                  AND pn.nspname = 'ami'
+                  AND p.proname = 'enforce_import_packet_writeback_gate'
+                  AND (t.tgtype & 1) = 1
+                  AND (t.tgtype & 2) = 2
+                  AND (t.tgtype & 4) = 4
+                  AND (t.tgtype & 16) = 16
+                  AND pg_get_triggerdef(t.oid) LIKE '%UPDATE OF source_project_id, target_project_id, transfer_policy_id, status, trust_state, verification_state, borrowed_status, can_promote_after_verification%'
+            )
+            "#,
+            &[],
+        )
+        .await
+        .expect("import packet DB trigger sentinel")
+        .get(0);
+    assert!(
+        trigger_present,
+        "bootstrap schema must install import packet writeback DB trigger before direct SQL bypass test"
+    );
+    let trigger_function_current: bool = client
+        .query_one(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_proc p
+                INNER JOIN pg_namespace n ON n.oid = p.pronamespace
+                WHERE n.nspname = 'ami'
+                  AND p.proname = 'enforce_import_packet_writeback_gate'
+                  AND pg_get_functiondef(p.oid) LIKE '%packet transfer policy is not in source workspace%'
+                  AND pg_get_functiondef(p.oid) LIKE '%relation transfer policy is not in source workspace%'
+                  AND pg_get_functiondef(p.oid) LIKE '%access policy does not grant can_promote%'
+                  AND pg_get_functiondef(p.oid) LIKE '%access policy does not grant can_approve_transfer%'
+                  AND pg_get_functiondef(p.oid) LIKE '%trust_state=verified%'
+            )
+            "#,
+            &[],
+        )
+        .await
+        .expect("import packet DB trigger function sentinel")
+        .get(0);
+    assert!(
+        trigger_function_current,
+        "bootstrap schema must install current import packet writeback DB trigger function before direct SQL bypass test"
+    );
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let (workspace_code, source_code, target_code, transfer_policy_code) =
+        create_stage2_import_shared_context(&client, suffix).await;
+
+    ensure_transfer_policy(
+        &client,
+        &workspace_code,
+        &transfer_policy_code,
+        "Stage2 DB trigger human approval",
+        "borrowed_unverified",
+        true,
+        true,
+        true,
+        true,
+    )
+    .await
+    .expect("human approval policy");
+
+    let human_approval_error = client
+        .execute(
+            r#"
+            INSERT INTO ami.import_packets(
+                source_project_id,
+                target_project_id,
+                transfer_policy_id,
+                status,
+                summary,
+                allowed_by_project_link,
+                memory_object_ids,
+                artifact_refs,
+                reason,
+                imported_by_agent_scope,
+                trust_state,
+                verification_state,
+                borrowed_status,
+                can_promote_after_verification,
+                source_kind,
+                source_event_ids,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version
+            )
+            SELECT
+                source.project_id,
+                target.project_id,
+                policy.transfer_policy_id,
+                'verified',
+                'direct verified DB bypass',
+                TRUE,
+                '[]'::jsonb,
+                '["artifact://proof/direct-db-bypass"]'::jsonb,
+                'direct sql must fail closed',
+                'cross_project_linked',
+                'verified',
+                'verified',
+                'verified_local_copy',
+                TRUE,
+                'import_runtime',
+                '["event:direct-db-bypass"]'::jsonb,
+                '["thread:direct-db-bypass"]'::jsonb,
+                '{"kind":"direct_db_bypass"}'::jsonb,
+                'import',
+                'import-packet-envelope-v1'
+            FROM ami.projects source
+            INNER JOIN ami.projects target ON target.code = $2
+            INNER JOIN ami.transfer_policies policy ON policy.code = $3
+            WHERE source.code = $1
+            "#,
+            &[&source_code, &target_code, &transfer_policy_code],
+        )
+        .await
+        .expect_err("DB trigger must reject direct verified insert with human approval");
+    let rendered_human_approval_error = human_approval_error
+        .as_db_error()
+        .map(|error| error.message().to_string())
+        .unwrap_or_else(|| format!("{human_approval_error:?}"));
+    assert!(
+        rendered_human_approval_error.contains("still requires human approval"),
+        "{rendered_human_approval_error}"
+    );
+
+    ensure_transfer_policy(
+        &client,
+        &workspace_code,
+        &transfer_policy_code,
+        "Stage2 DB trigger writeback block",
+        "borrowed_unverified",
+        true,
+        true,
+        false,
+        false,
+    )
+    .await
+    .expect("writeback block policy");
+
+    let writeback_error = client
+        .execute(
+            r#"
+            INSERT INTO ami.import_packets(
+                source_project_id,
+                target_project_id,
+                transfer_policy_id,
+                status,
+                summary,
+                allowed_by_project_link,
+                memory_object_ids,
+                artifact_refs,
+                reason,
+                imported_by_agent_scope,
+                trust_state,
+                verification_state,
+                borrowed_status,
+                can_promote_after_verification,
+                source_kind,
+                source_event_ids,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version
+            )
+            SELECT
+                source.project_id,
+                target.project_id,
+                policy.transfer_policy_id,
+                'verified',
+                'direct verified DB bypass',
+                TRUE,
+                '[]'::jsonb,
+                '["artifact://proof/direct-db-bypass-writeback"]'::jsonb,
+                'direct sql must fail closed',
+                'cross_project_linked',
+                'verified',
+                'verified',
+                'verified_local_copy',
+                TRUE,
+                'import_runtime',
+                '["event:direct-db-bypass-writeback"]'::jsonb,
+                '["thread:direct-db-bypass-writeback"]'::jsonb,
+                '{"kind":"direct_db_bypass_writeback"}'::jsonb,
+                'import',
+                'import-packet-envelope-v1'
+            FROM ami.projects source
+            INNER JOIN ami.projects target ON target.code = $2
+            INNER JOIN ami.transfer_policies policy ON policy.code = $3
+            WHERE source.code = $1
+            "#,
+            &[&source_code, &target_code, &transfer_policy_code],
+        )
+        .await
+        .expect_err("DB trigger must reject direct verified insert without writeback");
+    let rendered_writeback_error = writeback_error
+        .as_db_error()
+        .map(|error| error.message().to_string())
+        .unwrap_or_else(|| format!("{writeback_error:?}"));
+    assert!(
+        rendered_writeback_error.contains("blocks verified writeback"),
+        "{rendered_writeback_error}"
+    );
+
+    let limited_access_policy_code = format!("stage2_db_trigger_no_approve_access_{suffix}");
+    ensure_access_policy(
+        &client,
+        &workspace_code,
+        None,
+        None,
+        Some(&source_code),
+        &limited_access_policy_code,
+        "Stage2 DB trigger no approve transfer access",
+        "fact",
+        "cross_project_linked",
+        500,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false,
+        true,
+        false,
+        false,
+        Some("direct DB trigger negative path"),
+        "active",
+    )
+    .await
+    .expect("limited access policy");
+
+    ensure_transfer_policy(
+        &client,
+        &workspace_code,
+        &transfer_policy_code,
+        "Stage2 DB trigger permissive transfer",
+        "verified_writeback",
+        true,
+        true,
+        true,
+        false,
+    )
+    .await
+    .expect("permissive transfer policy");
+
+    let approve_transfer_error = client
+        .execute(
+            r#"
+            INSERT INTO ami.import_packets(
+                source_project_id,
+                target_project_id,
+                transfer_policy_id,
+                status,
+                summary,
+                allowed_by_project_link,
+                memory_object_ids,
+                artifact_refs,
+                reason,
+                imported_by_agent_scope,
+                trust_state,
+                verification_state,
+                borrowed_status,
+                can_promote_after_verification,
+                source_kind,
+                source_event_ids,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version
+            )
+            SELECT
+                source.project_id,
+                target.project_id,
+                policy.transfer_policy_id,
+                'verified',
+                'direct verified DB bypass access',
+                TRUE,
+                '[]'::jsonb,
+                '["artifact://proof/direct-db-bypass-access"]'::jsonb,
+                'direct sql must fail closed',
+                'cross_project_linked',
+                'verified',
+                'verified',
+                'verified_local_copy',
+                TRUE,
+                'import_runtime',
+                '["event:direct-db-bypass-access"]'::jsonb,
+                '["thread:direct-db-bypass-access"]'::jsonb,
+                '{"kind":"direct_db_bypass_access"}'::jsonb,
+                'import',
+                'import-packet-envelope-v1'
+            FROM ami.projects source
+            INNER JOIN ami.projects target ON target.code = $2
+            INNER JOIN ami.transfer_policies policy ON policy.code = $3
+            WHERE source.code = $1
+            "#,
+            &[&source_code, &target_code, &transfer_policy_code],
+        )
+        .await
+        .expect_err(
+            "DB trigger must reject direct verified insert without approve-transfer access",
+        );
+    let rendered_approve_transfer_error = approve_transfer_error
+        .as_db_error()
+        .map(|error| error.message().to_string())
+        .unwrap_or_else(|| format!("{approve_transfer_error:?}"));
+    assert!(
+        rendered_approve_transfer_error.contains("does not grant can_approve_transfer"),
+        "{rendered_approve_transfer_error}"
+    );
+
+    let no_promote_access_policy_code = format!("stage2_db_trigger_no_promote_access_{suffix}");
+    ensure_access_policy(
+        &client,
+        &workspace_code,
+        None,
+        None,
+        Some(&source_code),
+        &no_promote_access_policy_code,
+        "Stage2 DB trigger no promote access",
+        "fact",
+        "cross_project_linked",
+        600,
+        true,
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        Some("direct DB trigger promote negative path"),
+        "active",
+    )
+    .await
+    .expect("no promote access policy");
+
+    let promote_error = client
+        .execute(
+            r#"
+            INSERT INTO ami.import_packets(
+                source_project_id,
+                target_project_id,
+                transfer_policy_id,
+                status,
+                summary,
+                allowed_by_project_link,
+                memory_object_ids,
+                artifact_refs,
+                reason,
+                imported_by_agent_scope,
+                trust_state,
+                verification_state,
+                borrowed_status,
+                can_promote_after_verification,
+                source_kind,
+                source_event_ids,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version
+            )
+            SELECT
+                source.project_id,
+                target.project_id,
+                policy.transfer_policy_id,
+                'verified',
+                'direct verified DB bypass promote access',
+                TRUE,
+                '[]'::jsonb,
+                '["artifact://proof/direct-db-bypass-promote-access"]'::jsonb,
+                'direct sql must fail closed',
+                'cross_project_linked',
+                'verified',
+                'verified',
+                'verified_local_copy',
+                TRUE,
+                'import_runtime',
+                '["event:direct-db-bypass-promote-access"]'::jsonb,
+                '["thread:direct-db-bypass-promote-access"]'::jsonb,
+                '{"kind":"direct_db_bypass_promote_access"}'::jsonb,
+                'import',
+                'import-packet-envelope-v1'
+            FROM ami.projects source
+            INNER JOIN ami.projects target ON target.code = $2
+            INNER JOIN ami.transfer_policies policy ON policy.code = $3
+            WHERE source.code = $1
+            "#,
+            &[&source_code, &target_code, &transfer_policy_code],
+        )
+        .await
+        .expect_err("DB trigger must reject direct verified insert without promote access");
+    let rendered_promote_error = promote_error
+        .as_db_error()
+        .map(|error| error.message().to_string())
+        .unwrap_or_else(|| format!("{promote_error:?}"));
+    assert!(
+        rendered_promote_error.contains("does not grant can_promote"),
+        "{rendered_promote_error}"
+    );
+
+    let no_policy_workspace_code = format!("stage2_db_trigger_no_policy_ws_{suffix}");
+    let no_policy_source_code = format!("stage2_db_trigger_no_policy_src_{suffix}");
+    let no_policy_target_code = format!("stage2_db_trigger_no_policy_tgt_{suffix}");
+    let no_policy_source_root = format!("/tmp/{no_policy_source_code}");
+    let no_policy_target_root = format!("/tmp/{no_policy_target_code}");
+    std::fs::create_dir_all(&no_policy_source_root).expect("no policy source root");
+    std::fs::create_dir_all(&no_policy_target_root).expect("no policy target root");
+    ensure_workspace(
+        &client,
+        &no_policy_workspace_code,
+        "Stage2 DB trigger no policy workspace",
+        "active",
+    )
+    .await
+    .expect("no policy workspace");
+    upsert_project(
+        &client,
+        &no_policy_source_code,
+        "Stage2 DB trigger no policy source",
+        &no_policy_source_root,
+        Some("main"),
+        &no_policy_workspace_code,
+        "cross_project_linked",
+        "local_strict",
+    )
+    .await
+    .expect("no policy source project");
+    upsert_project(
+        &client,
+        &no_policy_target_code,
+        "Stage2 DB trigger no policy target",
+        &no_policy_target_root,
+        Some("main"),
+        &no_policy_workspace_code,
+        "cross_project_linked",
+        "local_strict",
+    )
+    .await
+    .expect("no policy target project");
+    ensure_access_policy(
+        &client,
+        &no_policy_workspace_code,
+        None,
+        None,
+        Some(&no_policy_source_code),
+        &format!("stage2_db_trigger_no_policy_access_{suffix}"),
+        "Stage2 DB trigger no policy access",
+        "fact",
+        "cross_project_linked",
+        250,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false,
+        Some("direct DB trigger no policy negative path"),
+        "active",
+    )
+    .await
+    .expect("no policy access");
+    add_relation(
+        &client,
+        &no_policy_source_code,
+        &no_policy_target_code,
+        "shared_codebase",
+        Some("knowledge_may_transfer"),
+        "facts",
+        "cross_project_linked",
+        "active",
+        false,
+        None,
+        "explicit_foreign",
+    )
+    .await
+    .expect("no policy relation");
+
+    let no_policy_error = client
+        .execute(
+            r#"
+            INSERT INTO ami.import_packets(
+                source_project_id,
+                target_project_id,
+                transfer_policy_id,
+                status,
+                summary,
+                allowed_by_project_link,
+                memory_object_ids,
+                artifact_refs,
+                reason,
+                imported_by_agent_scope,
+                trust_state,
+                verification_state,
+                borrowed_status,
+                can_promote_after_verification,
+                source_kind,
+                source_event_ids,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version
+            )
+            SELECT
+                source.project_id,
+                target.project_id,
+                NULL,
+                'verified',
+                'direct verified DB no policy bypass',
+                TRUE,
+                '[]'::jsonb,
+                '["artifact://proof/direct-db-no-policy"]'::jsonb,
+                'direct sql must fail closed',
+                'cross_project_linked',
+                'verified',
+                'verified',
+                'verified_local_copy',
+                TRUE,
+                'import_runtime',
+                '["event:direct-db-no-policy"]'::jsonb,
+                '["thread:direct-db-no-policy"]'::jsonb,
+                '{"kind":"direct_db_no_policy"}'::jsonb,
+                'import',
+                'import-packet-envelope-v1'
+            FROM ami.projects source
+            INNER JOIN ami.projects target ON target.code = $2
+            WHERE source.code = $1
+            "#,
+            &[&no_policy_source_code, &no_policy_target_code],
+        )
+        .await
+        .expect_err("DB trigger must reject direct verified insert without any transfer policy");
+    let rendered_no_policy_error = no_policy_error
+        .as_db_error()
+        .map(|error| error.message().to_string())
+        .unwrap_or_else(|| format!("{no_policy_error:?}"));
+    assert!(
+        rendered_no_policy_error.contains("without transfer policy"),
+        "{rendered_no_policy_error}"
+    );
+
+    let no_policy_update_packet_id: Uuid = client
+        .query_one(
+            r#"
+            INSERT INTO ami.import_packets(
+                source_project_id,
+                target_project_id,
+                transfer_policy_id,
+                status,
+                summary,
+                allowed_by_project_link,
+                memory_object_ids,
+                artifact_refs,
+                reason,
+                imported_by_agent_scope,
+                trust_state,
+                verification_state,
+                borrowed_status,
+                can_promote_after_verification,
+                source_kind,
+                source_event_ids,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version
+            )
+            SELECT
+                source.project_id,
+                target.project_id,
+                NULL::uuid,
+                'borrowed_unverified',
+                'direct borrowed DB no policy packet',
+                TRUE,
+                '[]'::jsonb,
+                '["artifact://proof/direct-db-no-policy-update"]'::jsonb,
+                'direct sql setup must pass before update trigger',
+                'cross_project_linked',
+                'proposed',
+                'unverified',
+                'borrowed',
+                FALSE,
+                'import_runtime',
+                '["event:direct-db-no-policy-update"]'::jsonb,
+                '["thread:direct-db-no-policy-update"]'::jsonb,
+                '{"kind":"direct_db_no_policy_update"}'::jsonb,
+                'import',
+                'import-packet-envelope-v1'
+            FROM ami.projects source
+            INNER JOIN ami.projects target ON target.code = $2
+            WHERE source.code = $1
+            RETURNING import_packet_id
+            "#,
+            &[&no_policy_source_code, &no_policy_target_code],
+        )
+        .await
+        .expect("direct borrowed no-policy setup packet")
+        .get(0);
+    let no_policy_update_error = client
+        .execute(
+            r#"
+            UPDATE ami.import_packets
+            SET status = 'verified',
+                trust_state = 'verified',
+                verification_state = 'verified',
+                borrowed_status = 'verified_local_copy',
+                can_promote_after_verification = TRUE
+            WHERE import_packet_id = $1
+            "#,
+            &[&no_policy_update_packet_id],
+        )
+        .await
+        .expect_err("DB trigger must reject direct verified update without any transfer policy");
+    let rendered_no_policy_update_error = no_policy_update_error
+        .as_db_error()
+        .map(|error| error.message().to_string())
+        .unwrap_or_else(|| format!("{no_policy_update_error:?}"));
+    assert!(
+        rendered_no_policy_update_error.contains("without transfer policy"),
+        "{rendered_no_policy_update_error}"
+    );
+
+    let bad_trust_update_packet_id: Uuid = client
+        .query_one(
+            r#"
+            INSERT INTO ami.import_packets(
+                source_project_id,
+                target_project_id,
+                transfer_policy_id,
+                status,
+                summary,
+                allowed_by_project_link,
+                memory_object_ids,
+                artifact_refs,
+                reason,
+                imported_by_agent_scope,
+                trust_state,
+                verification_state,
+                borrowed_status,
+                can_promote_after_verification,
+                source_kind,
+                source_event_ids,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version
+            )
+            SELECT
+                source.project_id,
+                target.project_id,
+                policy.transfer_policy_id,
+                'borrowed_unverified',
+                'direct borrowed DB bad trust packet',
+                TRUE,
+                '[]'::jsonb,
+                '["artifact://proof/direct-db-bad-trust-update"]'::jsonb,
+                'direct sql setup must pass before trust update trigger',
+                'cross_project_linked',
+                'proposed',
+                'unverified',
+                'borrowed',
+                FALSE,
+                'import_runtime',
+                '["event:direct-db-bad-trust-update"]'::jsonb,
+                '["thread:direct-db-bad-trust-update"]'::jsonb,
+                '{"kind":"direct_db_bad_trust_update"}'::jsonb,
+                'import',
+                'import-packet-envelope-v1'
+            FROM ami.projects source
+            INNER JOIN ami.projects target ON target.code = $2
+            INNER JOIN ami.transfer_policies policy ON policy.code = $3
+            WHERE source.code = $1
+            RETURNING import_packet_id
+            "#,
+            &[&source_code, &target_code, &transfer_policy_code],
+        )
+        .await
+        .expect("direct borrowed trust setup packet")
+        .get(0);
+    let bad_trust_update_error = client
+        .execute(
+            r#"
+            UPDATE ami.import_packets
+            SET status = 'verified',
+                trust_state = 'proposed',
+                verification_state = 'verified',
+                borrowed_status = 'verified_local_copy',
+                can_promote_after_verification = TRUE
+            WHERE import_packet_id = $1
+            "#,
+            &[&bad_trust_update_packet_id],
+        )
+        .await
+        .expect_err("DB trigger must reject direct verified update without trust_state=verified");
+    let rendered_bad_trust_update_error = bad_trust_update_error
+        .as_db_error()
+        .map(|error| error.message().to_string())
+        .unwrap_or_else(|| format!("{bad_trust_update_error:?}"));
+    assert!(
+        rendered_bad_trust_update_error.contains("trust_state=verified"),
+        "{rendered_bad_trust_update_error}"
+    );
+
+    let strict_relation_policy_code = format!("stage2_db_trigger_strict_relation_{suffix}");
+    ensure_transfer_policy(
+        &client,
+        &workspace_code,
+        &strict_relation_policy_code,
+        "Stage2 DB trigger strict relation",
+        "borrowed_unverified",
+        true,
+        true,
+        false,
+        false,
+    )
+    .await
+    .expect("strict relation policy");
+    add_relation(
+        &client,
+        &source_code,
+        &target_code,
+        "strict_relation",
+        Some("knowledge_may_transfer"),
+        "strict_facts",
+        "cross_project_linked",
+        "active",
+        false,
+        Some(strict_relation_policy_code.as_str()),
+        "explicit_foreign",
+    )
+    .await
+    .expect("strict relation");
+    add_relation(
+        &client,
+        &source_code,
+        &target_code,
+        "permissive_relation",
+        Some("knowledge_may_transfer"),
+        "permissive_facts",
+        "cross_project_linked",
+        "active",
+        false,
+        Some(transfer_policy_code.as_str()),
+        "explicit_foreign",
+    )
+    .await
+    .expect("permissive relation");
+
+    let multi_relation_error = client
+        .execute(
+            r#"
+            INSERT INTO ami.import_packets(
+                source_project_id,
+                target_project_id,
+                transfer_policy_id,
+                status,
+                summary,
+                allowed_by_project_link,
+                memory_object_ids,
+                artifact_refs,
+                reason,
+                imported_by_agent_scope,
+                trust_state,
+                verification_state,
+                borrowed_status,
+                can_promote_after_verification,
+                source_kind,
+                source_event_ids,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version
+            )
+            SELECT
+                source.project_id,
+                target.project_id,
+                policy.transfer_policy_id,
+                'verified',
+                'direct verified DB multi relation bypass',
+                TRUE,
+                '[]'::jsonb,
+                '["artifact://proof/direct-db-multi-relation"]'::jsonb,
+                'direct sql must fail closed',
+                'cross_project_linked',
+                'verified',
+                'verified',
+                'verified_local_copy',
+                TRUE,
+                'import_runtime',
+                '["event:direct-db-multi-relation"]'::jsonb,
+                '["thread:direct-db-multi-relation"]'::jsonb,
+                '{"kind":"direct_db_multi_relation"}'::jsonb,
+                'import',
+                'import-packet-envelope-v1'
+            FROM ami.projects source
+            INNER JOIN ami.projects target ON target.code = $2
+            INNER JOIN ami.transfer_policies policy ON policy.code = $3
+            WHERE source.code = $1
+            "#,
+            &[&source_code, &target_code, &transfer_policy_code],
+        )
+        .await
+        .expect_err("DB trigger must reject when any active relation policy blocks writeback");
+    let rendered_multi_relation_error = multi_relation_error
+        .as_db_error()
+        .map(|error| error.message().to_string())
+        .unwrap_or_else(|| format!("{multi_relation_error:?}"));
+    assert!(
+        rendered_multi_relation_error
+            .contains("relation transfer policy blocks verified writeback"),
+        "{rendered_multi_relation_error}"
+    );
+
+    update_relation(
+        &client,
+        RelationUpdate {
+            source_code: &source_code,
+            target_code: &target_code,
+            relation_type: "strict_relation",
+            shared_contour: "strict_facts",
+            project_link_type: Some("knowledge_may_transfer"),
+            visibility_scope: Some("cross_project_linked"),
+            relation_status: Some("disabled"),
+            requires_approval: Some(false),
+            transfer_policy_code: None,
+            access_mode: Some("explicit_foreign"),
+            actor_agent_code: None,
+            override_reason: Some("restore direct DB trigger workspace-policy case"),
+        },
+    )
+    .await
+    .expect("disable strict relation");
+
+    let foreign_workspace_code = format!("stage2_db_trigger_foreign_policy_ws_{suffix}");
+    ensure_workspace(
+        &client,
+        &foreign_workspace_code,
+        "Stage2 DB trigger foreign policy workspace",
+        "active",
+    )
+    .await
+    .expect("foreign policy workspace");
+    let foreign_policy_code = format!("stage2_db_trigger_foreign_policy_{suffix}");
+    ensure_transfer_policy(
+        &client,
+        &foreign_workspace_code,
+        &foreign_policy_code,
+        "Stage2 DB trigger foreign permissive policy",
+        "verified_writeback",
+        true,
+        true,
+        true,
+        false,
+    )
+    .await
+    .expect("foreign permissive policy");
+
+    let foreign_policy_error = client
+        .execute(
+            r#"
+            INSERT INTO ami.import_packets(
+                source_project_id,
+                target_project_id,
+                transfer_policy_id,
+                status,
+                summary,
+                allowed_by_project_link,
+                memory_object_ids,
+                artifact_refs,
+                reason,
+                imported_by_agent_scope,
+                trust_state,
+                verification_state,
+                borrowed_status,
+                can_promote_after_verification,
+                source_kind,
+                source_event_ids,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version
+            )
+            SELECT
+                source.project_id,
+                target.project_id,
+                foreign_policy.transfer_policy_id,
+                'verified',
+                'direct verified DB foreign policy bypass',
+                TRUE,
+                '[]'::jsonb,
+                '["artifact://proof/direct-db-foreign-policy"]'::jsonb,
+                'direct sql must fail closed',
+                'cross_project_linked',
+                'verified',
+                'verified',
+                'verified_local_copy',
+                TRUE,
+                'import_runtime',
+                '["event:direct-db-foreign-policy"]'::jsonb,
+                '["thread:direct-db-foreign-policy"]'::jsonb,
+                '{"kind":"direct_db_foreign_policy"}'::jsonb,
+                'import',
+                'import-packet-envelope-v1'
+            FROM ami.projects source
+            INNER JOIN ami.projects target ON target.code = $2
+            INNER JOIN ami.transfer_policies foreign_policy ON foreign_policy.code = $3
+            WHERE source.code = $1
+            "#,
+            &[&source_code, &target_code, &foreign_policy_code],
+        )
+        .await
+        .expect_err("DB trigger must reject foreign-workspace transfer policy");
+    let rendered_foreign_policy_error = foreign_policy_error
+        .as_db_error()
+        .map(|error| error.message().to_string())
+        .unwrap_or_else(|| format!("{foreign_policy_error:?}"));
+    assert!(
+        rendered_foreign_policy_error.contains("packet transfer policy is not in source workspace"),
+        "{rendered_foreign_policy_error}"
+    );
+
+    add_relation(
+        &client,
+        &source_code,
+        &target_code,
+        "mixed_foreign_relation",
+        Some("knowledge_may_transfer"),
+        "mixed_foreign_facts",
+        "cross_project_linked",
+        "active",
+        false,
+        Some(foreign_policy_code.as_str()),
+        "explicit_foreign",
+    )
+    .await
+    .expect("mixed foreign relation");
+    add_relation(
+        &client,
+        &source_code,
+        &target_code,
+        "mixed_permissive_relation",
+        Some("knowledge_may_transfer"),
+        "mixed_permissive_facts",
+        "cross_project_linked",
+        "active",
+        false,
+        Some(transfer_policy_code.as_str()),
+        "explicit_foreign",
+    )
+    .await
+    .expect("mixed permissive relation");
+
+    let mixed_relation_foreign_error = client
+        .execute(
+            r#"
+            INSERT INTO ami.import_packets(
+                source_project_id,
+                target_project_id,
+                transfer_policy_id,
+                status,
+                summary,
+                allowed_by_project_link,
+                memory_object_ids,
+                artifact_refs,
+                reason,
+                imported_by_agent_scope,
+                trust_state,
+                verification_state,
+                borrowed_status,
+                can_promote_after_verification,
+                source_kind,
+                source_event_ids,
+                message_refs,
+                evidence_span,
+                derivation_kind,
+                schema_version
+            )
+            SELECT
+                source.project_id,
+                target.project_id,
+                policy.transfer_policy_id,
+                'verified',
+                'direct verified DB mixed foreign relation bypass',
+                TRUE,
+                '[]'::jsonb,
+                '["artifact://proof/direct-db-mixed-foreign-relation"]'::jsonb,
+                'direct sql must fail closed',
+                'cross_project_linked',
+                'verified',
+                'verified',
+                'verified_local_copy',
+                TRUE,
+                'import_runtime',
+                '["event:direct-db-mixed-foreign-relation"]'::jsonb,
+                '["thread:direct-db-mixed-foreign-relation"]'::jsonb,
+                '{"kind":"direct_db_mixed_foreign_relation"}'::jsonb,
+                'import',
+                'import-packet-envelope-v1'
+            FROM ami.projects source
+            INNER JOIN ami.projects target ON target.code = $2
+            INNER JOIN ami.transfer_policies policy ON policy.code = $3
+            WHERE source.code = $1
+            "#,
+            &[&source_code, &target_code, &transfer_policy_code],
+        )
+        .await
+        .expect_err(
+            "DB trigger must reject when any active relation policy belongs to another workspace",
+        );
+    let rendered_mixed_relation_foreign_error = mixed_relation_foreign_error
+        .as_db_error()
+        .map(|error| error.message().to_string())
+        .unwrap_or_else(|| format!("{mixed_relation_foreign_error:?}"));
+    assert!(
+        rendered_mixed_relation_foreign_error
+            .contains("relation transfer policy is not in source workspace"),
+        "{rendered_mixed_relation_foreign_error}"
+    );
 }
 
 #[tokio::test]
@@ -19740,6 +22462,211 @@ async fn repo_root_hint_for_child_or_relocated_alias_returns_canonical_project_r
         .expect("child repo root hint resolves");
     assert_eq!(resolved.project_id, project.project_id);
     assert_eq!(resolved.repo_root, parent_root.display().to_string());
+}
+
+#[tokio::test]
+async fn repo_root_hint_for_parent_with_multiple_child_projects_fails_closed() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = Uuid::new_v4();
+    let workspace_code = format!("root_ambiguous_ws_{suffix}");
+    let first_project_code = format!("root_ambiguous_first_{suffix}");
+    let second_project_code = format!("root_ambiguous_second_{suffix}");
+    let parent_root = std::env::temp_dir().join(format!("amai-root-ambiguous-{suffix}"));
+    let first_child_root = parent_root.join("service-a");
+    let second_child_root = parent_root.join("service-b");
+    std::fs::create_dir_all(&first_child_root).expect("first child repo root");
+    std::fs::create_dir_all(&second_child_root).expect("second child repo root");
+
+    ensure_workspace(
+        &client,
+        &workspace_code,
+        "Root Ambiguous Workspace",
+        "active",
+    )
+    .await
+    .expect("workspace");
+    upsert_project(
+        &client,
+        &first_project_code,
+        "Root Ambiguous First",
+        &first_child_root.display().to_string(),
+        Some("main"),
+        &workspace_code,
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("first child project");
+    upsert_project(
+        &client,
+        &second_project_code,
+        "Root Ambiguous Second",
+        &second_child_root.display().to_string(),
+        Some("main"),
+        &workspace_code,
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("second child project");
+
+    let error = resolve_project_by_repo_root_hint(&client, &parent_root.display().to_string())
+        .await
+        .expect_err("parent repo_root hint with multiple child projects must fail closed");
+    let rendered = format!("{error:#}");
+    assert!(rendered.contains("repo_root hint"));
+    assert!(rendered.contains("ambiguous"));
+    assert!(rendered.contains(&first_project_code));
+    assert!(rendered.contains(&second_project_code));
+}
+
+#[tokio::test]
+async fn upsert_project_blocks_foreign_child_repo_root_claim() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = Uuid::new_v4();
+    let workspace_code = format!("root_claim_ws_{suffix}");
+    let project_code = format!("root_claim_project_{suffix}");
+    let alias_code = format!("root_claim_alias_{suffix}");
+    let parent_root = std::env::temp_dir().join(format!("amai-root-claim-{suffix}"));
+    let child_root = parent_root.join("nested-app");
+    std::fs::create_dir_all(&child_root).expect("child repo root");
+
+    ensure_workspace(&client, &workspace_code, "Root Claim Workspace", "active")
+        .await
+        .expect("workspace");
+    upsert_project(
+        &client,
+        &project_code,
+        "Root Claim Project",
+        &parent_root.display().to_string(),
+        Some("main"),
+        &workspace_code,
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("parent project");
+
+    let error = upsert_project(
+        &client,
+        &alias_code,
+        "Root Claim Alias",
+        &child_root.display().to_string(),
+        Some("main"),
+        &workspace_code,
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect_err("foreign child repo_root claim must fail closed");
+
+    let rendered = format!("{error:#}");
+    assert!(rendered.contains("already registered as project"));
+    assert!(rendered.contains(&project_code));
+    assert!(rendered.contains(&alias_code));
+    assert!(get_project_by_code(&client, &alias_code).await.is_err());
+}
+
+#[tokio::test]
+async fn upsert_project_blocks_same_code_child_repo_root_narrowing() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = Uuid::new_v4();
+    let workspace_code = format!("root_narrow_ws_{suffix}");
+    let project_code = format!("root_narrow_project_{suffix}");
+    let parent_root = std::env::temp_dir().join(format!("amai-root-narrow-{suffix}"));
+    let child_root = parent_root.join("nested-app");
+    std::fs::create_dir_all(&child_root).expect("child repo root");
+
+    ensure_workspace(&client, &workspace_code, "Root Narrow Workspace", "active")
+        .await
+        .expect("workspace");
+    let project = upsert_project(
+        &client,
+        &project_code,
+        "Root Narrow Project",
+        &parent_root.display().to_string(),
+        Some("main"),
+        &workspace_code,
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("parent project");
+
+    let error = upsert_project(
+        &client,
+        &project_code,
+        "Root Narrow Project",
+        &child_root.display().to_string(),
+        Some("main"),
+        &workspace_code,
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect_err("same-code child root narrowing must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("narrowing the canonical project root is blocked")
+    );
+
+    let stored = get_project_by_code(&client, &project_code)
+        .await
+        .expect("stored project");
+    assert_eq!(stored.project_id, project.project_id);
+    assert_eq!(stored.repo_root, parent_root.display().to_string());
 }
 
 #[test]

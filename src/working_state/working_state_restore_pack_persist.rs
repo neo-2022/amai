@@ -261,6 +261,43 @@ pub(super) async fn materialize_restore_pack(
                 ));
             }
         }
+        Err(error)
+            if error
+                .error
+                .to_string()
+                .contains("restore pack canonical content conflict") =>
+        {
+            postgres::refresh_mutable_working_state_restore_pack(
+                db,
+                &project.code,
+                &namespace.code,
+                &postgres::RestorePackInsert {
+                    agent_scope,
+                    session_id,
+                    thread_id,
+                    source_snapshot_id: Some(source_snapshot_id),
+                    source_snapshot_hint: Some(postgres::RestorePackSourceSnapshotHint {
+                        snapshot_kind: WORKING_STATE_RESTORE_KIND,
+                        scope_project_code: Some(project.code.as_str()),
+                        scope_namespace_code: Some(namespace.code.as_str()),
+                        verified_exists: true,
+                    }),
+                    pack_kind: "workspace_restore_pack",
+                    source_kind: Some("working_state_restore_runtime"),
+                    source_event_ids: Some(&source_event_ids),
+                    artifact_refs: Some(&artifact_refs),
+                    message_refs: Some(&message_refs),
+                    evidence_span: Some(&evidence_span),
+                    derivation_kind: Some("summary"),
+                    schema_version: Some(WORKSPACE_RESTORE_PACK_ENVELOPE_VERSION),
+                    headline,
+                    summary,
+                    payload: &payload,
+                    captured_at_epoch_ms,
+                },
+            )
+            .await?;
+        }
         Err(error) => return Err(error.error),
     }
     Ok(())

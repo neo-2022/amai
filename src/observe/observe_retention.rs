@@ -97,7 +97,7 @@ pub(super) async fn maybe_cleanup_observability_snapshots_with_db(db: &Client) -
     let deleted = cleanup["deleted"].as_u64().unwrap_or(0);
     let expired = cleanup["expired"].as_u64().unwrap_or(0);
     if deleted > 0 || expired > 0 {
-        println!(
+        eprintln!(
             "Amai observability retention cleanup: deleted={}, expired={}, scanned={}",
             deleted,
             expired,

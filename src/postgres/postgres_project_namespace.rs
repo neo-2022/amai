@@ -12,14 +12,26 @@ pub async fn upsert_project(
 ) -> Result<ProjectRecord> {
     let workspace = get_workspace_by_code(client, workspace_code).await?;
     let canonical_repo_root = canonical_repo_root_string(repo_root)?;
-    if let Some(existing) = get_bound_project_for_repo_root(client, &canonical_repo_root).await? {
+    if let Some(existing) =
+        resolve_project_for_canonical_repo_root_hint(client, &canonical_repo_root).await?
+    {
         if existing.code != code {
             return Err(anyhow!(
-                "canonical repo_root {} is already registered as project {} (display_name: {}); alias code {} is blocked",
+                "canonical repo_root {} resolves to repo_root already registered as project {} (display_name: {}); alias code {} is blocked",
                 canonical_repo_root,
                 existing.code,
                 existing.display_name,
                 code
+            ));
+        }
+        if existing.repo_root != canonical_repo_root
+            && canonical_repo_root.starts_with(&format!("{}/", existing.repo_root))
+        {
+            return Err(anyhow!(
+                "canonical repo_root {} is a child/descendant hint for already registered project {} at {}; narrowing the canonical project root is blocked",
+                canonical_repo_root,
+                existing.code,
+                existing.repo_root
             ));
         }
     }
@@ -188,8 +200,24 @@ pub async fn resolve_project_by_repo_root_hint(
     repo_root: &str,
 ) -> Result<ProjectRecord> {
     let canonical_repo_root = canonical_repo_root_string(repo_root)?;
-    if let Some(project) = get_bound_project_for_repo_root(client, &canonical_repo_root).await? {
+    if let Some(project) =
+        resolve_project_for_canonical_repo_root_hint(client, &canonical_repo_root).await?
+    {
         return Ok(project);
+    }
+
+    Err(anyhow!(
+        "project not found for repo_root hint: {}",
+        canonical_repo_root
+    ))
+}
+
+async fn resolve_project_for_canonical_repo_root_hint(
+    client: &Client,
+    canonical_repo_root: &str,
+) -> Result<Option<ProjectRecord>> {
+    if let Some(project) = get_bound_project_for_repo_root(client, &canonical_repo_root).await? {
+        return Ok(Some(project));
     }
 
     let ancestor_rows = client
@@ -213,7 +241,7 @@ pub async fn resolve_project_by_repo_root_hint(
         .await
         .context("failed to resolve project repo_root ancestor binding")?;
     if let Some(row) = ancestor_rows.first() {
-        return Ok(project_record_from_row(row));
+        return Ok(Some(project_record_from_row(row)));
     }
 
     let descendant_rows = client
@@ -237,7 +265,7 @@ pub async fn resolve_project_by_repo_root_hint(
         .await
         .context("failed to resolve project repo_root descendant binding")?;
     if descendant_rows.len() == 1 {
-        return Ok(project_record_from_row(&descendant_rows[0]));
+        return Ok(Some(project_record_from_row(&descendant_rows[0])));
     }
     if descendant_rows.len() > 1 {
         let codes = descendant_rows
@@ -252,10 +280,7 @@ pub async fn resolve_project_by_repo_root_hint(
         ));
     }
 
-    Err(anyhow!(
-        "project not found for repo_root hint: {}",
-        canonical_repo_root
-    ))
+    Ok(None)
 }
 
 pub async fn project_has_repo_root(

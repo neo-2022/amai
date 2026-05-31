@@ -160,6 +160,53 @@ async fn bootstrap_schema_is_current(client: &Client) -> Result<bool> {
                 AND to_regclass('ami.restore_packs') IS NOT NULL
                 AND to_regclass('ami.policy_rules') IS NOT NULL
                 AND to_regclass('ami.quarantine_items') IS NOT NULL
+                AND EXISTS (
+                    SELECT 1
+                    FROM pg_attribute a
+                    INNER JOIN pg_class c ON c.oid = a.attrelid
+                    INNER JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'ami'
+                      AND c.relname = 'quarantine_items'
+                      AND a.attname = 'entity_id'
+                      AND a.attnum > 0
+                      AND NOT a.attisdropped
+                      AND format_type(a.atttypid, a.atttypmod) = 'uuid'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'ami'
+                      AND table_name = 'quarantine_items'
+                      AND column_name = 'quarantine_state'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'ami'
+                      AND table_name = 'quarantine_items'
+                      AND column_name = 'evidence'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'ami'
+                      AND table_name = 'quarantine_items'
+                      AND column_name = 'quarantined_at_epoch_ms'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'ami'
+                      AND table_name = 'quarantine_items'
+                      AND column_name = 'released_at_epoch_ms'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'ami'
+                      AND table_name = 'quarantine_items'
+                      AND column_name = 'updated_at'
+                )
                 AND to_regclass('ami.forgetting_audit_log') IS NOT NULL
                 AND to_regclass('ami.lifecycle_transition_events_v1') IS NOT NULL
                 AND to_regclass('ami.lifecycle_transition_stats_v1') IS NOT NULL
@@ -188,6 +235,41 @@ async fn bootstrap_schema_is_current(client: &Client) -> Result<bool> {
                       AND t.relname = 'restore_packs'
                       AND c.conname = 'restore_packs_workspace_restore_pack_requires_source_snapshot_check'
                       AND pg_get_constraintdef(c.oid) LIKE '%pack_kind <> ''workspace_restore_pack'' OR source_snapshot_id IS NOT NULL%'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM pg_proc p
+                    INNER JOIN pg_namespace n ON n.oid = p.pronamespace
+                    WHERE n.nspname = 'ami'
+                      AND p.proname = 'enforce_import_packet_writeback_gate'
+                      AND pg_get_functiondef(p.oid) LIKE '%relation still requires approval%'
+                      AND pg_get_functiondef(p.oid) LIKE '%packet transfer policy is not in source workspace%'
+                      AND pg_get_functiondef(p.oid) LIKE '%packet transfer policy blocks verified writeback%'
+                      AND pg_get_functiondef(p.oid) LIKE '%relation transfer policy is not in source workspace%'
+                      AND pg_get_functiondef(p.oid) LIKE '%relation transfer policy still requires human approval%'
+                      AND pg_get_functiondef(p.oid) LIKE '%trust_state=verified%'
+                      AND pg_get_functiondef(p.oid) LIKE '%access policy does not grant can_promote%'
+                      AND pg_get_functiondef(p.oid) LIKE '%access policy does not grant can_approve_transfer%'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM pg_trigger tr
+                    INNER JOIN pg_class c ON c.oid = tr.tgrelid
+                    INNER JOIN pg_namespace n ON n.oid = c.relnamespace
+                    INNER JOIN pg_proc p ON p.oid = tr.tgfoid
+                    INNER JOIN pg_namespace pn ON pn.oid = p.pronamespace
+                    WHERE n.nspname = 'ami'
+                      AND c.relname = 'import_packets'
+                      AND tr.tgname = 'import_packets_enforce_writeback_gate_trigger'
+                      AND NOT tr.tgisinternal
+                      AND tr.tgenabled = 'O'
+                      AND pn.nspname = 'ami'
+                      AND p.proname = 'enforce_import_packet_writeback_gate'
+                      AND (tr.tgtype & 1) = 1
+                      AND (tr.tgtype & 2) = 2
+                      AND (tr.tgtype & 4) = 4
+                      AND (tr.tgtype & 16) = 16
+                      AND pg_get_triggerdef(tr.oid) LIKE '%UPDATE OF source_project_id, target_project_id, transfer_policy_id, status, trust_state, verification_state, borrowed_status, can_promote_after_verification%'
                 )
                 AND EXISTS (
                     SELECT 1
@@ -375,6 +457,14 @@ async fn bootstrap_schema_is_current(client: &Client) -> Result<bool> {
                       AND table_name = 'projects'
                       AND column_name = 'visibility_scope'
                 )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'ami'
+                      AND table_name = 'policy_rules'
+                      AND column_name = 'rule_payload'
+                )
+                AND to_regclass('ami.idx_policy_rules_workspace_rule_code') IS NOT NULL
                 AND EXISTS (
                     SELECT 1
                     FROM information_schema.columns

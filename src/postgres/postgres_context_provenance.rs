@@ -82,6 +82,10 @@ fn ensure_existing_restore_pack_matches_incoming(
     let incoming_headline = record.headline.map(ToOwned::to_owned);
     let incoming_summary = record.summary.map(ToOwned::to_owned);
 
+    // `captured_at_epoch_ms` is freshness metadata for the source snapshot and may
+    // advance across exact replays without changing the canonical restore-pack
+    // content. Keep it out of the semantic identity check so a fresher replay can
+    // reuse the same row instead of conflicting on metadata drift alone.
     let same_canonical_content = existing.source_kind == incoming_source_kind
         && existing.source_event_ids == *source_event_ids
         && existing.artifact_refs == *artifact_refs
@@ -91,8 +95,7 @@ fn ensure_existing_restore_pack_matches_incoming(
         && existing.schema_version == schema_version
         && existing.headline == incoming_headline
         && existing.summary == incoming_summary
-        && existing.payload == *record.payload
-        && existing.captured_at_epoch_ms == record.captured_at_epoch_ms;
+        && existing.payload == *record.payload;
 
     if same_canonical_content {
         return Ok(());
@@ -1402,6 +1405,153 @@ pub(crate) async fn create_restore_pack_detailed(
         return Err(forced_error);
     }
     Ok(row)
+}
+
+pub(crate) async fn refresh_mutable_working_state_restore_pack(
+    client: &Client,
+    project_code: &str,
+    namespace_code: &str,
+    record: &RestorePackInsert<'_>,
+) -> Result<RestorePackRecord> {
+    if record.pack_kind != "workspace_restore_pack"
+        || record.source_kind != Some("working_state_restore_runtime")
+    {
+        return Err(anyhow!(
+            "mutable restore-pack refresh is only allowed for workspace_restore_pack derived from working_state_restore_runtime"
+        ));
+    }
+    let source_snapshot_id = record
+        .source_snapshot_id
+        .ok_or_else(|| anyhow!("mutable restore-pack refresh requires source_snapshot_id"))?;
+    let (workspace_id, project, namespace) =
+        resolve_scope_ids(client, project_code, namespace_code).await?;
+    let workspace = get_workspace_by_id(client, workspace_id).await?;
+    let existing = lookup_restore_pack_by_source_snapshot_id(
+        client,
+        project.project_id,
+        namespace.namespace_id,
+        record.pack_kind,
+        source_snapshot_id,
+    )
+    .await?
+    .ok_or_else(|| {
+        anyhow!(
+            "mutable restore-pack refresh had no existing restore_pack for source_snapshot_id={source_snapshot_id}"
+        )
+    })?;
+
+    let source_event_ids = record
+        .source_event_ids
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let artifact_refs = record.artifact_refs.cloned().unwrap_or_else(|| json!([]));
+    let message_refs = record.message_refs.cloned().unwrap_or_else(|| json!([]));
+    let evidence_span = record.evidence_span.cloned().unwrap_or_else(|| json!({}));
+    let derivation_kind = record.derivation_kind.unwrap_or("summary");
+    let schema_version = record.schema_version.unwrap_or("restore-pack-envelope-v1");
+    validate_stage2_basis(
+        "restore pack",
+        derivation_kind,
+        &source_event_ids,
+        &artifact_refs,
+        &message_refs,
+        &evidence_span,
+    )?;
+    let policy_filter =
+        run_restore_pack_policy_scope_filter(client, &workspace.code, &project, &namespace, record)
+            .await?;
+    validate_restore_pack_policy_scope_filter(&policy_filter)?;
+    let verification_check = run_restore_pack_verification_conflict_check(
+        derivation_kind,
+        &source_event_ids,
+        &artifact_refs,
+        &message_refs,
+        &evidence_span,
+        &policy_filter,
+    );
+    validate_restore_pack_verification_conflict_check(&verification_check)?;
+    let stored_evidence_span = augment_restore_pack_evidence_span_with_stage2_preflight(
+        &evidence_span,
+        &policy_filter,
+        &verification_check,
+    );
+
+    let incoming_captured_at = record.captured_at_epoch_ms.unwrap_or(i64::MIN);
+    let existing_captured_at = existing.captured_at_epoch_ms.unwrap_or(i64::MIN);
+    if incoming_captured_at < existing_captured_at {
+        return Ok(existing);
+    }
+    if incoming_captured_at == existing_captured_at {
+        return Err(anyhow!(
+            "mutable restore-pack refresh refused same-timestamp canonical content conflict for restore_pack_id={} source_snapshot_id={}",
+            existing.restore_pack_id,
+            source_snapshot_id
+        ));
+    }
+
+    let updated = client
+        .execute(
+            r#"
+            UPDATE ami.restore_packs
+            SET
+                agent_scope = $2,
+                session_id = $3,
+                thread_id = $4,
+                source_kind = $5,
+                source_event_ids = $6::jsonb,
+                artifact_refs = $7::jsonb,
+                message_refs = $8::jsonb,
+                evidence_span = $9::jsonb,
+                derivation_kind = $10,
+                schema_version = $11,
+                headline = $12,
+                summary = $13,
+                payload = $14::jsonb,
+                captured_at_epoch_ms = $15
+            WHERE restore_pack_id = $1
+              AND project_id = $16
+              AND namespace_id = $17
+              AND pack_kind = $18
+              AND source_snapshot_id = $19
+            "#,
+            &[
+                &existing.restore_pack_id,
+                &record.agent_scope,
+                &record.session_id,
+                &record.thread_id,
+                &record.source_kind,
+                &source_event_ids,
+                &artifact_refs,
+                &message_refs,
+                &stored_evidence_span,
+                &derivation_kind,
+                &schema_version,
+                &record.headline,
+                &record.summary,
+                record.payload,
+                &record.captured_at_epoch_ms,
+                &project.project_id,
+                &namespace.namespace_id,
+                &record.pack_kind,
+                &source_snapshot_id,
+            ],
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to refresh mutable workspace_restore_pack for {}:{} source_snapshot_id={source_snapshot_id}",
+                project.code, namespace.code
+            )
+        })?;
+    if updated != 1 {
+        return Err(anyhow!(
+            "mutable restore-pack refresh updated {} rows for restore_pack_id={} source_snapshot_id={}",
+            updated,
+            existing.restore_pack_id,
+            source_snapshot_id
+        ));
+    }
+    get_restore_pack(client, existing.restore_pack_id).await
 }
 
 pub(crate) async fn lookup_restore_pack_by_source_snapshot_id(

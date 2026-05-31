@@ -1137,8 +1137,27 @@ pub async fn delete_observability_snapshots_by_ids(
     client
         .execute(
             r#"
-            DELETE FROM ami.observability_snapshots
-            WHERE snapshot_id = ANY($1::uuid[])
+            WITH candidate_snapshot_ids AS (
+                SELECT DISTINCT unnest($1::uuid[]) AS snapshot_id
+            )
+            DELETE FROM ami.observability_snapshots AS snapshot
+            USING candidate_snapshot_ids AS candidate
+            WHERE snapshot.snapshot_id = candidate.snapshot_id
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM ami.memory_provenance AS memory_provenance
+                    WHERE memory_provenance.source_snapshot_id = snapshot.snapshot_id
+                )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM ami.task_events AS task_events
+                    WHERE task_events.source_snapshot_id = snapshot.snapshot_id
+                )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM ami.restore_packs AS restore_packs
+                    WHERE restore_packs.source_snapshot_id = snapshot.snapshot_id
+                )
             "#,
             &[&snapshot_ids],
         )
