@@ -82,7 +82,7 @@ for i in $(seq 1 "${iterations}"); do
   else
     before_sha="absent"
   fi
-  started_ms="$(date +%s%3N)"
+  started_ms="$(./scripts/epoch_ms.sh)"
   payload="$(
     PATH="${fakebin}:/usr/bin:/bin" AMI_OBSERVE_BIND=127.0.0.1:1 \
       timeout 10s ./scripts/continuity_handoff.sh \
@@ -91,7 +91,7 @@ for i in $(seq 1 "${iterations}"); do
         --headline "${headline}" \
         --next-step "${next_step}"
   )"
-  ended_ms="$(date +%s%3N)"
+  ended_ms="$(./scripts/epoch_ms.sh)"
   elapsed_ms="$((ended_ms - started_ms))"
   total_ms="$((total_ms + elapsed_ms))"
   if (( elapsed_ms > max_seen_ms )); then

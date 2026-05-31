@@ -43,9 +43,9 @@ measure_release() {
   local thread_id="$3"
   shift 3
   local started_ms ended_ms
-  started_ms="$(date +%s%3N)"
+  started_ms="$(./scripts/epoch_ms.sh)"
   run_release "${scope}" "${thread_id}" "$@" >/dev/null
-  ended_ms="$(date +%s%3N)"
+  ended_ms="$(./scripts/epoch_ms.sh)"
   record_latency "${kind}" "${started_ms}" "${ended_ms}"
 }
 
@@ -65,16 +65,16 @@ fetch_restore_for_scope() {
 measure_fetch_restore() {
   local scope="$1"
   local started_ms ended_ms
-  started_ms="$(date +%s%3N)"
+  started_ms="$(./scripts/epoch_ms.sh)"
   fetch_restore_for_scope "${scope}" >"${restore_output}"
-  ended_ms="$(date +%s%3N)"
+  ended_ms="$(./scripts/epoch_ms.sh)"
   record_latency "restore_read" "${started_ms}" "${ended_ms}"
   test -s "${restore_output}"
 }
 
 cd "${repo_root}"
 
-psql "${dsn}" -v ON_ERROR_STOP=1 -f "${repo_root}/sql/000_bootstrap.sql" >/dev/null
+cargo run --release --quiet -- bootstrap schema >/dev/null
 
 ./target/release/amai project register \
   --code "${project_code}" \

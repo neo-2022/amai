@@ -296,7 +296,7 @@ step "explainability: reason='${explain_reason}' (pass)"
 # 5. Prune expired items
 # ────────────────────────────────────────────────────────────────────────
 step "run prune (should prune ephemeral expired item)"
-now_epoch_ms="$(date +%s%3N)"
+now_epoch_ms="$(./scripts/epoch_ms.sh)"
 prune_output="$(cargo run --quiet -- memory run-job \
   --project "${project_code}" \
   --namespace "${namespace_code}" \

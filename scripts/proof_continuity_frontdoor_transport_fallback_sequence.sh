@@ -97,7 +97,7 @@ jq -e '
   and .operator_notice.exact_chat_command == "экономия_90"
 ' /tmp/proof_continuity_transport_fallback_target.out >/dev/null
 
-start_epoch_ms="$(date +%s%3N)"
+start_epoch_ms="$(./scripts/epoch_ms.sh)"
 handoff_payload="$(
   PATH="${fakebin}:/usr/bin:/bin" AMI_OBSERVE_BIND=127.0.0.1:1 \
     timeout 8s ./scripts/continuity_handoff.sh \
@@ -106,7 +106,7 @@ handoff_payload="$(
       --headline "${headline}" \
       --next-step "${next_step}"
 )"
-end_epoch_ms="$(date +%s%3N)"
+end_epoch_ms="$(./scripts/epoch_ms.sh)"
 elapsed_ms="$((end_epoch_ms - start_epoch_ms))"
 
 printf '%s\n' "${handoff_payload}" | jq -e \

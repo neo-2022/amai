@@ -16,7 +16,7 @@ trap cleanup EXIT
 
 cd "${repo_root}"
 
-psql "${dsn}" -v ON_ERROR_STOP=1 -f "${repo_root}/sql/000_bootstrap.sql" >/dev/null
+cargo run --release --quiet -- bootstrap schema >/dev/null
 
 ./target/release/amai project register \
   --code "${project_code}" \

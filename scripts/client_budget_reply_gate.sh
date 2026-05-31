@@ -41,7 +41,7 @@ fresh_compact_client_budget_gate_cache_available() {
   [[ -f "$cache_path" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   local now_ms fetched_at_ms observed_at_ms
-  now_ms="$(date +%s%3N 2>/dev/null || true)"
+  now_ms="$(./scripts/epoch_ms.sh 2>/dev/null || true)"
   [[ -n "$now_ms" ]] || return 1
   fetched_at_ms="$(jq -r '.fetched_at_epoch_ms // 0' "$cache_path" 2>/dev/null || printf '0')"
   observed_at_ms="$(

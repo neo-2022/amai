@@ -73,7 +73,7 @@ declare -a pids=()
 declare -a headlines=()
 declare -a next_steps=()
 
-start_epoch_ms="$(date +%s%3N)"
+start_epoch_ms="$(./scripts/epoch_ms.sh)"
 
 for i in $(seq 1 "${workers}"); do
   headline="proof transport burst handoff ${i}"
@@ -97,7 +97,7 @@ for pid in "${pids[@]}"; do
   wait "${pid}"
 done
 
-end_epoch_ms="$(date +%s%3N)"
+end_epoch_ms="$(./scripts/epoch_ms.sh)"
 elapsed_ms="$((end_epoch_ms - start_epoch_ms))"
 
 for i in $(seq 1 "${workers}"); do

@@ -48,7 +48,7 @@ last_case_id=""
 write_status() {
   local stage="$1"
   local now_ms
-  now_ms="$(date +%s%3N)"
+  now_ms="$(./scripts/epoch_ms.sh)"
   jq -cn \
     --arg stage "$stage" \
     --arg model "$MODEL" \

@@ -29,12 +29,12 @@ sleep 60
 EOF
 chmod +x "${AMAI_EXEC_PATH}"
 
-start_ms="$(date +%s%3N)"
+start_ms="$(./scripts/epoch_ms.sh)"
 set +e
 AMI_OBSERVE_BIND=127.0.0.1:1 "${SCRIPT_DIR}/client_budget_root_cause.sh" >/tmp/proof_client_budget_root_cause_no_hang.out 2>/tmp/proof_client_budget_root_cause_no_hang.err
 status=$?
 set -e
-end_ms="$(date +%s%3N)"
+end_ms="$(./scripts/epoch_ms.sh)"
 elapsed_ms=$(( end_ms - start_ms ))
 
 # This proof is about "no hang". Any non-zero exit is acceptable, but it must return quickly.

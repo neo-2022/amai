@@ -103,7 +103,7 @@ fresh_compact_client_budget_cache_available() {
   [[ -f "$cache_path" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   local now_ms fetched_at_ms observed_at_ms cache_thread_id
-  now_ms="$(date +%s%3N 2>/dev/null || true)"
+  now_ms="$(./scripts/epoch_ms.sh 2>/dev/null || true)"
   [[ -n "$now_ms" ]] || return 1
   fetched_at_ms="$(jq -r '.fetched_at_epoch_ms // 0' "$cache_path" 2>/dev/null || printf '0')"
   observed_at_ms="$(
@@ -139,7 +139,7 @@ compact_client_budget_root_cause_payload_is_fresh() {
   [[ -n "$payload" ]] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   local now_ms observed_at_ms max_guard_age_seconds
-  now_ms="$(date +%s%3N 2>/dev/null || true)"
+  now_ms="$(./scripts/epoch_ms.sh 2>/dev/null || true)"
   [[ -n "$now_ms" ]] || return 1
   observed_at_ms="$(
     printf '%s' "$payload" | jq -r '
@@ -257,9 +257,6 @@ if [[ -n "$api_payload" ]]; then
 fi
 
 fallback_command=("$SCRIPT_DIR/amai_exec.sh" observe client-budget-root-cause "${observe_passthrough_args[@]}")
-if [[ -x "$REPO_ROOT/target/release/amai" ]]; then
-  fallback_command=("$REPO_ROOT/target/release/amai" observe client-budget-root-cause "${observe_passthrough_args[@]}")
-fi
 
 if [[ ! -x "${fallback_command[0]}" ]]; then
   echo "client budget root cause: no root cause payload available" >&2
@@ -303,5 +300,5 @@ exec env \
     # The observe/CLI fallback is allowed to fail, but it must not hang the caller.
     # Thread-bound root-cause evaluation can legitimately take around 12s on a live
     # giant-thread contour, so keep a safety margin instead of failing on a near-edge timeout.
-    run_with_hard_timeout 20 "$@"
+    run_with_hard_timeout 14 "$@"
   ' bash "${fallback_command[@]}"

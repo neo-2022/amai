@@ -72,7 +72,7 @@ max_single_ms=5000
 for code in "${codes[@]}"; do
   headline="proof transport matrix handoff ${code}"
   next_step="verify fallback for curl exit ${code}"
-  started_ms="$(date +%s%3N)"
+  started_ms="$(./scripts/epoch_ms.sh)"
   payload="$(
     PATH="${fakebin}:/usr/bin:/bin" AMI_OBSERVE_BIND=127.0.0.1:1 AMAI_FAKE_CURL_EXIT_CODE="${code}" \
       timeout 10s ./scripts/continuity_handoff.sh \
@@ -81,7 +81,7 @@ for code in "${codes[@]}"; do
         --headline "${headline}" \
         --next-step "${next_step}"
   )"
-  ended_ms="$(date +%s%3N)"
+  ended_ms="$(./scripts/epoch_ms.sh)"
   elapsed_ms="$((ended_ms - started_ms))"
 
   printf '%s\n' "${payload}" | jq -e \

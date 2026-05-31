@@ -57,8 +57,7 @@ count_snapshot_kind() {
 
 cd "${repo_root}"
 
-PGOPTIONS='-c client_min_messages=warning' psql "${dsn}" -v ON_ERROR_STOP=1 \
-  -f "${repo_root}/sql/000_bootstrap.sql" >/dev/null
+PGOPTIONS='-c client_min_messages=warning' cargo run --release --quiet -- bootstrap schema >/dev/null
 
 run_release project register \
   --code "${project_code}" \
@@ -77,13 +76,13 @@ previous_lease_heartbeat=0
 document_index_refresh_count=""
 
 for i in $(seq 1 "${iterations}"); do
-  started_ms="$(date +%s%3N)"
+  started_ms="$(./scripts/epoch_ms.sh)"
   run_release continuity handoff \
     --project "${project_code}" \
     --namespace "${namespace_code}" \
     --headline "Same line" \
     --next-step "Replay same line twice." >/dev/null
-  ended_ms="$(date +%s%3N)"
+  ended_ms="$(./scripts/epoch_ms.sh)"
   elapsed_ms="$((ended_ms - started_ms))"
   total_ms="$((total_ms + elapsed_ms))"
   if (( elapsed_ms > max_seen_ms )); then

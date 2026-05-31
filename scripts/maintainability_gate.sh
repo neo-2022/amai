@@ -30,7 +30,7 @@ if [[ ! -f "$implementation_status_path" ]]; then
 fi
 
 git_head="$(git rev-parse HEAD 2>/dev/null)"
-observed_at_epoch_ms="$(date +%s%3N)"
+observed_at_epoch_ms="$(./scripts/epoch_ms.sh)"
 worktree_status="$(git status --porcelain=v1 --untracked-files=all 2>/dev/null || true)"
 worktree_fingerprint_sha256="$(printf '%s' "$worktree_status" | sha256sum | awk '{print $1}')"
 implementation_status_sha256="$(sha256sum "$implementation_status_path" | awk '{print $1}')"
