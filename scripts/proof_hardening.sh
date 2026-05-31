@@ -2,6 +2,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+source "./scripts/stage2_fixture_roots.sh"
+stage2_prepare_fixture_roots "$PWD"
 
 ./scripts/bootstrap_stack.sh
 ./scripts/bootstrap_stack.sh
@@ -10,12 +12,12 @@ cargo run --quiet -- compat check
 cargo run --quiet -- project register \
   --code project_alpha \
   --display-name "Project Alpha" \
-  --repo-root "$PWD/fixtures/project_alpha"
+  --repo-root "${AMAI_STAGE2_PROJECT_ALPHA_ROOT}"
 
 cargo run --quiet -- project register \
   --code project_beta \
   --display-name "Project Beta" \
-  --repo-root "$PWD/fixtures/project_beta"
+  --repo-root "${AMAI_STAGE2_PROJECT_BETA_ROOT}"
 
 cargo run --quiet -- namespace ensure \
   --project project_alpha \
@@ -62,13 +64,13 @@ cargo run --quiet -- access-policy ensure \
 
 cargo run --quiet -- index project \
   --code project_alpha \
-  --path "$PWD/fixtures/project_alpha" \
+  --path "${AMAI_STAGE2_PROJECT_ALPHA_ROOT}" \
   --namespace review \
   --skip-embeddings
 
 cargo run --quiet -- index project \
   --code project_beta \
-  --path "$PWD/fixtures/project_beta" \
+  --path "${AMAI_STAGE2_PROJECT_BETA_ROOT}" \
   --namespace review \
   --skip-embeddings
 
@@ -114,11 +116,39 @@ assert ("project_alpha", "src/lib.rs") in paths, paths
 assert ("project_beta", "src/lib.rs") in paths, paths
 PY
 
+wait_for_stack_ready_after_restart() {
+  local attempt consecutive_ok
+  consecutive_ok=0
+  for attempt in $(seq 1 60); do
+    if ./scripts/bootstrap_stack.sh >/tmp/amai-proof-hardening-bootstrap-after-restart.out 2>&1 \
+      && cargo run --quiet -- compat check >/tmp/amai-proof-hardening-compat-after-restart.out 2>&1 \
+      && ./scripts/status.sh >/tmp/amai-proof-hardening-status-after-restart.out 2>&1; then
+      consecutive_ok=$((consecutive_ok + 1))
+      if (( consecutive_ok >= 2 )); then
+        cat /tmp/amai-proof-hardening-status-after-restart.out
+        return 0
+      fi
+    else
+      consecutive_ok=0
+    fi
+    sleep 2
+  done
+
+  echo "proof_hardening: stack did not become stable after restart" >&2
+  for log in \
+    /tmp/amai-proof-hardening-bootstrap-after-restart.out \
+    /tmp/amai-proof-hardening-compat-after-restart.out \
+    /tmp/amai-proof-hardening-status-after-restart.out; do
+    if [[ -s "${log}" ]]; then
+      echo "--- ${log} ---" >&2
+      tail -n 80 "${log}" >&2
+    fi
+  done
+  return 1
+}
+
 docker compose restart postgres qdrant minio nats
-sleep 5
-./scripts/bootstrap_stack.sh
-cargo run --quiet -- compat check
-./scripts/status.sh
+wait_for_stack_ready_after_restart
 ./scripts/proof_execctl_pending_return.sh
 ./scripts/proof_execctl_resolved_task_ids.sh
 ./scripts/proof_execctl_restore_stress.sh

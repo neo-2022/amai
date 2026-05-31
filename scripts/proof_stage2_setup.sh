@@ -2,6 +2,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+source "./scripts/stage2_fixture_roots.sh"
+stage2_prepare_fixture_roots "$PWD"
 
 stack_healthy() {
   local status_output
@@ -23,12 +25,12 @@ cargo run --release --quiet -- compat check
 cargo run --release --quiet -- project register \
   --code project_alpha \
   --display-name "Project Alpha" \
-  --repo-root "$PWD/fixtures/project_alpha"
+  --repo-root "${AMAI_STAGE2_PROJECT_ALPHA_ROOT}"
 
 cargo run --release --quiet -- project register \
   --code project_beta \
   --display-name "Project Beta" \
-  --repo-root "$PWD/fixtures/project_beta"
+  --repo-root "${AMAI_STAGE2_PROJECT_BETA_ROOT}"
 
 cargo run --release --quiet -- namespace ensure \
   --project project_alpha \
@@ -75,12 +77,12 @@ cargo run --release --quiet -- access-policy ensure \
 
 cargo run --release --quiet -- index project \
   --code project_alpha \
-  --path "$PWD/fixtures/project_alpha" \
+  --path "${AMAI_STAGE2_PROJECT_ALPHA_ROOT}" \
   --namespace review \
   --skip-embeddings
 
 cargo run --release --quiet -- index project \
   --code project_beta \
-  --path "$PWD/fixtures/project_beta" \
+  --path "${AMAI_STAGE2_PROJECT_BETA_ROOT}" \
   --namespace review \
   --skip-embeddings

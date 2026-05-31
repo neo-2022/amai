@@ -2,6 +2,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+source ./scripts/stage2_fixture_roots.sh
+stage2_prepare_fixture_roots "$PWD"
 source ./scripts/load_env.sh
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Awarnings"
 export CARGO_TERM_COLOR=never
@@ -43,6 +45,11 @@ suffix="manual_stage5_$(date +%s%N)"
 namespace_code="review_${suffix}"
 project_code="project_alpha"
 related_project_code="project_beta"
+
+run_amai_capture project register \
+  --code "${project_code}" \
+  --display-name "Project Alpha" \
+  --repo-root "${AMAI_STAGE2_PROJECT_ALPHA_ROOT}" >/dev/null
 
 run_amai_capture namespace ensure \
   --project "${project_code}" \
@@ -300,7 +307,7 @@ owner_hits="$(
 run_amai_capture project register \
   --code "${related_project_code}" \
   --display-name "Project Beta" \
-  --repo-root "$PWD/fixtures/project_beta" >/dev/null
+  --repo-root "${AMAI_STAGE2_PROJECT_BETA_ROOT}" >/dev/null
 
 run_amai_capture namespace ensure \
   --project "${related_project_code}" \
