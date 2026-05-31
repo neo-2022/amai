@@ -233,8 +233,17 @@ async fn bootstrap_schema_is_current(client: &Client) -> Result<bool> {
                     INNER JOIN pg_namespace n ON n.oid = t.relnamespace
                     WHERE n.nspname = 'ami'
                       AND t.relname = 'restore_packs'
-                      AND c.conname = 'restore_packs_workspace_restore_pack_requires_source_snapshot_check'
+                      AND c.conname = 'restore_packs_workspace_pack_source_snapshot_check'
                       AND pg_get_constraintdef(c.oid) LIKE '%pack_kind <> ''workspace_restore_pack'' OR source_snapshot_id IS NOT NULL%'
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint c
+                    INNER JOIN pg_class t ON t.oid = c.conrelid
+                    INNER JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE n.nspname = 'ami'
+                      AND t.relname = 'restore_packs'
+                      AND c.conname LIKE 'restore_packs_workspace_restore_pack_requires_source_snapshot%'
                 )
                 AND EXISTS (
                     SELECT 1

@@ -90,10 +90,26 @@ const RESTORE_PACK_WORKSPACE_SOURCE_SNAPSHOT_REQUIRED_SQL: &str = r#"
 DELETE FROM ami.restore_packs
 WHERE pack_kind = 'workspace_restore_pack'
   AND source_snapshot_id IS NULL;
+DO $$
+DECLARE
+    legacy_constraint_name name;
+BEGIN
+    FOR legacy_constraint_name IN
+        SELECT c.conname
+        FROM pg_constraint c
+        INNER JOIN pg_class t ON t.oid = c.conrelid
+        INNER JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'ami'
+          AND t.relname = 'restore_packs'
+          AND c.conname LIKE 'restore_packs_workspace_restore_pack_requires_source_snapshot%'
+    LOOP
+        EXECUTE format('ALTER TABLE ami.restore_packs DROP CONSTRAINT %I', legacy_constraint_name);
+    END LOOP;
+END $$;
 ALTER TABLE ami.restore_packs
-    DROP CONSTRAINT IF EXISTS restore_packs_workspace_restore_pack_requires_source_snapshot_check;
+    DROP CONSTRAINT IF EXISTS restore_packs_workspace_pack_source_snapshot_check;
 ALTER TABLE ami.restore_packs
-    ADD CONSTRAINT restore_packs_workspace_restore_pack_requires_source_snapshot_check CHECK (
+    ADD CONSTRAINT restore_packs_workspace_pack_source_snapshot_check CHECK (
         pack_kind <> 'workspace_restore_pack' OR source_snapshot_id IS NOT NULL
     );
 "#;
@@ -105,10 +121,26 @@ WHERE pack_kind = 'workspace_restore_pack'
 SELECT definitely_missing_column
 FROM ami.restore_packs
 LIMIT 1;
+DO $$
+DECLARE
+    legacy_constraint_name name;
+BEGIN
+    FOR legacy_constraint_name IN
+        SELECT c.conname
+        FROM pg_constraint c
+        INNER JOIN pg_class t ON t.oid = c.conrelid
+        INNER JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'ami'
+          AND t.relname = 'restore_packs'
+          AND c.conname LIKE 'restore_packs_workspace_restore_pack_requires_source_snapshot%'
+    LOOP
+        EXECUTE format('ALTER TABLE ami.restore_packs DROP CONSTRAINT %I', legacy_constraint_name);
+    END LOOP;
+END $$;
 ALTER TABLE ami.restore_packs
-    DROP CONSTRAINT IF EXISTS restore_packs_workspace_restore_pack_requires_source_snapshot_check;
+    DROP CONSTRAINT IF EXISTS restore_packs_workspace_pack_source_snapshot_check;
 ALTER TABLE ami.restore_packs
-    ADD CONSTRAINT restore_packs_workspace_restore_pack_requires_source_snapshot_check CHECK (
+    ADD CONSTRAINT restore_packs_workspace_pack_source_snapshot_check CHECK (
         pack_kind <> 'workspace_restore_pack' OR source_snapshot_id IS NOT NULL
     );
 "#;
@@ -324,9 +356,7 @@ fn bootstrap_sql_restore_packs_create_blocks_keep_source_identity_law_aligned() 
             "restore_packs CREATE block #{index} drifted from ON DELETE RESTRICT"
         );
         assert!(
-            body.contains(
-                "CONSTRAINT restore_packs_workspace_restore_pack_requires_source_snapshot_check CHECK"
-            ),
+            body.contains("CONSTRAINT restore_packs_workspace_pack_source_snapshot_check CHECK"),
             "restore_packs CREATE block #{index} drifted from workspace_restore_pack source identity check"
         );
         assert!(
@@ -12320,7 +12350,25 @@ async fn get_restore_pack_rejects_dirty_workspace_restore_pack_without_source_sn
 
     batch_execute_restore_pack_source_identity_schema_mutation(
         &client,
-        "ALTER TABLE ami.restore_packs DROP CONSTRAINT IF EXISTS restore_packs_workspace_restore_pack_requires_source_snapshot_check;",
+        r#"
+        DO $$
+        DECLARE
+            legacy_constraint_name name;
+        BEGIN
+            FOR legacy_constraint_name IN
+                SELECT c.conname
+                FROM pg_constraint c
+                INNER JOIN pg_class t ON t.oid = c.conrelid
+                INNER JOIN pg_namespace n ON n.oid = t.relnamespace
+                WHERE n.nspname = 'ami'
+                  AND t.relname = 'restore_packs'
+                  AND c.conname LIKE 'restore_packs_workspace_restore_pack_requires_source_snapshot%'
+            LOOP
+                EXECUTE format('ALTER TABLE ami.restore_packs DROP CONSTRAINT %I', legacy_constraint_name);
+            END LOOP;
+        END $$;
+        ALTER TABLE ami.restore_packs DROP CONSTRAINT IF EXISTS restore_packs_workspace_pack_source_snapshot_check;
+        "#,
     )
     .await
     .expect("drop workspace_restore_pack source_snapshot check");
@@ -12433,7 +12481,25 @@ async fn restore_pack_workspace_source_snapshot_check_migration_deletes_dirty_or
 
     batch_execute_restore_pack_source_identity_schema_mutation(
         &client,
-        "ALTER TABLE ami.restore_packs DROP CONSTRAINT IF EXISTS restore_packs_workspace_restore_pack_requires_source_snapshot_check;",
+        r#"
+        DO $$
+        DECLARE
+            legacy_constraint_name name;
+        BEGIN
+            FOR legacy_constraint_name IN
+                SELECT c.conname
+                FROM pg_constraint c
+                INNER JOIN pg_class t ON t.oid = c.conrelid
+                INNER JOIN pg_namespace n ON n.oid = t.relnamespace
+                WHERE n.nspname = 'ami'
+                  AND t.relname = 'restore_packs'
+                  AND c.conname LIKE 'restore_packs_workspace_restore_pack_requires_source_snapshot%'
+            LOOP
+                EXECUTE format('ALTER TABLE ami.restore_packs DROP CONSTRAINT %I', legacy_constraint_name);
+            END LOOP;
+        END $$;
+        ALTER TABLE ami.restore_packs DROP CONSTRAINT IF EXISTS restore_packs_workspace_pack_source_snapshot_check;
+        "#,
     )
         .await
         .expect("drop workspace_restore_pack source_snapshot check");
@@ -12573,7 +12639,25 @@ async fn restore_pack_workspace_source_snapshot_check_migration_failure_rolls_ba
 
     batch_execute_restore_pack_source_identity_schema_mutation(
         &client,
-        "ALTER TABLE ami.restore_packs DROP CONSTRAINT IF EXISTS restore_packs_workspace_restore_pack_requires_source_snapshot_check;",
+        r#"
+        DO $$
+        DECLARE
+            legacy_constraint_name name;
+        BEGIN
+            FOR legacy_constraint_name IN
+                SELECT c.conname
+                FROM pg_constraint c
+                INNER JOIN pg_class t ON t.oid = c.conrelid
+                INNER JOIN pg_namespace n ON n.oid = t.relnamespace
+                WHERE n.nspname = 'ami'
+                  AND t.relname = 'restore_packs'
+                  AND c.conname LIKE 'restore_packs_workspace_restore_pack_requires_source_snapshot%'
+            LOOP
+                EXECUTE format('ALTER TABLE ami.restore_packs DROP CONSTRAINT %I', legacy_constraint_name);
+            END LOOP;
+        END $$;
+        ALTER TABLE ami.restore_packs DROP CONSTRAINT IF EXISTS restore_packs_workspace_pack_source_snapshot_check;
+        "#,
     )
         .await
         .expect("drop workspace_restore_pack source_snapshot check");
@@ -12714,8 +12798,24 @@ async fn bootstrap_schema_restores_restore_pack_source_identity_law_and_cleans_d
     batch_execute_restore_pack_source_identity_schema_mutation(
         &client,
         r#"
+            DO $$
+            DECLARE
+                legacy_constraint_name name;
+            BEGIN
+                FOR legacy_constraint_name IN
+                    SELECT c.conname
+                    FROM pg_constraint c
+                    INNER JOIN pg_class t ON t.oid = c.conrelid
+                    INNER JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE n.nspname = 'ami'
+                      AND t.relname = 'restore_packs'
+                      AND c.conname LIKE 'restore_packs_workspace_restore_pack_requires_source_snapshot%'
+                LOOP
+                    EXECUTE format('ALTER TABLE ami.restore_packs DROP CONSTRAINT %I', legacy_constraint_name);
+                END LOOP;
+            END $$;
             ALTER TABLE ami.restore_packs
-                DROP CONSTRAINT IF EXISTS restore_packs_workspace_restore_pack_requires_source_snapshot_check;
+                DROP CONSTRAINT IF EXISTS restore_packs_workspace_pack_source_snapshot_check;
             ALTER TABLE ami.restore_packs
                 DROP CONSTRAINT IF EXISTS restore_packs_source_snapshot_id_fkey;
             ALTER TABLE ami.restore_packs
@@ -12792,6 +12892,18 @@ async fn bootstrap_schema_restores_restore_pack_source_identity_law_and_cleans_d
         .await
         .expect("insert dirty orphan workspace_restore_pack");
 
+    client
+        .batch_execute(
+            r#"
+            ALTER TABLE ami.restore_packs
+                ADD CONSTRAINT restore_packs_workspace_restore_pack_requires_source_snapshot_check
+                CHECK (pack_kind <> 'workspace_restore_pack' OR source_snapshot_id IS NOT NULL)
+                NOT VALID;
+            "#,
+        )
+        .await
+        .expect("add legacy truncated workspace source identity CHECK");
+
     bootstrap_schema(&client, &cfg)
         .await
         .expect("bootstrap schema should restore restore_pack source identity law");
@@ -12845,7 +12957,7 @@ async fn bootstrap_schema_restores_restore_pack_source_identity_law_and_cleans_d
             INNER JOIN pg_namespace n ON n.oid = t.relnamespace
             WHERE n.nspname = 'ami'
               AND t.relname = 'restore_packs'
-              AND c.conname = 'restore_packs_workspace_restore_pack_requires_source_snapshot_check'
+              AND c.conname = 'restore_packs_workspace_pack_source_snapshot_check'
             "#,
             &[],
         )
@@ -12854,6 +12966,23 @@ async fn bootstrap_schema_restores_restore_pack_source_identity_law_and_cleans_d
     let check_def: String = check_row.get(0);
     assert!(check_def.contains("pack_kind <> 'workspace_restore_pack'"));
     assert!(check_def.contains("source_snapshot_id IS NOT NULL"));
+    let legacy_check_count: i64 = client
+        .query_one(
+            r#"
+            SELECT COUNT(*)
+            FROM pg_constraint c
+            INNER JOIN pg_class t ON t.oid = c.conrelid
+            INNER JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE n.nspname = 'ami'
+              AND t.relname = 'restore_packs'
+              AND c.conname LIKE 'restore_packs_workspace_restore_pack_requires_source_snapshot%'
+            "#,
+            &[],
+        )
+        .await
+        .expect("legacy truncated workspace source identity CHECK count")
+        .get(0);
+    assert_eq!(legacy_check_count, 0);
     Ok(())
     })
     .await

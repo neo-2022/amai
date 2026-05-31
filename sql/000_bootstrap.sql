@@ -2755,7 +2755,7 @@ CREATE TABLE IF NOT EXISTS ami.restore_packs (
     payload JSONB NOT NULL DEFAULT '{}'::jsonb,
     captured_at_epoch_ms BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT restore_packs_workspace_restore_pack_requires_source_snapshot_check CHECK (
+    CONSTRAINT restore_packs_workspace_pack_source_snapshot_check CHECK (
         pack_kind <> 'workspace_restore_pack' OR source_snapshot_id IS NOT NULL
     )
 );
@@ -2811,11 +2811,28 @@ ALTER TABLE ami.restore_packs
     REFERENCES ami.observability_snapshots(snapshot_id)
     ON DELETE RESTRICT;
 
-ALTER TABLE ami.restore_packs
-    DROP CONSTRAINT IF EXISTS restore_packs_workspace_restore_pack_requires_source_snapshot_check;
+DO $$
+DECLARE
+    legacy_constraint_name name;
+BEGIN
+    FOR legacy_constraint_name IN
+        SELECT c.conname
+        FROM pg_constraint c
+        INNER JOIN pg_class t ON t.oid = c.conrelid
+        INNER JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'ami'
+          AND t.relname = 'restore_packs'
+          AND c.conname LIKE 'restore_packs_workspace_restore_pack_requires_source_snapshot%'
+    LOOP
+        EXECUTE format('ALTER TABLE ami.restore_packs DROP CONSTRAINT %I', legacy_constraint_name);
+    END LOOP;
+END $$;
 
 ALTER TABLE ami.restore_packs
-    ADD CONSTRAINT restore_packs_workspace_restore_pack_requires_source_snapshot_check CHECK (
+    DROP CONSTRAINT IF EXISTS restore_packs_workspace_pack_source_snapshot_check;
+
+ALTER TABLE ami.restore_packs
+    ADD CONSTRAINT restore_packs_workspace_pack_source_snapshot_check CHECK (
         pack_kind <> 'workspace_restore_pack' OR source_snapshot_id IS NOT NULL
     );
 
@@ -3286,7 +3303,7 @@ CREATE TABLE IF NOT EXISTS ami.restore_packs (
     payload JSONB NOT NULL DEFAULT '{}'::jsonb,
     captured_at_epoch_ms BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT restore_packs_workspace_restore_pack_requires_source_snapshot_check CHECK (
+    CONSTRAINT restore_packs_workspace_pack_source_snapshot_check CHECK (
         pack_kind <> 'workspace_restore_pack' OR source_snapshot_id IS NOT NULL
     )
 );
