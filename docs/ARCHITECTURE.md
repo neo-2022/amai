@@ -294,6 +294,31 @@ Truthful статус теперь такой:
 - любой следующий `ExecCtl` layer должен расти поверх этого состояния, а не заменять его
   prompt-договорённостью.
 
+## Startup Stale-Success Reconcile
+
+`amai_continuity_startup` success сам по себе не является достаточной правдой, если embedded MCP
+сервер старее workspace startup contract.
+
+Canonical transition:
+1. `MCP startup success`.
+2. Агент читает `.amai/continuity/project-chat-startup-state.json`.
+3. Если обнаружен stale-success признак:
+   - startup-contract SHA не совпал;
+   - нет `agent_workflow_guard`;
+   - нет `workflow_promotion_state`;
+   - нет lineage/source event id;
+   - `workflow_promotion_state.source_event_match != true`;
+   - `gate_semantics_consistent != true`.
+4. Success понижается до `stale_embedded_mcp_session`.
+5. Агент обязан выполнить local CLI reconcile:
+   - `./scripts/continuity_startup.sh --repo-root ... --namespace ... --json`.
+6. До успешного local payload отчёт пользователю запрещён.
+7. После успешного local payload агент продолжает только от локального state и требует MCP reconnect.
+
+Этот contour нужен не для удобства, а для truth non-regression: stale embedded tool не имеет права
+тихо перезаписать новый workflow contract старым runtime-state и тем самым обойти обязательный
+specialist-team workflow.
+
 ## Compatibility contour
 
 Чтобы стек не ломался молча при частичном обновлении компонентов, в `Amai` есть отдельный compatibility contour.
