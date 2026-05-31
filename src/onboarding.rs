@@ -4687,7 +4687,7 @@ fn render_startup_instruction_body(
         ),
         "5a. Если пользователь явно переключил задачу, это новый active workline немедленно: сначала materialize `continuity_handoff` для новой линии, затем продолжай только от неё; старую незавершённую линию, если она ещё не закрыта, паркуй в `pending_return_queue`, не продолжай её по инерции и не проси пользователя повторять указание."
             .to_string(),
-        "5b. Agent workflow guard: `agent_workflow_guard.guard_version = \"agent-workflow-guard-v1\"`; `workflow_promotion_state.source_event_match = true` + fresh `workflow_promotion_event_id`; external refs official/primary + local corroboration; per-item specialist consensus + bughunter-review; signoff: `./scripts/provision_specialist_signoff_trust.sh`, `./scripts/materialize_specialist_signoff.sh`, `./scripts/proof_workflow_before_report.sh`, `./scripts/proof_before_report.sh`, `./scripts/proof_specialist_signoff.sh`; subagents веди на английском."
+        "5b. Agent workflow guard: `agent_workflow_guard.guard_version = \"agent-workflow-guard-v1\"`; `workflow_promotion_state.source_event_match = true` + fresh `workflow_promotion_event_id`; external refs official/primary + local corroboration; per-item specialist consensus + bughunter-review; signoff: `./scripts/provision_specialist_signoff_trust.sh`, `./scripts/materialize_specialist_signoff.sh`, `./scripts/proof_workflow_before_report.sh`, `./scripts/proof_before_report.sh`, `./scripts/proof_specialist_signoff.sh`; subagents/specialists: только явно; язык en."
             .to_string(),
         format!(
             "6. Перед каждым содержательным ответом обновляй guard `{client_budget_guard_shell_command}` и работай только по `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}`. `must_check_before_each_substantive_reply = {client_budget_must_check_before_each_reply_text}`; stale старше `{client_budget_max_guard_age_seconds_text}` секунд запрещён (`stale_guard_requires_refresh = {client_budget_stale_guard_requires_refresh_text}`). Enforce `{client_budget_guard_enforcement_flag}` (`guard_enforcement_exit_on_blocking = {client_budget_guard_enforcement_exit_on_blocking_text}`). {client_budget_prefix_preflight_instruction} Amai continuity writes ({client_budget_continuity_write_operations}) exempt: `continuity_write_exempt_from_reply_guard = {client_budget_continuity_write_exempt_from_reply_guard_text}`; before rotate: `continuity_write_required_before_rotate = {client_budget_continuity_write_required_before_rotate_text}`. Root-cause first: `{client_budget_compact_diagnostics_shell_command}`; `must_prefer_compact_diagnostics_over_full_snapshot = {client_budget_prefer_compact_diagnostics_text}`."
@@ -5940,7 +5940,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("./scripts/proof_specialist_signoff.sh"));
         assert!(text.contains("official/primary"));
         assert!(text.contains("local corroboration"));
-        assert!(text.contains("subagents веди на английском"));
+        assert!(text.contains("subagents/specialists: только явно; язык en"));
         assert!(text.contains("gate_semantics_consistent != true"));
         assert!(text.contains("gate_semantics_consistent_true_required = true"));
         assert!(text.contains("./scripts/continuity_startup_state.sh --repo-root"));
