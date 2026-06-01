@@ -93,9 +93,27 @@ for i in $(seq 1 "${workers}"); do
   pids+=($!)
 done
 
-for pid in "${pids[@]}"; do
+worker_failures=0
+for i in $(seq 1 "${workers}"); do
+  pid="${pids[$((i-1))]}"
+  set +e
   wait "${pid}"
+  status=$?
+  set -e
+  if [[ "${status}" -ne 0 ]]; then
+    worker_failures=$((worker_failures + 1))
+    echo "proof_continuity_handoff_transport_failure_burst: worker ${i} failed with exit ${status}" >&2
+    if [[ -s "${proof_tmp}/handoff-${i}.err" ]]; then
+      cat "${proof_tmp}/handoff-${i}.err" >&2
+    fi
+    if [[ -s "${proof_tmp}/handoff-${i}.out" ]]; then
+      cat "${proof_tmp}/handoff-${i}.out" >&2
+    fi
+  fi
 done
+if (( worker_failures > 0 )); then
+  exit 1
+fi
 
 end_epoch_ms="$(./scripts/epoch_ms.sh)"
 elapsed_ms="$((end_epoch_ms - start_epoch_ms))"

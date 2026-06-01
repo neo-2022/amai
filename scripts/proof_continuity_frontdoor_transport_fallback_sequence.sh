@@ -57,7 +57,7 @@ set -euo pipefail
 last_arg="${@: -1}"
 case "${last_arg}" in
   *"/api/client-budget-compact-chat")
-    printf '%s\n' '{"continuity_compact_chat":{"project":{"code":"amai"},"namespace":{"code":"continuity"},"operator_notice":{"kind":"client_budget_compact_chat_requested"},"handoff":{"headline":"compact headline","next_step":"compact next"}}}'
+    printf '%s\n' '{"continuity_compact_chat":{"project":{"code":"amai"},"namespace":{"code":"continuity"},"chat_start_restore":{"prompt_text":"restore prompt"},"operator_notice":{"kind":"client_budget_compact_chat_requested","required_host_action":"open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable"},"handoff":{"headline":"compact headline","next_step":"compact next"}}}'
     ;;
   *"/api/client-budget-target")
     printf '%s\n' '{"client_budget_target_update":{"target_percent":90,"project":{"code":"amai"},"namespace":{"code":"continuity"},"operator_notice":{"exact_chat_command":"экономия_90","message_text":"budget target ready"}}}'
@@ -86,6 +86,8 @@ PATH="${fakebin}:/usr/bin:/bin" AMI_OBSERVE_BIND=127.0.0.1:1 \
 jq -e '
   .project.code == "amai"
   and .namespace.code == "continuity"
+  and .chat_start_restore.prompt_text == "restore prompt"
+  and .operator_notice.required_host_action == "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable"
   and .handoff.headline == "compact headline"
 ' /tmp/proof_continuity_transport_fallback_compact.out >/dev/null
 

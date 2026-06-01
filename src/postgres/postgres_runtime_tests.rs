@@ -1,21 +1,22 @@
 use super::{
-    ArtifactRefInsert, ChunkRecord, ContextPackInsert, DocumentRecord, ImportPacketRecord,
-    ImportPacketUpdate, MemoryCardVerificationConflictCheck, MemoryConflictInsert,
-    MemoryEdgeInsert, MemoryItemInsert, MemoryItemRecord, MemoryLinkDecisionInsert,
-    MemoryProvenanceInsert, NamespaceRecord, ObservabilityInsertErrorPhase,
-    ObservabilityInsertMeta, PendingLinkProposalInsert, PolicyRuleInsert, ProjectRecord,
-    QuarantineItemInsert, RelationUpdate, RestorePackCreateErrorPhase, RestorePackInsert,
-    RestorePackSourceSnapshotHint, RetrievalTraceInsert, SkillCardRecord,
-    SkillCardVerificationConflictCheck, SymbolRecord, TaskEventInsert, TaskNodeCandidateExtraction,
-    TaskNodeInsert, TaskNodeVerificationConflictCheck, add_relation, apply_memory_card_update,
+    ArtifactRefInsert, BOOTSTRAP_SCHEMA_ADVISORY_LOCK_KEY, ChunkRecord, ContextPackInsert,
+    DocumentRecord, ImportPacketRecord, ImportPacketUpdate, MemoryCardVerificationConflictCheck,
+    MemoryConflictInsert, MemoryEdgeInsert, MemoryItemInsert, MemoryItemRecord,
+    MemoryLinkDecisionInsert, MemoryProvenanceInsert, NamespaceRecord,
+    ObservabilityInsertErrorPhase, ObservabilityInsertMeta, PendingLinkProposalInsert,
+    PolicyRuleInsert, ProjectRecord, QuarantineItemInsert, RelationUpdate,
+    RestorePackCreateErrorPhase, RestorePackInsert, RestorePackSourceSnapshotHint,
+    RetrievalTraceInsert, SkillCardRecord, SkillCardVerificationConflictCheck, SymbolRecord,
+    TaskEventInsert, TaskNodeCandidateExtraction, TaskNodeInsert,
+    TaskNodeVerificationConflictCheck, add_relation, app_role_is_current, apply_memory_card_update,
     augment_memory_item_metadata_with_stage2_runtime, bind_shared_asset_to_project,
-    bootstrap_schema, build_memory_write_pipeline, build_skill_execution_cards,
-    canonical_repo_root_string, connect_admin, count_documents_for_project_namespace_codes,
-    create_artifact_ref, create_import_packet, create_memory_card, create_memory_conflict,
-    create_memory_edge, create_memory_item, create_memory_link_decision, create_memory_provenance,
-    create_memory_relation_edge, create_pending_link_proposal, create_policy_rule,
-    create_quarantine_item, create_restore_pack, create_restore_pack_detailed,
-    create_retrieval_trace, create_skill_card_candidate,
+    bootstrap_schema, bootstrap_schema_is_current, build_memory_write_pipeline,
+    build_skill_execution_cards, canonical_repo_root_string, connect_admin,
+    count_documents_for_project_namespace_codes, create_artifact_ref, create_import_packet,
+    create_memory_card, create_memory_conflict, create_memory_edge, create_memory_item,
+    create_memory_link_decision, create_memory_provenance, create_memory_relation_edge,
+    create_pending_link_proposal, create_policy_rule, create_quarantine_item, create_restore_pack,
+    create_restore_pack_detailed, create_retrieval_trace, create_skill_card_candidate,
     create_skill_card_candidate_with_refinement, create_skill_evidence_bundle, create_task_event,
     create_task_node, delete_observability_snapshots_by_ids, derive_memory_item_source_kind,
     ensure_access_policy, ensure_namespace, ensure_shared_asset, ensure_transfer_policy,
@@ -34,20 +35,20 @@ use super::{
     replace_document_index_with_document_id, resolve_project_by_repo_root_hint,
     run_memory_card_policy_scope_filter, run_memory_item_policy_scope_filter,
     run_skill_card_policy_scope_filter, run_task_node_policy_scope_filter,
-    safe_postgres_descriptor, search_memory_cards_for_namespace, task_node_marks_poisoned,
-    update_import_packet, update_memory_card_truth_state, update_observability_snapshot_payload,
-    update_relation, upsert_project, upsert_stack_meta, validate_artifact_ref_basis,
-    validate_memory_card_candidate, validate_memory_card_policy_scope_filter,
-    validate_memory_card_runtime_states, validate_memory_card_verification_conflict_check,
-    validate_memory_item_candidate, validate_memory_item_policy_scope_filter,
-    validate_memory_item_verification_conflict_check, validate_memory_link_decision_basis,
-    validate_memory_relation_edge_basis, validate_observability_update,
-    validate_pending_link_proposal_basis, validate_skill_activity_basis,
-    validate_skill_card_candidate, validate_skill_card_policy_scope_filter,
-    validate_skill_card_verification_conflict_check, validate_skill_evidence_bundle_basis,
-    validate_stage2_basis, validate_task_event_basis, validate_task_node_candidate,
-    validate_task_node_policy_scope_filter, validate_task_node_verification_conflict_check,
-    with_postgres_advisory_lock,
+    safe_postgres_descriptor, search_memory_cards_for_namespace, sql_ident,
+    task_node_marks_poisoned, update_import_packet, update_memory_card_truth_state,
+    update_observability_snapshot_payload, update_relation, upsert_project, upsert_stack_meta,
+    validate_artifact_ref_basis, validate_memory_card_candidate,
+    validate_memory_card_policy_scope_filter, validate_memory_card_runtime_states,
+    validate_memory_card_verification_conflict_check, validate_memory_item_candidate,
+    validate_memory_item_policy_scope_filter, validate_memory_item_verification_conflict_check,
+    validate_memory_link_decision_basis, validate_memory_relation_edge_basis,
+    validate_observability_update, validate_pending_link_proposal_basis,
+    validate_skill_activity_basis, validate_skill_card_candidate,
+    validate_skill_card_policy_scope_filter, validate_skill_card_verification_conflict_check,
+    validate_skill_evidence_bundle_basis, validate_stage2_basis, validate_task_event_basis,
+    validate_task_node_candidate, validate_task_node_policy_scope_filter,
+    validate_task_node_verification_conflict_check, with_postgres_advisory_lock,
 };
 use crate::config::AppConfig;
 use crate::nats;
@@ -23138,4 +23139,61 @@ fn bootstrap_schema_cache_roundtrips() {
     assert!(!super::bootstrap_schema_cache_contains(&cache_key));
     super::bootstrap_schema_cache_insert(cache_key.clone());
     assert!(super::bootstrap_schema_cache_contains(&cache_key));
+}
+
+#[tokio::test]
+async fn bootstrap_schema_marks_app_role_grants_current() {
+    let cfg = AppConfig::from_env().expect("env config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+
+    with_restore_pack_source_identity_schema_test_lock(&client, || async {
+        bootstrap_schema(&client, &cfg).await.expect("schema");
+
+        assert!(
+            bootstrap_schema_is_current(&client)
+                .await
+                .expect("schema sentinel"),
+            "bootstrap schema must leave the schema-current sentinel true so hot-path bootstraps do not repeat full DDL"
+        );
+        assert!(
+            app_role_is_current(&client, &cfg)
+                .await
+                .expect("app role grant sentinel"),
+            "bootstrap schema must leave app role grants current so hot-path bootstraps do not repeat table-wide GRANT/REVOKE"
+        );
+
+        let user = sql_ident(&cfg.app_db_user).expect("safe app role identifier");
+        let revoke_default_sequence_select_sql = format!(
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA ami REVOKE SELECT ON SEQUENCES FROM {user};"
+        );
+        let (drift_detected, repaired) = with_postgres_advisory_lock(
+            &client,
+            BOOTSTRAP_SCHEMA_ADVISORY_LOCK_KEY,
+            "failed to acquire app role default privilege test lock",
+            "failed to release app role default privilege test lock",
+            || async {
+                client
+                    .batch_execute(&revoke_default_sequence_select_sql)
+                    .await?;
+                let drift_detected = app_role_is_current(&client, &cfg).await;
+                let repair_result = bootstrap_schema(&client, &cfg).await;
+                let repaired = app_role_is_current(&client, &cfg).await;
+                repair_result?;
+                Ok((drift_detected?, repaired?))
+            },
+        )
+        .await
+        .expect("app role default privilege drift test lock");
+        assert!(
+            !drift_detected,
+            "app role sentinel must catch drift in default privileges for future sequences"
+        );
+        assert!(
+            repaired,
+            "bootstrap schema must repair drift in app role default privileges"
+        );
+        Ok(())
+    })
+    .await
+    .expect("run app role grant freshness test");
 }

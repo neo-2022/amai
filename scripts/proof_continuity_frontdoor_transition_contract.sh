@@ -45,6 +45,9 @@ case "${mode}:${last_arg}" in
   valid_sequence:*"/api/client-budget-compact-chat")
     printf '%s\n' '{"continuity_compact_chat":{"project":{"code":"amai"},"namespace":{"code":"continuity"},"chat_start_restore":{"prompt_text":"restore prompt"},"operator_notice":{"kind":"client_budget_compact_chat_requested","required_host_action":"open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable"},"handoff":{"headline":"compact headline","next_step":"compact next"}}}'
     ;;
+  valid_launch_command_only:*"/api/client-budget-compact-chat")
+    printf '%s\n' '{"continuity_compact_chat":{"project":{"code":"amai"},"namespace":{"code":"continuity"},"chat_start_restore":{"prompt_text":"restore prompt"},"operator_notice":{"kind":"client_budget_compact_chat_requested","launch_clean_chat_command":"code chat --mode agent"},"handoff":{"headline":"compact headline","next_step":"compact next"}}}'
+    ;;
   valid_sequence:*"/api/client-budget-target")
     printf '%s\n' '{"client_budget_target_update":{"target_percent":90,"project":{"code":"amai"},"namespace":{"code":"continuity"},"operator_notice":{"exact_chat_command":"экономия_90","message_text":"budget target ready"}}}'
     ;;
@@ -79,6 +82,20 @@ jq -e '
   and .handoff.headline == "compact headline"
   and .handoff.next_step == "compact next"
 ' /tmp/proof_continuity_frontdoor_transition_compact.out >/dev/null
+
+PATH="${fakebin}:/usr/bin:/bin" AMI_OBSERVE_BIND=127.0.0.1:1 AMAI_FAKE_FRONTDOOR_MODE=valid_launch_command_only \
+  ./scripts/continuity_compact_chat.sh --project amai --namespace continuity --json \
+  >/tmp/proof_continuity_frontdoor_transition_compact_launch.out
+jq -e '
+  .project.code == "amai"
+  and .namespace.code == "continuity"
+  and .chat_start_restore.prompt_text == "restore prompt"
+  and .operator_notice.kind == "client_budget_compact_chat_requested"
+  and .operator_notice.launch_clean_chat_command == "code chat --mode agent"
+  and .operator_notice.required_host_action == null
+  and .handoff.headline == "compact headline"
+  and .handoff.next_step == "compact next"
+' /tmp/proof_continuity_frontdoor_transition_compact_launch.out >/dev/null
 
 PATH="${fakebin}:/usr/bin:/bin" AMI_OBSERVE_BIND=127.0.0.1:1 AMAI_FAKE_FRONTDOOR_MODE=valid_sequence \
   ./scripts/continuity_client_budget_target.sh --project amai --namespace continuity --percent 90 \

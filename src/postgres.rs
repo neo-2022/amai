@@ -71,7 +71,8 @@ mod postgres_workspace_access;
 pub use self::postgres_bootstrap_runtime::*;
 #[cfg(test)]
 use self::postgres_bootstrap_runtime::{
-    bootstrap_schema_cache_contains, bootstrap_schema_cache_insert, safe_postgres_descriptor,
+    app_role_is_current, bootstrap_schema_cache_contains, bootstrap_schema_cache_insert,
+    bootstrap_schema_is_current, safe_postgres_descriptor,
 };
 use self::postgres_bootstrap_runtime::{
     conflict_state_to_edge_state, conflict_state_to_edge_trust_state, sql_ident, sql_literal,

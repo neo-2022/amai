@@ -87,7 +87,10 @@ fn postgres_host_label(host: &Host) -> String {
 
 pub async fn bootstrap_schema(client: &Client, cfg: &AppConfig) -> Result<()> {
     let cache_key = bootstrap_schema_cache_key(cfg);
-    if bootstrap_schema_cache_contains(&cache_key) && bootstrap_schema_is_current(client).await? {
+    if bootstrap_schema_cache_contains(&cache_key)
+        && bootstrap_schema_is_current(client).await?
+        && app_role_is_current(client, cfg).await?
+    {
         return Ok(());
     }
     super::with_postgres_advisory_lock(
@@ -102,8 +105,12 @@ pub async fn bootstrap_schema(client: &Client, cfg: &AppConfig) -> Result<()> {
                     .await
                     .context("failed to apply postgres schema")?;
             }
-            ensure_app_role(client, cfg).await?;
-            if bootstrap_schema_is_current(client).await? {
+            if !app_role_is_current(client, cfg).await? {
+                ensure_app_role(client, cfg).await?;
+            }
+            if bootstrap_schema_is_current(client).await?
+                && app_role_is_current(client, cfg).await?
+            {
                 bootstrap_schema_cache_insert(cache_key.clone());
             }
             Ok(())
@@ -133,7 +140,7 @@ pub(super) fn bootstrap_schema_cache_insert(cache_key: String) {
     }
 }
 
-async fn bootstrap_schema_is_current(client: &Client) -> Result<bool> {
+pub(super) async fn bootstrap_schema_is_current(client: &Client) -> Result<bool> {
     let row = client
         .query_one(
             r#"
@@ -234,7 +241,9 @@ async fn bootstrap_schema_is_current(client: &Client) -> Result<bool> {
                     WHERE n.nspname = 'ami'
                       AND t.relname = 'restore_packs'
                       AND c.conname = 'restore_packs_workspace_pack_source_snapshot_check'
-                      AND pg_get_constraintdef(c.oid) LIKE '%pack_kind <> ''workspace_restore_pack'' OR source_snapshot_id IS NOT NULL%'
+                      AND pg_get_constraintdef(c.oid) LIKE '%pack_kind <> ''workspace_restore_pack''%'
+                      AND pg_get_constraintdef(c.oid) LIKE '% OR %'
+                      AND pg_get_constraintdef(c.oid) LIKE '%source_snapshot_id IS NOT NULL%'
                 )
                 AND NOT EXISTS (
                     SELECT 1
@@ -530,6 +539,104 @@ async fn bootstrap_schema_is_current(client: &Client) -> Result<bool> {
         )
         .await
         .context("failed to validate postgres schema bootstrap sentinel")?;
+    Ok(row.get::<_, bool>(0))
+}
+
+pub(super) async fn app_role_is_current(client: &Client, cfg: &AppConfig) -> Result<bool> {
+    let row = client
+        .query_one(
+            r#"
+            WITH app_role(role_oid, role_name) AS (
+                SELECT oid, rolname
+                FROM pg_roles
+                WHERE rolname = $1
+            ),
+            current_owner(role_oid) AS (
+                SELECT oid
+                FROM pg_roles
+                WHERE rolname = current_user
+            ),
+            default_acl AS (
+                SELECT d.defaclobjtype, acl.privilege_type
+                FROM pg_default_acl d
+                INNER JOIN pg_namespace n ON n.oid = d.defaclnamespace
+                INNER JOIN current_owner owner ON owner.role_oid = d.defaclrole
+                INNER JOIN app_role role ON TRUE
+                CROSS JOIN LATERAL aclexplode(COALESCE(d.defaclacl, '{}'::aclitem[])) acl
+                WHERE n.nspname = 'ami'
+                  AND d.defaclobjtype IN ('r', 'S')
+                  AND acl.grantee = role.role_oid
+            )
+            SELECT COALESCE((
+                SELECT
+                    has_database_privilege(role_name, current_database(), 'CONNECT')
+                    AND has_schema_privilege(role_name, 'ami', 'USAGE')
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM pg_class c
+                        INNER JOIN pg_namespace n ON n.oid = c.relnamespace
+                        WHERE n.nspname = 'ami'
+                          AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                          AND (
+                              NOT has_table_privilege(role_name, c.oid, 'SELECT')
+                              OR has_table_privilege(role_name, c.oid, 'INSERT')
+                              OR has_table_privilege(role_name, c.oid, 'UPDATE')
+                              OR has_table_privilege(role_name, c.oid, 'DELETE')
+                              OR has_table_privilege(role_name, c.oid, 'TRUNCATE')
+                              OR has_table_privilege(role_name, c.oid, 'REFERENCES')
+                              OR has_table_privilege(role_name, c.oid, 'TRIGGER')
+                          )
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM pg_class c
+                        INNER JOIN pg_namespace n ON n.oid = c.relnamespace
+                        WHERE n.nspname = 'ami'
+                          AND c.relkind = 'S'
+                          AND (
+                              NOT has_sequence_privilege(role_name, c.oid, 'SELECT')
+                              OR has_sequence_privilege(role_name, c.oid, 'USAGE')
+                              OR has_sequence_privilege(role_name, c.oid, 'UPDATE')
+                          )
+                    )
+                    AND EXISTS (
+                        SELECT 1
+                        FROM default_acl
+                        WHERE defaclobjtype = 'r'
+                          AND privilege_type = 'SELECT'
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM default_acl
+                        WHERE defaclobjtype = 'r'
+                          AND privilege_type IN (
+                              'INSERT',
+                              'UPDATE',
+                              'DELETE',
+                              'TRUNCATE',
+                              'REFERENCES',
+                              'TRIGGER'
+                          )
+                    )
+                    AND EXISTS (
+                        SELECT 1
+                        FROM default_acl
+                        WHERE defaclobjtype = 'S'
+                          AND privilege_type = 'SELECT'
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM default_acl
+                        WHERE defaclobjtype = 'S'
+                          AND privilege_type IN ('USAGE', 'UPDATE')
+                    )
+                FROM app_role
+            ), false)
+            "#,
+            &[&cfg.app_db_user],
+        )
+        .await
+        .context("failed to validate postgres app role grants")?;
     Ok(row.get::<_, bool>(0))
 }
 
