@@ -115,10 +115,33 @@ jq -e --argjson limit "$LIMIT" '
   and .gold_answer_relevance_boundary.gold_labeled_cases > 0
   and .gold_answer_relevance_boundary.retrieval_evidence_cases > 0
   and .gold_answer_relevance_boundary.gold_answer_supported_retrieval_cases <= .gold_answer_relevance_boundary.retrieval_evidence_cases
+  and .gold_answer_relevance_boundary.top_ranked_gold_answer_supported_retrieval_cases <= .gold_answer_relevance_boundary.gold_answer_supported_retrieval_cases
+  and .gold_answer_relevance_boundary.top_ranked_relevance_and_gold_answer_supported_retrieval_cases <= .gold_answer_relevance_boundary.top_ranked_gold_answer_supported_retrieval_cases
   and (.gold_answer_relevance_boundary.no_retrieval_evidence_cases + .gold_answer_relevance_boundary.retrieval_evidence_cases == .gold_answer_relevance_boundary.judged_cases)
   and (.gold_answer_relevance_boundary.maturity_blocking_reasons | index("gold_answer_overlap_is_lexical_not_semantic") != null)
   and (.gold_answer_relevance_boundary.maturity_blocking_reasons | index("official_upstream_relevance_judge_not_integrated") != null)
-  and (.gold_answer_relevance_boundary.maturity_blocking_reasons | index("not_all_gold_labeled_cases_supported_by_retrieval") != null)
+  and (
+    (
+      .gold_answer_relevance_boundary.gold_answer_supported_retrieval_cases
+      >= .gold_answer_relevance_boundary.retrieval_evidence_cases
+    )
+    or
+    (
+      .gold_answer_relevance_boundary.maturity_blocking_reasons
+      | index("not_all_gold_labeled_cases_supported_by_retrieval") != null
+    )
+  )
+  and (
+    (
+      .gold_answer_relevance_boundary.top_ranked_gold_answer_supported_retrieval_cases
+      >= .gold_answer_relevance_boundary.gold_answer_supported_retrieval_cases
+    )
+    or
+    (
+      .gold_answer_relevance_boundary.maturity_blocking_reasons
+      | index("top_ranked_retrieval_not_always_answer_supporting") != null
+    )
+  )
 ' "$METRICS" >/dev/null
 
 if ! jq -e '(.chunk_hits_avg + .document_hits_avg) > 0' "$METRICS" >/dev/null; then

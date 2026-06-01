@@ -128,6 +128,8 @@ pub enum BenchmarkCommand {
     ExternalMemoryScore(BenchmarkExternalMemoryScoreArgs),
     ExternalMemoryOfficialJudge(BenchmarkExternalMemoryOfficialJudgeArgs),
     ExternalMemoryOfficialScore(BenchmarkExternalMemoryOfficialScoreArgs),
+    ExternalMemoryLocalJudge(BenchmarkExternalMemoryLocalJudgeArgs),
+    ExternalMemoryLocalScore(BenchmarkExternalMemoryLocalScoreArgs),
     ExternalMemorySecretScan(BenchmarkExternalMemorySecretScanArgs),
     ExternalMemorySchema(BenchmarkExternalMemorySchemaArgs),
 }
@@ -971,6 +973,12 @@ pub struct BenchmarkExternalMemoryOfficialJudgeArgs {
     pub allow_live: bool,
     #[arg(long, default_value = "https://api.openai.com/v1")]
     pub api_base_url: String,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Allow a non-official OpenAI-compatible API base URL for local proof/debug only; upstream-eligible official provenance stays blocked."
+    )]
+    pub allow_non_official_api_base: bool,
     #[arg(long, default_value = "OPENAI_API_KEY")]
     pub api_key_env: String,
     #[arg(long, default_value = "gpt-4o-2024-08-06")]
@@ -985,6 +993,45 @@ pub struct BenchmarkExternalMemoryOfficialScoreArgs {
     pub eval_results: PathBuf,
     #[arg(long)]
     pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchmarkExternalMemoryLocalJudgeArgs {
+    #[arg(long)]
+    pub cases: PathBuf,
+    #[arg(long)]
+    pub predictions: PathBuf,
+    #[arg(long)]
+    pub eval_results: PathBuf,
+    #[arg(long)]
+    pub summary: Option<PathBuf>,
+    #[arg(
+        long,
+        default_value = "http://127.0.0.1:11434",
+        help = "Local Ollama base URL for the non-official provider-independent judge lane."
+    )]
+    pub ollama_base_url: String,
+    #[arg(
+        long,
+        default_value = "gemma4:e4b",
+        help = "Local Ollama model for the non-official judge lane; default matches the repo proof harness."
+    )]
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchmarkExternalMemoryLocalScoreArgs {
+    #[arg(long)]
+    pub cases: PathBuf,
+    #[arg(long)]
+    pub eval_results: PathBuf,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Expected local model label inside eval-results; blocks mixed or mismatched local judge logs."
+    )]
+    pub expected_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]

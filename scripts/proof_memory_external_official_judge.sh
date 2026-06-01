@@ -13,6 +13,8 @@ MISSING_KEY_RESULTS="$OUT_DIR/missing-key-eval-results.jsonl"
 MISSING_KEY_SUMMARY="$OUT_DIR/missing-key-summary.json"
 MODEL_MISMATCH_RESULTS="$OUT_DIR/model-mismatch-eval-results.jsonl"
 MODEL_MISMATCH_SUMMARY="$OUT_DIR/model-mismatch-summary.json"
+NON_OFFICIAL_RESULTS="$OUT_DIR/non-official-base-eval-results.jsonl"
+NON_OFFICIAL_SUMMARY="$OUT_DIR/non-official-base-summary.json"
 REDACTION_MARKER="REDACTED_OFFICIAL_JUDGE_API_KEY"
 
 echo "== Amai external memory official LongMemEval judge proof =="
@@ -102,7 +104,26 @@ jq -e '
 ' "$MODEL_MISMATCH_SUMMARY" >/dev/null
 test ! -e "$MODEL_MISMATCH_RESULTS"
 
-for no_key_summary in "$SUMMARY" "$MISSING_KEY_SUMMARY" "$MODEL_MISMATCH_SUMMARY"; do
+AMAI_PROOF_FAKE_OFFICIAL_KEY="sk-test-non-official-base" cargo run --quiet -- benchmark external-memory-official-judge \
+  --cases "$CASES" \
+  --predictions "$PREDICTIONS" \
+  --eval-results "$NON_OFFICIAL_RESULTS" \
+  --summary "$NON_OFFICIAL_SUMMARY" \
+  --allow-live \
+  --api-base-url https://codexcn.top/v1 \
+  --api-key-env AMAI_PROOF_FAKE_OFFICIAL_KEY
+
+jq -e '
+  .status == "blocked"
+  and .allow_live == true
+  and .api_base_url_matches_official == false
+  and .official_upstream_provenance_eligible == false
+  and (.validation_blocking_reasons | index("official_judge_api_base_url_not_official") != null)
+  and (.maturity_blocking_reasons | index("official_judge_api_base_url_not_official") != null)
+' "$NON_OFFICIAL_SUMMARY" >/dev/null
+test ! -e "$NON_OFFICIAL_RESULTS"
+
+for no_key_summary in "$SUMMARY" "$MISSING_KEY_SUMMARY" "$MODEL_MISMATCH_SUMMARY" "$NON_OFFICIAL_SUMMARY"; do
   if grep -q "$REDACTION_MARKER" "$no_key_summary"; then
     echo "no-key/offline official judge summary must not contain redaction marker: $no_key_summary" >&2
     exit 6

@@ -29,8 +29,15 @@ const AMAI_ANN_QDRANT_RUN_TIMEOUT_SECONDS: u32 = 21600;
 const AMAI_EXTERNAL_MEMORY_RETRIEVAL_RELEVANCE_THRESHOLD: usize = 2;
 const LONGMEMEVAL_OFFICIAL_METRIC_MODEL: &str = "gpt-4o-2024-08-06";
 const LONGMEMEVAL_OFFICIAL_METRIC_MODEL_SHORT: &str = "gpt-4o";
+const LONGMEMEVAL_OFFICIAL_API_BASE_URL: &str = "https://api.openai.com/v1";
 const LONGMEMEVAL_OFFICIAL_JUDGE_MAX_ATTEMPTS: usize = 3;
 const OFFICIAL_JUDGE_REDACTION_MARKER: &str = "[REDACTED_OFFICIAL_JUDGE_API_KEY]";
+const LONGMEMEVAL_OFFICIAL_JUDGE_SOURCE_KIND: &str = "official_longmemeval_llm_judge_execution";
+const LONGMEMEVAL_NON_OFFICIAL_JUDGE_SOURCE_KIND: &str =
+    "openai_compatible_llm_judge_execution_non_official_base_url";
+const LONGMEMEVAL_LOCAL_JUDGE_DEFAULT_MODEL: &str = "gemma4:e4b";
+const LONGMEMEVAL_LOCAL_JUDGE_SOURCE_KIND: &str = "local_ollama_llm_judge_execution";
+const LONGMEMEVAL_LOCAL_JUDGE_TRANSPORT_KIND: &str = "ollama_api_chat";
 const AMAI_EXTERNAL_MEMORY_RUNTIME_TARGET_WINDOW_BYTES: usize = 32 * 1024;
 const AMAI_EXTERNAL_MEMORY_RUNTIME_TARGET_WINDOW_BYTES_ACCURATE_RETRIEVAL: usize = 12 * 1024;
 const LONGMEMEVAL_OFFICIAL_QUESTION_TYPES: [&str; 6] = [
@@ -1169,6 +1176,44 @@ pub fn reconcile_external_memory_official_score(
     Ok(())
 }
 
+pub fn reconcile_external_memory_local_score(
+    cases_path: &Path,
+    eval_results_path: &Path,
+    output_path: Option<&Path>,
+    expected_model: Option<&str>,
+) -> Result<()> {
+    let cases = load_cases_jsonl(cases_path)?;
+    let bench = cases
+        .values()
+        .find_map(|case| case["bench"].as_str().map(|value| value.to_string()));
+    let dataset = cases
+        .values()
+        .find_map(|case| case["dataset"].as_str().map(|value| value.to_string()));
+    let eval_results_content = match fs::read_to_string(eval_results_path) {
+        Ok(content) => Some(content),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to read {}", eval_results_path.display()));
+        }
+    };
+    let summary = memory_local_score_reconciliation(
+        bench.as_deref(),
+        dataset.as_deref(),
+        cases_path,
+        eval_results_path,
+        &cases,
+        eval_results_content.as_deref(),
+        expected_model,
+    );
+    if let Some(output_path) = output_path {
+        fs::write(output_path, serde_json::to_string_pretty(&summary)?)
+            .with_context(|| format!("failed to write {}", output_path.display()))?;
+    }
+    println!("{}", serde_json::to_string_pretty(&summary)?);
+    Ok(())
+}
+
 pub fn scan_external_memory_secret_artifacts(
     output_dir: &Path,
     secret_env: &str,
@@ -1268,6 +1313,7 @@ pub async fn run_external_memory_official_judge(
     summary_path: Option<&Path>,
     allow_live: bool,
     api_base_url: &str,
+    allow_non_official_api_base: bool,
     api_key_env: &str,
     model: &str,
 ) -> Result<()> {
@@ -1284,6 +1330,8 @@ pub async fn run_external_memory_official_judge(
         &cases,
         &predictions,
         allow_live,
+        api_base_url,
+        allow_non_official_api_base,
         api_key_env,
         model,
     );
@@ -1310,6 +1358,7 @@ pub async fn run_external_memory_official_judge(
                 allow_live,
                 false,
                 api_base_url,
+                allow_non_official_api_base,
                 api_key_env,
                 model,
                 &validation_blockers,
@@ -1356,6 +1405,7 @@ pub async fn run_external_memory_official_judge(
         allow_live,
         !eval_entries.is_empty(),
         api_base_url,
+        allow_non_official_api_base,
         api_key_env,
         model,
         &validation_blockers,
@@ -1366,9 +1416,72 @@ pub async fn run_external_memory_official_judge(
     Ok(())
 }
 
+pub async fn run_external_memory_local_judge(
+    cases_path: &Path,
+    predictions_path: &Path,
+    eval_results_path: &Path,
+    summary_path: Option<&Path>,
+    ollama_base_url: &str,
+    model: &str,
+) -> Result<()> {
+    let cases = load_cases_jsonl(cases_path)?;
+    let predictions = load_predictions_jsonl(predictions_path)?;
+    let bench = cases
+        .values()
+        .find_map(|case| case["bench"].as_str().map(|value| value.to_string()));
+    let dataset = cases
+        .values()
+        .find_map(|case| case["dataset"].as_str().map(|value| value.to_string()));
+    let mut validation_blockers = validate_longmemeval_local_judge_inputs(
+        bench.as_deref(),
+        &cases,
+        &predictions,
+        ollama_base_url,
+        model,
+    );
+    let mut eval_entries = Vec::new();
+    let mut judge_failure_examples = Vec::new();
+    if validation_blockers.is_empty() {
+        match execute_longmemeval_local_judge_live(&cases, &predictions, ollama_base_url, model)
+            .await
+        {
+            Ok(entries) => {
+                eval_entries = entries;
+                write_jsonl_values(eval_results_path, &eval_entries)?;
+            }
+            Err(err) => {
+                let err = format!("{err:#}");
+                validation_blockers.insert("local_judge_live_execution_failed".to_string());
+                validation_blockers
+                    .insert(classify_longmemeval_local_judge_execution_failure(&err));
+                judge_failure_examples.push(err);
+            }
+        }
+    }
+
+    let summary = memory_local_judge_execution_summary(
+        bench.as_deref(),
+        dataset.as_deref(),
+        cases_path,
+        predictions_path,
+        eval_results_path,
+        &cases,
+        predictions.len(),
+        eval_entries.len(),
+        !eval_entries.is_empty(),
+        ollama_base_url,
+        model,
+        &validation_blockers,
+        &judge_failure_examples,
+    );
+    write_memory_local_judge_summary(summary_path, &summary)?;
+    println!("{}", serde_json::to_string_pretty(&summary)?);
+    Ok(())
+}
+
 pub async fn run_external_memory_benchmark_amai(
     cfg: &AppConfig,
-    db: &tokio_postgres::Client,
+    _db: &tokio_postgres::Client,
     repo_root: &Path,
     requests_path: &Path,
     predictions_path: &Path,
@@ -1408,29 +1521,9 @@ pub async fn run_external_memory_benchmark_amai(
         Vec::new()
     };
 
-    let bench_project_code = benchmark_runtime_project_code(namespace_code);
     let runtime_root = benchmark_runtime_root(cfg, namespace_code);
     fs::create_dir_all(&runtime_root)
         .with_context(|| format!("failed to create {}", runtime_root.display()))?;
-    let bench_project = postgres::upsert_project(
-        db,
-        &bench_project_code,
-        &format!("External Memory Runtime {}", namespace_code),
-        &runtime_root.display().to_string(),
-        None,
-        "default",
-        "project_private",
-        "local_strict",
-    )
-    .await?;
-    let _namespace = postgres::ensure_namespace(
-        db,
-        bench_project.project_id,
-        namespace_code,
-        Some("External Memory Benchmark Runtime"),
-        "local_strict",
-    )
-    .await?;
 
     write_memory_runtime_status(
         &status_path,
@@ -1485,7 +1578,7 @@ pub async fn run_external_memory_benchmark_amai(
             materialize_benchmark_runtime_case(&runtime_root, &request.case_id, &runtime_windows)?;
             let materialize_case_ms = materialize_started_at.elapsed().as_millis();
             let index_args = IndexProjectArgs {
-                code: bench_project_code.clone(),
+                code: project_code.to_string(),
                 path: runtime_root.clone(),
                 namespace: namespace_code.to_string(),
                 limit_files: None,
@@ -1506,7 +1599,7 @@ pub async fn run_external_memory_benchmark_amai(
         let retrieval_pack = execute_memory_runtime_context_pack(
             cfg,
             &mut runtime_db,
-            &bench_project_code,
+            project_code,
             namespace_code,
             benchmark,
             &request.question,
@@ -1666,6 +1759,292 @@ pub async fn run_external_memory_benchmark_amai(
             "status": status_path,
         }))?
     );
+    Ok(())
+}
+
+fn validate_longmemeval_local_judge_inputs(
+    bench: Option<&str>,
+    cases: &BTreeMap<String, Value>,
+    predictions: &BTreeMap<String, String>,
+    ollama_base_url: &str,
+    model: &str,
+) -> BTreeSet<String> {
+    let mut blockers = BTreeSet::new();
+    if bench != Some("longmemeval") {
+        blockers.insert("local_judge_supported_only_for_longmemeval".to_string());
+    }
+    if cases.is_empty() {
+        blockers.insert("local_reference_cases_empty".to_string());
+    }
+    if normalize_local_judge_ollama_base_url(ollama_base_url).is_empty() {
+        blockers.insert("local_judge_ollama_base_url_empty".to_string());
+    }
+    if model.trim().is_empty() {
+        blockers.insert("local_judge_model_empty".to_string());
+    }
+
+    for prediction_id in predictions.keys() {
+        if !cases.contains_key(prediction_id) {
+            blockers.insert("local_judge_prediction_without_reference_case".to_string());
+            break;
+        }
+    }
+    for (case_id, case) in cases {
+        if !predictions.contains_key(case_id) {
+            blockers.insert("local_judge_missing_prediction".to_string());
+        }
+        if case["question"]
+            .as_str()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            blockers.insert("local_reference_question_missing".to_string());
+        }
+        if case.get("answer").and_then(Value::as_str).is_none() {
+            blockers.insert("local_reference_answer_missing".to_string());
+        }
+        match longmemeval_case_question_type(case) {
+            Some(question_type)
+                if LONGMEMEVAL_OFFICIAL_QUESTION_TYPES.contains(&question_type.as_str()) => {}
+            Some(_) => {
+                blockers.insert("local_reference_question_type_unsupported".to_string());
+            }
+            None => {
+                blockers.insert("local_reference_question_type_missing".to_string());
+            }
+        }
+    }
+    blockers
+}
+
+async fn execute_longmemeval_local_judge_live(
+    cases: &BTreeMap<String, Value>,
+    predictions: &BTreeMap<String, String>,
+    ollama_base_url: &str,
+    model: &str,
+) -> Result<Vec<Value>> {
+    let client = HttpClient::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .context("failed to build local judge HTTP client")?;
+    let normalized_ollama_base_url = normalize_local_judge_ollama_base_url(ollama_base_url);
+    let mut entries = Vec::new();
+    for (case_id, case) in cases {
+        let question_type = longmemeval_case_question_type(case)
+            .ok_or_else(|| anyhow!("case {} missing LongMemEval question type", case_id))?;
+        let question = case["question"].as_str().unwrap_or_default();
+        let answer = case["answer"].as_str().unwrap_or_default();
+        let hypothesis = predictions
+            .get(case_id)
+            .ok_or_else(|| anyhow!("case {} missing prediction", case_id))?;
+        let prompt = longmemeval_official_answer_check_prompt(
+            &question_type,
+            question,
+            answer,
+            hypothesis,
+            case_id.contains("_abs"),
+        )?;
+        let prompt_sha256 = hex_sha256_local(prompt.as_bytes());
+        let raw_response =
+            call_longmemeval_local_judge(&client, &normalized_ollama_base_url, model, &prompt)
+                .await
+                .with_context(|| format!("local judge request failed for {}", case_id))?;
+        let label = longmemeval_official_label_from_response(&raw_response);
+        entries.push(json!({
+            "question_id": case_id,
+            "hypothesis": hypothesis,
+            "autoeval_label": {
+                "model": model,
+                "label": label,
+            },
+            "local_judge_provenance": {
+                "provenance_version": "external_memory_local_judge_provenance_v1",
+                "source_kind": LONGMEMEVAL_LOCAL_JUDGE_SOURCE_KIND,
+                "judge_transport": LONGMEMEVAL_LOCAL_JUDGE_TRANSPORT_KIND,
+                "official_script_path": "src/evaluation/evaluate_qa.py",
+                "official_metrics_script_path": "src/evaluation/print_qa_metrics.py",
+                "metric_model": model,
+                "metric_model_family": "local_ollama_model",
+                "judge_temperature": 0,
+                "prompt_template_source_kind": "embedded_from_upstream_evaluate_qa_py",
+                "prompt_sha256": prompt_sha256,
+                "abstention_detection": "question_id_contains__abs",
+                "ollama_base_url": normalized_ollama_base_url,
+                "official_upstream_provenance_eligible": false,
+                "raw_response": raw_response,
+                "label_rule": "eval_response_contains_yes_case_insensitive",
+                "completed_at_epoch_ms": now_epoch_ms_local(),
+            },
+        }));
+    }
+    Ok(entries)
+}
+
+async fn call_longmemeval_local_judge(
+    client: &HttpClient,
+    ollama_base_url: &str,
+    model: &str,
+    prompt: &str,
+) -> Result<String> {
+    let endpoint = format!(
+        "{}/api/chat",
+        normalize_local_judge_ollama_base_url(ollama_base_url)
+    );
+    let payload = json!({
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        "stream": false,
+        "options": {
+            "temperature": 0,
+        },
+    });
+    let mut last_error = None;
+    for attempt_idx in 0..LONGMEMEVAL_OFFICIAL_JUDGE_MAX_ATTEMPTS {
+        let result = client.post(&endpoint).json(&payload).send().await;
+        match result {
+            Ok(response) => {
+                let status = response.status();
+                let body = response
+                    .text()
+                    .await
+                    .context("failed to read local judge response body")?;
+                if status.is_success() {
+                    let value: Value = serde_json::from_str(&body)
+                        .context("failed to parse local judge response JSON")?;
+                    let content = value["message"]["content"]
+                        .as_str()
+                        .ok_or_else(|| anyhow!("local judge response missing message.content"))?;
+                    return Ok(content.trim().to_string());
+                }
+                last_error = Some(anyhow!("local judge HTTP {}: {}", status, body));
+                if status.as_u16() == 400 || status.as_u16() == 404 {
+                    return Err(last_error.expect("local request/model failure"));
+                }
+            }
+            Err(err) => {
+                last_error = Some(anyhow!(err).context("local judge HTTP request failed"));
+            }
+        }
+        if attempt_idx + 1 < LONGMEMEVAL_OFFICIAL_JUDGE_MAX_ATTEMPTS {
+            let delay_ms = 500u64 * (1u64 << attempt_idx);
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("local judge request failed without detail")))
+}
+
+fn classify_longmemeval_local_judge_execution_failure(error: &str) -> String {
+    if error.contains("HTTP 404") || error.to_lowercase().contains("not found") {
+        "local_judge_model_unavailable".to_string()
+    } else if error.contains("HTTP 400") {
+        "local_judge_request_invalid".to_string()
+    } else if error.contains("HTTP 429") {
+        "local_judge_backend_rate_limited".to_string()
+    } else if error.contains("HTTP 5") {
+        "local_judge_backend_http_error".to_string()
+    } else if error.contains("missing message.content")
+        || error.contains("parse local judge response JSON")
+    {
+        "local_judge_response_contract_invalid".to_string()
+    } else {
+        "local_judge_transport_or_unknown_failure".to_string()
+    }
+}
+
+fn normalize_local_judge_ollama_base_url(ollama_base_url: &str) -> String {
+    ollama_base_url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches("/api/chat")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn memory_local_judge_execution_summary(
+    bench: Option<&str>,
+    dataset: Option<&str>,
+    cases_path: &Path,
+    predictions_path: &Path,
+    eval_results_path: &Path,
+    cases: &BTreeMap<String, Value>,
+    prediction_count: usize,
+    eval_entries_written: usize,
+    live_local_llm_judge_run: bool,
+    ollama_base_url: &str,
+    model: &str,
+    validation_blockers: &BTreeSet<String>,
+    judge_failure_examples: &[String],
+) -> Value {
+    let normalized_ollama_base_url = normalize_local_judge_ollama_base_url(ollama_base_url);
+    let validation_blocking_reasons = validation_blockers.iter().cloned().collect::<Vec<_>>();
+    let mut maturity_blocking_reasons = validation_blocking_reasons.clone();
+    for reason in [
+        "non_official_local_judge_lane",
+        "official_upstream_scorer_not_used_by_this_command",
+        "full_dataset_runtime_not_proven_by_this_command",
+    ] {
+        if !maturity_blocking_reasons
+            .iter()
+            .any(|value| value == reason)
+        {
+            maturity_blocking_reasons.push(reason.to_string());
+        }
+    }
+    json!({
+        "boundary_version": "external_memory_local_judge_execution_v1",
+        "bench": bench,
+        "dataset": dataset,
+        "cases": cases_path,
+        "predictions": predictions_path,
+        "eval_results": eval_results_path,
+        "status": if validation_blockers.is_empty() && live_local_llm_judge_run {
+            "executed"
+        } else {
+            "blocked"
+        },
+        "case_count": cases.len(),
+        "prediction_count": prediction_count,
+        "eval_entries_written": eval_entries_written,
+        "live_local_llm_judge_run": live_local_llm_judge_run,
+        "local_eval_log_materialized": live_local_llm_judge_run && eval_entries_written == cases.len(),
+        "official_prompt_templates_embedded": true,
+        "prompt_template_source_kind": "embedded_from_upstream_evaluate_qa_py",
+        "official_script_path": "src/evaluation/evaluate_qa.py",
+        "official_metrics_script_path": "src/evaluation/print_qa_metrics.py",
+        "local_judge_logic_version": "longmemeval_local_judge_execution_v1",
+        "local_judge_source_kind": LONGMEMEVAL_LOCAL_JUDGE_SOURCE_KIND,
+        "local_judge_transport": LONGMEMEVAL_LOCAL_JUDGE_TRANSPORT_KIND,
+        "ollama_base_url": normalized_ollama_base_url,
+        "requested_model": model,
+        "default_local_model": LONGMEMEVAL_LOCAL_JUDGE_DEFAULT_MODEL,
+        "judge_temperature": 0,
+        "judge_label_rule": "eval_response_contains_yes_case_insensitive",
+        "validation_blocking_reasons": validation_blocking_reasons,
+        "judge_failure_examples": judge_failure_examples,
+        "official_upstream_provenance_eligible": false,
+        "official_upstream_scorer_parity": false,
+        "official_upstream_scorer_parity_reason": "this lane is intentionally local and non-official; use it for provider-independent diagnostics and regression checks, not upstream parity claims",
+        "official_upstream_scorer_parity_boundary": {
+            "live_log_materialized_by_this_command": false,
+            "local_log_materialized_by_this_command": live_local_llm_judge_run && eval_entries_written == cases.len(),
+            "score_reconciliation_run_by_this_command": false,
+            "official_metrics_compared_by_this_command": false,
+            "full_dataset_runtime_proven_by_this_command": false,
+        },
+        "benchmark_grade_maturity": false,
+        "maturity_blocking_reasons": maturity_blocking_reasons,
+    })
+}
+
+fn write_memory_local_judge_summary(summary_path: Option<&Path>, summary: &Value) -> Result<()> {
+    if let Some(summary_path) = summary_path {
+        fs::write(summary_path, serde_json::to_string_pretty(summary)?)
+            .with_context(|| format!("failed to write {}", summary_path.display()))?;
+    }
     Ok(())
 }
 
@@ -2423,23 +2802,6 @@ fn now_epoch_ms_local() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
-}
-
-fn benchmark_runtime_project_code(namespace_code: &str) -> String {
-    format!(
-        "benchrt_{}",
-        namespace_code
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() {
-                    ch.to_ascii_lowercase()
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>()
-            .trim_matches('_')
-    )
 }
 
 fn benchmark_runtime_root(cfg: &AppConfig, namespace_code: &str) -> PathBuf {
@@ -7014,11 +7376,250 @@ fn memory_official_score_reconciliation(
     })
 }
 
+fn memory_local_score_reconciliation(
+    bench: Option<&str>,
+    dataset: Option<&str>,
+    cases_path: &Path,
+    eval_results_path: &Path,
+    cases: &BTreeMap<String, Value>,
+    eval_results_content: Option<&str>,
+    expected_model: Option<&str>,
+) -> Value {
+    let mut validation_blockers = BTreeSet::new();
+    if bench != Some("longmemeval") {
+        validation_blockers
+            .insert("local_score_reconciliation_supported_only_for_longmemeval".to_string());
+    }
+
+    let expected_model = expected_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut qtype_totals: BTreeMap<String, (usize, usize)> = LONGMEMEVAL_OFFICIAL_QUESTION_TYPES
+        .iter()
+        .map(|question_type| (question_type.to_string(), (0, 0)))
+        .collect();
+    let mut observed_models = BTreeSet::new();
+    let mut seen_question_ids = BTreeSet::new();
+    let mut reconciled_question_ids = BTreeSet::new();
+    let mut parse_error_examples = Vec::new();
+    let mut eval_entries_total = 0usize;
+    let mut valid_eval_entries = 0usize;
+    let mut invalid_eval_entries = 0usize;
+    let mut missing_required_fields = 0usize;
+    let mut duplicate_question_ids = 0usize;
+    let mut unexpected_eval_results = 0usize;
+    let mut model_mismatch_count = 0usize;
+    let mut missing_question_type_count = 0usize;
+    let mut unsupported_question_type_count = 0usize;
+    let mut correct_total = 0usize;
+    let mut abstention_total = 0usize;
+    let mut abstention_correct = 0usize;
+
+    match eval_results_content {
+        Some(content) => {
+            for (line_idx, line) in content.lines().enumerate() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                eval_entries_total += 1;
+                let value: Value = match serde_json::from_str(line) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        invalid_eval_entries += 1;
+                        if parse_error_examples.len() < 5 {
+                            parse_error_examples.push(format!("line {}: {}", line_idx + 1, err));
+                        }
+                        continue;
+                    }
+                };
+                let Some(question_id) = value["question_id"].as_str().map(str::to_string) else {
+                    missing_required_fields += 1;
+                    continue;
+                };
+                if !seen_question_ids.insert(question_id.clone()) {
+                    duplicate_question_ids += 1;
+                    continue;
+                }
+                let Some(autoeval_label) = value.get("autoeval_label") else {
+                    missing_required_fields += 1;
+                    continue;
+                };
+                let Some(model) = autoeval_label["model"].as_str() else {
+                    missing_required_fields += 1;
+                    continue;
+                };
+                observed_models.insert(model.to_string());
+                let Some(label) = autoeval_label["label"].as_bool() else {
+                    missing_required_fields += 1;
+                    continue;
+                };
+                let Some(case) = cases.get(&question_id) else {
+                    unexpected_eval_results += 1;
+                    continue;
+                };
+                if expected_model.is_some_and(|required| model != required) {
+                    model_mismatch_count += 1;
+                    continue;
+                }
+                let Some(question_type) = longmemeval_case_question_type(case) else {
+                    missing_question_type_count += 1;
+                    continue;
+                };
+                if !LONGMEMEVAL_OFFICIAL_QUESTION_TYPES.contains(&question_type.as_str()) {
+                    unsupported_question_type_count += 1;
+                    continue;
+                }
+
+                valid_eval_entries += 1;
+                reconciled_question_ids.insert(question_id.clone());
+                if label {
+                    correct_total += 1;
+                }
+                let entry = qtype_totals
+                    .entry(question_type)
+                    .or_insert((0usize, 0usize));
+                entry.0 += 1;
+                if label {
+                    entry.1 += 1;
+                }
+                if question_id.contains("_abs") {
+                    abstention_total += 1;
+                    if label {
+                        abstention_correct += 1;
+                    }
+                }
+            }
+            if eval_entries_total == 0 {
+                validation_blockers.insert("local_eval_log_empty".to_string());
+            }
+        }
+        None => {
+            validation_blockers.insert("local_eval_log_not_materialized".to_string());
+            validation_blockers.insert("local_metrics_not_materialized".to_string());
+        }
+    }
+
+    if invalid_eval_entries > 0 {
+        validation_blockers.insert("local_eval_log_invalid_json".to_string());
+    }
+    if missing_required_fields > 0 {
+        validation_blockers.insert("local_eval_log_missing_required_fields".to_string());
+    }
+    if duplicate_question_ids > 0 {
+        validation_blockers.insert("local_eval_log_duplicate_question_id".to_string());
+    }
+    if unexpected_eval_results > 0 {
+        validation_blockers.insert("local_eval_log_contains_unknown_question_id".to_string());
+    }
+    if model_mismatch_count > 0 {
+        validation_blockers.insert("local_eval_log_model_mismatch".to_string());
+    }
+    if missing_question_type_count > 0 {
+        validation_blockers.insert("local_reference_question_type_missing".to_string());
+    }
+    if unsupported_question_type_count > 0 {
+        validation_blockers.insert("local_reference_question_type_unsupported".to_string());
+    }
+    let missing_case_results = cases.len().saturating_sub(reconciled_question_ids.len());
+    if eval_results_content.is_some() && missing_case_results > 0 {
+        validation_blockers.insert("local_eval_log_missing_case_results".to_string());
+    }
+    let all_official_task_types_present = LONGMEMEVAL_OFFICIAL_QUESTION_TYPES
+        .iter()
+        .all(|question_type| qtype_totals[*question_type].0 > 0);
+    if eval_results_content.is_some() && !all_official_task_types_present {
+        validation_blockers.insert("not_all_official_question_types_present".to_string());
+    }
+
+    let mut by_question_type = serde_json::Map::new();
+    let mut task_accuracies = Vec::new();
+    for question_type in LONGMEMEVAL_OFFICIAL_QUESTION_TYPES {
+        let (total, correct) = qtype_totals[question_type];
+        let accuracy = accuracy_ratio(correct, total);
+        if let Some(value) = accuracy {
+            task_accuracies.push(value);
+        }
+        by_question_type.insert(
+            question_type.to_string(),
+            json!({
+                "total": total,
+                "correct": correct,
+                "accuracy": accuracy.map(round4),
+            }),
+        );
+    }
+    let task_averaged_accuracy = if all_official_task_types_present {
+        Some(round4(
+            task_accuracies.iter().sum::<f64>() / task_accuracies.len() as f64,
+        ))
+    } else {
+        None
+    };
+    let local_eval_log_contract_valid = validation_blockers.is_empty();
+    let local_metrics_reconciled = local_eval_log_contract_valid && valid_eval_entries > 0;
+    let validation_blocking_reasons = validation_blockers.iter().cloned().collect::<Vec<_>>();
+    let mut maturity_blocking_reasons = validation_blocking_reasons.clone();
+    for reason in [
+        "non_official_local_judge_lane",
+        "official_upstream_scorer_not_used_by_this_score",
+        "full_dataset_runtime_not_proven_by_this_score",
+    ] {
+        if !maturity_blocking_reasons
+            .iter()
+            .any(|value| value == reason)
+        {
+            maturity_blocking_reasons.push(reason.to_string());
+        }
+    }
+
+    json!({
+        "boundary_version": "external_memory_local_score_reconciliation_v1",
+        "bench": bench,
+        "dataset": dataset,
+        "cases": cases_path,
+        "eval_results": eval_results_path,
+        "score_kind": "local_longmemeval_eval_results_reconciliation",
+        "status": if local_metrics_reconciled { "reconciled" } else { "blocked" },
+        "case_count": cases.len(),
+        "eval_results_present": eval_results_content.is_some(),
+        "eval_entries_total": eval_entries_total,
+        "valid_eval_entries": valid_eval_entries,
+        "invalid_eval_entries": invalid_eval_entries,
+        "missing_required_fields": missing_required_fields,
+        "duplicate_question_ids": duplicate_question_ids,
+        "unexpected_eval_results": unexpected_eval_results,
+        "missing_case_results": missing_case_results,
+        "model_mismatch_count": model_mismatch_count,
+        "missing_question_type_count": missing_question_type_count,
+        "unsupported_question_type_count": unsupported_question_type_count,
+        "observed_models": observed_models.into_iter().collect::<Vec<_>>(),
+        "expected_model": expected_model,
+        "all_official_task_types_present": all_official_task_types_present,
+        "local_eval_log_contract_valid": local_eval_log_contract_valid,
+        "local_metrics_reconciled": local_metrics_reconciled,
+        "official_upstream_scorer_parity": false,
+        "benchmark_grade_maturity": false,
+        "validation_blocking_reasons": validation_blocking_reasons,
+        "maturity_blocking_reasons": maturity_blocking_reasons,
+        "parse_error_examples": parse_error_examples,
+        "metrics": {
+            "overall_accuracy": accuracy_ratio(correct_total, valid_eval_entries).map(round4),
+            "task_averaged_accuracy": task_averaged_accuracy,
+            "abstention_accuracy": accuracy_ratio(abstention_correct, abstention_total).map(round4),
+            "abstention_count": abstention_total,
+            "by_question_type": Value::Object(by_question_type),
+        },
+    })
+}
+
 fn validate_longmemeval_official_judge_inputs(
     bench: Option<&str>,
     cases: &BTreeMap<String, Value>,
     predictions: &BTreeMap<String, String>,
     allow_live: bool,
+    api_base_url: &str,
+    allow_non_official_api_base: bool,
     api_key_env: &str,
     model: &str,
 ) -> BTreeSet<String> {
@@ -7032,6 +7633,14 @@ fn validate_longmemeval_official_judge_inputs(
     if !allow_live {
         blockers.insert("live_official_llm_judge_not_run".to_string());
         blockers.insert("official_eval_log_not_materialized".to_string());
+    }
+    let normalized_api_base_url = normalize_official_judge_api_base_url(api_base_url);
+    if normalized_api_base_url.is_empty() {
+        blockers.insert("official_judge_api_base_url_empty".to_string());
+    } else if normalized_api_base_url != LONGMEMEVAL_OFFICIAL_API_BASE_URL
+        && !allow_non_official_api_base
+    {
+        blockers.insert("official_judge_api_base_url_not_official".to_string());
     }
     if model != LONGMEMEVAL_OFFICIAL_METRIC_MODEL {
         blockers.insert("official_judge_model_mismatch".to_string());
@@ -7091,6 +7700,14 @@ async fn execute_longmemeval_official_judge_live(
         .timeout(Duration::from_secs(90))
         .build()
         .context("failed to build official judge HTTP client")?;
+    let normalized_api_base_url = normalize_official_judge_api_base_url(api_base_url);
+    let api_base_url_matches_official =
+        normalized_api_base_url == LONGMEMEVAL_OFFICIAL_API_BASE_URL;
+    let source_kind = if api_base_url_matches_official {
+        LONGMEMEVAL_OFFICIAL_JUDGE_SOURCE_KIND
+    } else {
+        LONGMEMEVAL_NON_OFFICIAL_JUDGE_SOURCE_KIND
+    };
     let mut entries = Vec::new();
     for (case_id, case) in cases {
         let question_type = longmemeval_case_question_type(case)
@@ -7123,7 +7740,7 @@ async fn execute_longmemeval_official_judge_live(
             },
             "official_judge_provenance": {
                 "provenance_version": "external_memory_official_judge_provenance_v1",
-                "source_kind": "official_longmemeval_llm_judge_execution",
+                "source_kind": source_kind,
                 "official_script_path": "src/evaluation/evaluate_qa.py",
                 "official_metrics_script_path": "src/evaluation/print_qa_metrics.py",
                 "metric_model_short": LONGMEMEVAL_OFFICIAL_METRIC_MODEL_SHORT,
@@ -7133,7 +7750,10 @@ async fn execute_longmemeval_official_judge_live(
                 "prompt_template_source_kind": "embedded_from_upstream_evaluate_qa_py",
                 "prompt_sha256": prompt_sha256,
                 "abstention_detection": "question_id_contains__abs",
-                "api_base_url": api_base_url.trim_end_matches('/'),
+                "api_base_url": normalized_api_base_url,
+                "official_api_base_url_required": LONGMEMEVAL_OFFICIAL_API_BASE_URL,
+                "api_base_url_matches_official": api_base_url_matches_official,
+                "official_upstream_provenance_eligible": api_base_url_matches_official,
                 "api_key_env": api_key_env,
                 "api_key_value_persisted": false,
                 "raw_response": raw_response_for_artifact,
@@ -7154,9 +7774,7 @@ async fn call_longmemeval_official_judge(
 ) -> Result<String> {
     let endpoint = format!(
         "{}/chat/completions",
-        api_base_url
-            .trim_end_matches('/')
-            .trim_end_matches("/chat/completions")
+        normalize_official_judge_api_base_url(api_base_url)
     );
     let payload = json!({
         "model": model,
@@ -7278,6 +7896,15 @@ fn redact_official_judge_secret(value: &str, api_key: &str) -> String {
     }
 }
 
+fn normalize_official_judge_api_base_url(api_base_url: &str) -> String {
+    api_base_url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches("/chat/completions")
+        .trim_end_matches('/')
+        .to_string()
+}
+
 fn hex_sha256_local(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -7296,12 +7923,23 @@ fn memory_official_judge_execution_summary(
     allow_live: bool,
     live_official_llm_judge_run: bool,
     api_base_url: &str,
+    allow_non_official_api_base: bool,
     api_key_env: &str,
     model: &str,
     validation_blockers: &BTreeSet<String>,
     judge_failure_examples: &[String],
 ) -> Value {
+    let normalized_api_base_url = normalize_official_judge_api_base_url(api_base_url);
+    let api_base_url_matches_official =
+        normalized_api_base_url == LONGMEMEVAL_OFFICIAL_API_BASE_URL;
     let mut maturity_blocking_reasons = validation_blockers.iter().cloned().collect::<Vec<_>>();
+    if !api_base_url_matches_official
+        && !maturity_blocking_reasons
+            .iter()
+            .any(|value| value == "official_judge_api_base_url_not_official")
+    {
+        maturity_blocking_reasons.push("official_judge_api_base_url_not_official".to_string());
+    }
     for reason in [
         "official_score_reconciliation_not_run_by_this_command",
         "official_upstream_metrics_not_reconciled_by_this_command",
@@ -7357,7 +7995,11 @@ fn memory_official_judge_execution_summary(
         "judge_temperature": 0,
         "judge_max_tokens": 10,
         "judge_label_rule": "eval_response_contains_yes_case_insensitive",
-        "api_base_url": api_base_url.trim_end_matches('/'),
+        "api_base_url": normalized_api_base_url,
+        "official_api_base_url_required": LONGMEMEVAL_OFFICIAL_API_BASE_URL,
+        "api_base_url_matches_official": api_base_url_matches_official,
+        "non_official_api_base_allowed_for_this_run": allow_non_official_api_base,
+        "official_upstream_provenance_eligible": api_base_url_matches_official,
         "api_key_env": api_key_env,
         "max_attempts_per_case": LONGMEMEVAL_OFFICIAL_JUDGE_MAX_ATTEMPTS,
         "validation_blocking_reasons": validation_blocking_reasons,
@@ -9032,27 +9674,30 @@ mod tests {
         AdapterStatus, AnnLiveProgress, BenchmarkContextDocument, BenchmarkRuntimeMarkers,
         ExternalBenchmarkEntry, ExternalBenchmarkFile, ExternalBenchmarkMemoryRuntimePolicy,
         ExternalBenchmarkSource, ExternalDatasetEntry, ExternalDatasetFile, ExternalDatasetStorage,
-        ExternalResultSummary, LONGMEMEVAL_OFFICIAL_JUDGE_MAX_ATTEMPTS, MemoryBenchStats,
-        MemoryRuntimeCaseMetric, MemoryRuntimeStageMetrics, MemoryScoreStats,
-        OFFICIAL_JUDGE_REDACTION_MARKER, VectorDbBenchBundle, adapter_compatibility_overrides,
-        ann_benchmark_dataset_name, ann_qdrant_launch_marker,
-        benchmark_question_prefers_context_first, benchmark_relaxed_retrieval_query,
-        benchmark_relaxed_retrieval_query_override, benchmark_relaxed_retrieval_terms,
-        benchmark_run_summary_for_qdrant_http_url, benchmark_runtime_corpus_sha256,
-        benchmark_runtime_markers, benchmark_runtime_target_window_bytes, build_launch_commands,
+        ExternalResultSummary, LONGMEMEVAL_LOCAL_JUDGE_SOURCE_KIND,
+        LONGMEMEVAL_LOCAL_JUDGE_TRANSPORT_KIND, LONGMEMEVAL_NON_OFFICIAL_JUDGE_SOURCE_KIND,
+        LONGMEMEVAL_OFFICIAL_JUDGE_MAX_ATTEMPTS, MemoryBenchStats, MemoryRuntimeCaseMetric,
+        MemoryRuntimeStageMetrics, MemoryScoreStats, OFFICIAL_JUDGE_REDACTION_MARKER,
+        VectorDbBenchBundle, adapter_compatibility_overrides, ann_benchmark_dataset_name,
+        ann_qdrant_launch_marker, benchmark_question_prefers_context_first,
+        benchmark_relaxed_retrieval_query, benchmark_relaxed_retrieval_query_override,
+        benchmark_relaxed_retrieval_terms, benchmark_run_summary_for_qdrant_http_url,
+        benchmark_runtime_corpus_sha256, benchmark_runtime_markers,
+        benchmark_runtime_target_window_bytes, build_launch_commands,
         build_memory_runtime_answer_source_boundary,
         build_memory_runtime_gold_answer_relevance_boundary, build_memory_runtime_metrics_summary,
         build_memory_runtime_retrieval_relevance_boundary,
         classify_official_judge_execution_failure,
         coalesce_benchmark_runtime_documents_with_target,
         command_matches_benchmark_runtime_markers, command_output_with_timeout,
-        determine_adapter_status, execute_longmemeval_official_judge_live,
-        extend_benchmark_candidate_snippets, extend_runtime_payload_item_snippets,
-        external_memory_secret_artifact_scan_summary, extract_answer_from_context,
-        extract_origin_country_clause, find_untracked_ann_benchmark_process,
-        latest_ann_live_progress, load_memory_runtime_case_metrics_jsonl, load_registry,
-        load_requests_jsonl, longmemeval_official_answer_check_prompt,
-        longmemeval_official_label_from_response, memory_official_judge_execution_summary,
+        determine_adapter_status, execute_longmemeval_local_judge_live,
+        execute_longmemeval_official_judge_live, extend_benchmark_candidate_snippets,
+        extend_runtime_payload_item_snippets, external_memory_secret_artifact_scan_summary,
+        extract_answer_from_context, extract_origin_country_clause,
+        find_untracked_ann_benchmark_process, latest_ann_live_progress,
+        load_memory_runtime_case_metrics_jsonl, load_registry, load_requests_jsonl,
+        longmemeval_official_answer_check_prompt, longmemeval_official_label_from_response,
+        memory_local_score_reconciliation, memory_official_judge_execution_summary,
         memory_official_score_reconciliation, memory_official_scorer_boundary,
         memory_prep_validation_summary, memory_score_evidence_boundary, normalize_json_record,
         normalize_key, ordered_benchmarks, parse_ann_hdf5_result_summary,
@@ -9060,10 +9705,11 @@ mod tests {
         reconcile_run_status, reconcile_run_status_with_runtime, redact_official_judge_secret,
         render_adapter_script, resolve_benchmark, resolve_dataset,
         retrieval_payload_item_candidate_snippets, retrieval_payload_relevance_score,
-        retrieval_payload_top_ranked_item, run_external_memory_official_judge,
-        runtime_corpus_reuse_allowed, score_benchmark_candidate, score_case,
-        snippet_supports_gold_answer, split_benchmark_context_documents,
-        validate_longmemeval_official_judge_inputs, write_jsonl_values,
+        retrieval_payload_top_ranked_item, run_external_memory_local_judge,
+        run_external_memory_official_judge, runtime_corpus_reuse_allowed,
+        score_benchmark_candidate, score_case, snippet_supports_gold_answer,
+        split_benchmark_context_documents, validate_longmemeval_official_judge_inputs,
+        write_jsonl_values,
     };
     use hdf5::File as Hdf5File;
     use reqwest::Client as HttpClient;
@@ -9627,6 +10273,8 @@ query = "Norse OR Denmark OR Iceland OR Norway"
             &cases,
             &predictions,
             false,
+            "https://api.openai.com/v1",
+            false,
             "OPENAI_API_KEY",
             "gpt-4o-2024-08-06",
         );
@@ -9642,6 +10290,7 @@ query = "Norse OR Denmark OR Iceland OR Norway"
             false,
             false,
             "https://api.openai.com/v1",
+            false,
             "OPENAI_API_KEY",
             "gpt-4o-2024-08-06",
             &blockers,
@@ -9704,6 +10353,8 @@ query = "Norse OR Denmark OR Iceland OR Norway"
             &cases,
             &predictions,
             true,
+            "https://api.openai.com/v1",
+            false,
             &api_key_env,
             "gpt-4o-2024-08-06",
         );
@@ -9719,6 +10370,7 @@ query = "Norse OR Denmark OR Iceland OR Norway"
             true,
             false,
             "https://api.openai.com/v1",
+            false,
             &api_key_env,
             "gpt-4o-2024-08-06",
             &blockers,
@@ -9751,6 +10403,8 @@ query = "Norse OR Denmark OR Iceland OR Norway"
             &cases,
             &predictions,
             false,
+            "https://api.openai.com/v1",
+            false,
             "OPENAI_API_KEY",
             "gpt-4o-mini-2024-07-18",
         );
@@ -9766,6 +10420,7 @@ query = "Norse OR Denmark OR Iceland OR Norway"
             false,
             false,
             "https://api.openai.com/v1",
+            false,
             "OPENAI_API_KEY",
             "gpt-4o-mini-2024-07-18",
             &blockers,
@@ -9783,6 +10438,62 @@ query = "Norse OR Denmark OR Iceland OR Norway"
                 .contains(&json!("official_judge_model_mismatch"))
         );
         assert!(!summary_text.contains(OFFICIAL_JUDGE_REDACTION_MARKER));
+    }
+
+    #[test]
+    fn memory_official_judge_non_official_api_base_blocks_by_default() {
+        let cases = test_longmemeval_official_score_cases();
+        let predictions = cases
+            .keys()
+            .map(|case_id| (case_id.clone(), "hypothesis".to_string()))
+            .collect::<BTreeMap<_, _>>();
+        let blockers = validate_longmemeval_official_judge_inputs(
+            Some("longmemeval"),
+            &cases,
+            &predictions,
+            true,
+            "https://codexcn.top/v1",
+            false,
+            "OPENAI_API_KEY",
+            "gpt-4o-2024-08-06",
+        );
+        let summary = memory_official_judge_execution_summary(
+            Some("longmemeval"),
+            Some("proof"),
+            Path::new("cases.jsonl"),
+            Path::new("predictions.jsonl"),
+            Path::new("eval-results.jsonl"),
+            &cases,
+            predictions.len(),
+            0,
+            true,
+            false,
+            "https://codexcn.top/v1",
+            false,
+            "OPENAI_API_KEY",
+            "gpt-4o-2024-08-06",
+            &blockers,
+            &[],
+        );
+
+        assert_eq!(summary["status"], json!("blocked"));
+        assert_eq!(summary["api_base_url_matches_official"], json!(false));
+        assert_eq!(
+            summary["official_upstream_provenance_eligible"],
+            json!(false)
+        );
+        assert!(
+            summary["validation_blocking_reasons"]
+                .as_array()
+                .expect("validation blockers")
+                .contains(&json!("official_judge_api_base_url_not_official"))
+        );
+        assert!(
+            summary["maturity_blocking_reasons"]
+                .as_array()
+                .expect("maturity blockers")
+                .contains(&json!("official_judge_api_base_url_not_official"))
+        );
     }
 
     #[test]
@@ -10090,6 +10801,7 @@ query = "Norse OR Denmark OR Iceland OR Norway"
                 Some(&summary_path),
                 true,
                 &format!("http://{addr}/v1"),
+                true,
                 &api_key_env,
                 "gpt-4o-2024-08-06",
             )
@@ -10159,6 +10871,7 @@ query = "Norse OR Denmark OR Iceland OR Norway"
             Some(&summary_path),
             true,
             &format!("http://{addr}/v1"),
+            true,
             &api_key_env,
             "gpt-4o-2024-08-06",
         )
@@ -10173,6 +10886,11 @@ query = "Norse OR Denmark OR Iceland OR Norway"
         assert_eq!(requests.len(), 2);
         assert!(eval_results_path.exists());
         assert_eq!(summary["status"], json!("executed"));
+        assert_eq!(summary["api_base_url_matches_official"], json!(false));
+        assert_eq!(
+            summary["official_upstream_provenance_eligible"],
+            json!(false)
+        );
         assert_eq!(summary["eval_entries_written"], json!(1));
         assert_eq!(summary["live_official_llm_judge_run"], json!(true));
         assert_eq!(summary["official_eval_log_materialized"], json!(true));
@@ -10188,6 +10906,7 @@ query = "Norse OR Denmark OR Iceland OR Norway"
         assert!(!summary_text.contains(secret_value));
         assert!(!eval_results.contains(secret_value));
         assert!(eval_results.contains(r#""raw_response":"yes transient-secret""#));
+        assert!(eval_results.contains(LONGMEMEVAL_NON_OFFICIAL_JUDGE_SOURCE_KIND));
     }
 
     #[tokio::test]
@@ -10224,6 +10943,7 @@ query = "Norse OR Denmark OR Iceland OR Norway"
                 Some(&summary_path),
                 true,
                 &format!("http://{addr}/v1"),
+                true,
                 &api_key_env,
                 "gpt-4o-2024-08-06",
             )
@@ -10289,6 +11009,7 @@ query = "Norse OR Denmark OR Iceland OR Norway"
             Some(&summary_path),
             true,
             &format!("http://{addr}/v1"),
+            true,
             &api_key_env,
             "gpt-4o-2024-08-06",
         )
@@ -10343,6 +11064,7 @@ query = "Norse OR Denmark OR Iceland OR Norway"
             Some(&summary_path),
             true,
             &format!("http://{addr}/v1"),
+            true,
             &api_key_env,
             "gpt-4o-2024-08-06",
         )
@@ -10371,6 +11093,199 @@ query = "Norse OR Denmark OR Iceland OR Norway"
                 .contains(&json!("official_judge_transport_or_unknown_failure"))
         );
         assert!(!summary_text.contains(secret_value));
+    }
+
+    #[tokio::test]
+    async fn longmemeval_local_judge_executes_against_fake_ollama_chat() {
+        let (addr, server) = fake_chat_completion_server(
+            "HTTP/1.1 200 OK",
+            r#"{"message":{"content":"yes local gemma"}} "#,
+            1,
+        )
+        .await;
+        let cases = BTreeMap::from([(
+            "case-user".to_string(),
+            json!({
+                "bench": "longmemeval",
+                "dataset": "proof",
+                "case_id": "case-user",
+                "question": "Where did I buy coffee?",
+                "answer": "The corner shop",
+                "metadata": {
+                    "question_type": "single-session-user",
+                },
+            }),
+        )]);
+        let predictions = BTreeMap::from([(
+            "case-user".to_string(),
+            "You bought coffee at the corner shop.".to_string(),
+        )]);
+
+        let entries = execute_longmemeval_local_judge_live(
+            &cases,
+            &predictions,
+            &format!("http://{addr}"),
+            "gemma4:e4b",
+        )
+        .await
+        .expect("execute fake local judge");
+        let requests = server.await.expect("server join");
+        let request = &requests[0];
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0]["autoeval_label"],
+            json!({
+                "model": "gemma4:e4b",
+                "label": true,
+            })
+        );
+        assert_eq!(
+            entries[0]["local_judge_provenance"]["source_kind"],
+            json!(LONGMEMEVAL_LOCAL_JUDGE_SOURCE_KIND)
+        );
+        assert_eq!(
+            entries[0]["local_judge_provenance"]["judge_transport"],
+            json!(LONGMEMEVAL_LOCAL_JUDGE_TRANSPORT_KIND)
+        );
+        assert_eq!(
+            entries[0]["local_judge_provenance"]["official_upstream_provenance_eligible"],
+            json!(false)
+        );
+        assert_eq!(
+            entries[0]["local_judge_provenance"]["raw_response"],
+            json!("yes local gemma")
+        );
+        assert!(request.starts_with("POST /api/chat "));
+        assert!(request.contains(r#""model":"gemma4:e4b""#));
+        assert!(request.contains("Is the model response correct?"));
+    }
+
+    #[tokio::test]
+    async fn longmemeval_local_judge_response_contract_failures_do_not_materialize_eval_log() {
+        let temp_root = unique_temp_root("amai-local-judge-contract-failure");
+        let (cases_path, predictions_path, eval_results_path, summary_path) =
+            write_single_official_judge_fixture(&temp_root);
+        let (addr, server) = fake_chat_completion_server(
+            "HTTP/1.1 200 OK",
+            r#"{"message":{"role":"assistant"}}"#,
+            1,
+        )
+        .await;
+
+        let result = run_external_memory_local_judge(
+            &cases_path,
+            &predictions_path,
+            &eval_results_path,
+            Some(&summary_path),
+            &format!("http://{addr}"),
+            "gemma4:e4b",
+        )
+        .await;
+        result.expect("local judge contract failure should be summarized, not panic");
+        let requests = server.await.expect("server join");
+        let summary_text = fs::read_to_string(&summary_path).expect("summary text");
+        let summary: Value = serde_json::from_str(&summary_text).expect("summary json");
+
+        assert_eq!(requests.len(), 1);
+        assert!(!eval_results_path.exists());
+        assert_eq!(summary["status"], json!("blocked"));
+        assert_eq!(summary["eval_entries_written"], json!(0));
+        assert_eq!(summary["live_local_llm_judge_run"], json!(false));
+        assert_eq!(summary["local_eval_log_materialized"], json!(false));
+        assert_eq!(summary["benchmark_grade_maturity"], json!(false));
+        assert!(
+            summary["validation_blocking_reasons"]
+                .as_array()
+                .expect("validation blockers")
+                .contains(&json!("local_judge_live_execution_failed"))
+        );
+        assert!(
+            summary["validation_blocking_reasons"]
+                .as_array()
+                .expect("validation blockers")
+                .contains(&json!("local_judge_response_contract_invalid"))
+        );
+    }
+
+    #[tokio::test]
+    async fn longmemeval_local_judge_transport_failure_does_not_materialize_eval_log() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind unused fake local judge addr");
+        let addr = listener.local_addr().expect("fake local judge addr");
+        drop(listener);
+
+        let temp_root = unique_temp_root("amai-local-judge-transport-failure");
+        let (cases_path, predictions_path, eval_results_path, summary_path) =
+            write_single_official_judge_fixture(&temp_root);
+
+        let result = run_external_memory_local_judge(
+            &cases_path,
+            &predictions_path,
+            &eval_results_path,
+            Some(&summary_path),
+            &format!("http://{addr}"),
+            "gemma4:e4b",
+        )
+        .await;
+        result.expect("local judge transport failure should be summarized, not panic");
+        let summary_text = fs::read_to_string(&summary_path).expect("summary text");
+        let summary: Value = serde_json::from_str(&summary_text).expect("summary json");
+
+        assert!(!eval_results_path.exists());
+        assert_eq!(summary["status"], json!("blocked"));
+        assert_eq!(summary["eval_entries_written"], json!(0));
+        assert_eq!(summary["live_local_llm_judge_run"], json!(false));
+        assert_eq!(summary["local_eval_log_materialized"], json!(false));
+        assert_eq!(summary["benchmark_grade_maturity"], json!(false));
+        assert!(
+            summary["validation_blocking_reasons"]
+                .as_array()
+                .expect("validation blockers")
+                .contains(&json!("local_judge_live_execution_failed"))
+        );
+        assert!(
+            summary["validation_blocking_reasons"]
+                .as_array()
+                .expect("validation blockers")
+                .contains(&json!("local_judge_transport_or_unknown_failure"))
+        );
+    }
+
+    #[test]
+    fn memory_local_score_reconciliation_accepts_valid_longmemeval_eval_log() {
+        let cases = test_longmemeval_official_score_cases();
+        let summary = memory_local_score_reconciliation(
+            Some("longmemeval"),
+            Some("proof"),
+            Path::new("cases.jsonl"),
+            Path::new("eval-results.jsonl"),
+            &cases,
+            Some(
+                r#"{"question_id":"case-user","hypothesis":"ok","autoeval_label":{"model":"gemma4:e4b","label":true}}
+{"question_id":"case-preference","hypothesis":"ok","autoeval_label":{"model":"gemma4:e4b","label":false}}
+{"question_id":"case-assistant","hypothesis":"ok","autoeval_label":{"model":"gemma4:e4b","label":true}}
+{"question_id":"case-multi","hypothesis":"ok","autoeval_label":{"model":"gemma4:e4b","label":true}}
+{"question_id":"case-temporal_abs","hypothesis":"ok","autoeval_label":{"model":"gemma4:e4b","label":true}}
+{"question_id":"case-knowledge","hypothesis":"ok","autoeval_label":{"model":"gemma4:e4b","label":false}}"#,
+            ),
+            Some("gemma4:e4b"),
+        );
+
+        assert_eq!(
+            summary["boundary_version"],
+            json!("external_memory_local_score_reconciliation_v1")
+        );
+        assert_eq!(summary["status"], json!("reconciled"));
+        assert_eq!(summary["expected_model"], json!("gemma4:e4b"));
+        assert_eq!(summary["all_official_task_types_present"], json!(true));
+        assert_eq!(summary["local_eval_log_contract_valid"], json!(true));
+        assert_eq!(summary["local_metrics_reconciled"], json!(true));
+        assert_eq!(summary["official_upstream_scorer_parity"], json!(false));
+        assert_eq!(summary["metrics"]["overall_accuracy"], json!(0.6667));
+        assert_eq!(summary["metrics"]["task_averaged_accuracy"], json!(0.6667));
+        assert_eq!(summary["metrics"]["abstention_accuracy"], json!(1.0));
     }
 
     #[test]

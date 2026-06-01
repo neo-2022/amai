@@ -176,6 +176,7 @@ async fn main() -> Result<()> {
                         args.summary.as_deref(),
                         args.allow_live,
                         &args.api_base_url,
+                        args.allow_non_official_api_base,
                         &args.api_key_env,
                         &args.model,
                     )
@@ -186,6 +187,25 @@ async fn main() -> Result<()> {
                         &args.cases,
                         &args.eval_results,
                         args.output.as_deref(),
+                    )?
+                }
+                BenchmarkCommand::ExternalMemoryLocalJudge(args) => {
+                    external_benchmark::run_external_memory_local_judge(
+                        &args.cases,
+                        &args.predictions,
+                        &args.eval_results,
+                        args.summary.as_deref(),
+                        &args.ollama_base_url,
+                        &args.model,
+                    )
+                    .await?
+                }
+                BenchmarkCommand::ExternalMemoryLocalScore(args) => {
+                    external_benchmark::reconcile_external_memory_local_score(
+                        &args.cases,
+                        &args.eval_results,
+                        args.output.as_deref(),
+                        args.expected_model.as_deref(),
                     )?
                 }
                 BenchmarkCommand::ExternalMemorySecretScan(args) => {
