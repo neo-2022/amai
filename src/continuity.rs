@@ -504,6 +504,43 @@ fn recommended_workline_next_step_from_restore_or_handoff(
         .to_string()
 }
 
+fn authoritative_startup_handoff_summary(
+    restore_node: Option<&Value>,
+    handoff_summary: &Value,
+) -> Value {
+    let mut summary = normalized_handoff_summary_json(
+        Some(&recommended_workline_headline_from_restore_or_handoff(
+            restore_node,
+            handoff_summary,
+        )),
+        Some(&recommended_workline_next_step_from_restore_or_handoff(
+            restore_node,
+            handoff_summary,
+        )),
+    );
+    if handoff_summary["local_path"].is_string() {
+        summary["local_path"] = handoff_summary["local_path"].clone();
+    }
+    if handoff_summary["source_event_id"].is_string() {
+        summary["source_event_id"] = handoff_summary["source_event_id"].clone();
+    }
+    summary
+}
+
+fn startup_handoff_summary_from_source(handoff_summary_source: &Value) -> Value {
+    let mut summary = normalized_handoff_summary_json(
+        handoff_summary_source["headline"].as_str(),
+        handoff_summary_source["next_step"].as_str(),
+    );
+    if handoff_summary_source["local_path"].is_string() {
+        summary["local_path"] = handoff_summary_source["local_path"].clone();
+    }
+    if handoff_summary_source["source_event_id"].is_string() {
+        summary["source_event_id"] = handoff_summary_source["source_event_id"].clone();
+    }
+    summary
+}
+
 fn compact_chat_runtime_scope_fields(
     summary: &Value,
 ) -> (
@@ -1156,12 +1193,14 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
         );
         return Ok(());
     }
+    let (effective_restore, startup_handoff_summary) =
+        reconcile_startup_working_contour(&db, &context).await?;
     let chat_start_restore = build_chat_start_restore(
         &context.project,
         &context.namespace,
         &context.continuity,
-        &context.handoff_summary,
-        context.restore.as_ref(),
+        &startup_handoff_summary,
+        effective_restore.as_ref(),
     );
     token_budget::record_continuity_restore_observed_event(
         &db,
@@ -1173,8 +1212,12 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
         &args.token_source_kind,
     )
     .await?;
-    let startup_payload =
-        build_continuity_startup_payload(&context, context.restore.as_ref(), &chat_start_restore)?;
+    let startup_payload = build_continuity_startup_payload(
+        &startup_handoff_summary,
+        &context,
+        effective_restore.as_ref(),
+        &chat_start_restore,
+    )?;
     persist_startup_runtime_state_artifact(
         Path::new(&context.project.repo_root),
         &startup_payload,
@@ -1227,19 +1270,19 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
         format_optional_u64_for_human(context.continuity["rendered_transcript_files"].as_u64())
     );
     println!();
-    let startup_next_step = context.handoff_summary["next_step"]
+    let startup_next_step = startup_handoff_summary["next_step"]
         .as_str()
         .and_then(normalize_next_step_value)
         .unwrap_or_else(|| "ещё нет данных".to_string());
     println!("Текущая активная линия:");
     println!(
         "- {}",
-        format_optional_text_for_human(context.handoff_summary["headline"].as_str())
+        format_optional_text_for_human(startup_handoff_summary["headline"].as_str())
     );
     println!("- Ближайший обязательный следующий шаг: {startup_next_step}");
     println!();
     print_chat_start_restore_human(&chat_start_restore);
-    if let Some(restore) = context.restore.as_ref() {
+    if let Some(restore) = effective_restore.as_ref() {
         println!();
         working_state::print_restore_bundle_human(restore);
     }
@@ -1331,6 +1374,27 @@ async fn startup_payload_with_context(
     startup_payload_with_context_and_resources(db, context, args, None).await
 }
 
+async fn reconcile_startup_working_contour(
+    db: &Client,
+    context: &ContinuityStartupContext,
+) -> Result<(Option<Value>, Value)> {
+    let refreshed_restore = working_state::refresh_same_thread_execctl_active_lease_for_startup(
+        db,
+        &context.project,
+        &context.namespace,
+        context.restore.as_ref(),
+    )
+    .await?;
+    let effective_restore = refreshed_restore.or_else(|| context.restore.clone());
+    let startup_handoff_summary = authoritative_startup_handoff_summary(
+        effective_restore
+            .as_ref()
+            .map(|value| &value["working_state_restore"]),
+        &context.handoff_summary,
+    );
+    Ok((effective_restore, startup_handoff_summary))
+}
+
 async fn startup_payload_with_context_and_resources(
     db: &Client,
     context: &ContinuityStartupContext,
@@ -1347,13 +1411,8 @@ async fn startup_payload_with_context_and_resources(
         None => prepare_continuity_restore_observed_resources(context)?,
     };
     let step_started = Instant::now();
-    let refreshed_restore = working_state::refresh_same_thread_execctl_active_lease_for_startup(
-        db,
-        &context.project,
-        &context.namespace,
-        context.restore.as_ref(),
-    )
-    .await?;
+    let (effective_restore, startup_handoff_summary) =
+        reconcile_startup_working_contour(db, context).await?;
     continuity_profile_log(
         "startup_payload_with_context.refresh_same_thread_execctl_active_lease_for_startup",
         step_started.elapsed().as_millis(),
@@ -1367,8 +1426,8 @@ async fn startup_payload_with_context_and_resources(
         &context.project,
         &context.namespace,
         &context.continuity,
-        &context.handoff_summary,
-        refreshed_restore.as_ref(),
+        &startup_handoff_summary,
+        effective_restore.as_ref(),
     );
     continuity_profile_log(
         "startup_payload_with_context.build_chat_start_restore",
@@ -1403,8 +1462,12 @@ async fn startup_payload_with_context_and_resources(
         ),
     );
     let step_started = Instant::now();
-    let payload =
-        build_continuity_startup_payload(context, refreshed_restore.as_ref(), &chat_start_restore)?;
+    let payload = build_continuity_startup_payload(
+        &startup_handoff_summary,
+        context,
+        effective_restore.as_ref(),
+        &chat_start_restore,
+    )?;
     continuity_profile_log(
         "startup_payload_with_context.build_continuity_startup_payload",
         step_started.elapsed().as_millis(),
@@ -1915,7 +1978,9 @@ pub(crate) async fn restore_payload_with_db(
     args: &ContinuityStartupArgs,
 ) -> Result<Value> {
     let context = load_startup_context(&db, args).await?;
-    let restore = context.restore.ok_or_else(|| {
+    let (effective_restore, startup_handoff_summary) =
+        reconcile_startup_working_contour(db, &context).await?;
+    let restore = effective_restore.ok_or_else(|| {
         anyhow!(
             "no working-state restore bundle found for {}::{}",
             context.project.code,
@@ -1926,14 +1991,14 @@ pub(crate) async fn restore_payload_with_db(
         &context.project,
         &context.namespace,
         &context.continuity,
-        &context.handoff_summary,
+        &startup_handoff_summary,
         Some(&restore),
     );
     let payload = build_continuity_restore_payload(
         &context.project,
         &context.namespace,
         &context.continuity,
-        &context.handoff_summary,
+        &startup_handoff_summary,
         &restore,
         &chat_start_restore,
     )?;
@@ -1941,6 +2006,7 @@ pub(crate) async fn restore_payload_with_db(
 }
 
 fn build_continuity_startup_payload(
+    startup_handoff_summary: &Value,
     context: &ContinuityStartupContext,
     restore: Option<&Value>,
     chat_start_restore: &Value,
@@ -1950,7 +2016,7 @@ fn build_continuity_startup_payload(
     let workspace_restore_pack_node = restore
         .and_then(|value| value.get("workspace_restore_pack"))
         .or_else(|| working_state_node.and_then(|node| node.get("workspace_restore_pack")));
-    let startup_next_step = context.handoff_summary["next_step"]
+    let startup_next_step = startup_handoff_summary["next_step"]
         .as_str()
         .and_then(normalize_next_step_value)
         .unwrap_or_else(|| "ещё нет данных".to_string());
@@ -1991,7 +2057,7 @@ fn build_continuity_startup_payload(
                         && context.continuity["documents_imported"].as_u64().unwrap_or(0) > 0
                 ) || (
                     continuity_source_mode == Some("working_state_fallback")
-                        && context.handoff_summary["headline"].as_str().is_some_and(|value| !value.is_empty())
+                        && startup_handoff_summary["headline"].as_str().is_some_and(|value| !value.is_empty())
                         && !startup_next_step.is_empty()
                         && working_state_expected
                 ),
@@ -2005,7 +2071,7 @@ fn build_continuity_startup_payload(
                     continuity_source_namespace_code
                 ),
                 "headline": normalized_optional_text_json(
-                    context.handoff_summary["headline"].as_str()
+                    startup_handoff_summary["headline"].as_str()
                 ),
                 "next_step": startup_next_step,
             }),
@@ -2103,8 +2169,8 @@ fn build_continuity_startup_payload(
                 ),
             },
             "handoff_summary": normalized_handoff_summary_json(
-                context.handoff_summary["headline"].as_str(),
-                context.handoff_summary["next_step"].as_str(),
+                startup_handoff_summary["headline"].as_str(),
+                startup_handoff_summary["next_step"].as_str(),
             ),
             "canonical_eval": canonical_eval,
         }),
@@ -2149,18 +2215,19 @@ pub async fn verify_continuity(cfg: &AppConfig, args: &VerifyContinuityArgs) -> 
         skip_live_client_budget_guard: false,
     };
     let context = load_startup_context(&db, &startup_args).await?;
+    let (effective_restore, startup_handoff_summary) =
+        reconcile_startup_working_contour(&db, &context).await?;
     let direct_handoff_summary =
         latest_handoff_summary(&db, &context.project, &context.namespace).await?;
     let chat_start_restore = build_chat_start_restore(
         &context.project,
         &context.namespace,
         &context.continuity,
-        &context.handoff_summary,
-        context.restore.as_ref(),
+        &startup_handoff_summary,
+        effective_restore.as_ref(),
     );
     let chat_start_node = &chat_start_restore["chat_start_restore"];
-    let working_state_restore = context
-        .restore
+    let working_state_restore = effective_restore
         .as_ref()
         .and_then(|value| value.get("working_state_restore"))
         .cloned();
@@ -2184,7 +2251,7 @@ pub async fn verify_continuity(cfg: &AppConfig, args: &VerifyContinuityArgs) -> 
                 "unexpected_present": false,
                 "source": if direct_handoff_summary.is_some() { "continuity_handoff" } else { "continuity_import_fallback" },
                 "headline": normalized_optional_text_json(
-                    context.handoff_summary["headline"].as_str()
+                    startup_handoff_summary["headline"].as_str()
                 ),
             }),
         )?,
@@ -2267,8 +2334,8 @@ pub async fn verify_continuity(cfg: &AppConfig, args: &VerifyContinuityArgs) -> 
             },
             "handoff_summary_source": if direct_handoff_summary.is_some() { "continuity_handoff" } else { "continuity_import_fallback" },
             "handoff_summary": normalized_handoff_summary_json(
-                context.handoff_summary["headline"].as_str(),
-                context.handoff_summary["next_step"].as_str(),
+                startup_handoff_summary["headline"].as_str(),
+                startup_handoff_summary["next_step"].as_str(),
             ),
             "working_state_restore_present": working_state_restore_present,
             "working_state_restore": normalized_working_state_restore_projection(
@@ -2939,6 +3006,10 @@ pub async fn compact_chat_payload(
                 namespace: context.namespace,
                 continuity: context.continuity,
                 handoff_summary: handoff_payload["continuity_handoff"].clone(),
+                startup_handoff_summary: normalized_handoff_summary_json(
+                    handoff_payload["continuity_handoff"]["headline"].as_str(),
+                    handoff_payload["continuity_handoff"]["next_step"].as_str(),
+                ),
                 restore: context.restore,
             },
         )
@@ -3414,7 +3485,13 @@ pub async fn rotate_chat(cfg: &AppConfig, args: &ContinuityRotateChatArgs) -> Re
                         "documents_imported": Value::Null,
                         "rendered_transcript_files": Value::Null,
                     }),
-                    handoff_summary,
+                    handoff_summary: handoff_summary.clone(),
+                    startup_handoff_summary: authoritative_startup_handoff_summary(
+                        restore
+                            .as_ref()
+                            .map(|value| &value["working_state_restore"]),
+                        &handoff_summary,
+                    ),
                     restore,
                 },
                 true,
@@ -4056,25 +4133,38 @@ async fn capture_handoff_payload_locked(
             "semantic_replay_noop": semantic_replay_noop,
         }
     });
+    let handoff_source_event_id =
+        working_state::record_handoff_event_with_previous_restore_contract(
+            &db,
+            &project,
+            &namespace,
+            &headline,
+            &next_step,
+            &details,
+            resolve_current_goal,
+            &resolved_headlines,
+            &resolved_task_ids,
+            &local_handoff_path_text,
+            previous_restore.as_ref(),
+            promote_active_workline,
+        )
+        .await?;
     if !semantic_replay_noop {
-        let _ =
-            postgres::insert_observability_snapshot(&db, "continuity_handoff", &payload).await?;
+        let mut observability_payload = payload.clone();
+        observability_payload["_observability"] = json!({
+            "source_event_id": handoff_source_event_id,
+            "source_kind": "continuity_handoff",
+            "scope_project_code": project.code,
+            "scope_namespace_code": namespace.code,
+            "captured_at_epoch_ms": captured_at_epoch_ms,
+        });
+        let _ = postgres::insert_observability_snapshot(
+            &db,
+            "continuity_handoff",
+            &observability_payload,
+        )
+        .await?;
     }
-    working_state::record_handoff_event_with_previous_restore_contract(
-        &db,
-        &project,
-        &namespace,
-        &headline,
-        &next_step,
-        &details,
-        resolve_current_goal,
-        &resolved_headlines,
-        &resolved_task_ids,
-        &local_handoff_path_text,
-        previous_restore.as_ref(),
-        promote_active_workline,
-    )
-    .await?;
     Ok(payload)
 }
 
@@ -5490,10 +5580,7 @@ async fn load_startup_context(
         .or(fallback_handoff.as_ref())
         .cloned()
         .unwrap_or_else(|| continuity["active_workline_summary"]["details"].clone());
-    let handoff_summary = normalized_handoff_summary_json(
-        handoff_summary_source["headline"].as_str(),
-        handoff_summary_source["next_step"].as_str(),
-    );
+    let handoff_summary = startup_handoff_summary_from_source(&handoff_summary_source);
     let restore = maybe_refresh_startup_restore_from_newer_handoff(
         db,
         &project,
@@ -5517,11 +5604,18 @@ async fn load_startup_context(
             namespace.code
         ));
     }
+    let startup_handoff_summary = authoritative_startup_handoff_summary(
+        restore
+            .as_ref()
+            .map(|value| &value["working_state_restore"]),
+        &handoff_summary,
+    );
     Ok(ContinuityStartupContext {
         project,
         namespace,
         continuity,
         handoff_summary,
+        startup_handoff_summary,
         restore,
     })
 }
@@ -5542,10 +5636,10 @@ async fn maybe_refresh_startup_restore_from_newer_handoff(
     let handoff_local_path = requested_handoff["local_path"]
         .as_str()
         .and_then(|value| optional_non_empty_text(Some(value)));
-    let restore_local_path = requested_restore["working_state_restore"]["state_lineage"]
-        ["authoritative_local_path"]
-        .as_str()
-        .and_then(|value| optional_non_empty_text(Some(value)));
+    let restore_local_path =
+        requested_restore["working_state_restore"]["state_lineage"]["authoritative_local_path"]
+            .as_str()
+            .and_then(|value| optional_non_empty_text(Some(value)));
     let handoff_headline = requested_handoff["headline"]
         .as_str()
         .and_then(|value| optional_non_empty_text(Some(value)));
@@ -5560,14 +5654,21 @@ async fn maybe_refresh_startup_restore_from_newer_handoff(
         .as_str()
         .map(normalize_next_step_value)
         .unwrap_or(None);
-    let restore_authoritative_event_id = requested_restore["working_state_restore"]["state_lineage"]
-        ["authoritative_event_id"]
+    let restore_authoritative_event_id =
+        requested_restore["working_state_restore"]["state_lineage"]["authoritative_event_id"]
+            .as_str()
+            .and_then(|value| optional_non_empty_text(Some(value)));
+    let handoff_source_event_id = requested_handoff["source_event_id"]
         .as_str()
         .and_then(|value| optional_non_empty_text(Some(value)));
     let restore_already_matches_handoff = restore_local_path == handoff_local_path
         && restore_headline == handoff_headline
         && restore_next_step == handoff_next_step;
-    if restore_authoritative_event_id.is_some() && restore_already_matches_handoff {
+    if restore_authoritative_event_id.is_some()
+        && restore_already_matches_handoff
+        && (handoff_source_event_id.is_none()
+            || restore_authoritative_event_id == handoff_source_event_id)
+    {
         return Ok(None);
     }
     working_state::force_refresh_restore_snapshot_for_startup_reconcile(db, project, namespace)
@@ -6640,6 +6741,7 @@ async fn latest_handoff_summary(
             snapshot.payload["continuity_handoff"]["next_step"].as_str(),
         );
         summary["local_path"] = snapshot.payload["continuity_handoff"]["local_path"].clone();
+        summary["source_event_id"] = snapshot.payload["_observability"]["source_event_id"].clone();
         summary
     }))
 }
@@ -7201,8 +7303,8 @@ mod tests {
     use super::{
         COMPACT_CHAT_AUTO_LAUNCH_ENV, ContinuityStartupContext, StartupRuntimeStateAudit,
         apply_compact_chat_host_launch_completion, apply_compact_chat_host_launch_failed,
-        build_blocked_continuity_answer_payload, build_chat_start_restore,
-        build_compact_chat_clean_launch_surface_with_vscode_contracts,
+        authoritative_startup_handoff_summary, build_blocked_continuity_answer_payload,
+        build_chat_start_restore, build_compact_chat_clean_launch_surface_with_vscode_contracts,
         build_continuity_answer_payload, build_continuity_canonical_eval,
         build_continuity_restore_payload, build_continuity_startup_payload,
         build_startup_runtime_state_artifact, build_startup_runtime_state_cli_json,
@@ -7214,8 +7316,8 @@ mod tests {
         extract_next_step_from_text, fake_continuity_handoff_snapshot,
         fake_continuity_import_snapshot, inspect_startup_runtime_state, is_meta_continuity_handoff,
         latest_scoped_snapshot, maybe_launch_compact_chat_host,
-        maybe_launch_compact_chat_host_with_auto_launch_policy, parse_chat_reference_spec,
-        render_direct_answer, resolve_answer_intent, shell_quote,
+        maybe_launch_compact_chat_host_with_auto_launch_policy, normalized_handoff_summary_json,
+        parse_chat_reference_spec, render_direct_answer, resolve_answer_intent, shell_quote,
         startup_runtime_state_artifact_path, summarize_execctl_resume_obligation,
         summarize_required_task_set_for_human_surface, workspace_bound_vscode_chat_profile_name,
         write_compact_chat_prompt_artifact,
@@ -8613,7 +8715,9 @@ mod tests {
         let _thread_a = set_env_var_for_test("CODEX_THREAD_ID", "thread-a");
         let _operator_redirect =
             set_env_var_for_test("AMAI_OPERATOR_REDIRECT_PROVENANCE", "unit:test");
-        let mut handoff_db = postgres::connect_admin(&cfg).await.expect("handoff postgres");
+        let mut handoff_db = postgres::connect_admin(&cfg)
+            .await
+            .expect("handoff postgres");
         postgres::bootstrap_schema(&handoff_db, &cfg)
             .await
             .expect("handoff schema");
@@ -8694,10 +8798,10 @@ mod tests {
             .await
             .expect("startup context");
         let restore = context.restore.expect("rebuilt restore");
-        let rebuilt_event_id = restore["working_state_restore"]["state_lineage"]
-            ["authoritative_event_id"]
-            .as_str()
-            .expect("rebuilt authoritative event id");
+        let rebuilt_event_id =
+            restore["working_state_restore"]["state_lineage"]["authoritative_event_id"]
+                .as_str()
+                .expect("rebuilt authoritative event id");
 
         assert_ne!(rebuilt_event_id, stale_authoritative_event_id);
         assert_eq!(
@@ -8721,6 +8825,157 @@ mod tests {
             restore["working_state_restore"]["state_lineage"]["authoritative_local_path"],
             newer_handoff["local_path"]
         );
+    }
+
+    #[tokio::test]
+    async fn load_startup_context_rebuilds_stale_restore_when_handoff_event_changes_without_text_change()
+     {
+        load_env_for_postgres_test();
+        let cfg = AppConfig::from_env().expect("config");
+        let db = postgres::connect_admin(&cfg).await.expect("postgres");
+        postgres::bootstrap_schema(&db, &cfg).await.expect("schema");
+
+        let suffix = uuid::Uuid::new_v4();
+        let workspace_code = format!("startup_reconcile_same_text_ws_{suffix}");
+        let project_code = format!("startup_reconcile_same_text_project_{suffix}");
+        let project_root =
+            std::env::temp_dir().join(format!("amai-startup-reconcile-same-text-root-{suffix}"));
+        fs::create_dir_all(&project_root).expect("project root");
+
+        postgres::ensure_workspace(
+            &db,
+            &workspace_code,
+            "Startup Reconcile Same Text",
+            "active",
+        )
+        .await
+        .expect("workspace");
+        let project = postgres::upsert_project(
+            &db,
+            &project_code,
+            "Startup Reconcile Same Text Project",
+            &project_root.display().to_string(),
+            Some("main"),
+            &workspace_code,
+            "project_shared",
+            "local_strict",
+        )
+        .await
+        .expect("project");
+        let namespace = postgres::ensure_namespace(
+            &db,
+            project.project_id,
+            "continuity",
+            Some("Continuity"),
+            "local_strict",
+        )
+        .await
+        .expect("namespace");
+
+        let _thread_a = set_env_var_for_test("CODEX_THREAD_ID", "thread-a-same-text");
+        let _operator_redirect =
+            set_env_var_for_test("AMAI_OPERATOR_REDIRECT_PROVENANCE", "unit:test");
+        let mut handoff_db = postgres::connect_admin(&cfg)
+            .await
+            .expect("handoff postgres");
+        postgres::bootstrap_schema(&handoff_db, &cfg)
+            .await
+            .expect("handoff schema");
+
+        super::handoff_payload_from_parts_with_db(
+            &mut handoff_db,
+            &cfg,
+            &project.code,
+            &namespace.code,
+            "Same line",
+            "Same step",
+            "First handoff for same-text reconcile test.",
+            false,
+            &[],
+            &[],
+            false,
+        )
+        .await
+        .expect("older handoff");
+
+        let stale_restore =
+            working_state::load_recent_restore_bundle_without_live_guard(&db, &project, &namespace)
+                .await
+                .expect("stale restore load")
+                .expect("stale restore bundle");
+        let stale_authoritative_event_id = stale_restore["working_state_restore"]["state_lineage"]
+            ["authoritative_event_id"]
+            .as_str()
+            .expect("stale authoritative event id")
+            .to_string();
+
+        super::handoff_payload_from_parts_with_db(
+            &mut handoff_db,
+            &cfg,
+            &project.code,
+            &namespace.code,
+            "Same line",
+            "Same step",
+            "Second handoff with the same human text but a newer event identity.\npromotion_contract: operator_redirect",
+            false,
+            &[],
+            &[],
+            true,
+        )
+        .await
+        .expect("newer same-text handoff");
+
+        let newer_handoff = super::latest_handoff_summary(&db, &project, &namespace)
+            .await
+            .expect("latest handoff summary")
+            .expect("newer handoff summary");
+        let newer_source_event_id = newer_handoff["source_event_id"]
+            .as_str()
+            .expect("newer source event id");
+        assert_ne!(newer_source_event_id, stale_authoritative_event_id);
+
+        let stale_runtime_snapshot_payload = json!({
+            "_observability": {
+                "source_event_id": stale_authoritative_event_id,
+                "source_kind": "working_state_restore_runtime"
+            },
+            "working_state_restore": stale_restore["working_state_restore"].clone()
+        });
+        let _ = postgres::insert_observability_snapshot(
+            &db,
+            "working_state_restore",
+            &stale_runtime_snapshot_payload,
+        )
+        .await
+        .expect("stale restore snapshot");
+
+        let startup_args = ContinuityStartupArgs {
+            project: Some(project.code.clone()),
+            repo_root: Some(project_root.clone()),
+            namespace: namespace.code.clone(),
+            json: false,
+            runtime_state_json: false,
+            token_source_kind: "proof_startup_same_text_handoff_reconcile".to_string(),
+            skip_live_client_budget_guard: true,
+        };
+
+        let context = super::load_startup_context(&db, &startup_args)
+            .await
+            .expect("startup context");
+        let restore = context.restore.expect("rebuilt restore");
+        let rebuilt_event_id =
+            restore["working_state_restore"]["state_lineage"]["authoritative_event_id"]
+                .as_str()
+                .expect("rebuilt authoritative event id");
+
+        assert_ne!(rebuilt_event_id, stale_authoritative_event_id);
+        assert_eq!(rebuilt_event_id, newer_source_event_id);
+        assert_eq!(
+            context.handoff_summary["source_event_id"],
+            json!(newer_source_event_id)
+        );
+        assert_eq!(context.handoff_summary["headline"], json!("Same line"));
+        assert_eq!(context.handoff_summary["next_step"], json!("Same step"));
     }
 
     #[test]
@@ -9484,17 +9739,22 @@ mod tests {
             project,
             namespace,
             continuity,
-            handoff_summary: handoff,
+            handoff_summary: handoff.clone(),
+            startup_handoff_summary: authoritative_startup_handoff_summary(
+                Some(&restore["working_state_restore"]),
+                &handoff,
+            ),
             restore: Some(restore),
         };
         let chat_start_restore = build_chat_start_restore(
             &context.project,
             &context.namespace,
             &context.continuity,
-            &context.handoff_summary,
+            &context.startup_handoff_summary,
             context.restore.as_ref(),
         );
         let payload = build_continuity_startup_payload(
+            &context.startup_handoff_summary,
             &context,
             context.restore.as_ref(),
             &chat_start_restore,
@@ -9512,6 +9772,120 @@ mod tests {
         assert_eq!(
             payload["chat_start_restore"]["included_reasons_summary"].as_str(),
             Some("точные совпадения (1) — Нашлись точные совпадения по continuity.")
+        );
+    }
+
+    #[test]
+    fn continuity_startup_payload_uses_refreshed_summary_after_late_restore_refresh() {
+        let project = ProjectRecord {
+            project_id: uuid::Uuid::new_v4(),
+            code: "art".to_string(),
+            display_name: "Art".to_string(),
+            repo_root: "/home/art/Art".to_string(),
+            visibility_scope: "project_shared".to_string(),
+            updated_at: String::new(),
+        };
+        let namespace = NamespaceRecord {
+            namespace_id: uuid::Uuid::new_v4(),
+            code: "continuity".to_string(),
+            display_name: "Continuity".to_string(),
+            retrieval_mode: "local_strict".to_string(),
+        };
+        let continuity = json!({
+            "continuity_source_mode": "working_state_fallback",
+            "continuity_source_namespace_code": "continuity",
+            "imported_at_epoch_ms": Value::Null,
+            "documents_imported": Value::Null,
+            "bootstrap_summary": {
+                "details": {
+                    "thread_count": 1,
+                    "latest_rendered_transcript": ""
+                }
+            }
+        });
+        let stale_handoff = json!({
+            "headline": "Older line",
+            "next_step": "Old stale next step",
+            "local_path": "/tmp/old-handoff.md"
+        });
+        let stale_restore = json!({
+            "working_state_restore": {
+                "current_goal": "Older line",
+                "next_step": "Old stale next step",
+                "restore_confidence": "high",
+                "state_lineage": {
+                    "authoritative_event_id": "evt-old",
+                    "authoritative_local_path": "/tmp/old-handoff.md"
+                }
+            }
+        });
+        let refreshed_restore = json!({
+            "working_state_restore": {
+                "current_goal": "Newer live line",
+                "next_step": "Authoritative refreshed next step",
+                "restore_confidence": "high",
+                "state_lineage": {
+                    "authoritative_event_id": "evt-new",
+                    "authoritative_local_path": "/tmp/new-handoff.md"
+                },
+                "startup_next_action": {
+                    "action_kind": "continue_active_workline",
+                    "blocking": false,
+                    "headline": "Newer live line",
+                    "next_step": "Authoritative refreshed next step"
+                }
+            }
+        });
+        let context = ContinuityStartupContext {
+            project,
+            namespace,
+            continuity,
+            handoff_summary: stale_handoff.clone(),
+            startup_handoff_summary: authoritative_startup_handoff_summary(
+                Some(&stale_restore["working_state_restore"]),
+                &stale_handoff,
+            ),
+            restore: Some(stale_restore),
+        };
+        let refreshed_summary = authoritative_startup_handoff_summary(
+            Some(&refreshed_restore["working_state_restore"]),
+            &context.handoff_summary,
+        );
+        let chat_start_restore = build_chat_start_restore(
+            &context.project,
+            &context.namespace,
+            &context.continuity,
+            &refreshed_summary,
+            Some(&refreshed_restore),
+        );
+        let payload = build_continuity_startup_payload(
+            &refreshed_summary,
+            &context,
+            Some(&refreshed_restore),
+            &chat_start_restore,
+        )
+        .expect("payload");
+
+        assert_eq!(
+            chat_start_restore["chat_start_restore"]["headline"],
+            json!("Newer live line")
+        );
+        assert_eq!(
+            chat_start_restore["chat_start_restore"]["next_step"],
+            json!("Authoritative refreshed next step")
+        );
+        let prompt_text = chat_start_restore["chat_start_restore"]["prompt_text"]
+            .as_str()
+            .expect("prompt_text");
+        assert!(prompt_text.contains("Authoritative refreshed next step"));
+        assert!(!prompt_text.contains("Old stale next step"));
+        assert_eq!(
+            payload["continuity_startup"]["handoff_summary"]["headline"],
+            json!("Newer live line")
+        );
+        assert_eq!(
+            payload["continuity_startup"]["handoff_summary"]["next_step"],
+            json!("Authoritative refreshed next step")
         );
     }
 
@@ -12141,6 +12515,60 @@ mod tests {
     }
 
     #[test]
+    fn inspect_startup_runtime_state_fails_closed_on_workflow_source_event_drift_with_matching_ids()
+    {
+        let unique = format!(
+            "amai-startup-runtime-audit-source-event-drift-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("epoch")
+                .as_nanos()
+        );
+        let repo = std::env::temp_dir().join(unique);
+        fs::create_dir_all(repo.join(".amai/continuity")).expect("runtime state dir");
+
+        let payload = startup_runtime_semantic_guard_payload(repo.as_path());
+        let mut artifact = build_startup_runtime_state_artifact(repo.as_path(), &payload, 42)
+            .expect("startup runtime state artifact");
+        assert_eq!(artifact["gate_semantics_consistent"], json!(true));
+        artifact["workflow_promotion_state"]["source_event_match"] = json!(false);
+        fs::write(
+            startup_runtime_state_artifact_path(repo.as_path()),
+            serde_json::to_string_pretty(&artifact).expect("serialize artifact"),
+        )
+        .expect("write artifact");
+
+        let audit = inspect_startup_runtime_state(repo.as_path()).expect("startup runtime audit");
+        assert_eq!(audit.status, "startup_runtime_state_drift");
+        assert_eq!(audit.workflow_promotion_headline_consistent, Some(true));
+        assert_eq!(audit.workflow_promotion_source_kind_consistent, Some(true));
+        assert_eq!(
+            audit.workflow_promotion_source_event_consistent,
+            Some(false)
+        );
+        assert_eq!(audit.workflow_promotion_event_id_present, Some(true));
+        assert_eq!(
+            audit.workflow_promotion_missing_or_mismatch_blocks_report,
+            Some(true)
+        );
+        assert_eq!(
+            audit.execctl_active_lease_source_event_id_present,
+            Some(true)
+        );
+        assert_eq!(
+            audit.working_state_restore_lineage_event_present,
+            Some(true)
+        );
+        assert_eq!(audit.gate_semantics_consistent, Some(true));
+        assert_eq!(
+            audit.artifact_gate_semantics_consistent_matches_recomputed,
+            Some(true)
+        );
+
+        fs::remove_dir_all(&repo).expect("cleanup temp repo");
+    }
+
+    #[test]
     fn format_optional_u64_for_human_preserves_missing_state() {
         assert_eq!(super::format_optional_u64_for_human(Some(0)), "0");
         assert_eq!(super::format_optional_u64_for_human(Some(3)), "3");
@@ -12183,6 +12611,29 @@ mod tests {
             json!({
                 "headline": "ещё нет данных",
                 "next_step": "ещё нет данных",
+            })
+        );
+    }
+
+    #[test]
+    fn startup_handoff_summary_from_source_preserves_only_identity_allowlist() {
+        let summary = super::startup_handoff_summary_from_source(&json!({
+            "headline": " Same line ",
+            "next_step": " Same step ",
+            "local_path": "/tmp/live-handoff.md",
+            "source_event_id": "evt-123",
+            "details": "must not leak",
+            "unexpected_nested": {
+                "raw": true
+            }
+        }));
+        assert_eq!(
+            summary,
+            json!({
+                "headline": "Same line",
+                "next_step": "Same step",
+                "local_path": "/tmp/live-handoff.md",
+                "source_event_id": "evt-123"
             })
         );
     }
@@ -12629,6 +13080,10 @@ mod tests {
             namespace: namespace.clone(),
             continuity: continuity.clone(),
             handoff_summary: handoff.clone(),
+            startup_handoff_summary: authoritative_startup_handoff_summary(
+                Some(&restore["working_state_restore"]),
+                &handoff,
+            ),
             restore: Some(restore.clone()),
         };
         let chat_start_restore = build_chat_start_restore(
@@ -12639,6 +13094,7 @@ mod tests {
             context.restore.as_ref(),
         );
         let startup_payload = build_continuity_startup_payload(
+            &context.startup_handoff_summary,
             &context,
             context.restore.as_ref(),
             &chat_start_restore,
@@ -12699,7 +13155,7 @@ mod tests {
             &project,
             &namespace,
             &continuity,
-            &handoff,
+            &context.startup_handoff_summary,
             &restore,
             &chat_start_restore,
         )
@@ -12722,7 +13178,11 @@ mod tests {
             project,
             namespace,
             continuity,
-            handoff_summary: handoff,
+            handoff_summary: handoff.clone(),
+            startup_handoff_summary: normalized_handoff_summary_json(
+                handoff["headline"].as_str(),
+                handoff["next_step"].as_str(),
+            ),
             restore: None,
         };
         let no_restore_chat_start_restore = build_chat_start_restore(
@@ -12733,6 +13193,7 @@ mod tests {
             no_restore_context.restore.as_ref(),
         );
         let no_restore_startup_payload = build_continuity_startup_payload(
+            &no_restore_context.startup_handoff_summary,
             &no_restore_context,
             no_restore_context.restore.as_ref(),
             &no_restore_chat_start_restore,
@@ -12755,6 +13216,7 @@ mod tests {
                 "documents_imported": 1
             }),
             handoff_summary: no_restore_context.handoff_summary.clone(),
+            startup_handoff_summary: no_restore_context.startup_handoff_summary.clone(),
             restore: no_restore_context.restore.clone(),
         };
         let unknown_source_chat_start_restore = build_chat_start_restore(
@@ -12765,6 +13227,7 @@ mod tests {
             unknown_source_context.restore.as_ref(),
         );
         let unknown_source_startup_payload = build_continuity_startup_payload(
+            &unknown_source_context.startup_handoff_summary,
             &unknown_source_context,
             unknown_source_context.restore.as_ref(),
             &unknown_source_chat_start_restore,
@@ -12995,18 +13458,23 @@ mod tests {
             project,
             namespace,
             continuity,
-            handoff_summary: handoff,
+            handoff_summary: handoff.clone(),
+            startup_handoff_summary: authoritative_startup_handoff_summary(
+                Some(&restore["working_state_restore"]),
+                &handoff,
+            ),
             restore: Some(restore),
         };
         let chat_start_restore = build_chat_start_restore(
             &context.project,
             &context.namespace,
             &context.continuity,
-            &context.handoff_summary,
+            &context.startup_handoff_summary,
             context.restore.as_ref(),
         );
 
         let payload = build_continuity_startup_payload(
+            &context.startup_handoff_summary,
             &context,
             context.restore.as_ref(),
             &chat_start_restore,
@@ -13079,18 +13547,23 @@ mod tests {
             project,
             namespace,
             continuity,
-            handoff_summary: handoff,
+            handoff_summary: handoff.clone(),
+            startup_handoff_summary: authoritative_startup_handoff_summary(
+                Some(&restore["working_state_restore"]),
+                &handoff,
+            ),
             restore: Some(restore),
         };
         let chat_start_restore = build_chat_start_restore(
             &context.project,
             &context.namespace,
             &context.continuity,
-            &context.handoff_summary,
+            &context.startup_handoff_summary,
             context.restore.as_ref(),
         );
 
         let payload = build_continuity_startup_payload(
+            &context.startup_handoff_summary,
             &context,
             context.restore.as_ref(),
             &chat_start_restore,
@@ -13413,7 +13886,11 @@ mod tests {
             audit.working_state_restore_lineage_event_present,
             Some(true)
         );
-        assert_eq!(audit.gate_semantics_consistent, Some(false));
+        assert_eq!(audit.gate_semantics_consistent, Some(true));
+        assert_eq!(
+            audit.artifact_gate_semantics_consistent_matches_recomputed,
+            Some(false)
+        );
 
         fs::remove_dir_all(&repo).expect("cleanup temp repo");
     }
@@ -13511,7 +13988,7 @@ mod tests {
         assert_eq!(audit.workflow_promotion_state_present, Some(false));
         assert_eq!(
             audit.artifact_gate_semantics_consistent_matches_recomputed,
-            Some(false)
+            Some(true)
         );
 
         fs::remove_dir_all(&repo).expect("cleanup temp repo");
@@ -13676,6 +14153,9 @@ mod tests {
             workflow_promotion_state_present: Some(true),
             workflow_promotion_headline_consistent: Some(true),
             workflow_promotion_source_kind_consistent: Some(true),
+            workflow_promotion_source_event_consistent: Some(true),
+            workflow_promotion_event_id_present: Some(true),
+            workflow_promotion_missing_or_mismatch_blocks_report: Some(true),
             prompt_text_present: Some(true),
             startup_next_action_present: Some(true),
             startup_execution_gate_present: Some(true),

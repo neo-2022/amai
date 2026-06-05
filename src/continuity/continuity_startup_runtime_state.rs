@@ -210,6 +210,9 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
             workflow_promotion_state_present: None,
             workflow_promotion_headline_consistent: None,
             workflow_promotion_source_kind_consistent: None,
+            workflow_promotion_source_event_consistent: None,
+            workflow_promotion_event_id_present: None,
+            workflow_promotion_missing_or_mismatch_blocks_report: None,
             prompt_text_present: None,
             startup_next_action_present: None,
             startup_execution_gate_present: None,
@@ -353,6 +356,17 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         ),
         _ => Some(false),
     };
+    let workflow_promotion_source_event_consistent =
+        Some(payload["workflow_promotion_state"]["source_event_match"].as_bool() == Some(true));
+    let workflow_promotion_event_id_present = Some(
+        payload["workflow_promotion_state"]["workflow_promotion_event_id"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty()),
+    );
+    let workflow_promotion_missing_or_mismatch_blocks_report = Some(
+        payload["workflow_promotion_state"]["missing_or_mismatch_blocks_report"].as_bool()
+            == Some(true),
+    );
     let must_follow_startup_next_action =
         payload["startup_execution_gate"]["must_follow_startup_next_action"].as_bool();
     let unrelated_work_allowed =
@@ -407,6 +421,9 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         || workflow_promotion_state_present != Some(true)
         || workflow_promotion_headline_consistent != Some(true)
         || workflow_promotion_source_kind_consistent != Some(true)
+        || workflow_promotion_source_event_consistent != Some(true)
+        || workflow_promotion_event_id_present != Some(true)
+        || workflow_promotion_missing_or_mismatch_blocks_report != Some(true)
         || prompt_text_present != Some(true)
         || startup_next_action_present != Some(true)
         || startup_execution_gate_present != Some(true)
@@ -447,6 +464,9 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         workflow_promotion_state_present,
         workflow_promotion_headline_consistent,
         workflow_promotion_source_kind_consistent,
+        workflow_promotion_source_event_consistent,
+        workflow_promotion_event_id_present,
+        workflow_promotion_missing_or_mismatch_blocks_report,
         prompt_text_present,
         startup_next_action_present,
         startup_execution_gate_present,
@@ -645,6 +665,9 @@ pub(super) fn startup_runtime_state_audit_json(
         "workflow_promotion_state_present": audit.workflow_promotion_state_present,
         "workflow_promotion_headline_consistent": audit.workflow_promotion_headline_consistent,
         "workflow_promotion_source_kind_consistent": audit.workflow_promotion_source_kind_consistent,
+        "workflow_promotion_source_event_consistent": audit.workflow_promotion_source_event_consistent,
+        "workflow_promotion_event_id_present": audit.workflow_promotion_event_id_present,
+        "workflow_promotion_missing_or_mismatch_blocks_report": audit.workflow_promotion_missing_or_mismatch_blocks_report,
         "prompt_text_present": audit.prompt_text_present,
         "startup_next_action_present": audit.startup_next_action_present,
         "startup_execution_gate_present": audit.startup_execution_gate_present,
