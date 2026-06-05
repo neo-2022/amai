@@ -13,6 +13,12 @@ const RELOAD_WINDOW_COMMAND_ID = "amaiVscodeBridge.reloadWindow";
 const VIEW_ID = "amai.sidebar";
 const EXTENSION_URI_AUTHORITY = "amai.amai-vscode-bridge";
 const EXTENSION_VERSION = packageJson.version;
+const PUBLIC_BRIDGE_REQUEST_RELATIVE_PATH = path.join(
+  ".amai",
+  "onboarding",
+  "vscode-public-bridge-request.json"
+);
+const PUBLIC_BRIDGE_REQUEST_KIND = "open-clean-chat";
 const REQUIRED_CODEX_COMMANDS = [
   "chatgpt.openSidebar",
   "chatgpt.newChat",
@@ -70,6 +76,63 @@ function paramsToPayload(params) {
     target: normalizeString(params.get("target")) || "sidebar",
     autoSubmit: normalizeBoolean(params.get("auto_submit"), true),
   };
+}
+
+function requestRecordToPayload(record) {
+  if (!record || typeof record !== "object") {
+    return {
+      promptFile: null,
+      promptText: null,
+      resultFile: null,
+      repoRoot: null,
+      target: "sidebar",
+      autoSubmit: true,
+      sourceUriText: null,
+    };
+  }
+  return {
+    promptFile: normalizeString(record.prompt_file ?? record.promptFile),
+    promptText: normalizeString(record.prompt_text ?? record.promptText),
+    resultFile: normalizeString(record.result_file ?? record.resultFile),
+    repoRoot: normalizeString(record.repo_root ?? record.repoRoot),
+    target: normalizeString(record.target) || "sidebar",
+    autoSubmit: normalizeBoolean(
+      String(record.auto_submit ?? record.autoSubmit ?? "true"),
+      true
+    ),
+    sourceUriText: normalizeString(
+      record.source_uri_text ?? record.sourceUriText ?? record.uri_text ?? record.uriText
+    ),
+  };
+}
+
+function buildBridgeUriFromPayload(payload) {
+  const query = new URLSearchParams();
+  if (normalizeString(payload.promptFile)) {
+    query.set("prompt_file", payload.promptFile);
+  }
+  if (normalizeString(payload.promptText)) {
+    query.set("prompt_text", payload.promptText);
+  }
+  if (normalizeString(payload.resultFile)) {
+    query.set("result_file", payload.resultFile);
+  }
+  if (normalizeString(payload.repoRoot)) {
+    query.set("repo_root", payload.repoRoot);
+  }
+  if (normalizeString(payload.target)) {
+    query.set("target", payload.target);
+  }
+  query.set("auto_submit", payload.autoSubmit === false ? "0" : "1");
+  return `vscode://${EXTENSION_URI_AUTHORITY}/open-clean-chat?${query.toString()}`;
+}
+
+function bridgeRequestFilePath(repoRoot) {
+  return path.join(repoRoot, PUBLIC_BRIDGE_REQUEST_RELATIVE_PATH);
+}
+
+function bridgeRequestFilePathForWorkspaceFolder(folder) {
+  return bridgeRequestFilePath(folder.uri.fsPath);
 }
 
 function isBridgeUriLike(value) {
@@ -222,6 +285,67 @@ async function writeResultFile(resultFile, payload) {
   await fs.writeFile(resultFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
+async function processBridgeRequestFile(requestPath) {
+  const raw = await fs.readFile(requestPath, "utf8");
+  const request = JSON.parse(raw);
+  if (request?.kind !== PUBLIC_BRIDGE_REQUEST_KIND) {
+    return;
+  }
+  const payload = requestRecordToPayload(request);
+  if (!payload.promptFile || !payload.resultFile || !payload.repoRoot) {
+    throw new Error("bridge request file missing prompt_file, result_file, or repo_root");
+  }
+  const sourceUriText = payload.sourceUriText ?? buildBridgeUriFromPayload(payload);
+  try {
+    await openCleanChat(payload, sourceUriText);
+  } finally {
+    await fs.unlink(requestPath).catch(() => {});
+  }
+}
+
+async function scanBridgeRequestFiles() {
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    const requestPath = bridgeRequestFilePathForWorkspaceFolder(folder);
+    if (await pathExists(requestPath)) {
+      try {
+        await processBridgeRequestFile(requestPath);
+      } catch (error) {
+        console.error(
+          `Amai bridge request file failed during startup scan for ${requestPath}: ${
+            error instanceof Error ? error.stack ?? error.message : String(error)
+          }`
+        );
+      }
+    }
+  }
+}
+
+function watchBridgeRequestFiles(context) {
+  const watchers = [];
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    const requestPattern = new vscode.RelativePattern(
+      folder,
+      PUBLIC_BRIDGE_REQUEST_RELATIVE_PATH
+    );
+    const watcher = vscode.workspace.createFileSystemWatcher(requestPattern, false, false, false);
+    const process = async (uri) => {
+      try {
+        await processBridgeRequestFile(uri.fsPath);
+      } catch (error) {
+        console.error(
+          `Amai bridge request file failed for ${uri.fsPath}: ${
+            error instanceof Error ? error.stack ?? error.message : String(error)
+          }`
+        );
+      }
+    };
+    watcher.onDidCreate(process);
+    watcher.onDidChange(process);
+    watchers.push(watcher);
+  }
+  context.subscriptions.push(...watchers);
+}
+
 async function getCodexSurfaceState() {
   const commands = await vscode.commands.getCommands(true);
   const missingCommands = REQUIRED_CODEX_COMMANDS.filter(
@@ -231,6 +355,25 @@ async function getCodexSurfaceState() {
     available: missingCommands.length === 0,
     missingCommands,
   };
+}
+
+async function activateCodexSurfaceExtension() {
+  const extension = vscode.extensions.getExtension("openai.chatgpt");
+  if (!extension) {
+    return;
+  }
+  if (extension.isActive) {
+    return;
+  }
+  try {
+    await extension.activate();
+  } catch (error) {
+    console.error(
+      `Amai bridge failed to activate openai.chatgpt explicitly: ${
+        error instanceof Error ? error.stack ?? error.message : String(error)
+      }`
+    );
+  }
 }
 
 function formatCodexSurfaceError(surfaceState) {
@@ -246,10 +389,16 @@ function formatCodexSurfaceError(surfaceState) {
 }
 
 async function ensureCodexCommandsAvailable() {
-  const surfaceState = await getCodexSurfaceState();
-  if (!surfaceState.available) {
-    throw new Error(formatCodexSurfaceError(surfaceState));
+  await activateCodexSurfaceExtension();
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const surfaceState = await getCodexSurfaceState();
+    if (surfaceState.available) {
+      return;
+    }
+    await sleep(250);
   }
+  const surfaceState = await getCodexSurfaceState();
+  throw new Error(formatCodexSurfaceError(surfaceState));
 }
 
 async function pathExists(targetPath) {
@@ -763,11 +912,14 @@ class AmaiSidebarViewProvider {
   }
 }
 
-function activate(context) {
+async function activate(context) {
   const viewProvider = new AmaiSidebarViewProvider(context.extensionUri);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(VIEW_ID, viewProvider)
   );
+
+  watchBridgeRequestFiles(context);
+  await scanBridgeRequestFiles();
 
   context.subscriptions.push(
     vscode.commands.registerCommand(COMMAND_ID, async (input) => {

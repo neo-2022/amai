@@ -40,7 +40,7 @@ move_if_exists state/observe/client_budget_surfaces_cache.json
 move_if_exists state/observe/client_budget_gate_cache.json
 
 status=0
-if env -u CODEX_THREAD_ID PATH=/usr/bin:/bin AMI_OBSERVE_BIND=127.0.0.1:1 \
+if env -u AMAI_PLATFORM_THREAD_ID -u CODEX_THREAD_ID PATH=/usr/bin:/bin AMI_OBSERVE_BIND=127.0.0.1:1 \
   ./scripts/client_budget_gate.sh --enforce-reply-gate \
   >/tmp/proof_client_budget_gate_fail_closed.out \
   2>/tmp/proof_client_budget_gate_fail_closed.err; then

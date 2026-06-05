@@ -37,6 +37,7 @@
     "restore"
   ],
   "activationEvents": [
+    "*",
     "onUri",
     "onCommand:amaiVscodeBridge.openCleanChat",
     "onCommand:amaiVscodeBridge.openWorkspaceSidebarChat",

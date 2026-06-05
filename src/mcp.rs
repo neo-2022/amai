@@ -16,6 +16,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command as ProcessCommand};
 use tokio::time::{Duration, timeout};
@@ -295,7 +296,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         ));
     }
     let workflow_guard = &startup_contract["agent_workflow_guard"];
-    if workflow_guard["guard_version"].as_str() != Some("agent-workflow-guard-v1")
+    if workflow_guard["guard_version"].as_str() != Some("agent-workflow-guard-v2")
         || workflow_guard["must_run_before_substantive_report"].as_bool() != Some(true)
     {
         return Err(anyhow!(
@@ -326,6 +327,58 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         || workflow_guard["planning"]["specialist_consensus_required_before_implementation"]
             .as_bool()
             != Some(true)
+        || workflow_guard["planning"]["plan_item_required_fields"]
+            != json!([
+                "goal",
+                "expected_result",
+                "risks",
+                "verification_method",
+                "completion_criteria"
+            ])
+        || workflow_guard["workflow_cycle"]["ordered_stage_codes"]
+            != json!([
+                "analysis",
+                "plan",
+                "team_critique",
+                "implementation",
+                "team_verification",
+                "fix",
+                "reverify",
+                "final_audit",
+                "report"
+            ])
+        || workflow_guard["workflow_cycle"]["must_not_skip_stages"].as_bool() != Some(true)
+        || workflow_guard["workflow_cycle"]["must_not_advance_until_current_stage_closed"]
+            .as_bool()
+            != Some(true)
+        || workflow_guard["analysis"]["required_review_items"]
+            != json!([
+                "user_goal",
+                "requirements",
+                "constraints",
+                "existing_code",
+                "dependencies",
+                "risks",
+                "done_criteria",
+                "verification_method"
+            ])
+        || workflow_guard["team_critique"]["roles"]
+            != json!([
+                "architect",
+                "senior_developer",
+                "tester",
+                "security_engineer",
+                "devops_if_applicable",
+                "skeptic"
+            ])
+        || workflow_guard["team_critique"]["specialist_contour_policy"].as_str()
+            != Some("local_or_explicitly_allowed_only")
+        || workflow_guard["team_critique"]["approval_status_label_before_implementation"]
+            .as_str()
+            != Some("согласовано, замечаний нет")
+        || workflow_guard["team_critique"]["must_seek_errors_risks_complexity_and_gaps"]
+            .as_bool()
+            != Some(true)
         || workflow_guard["external_reference_policy"]["source_allowlist_kind"].as_str()
             != Some("official_or_primary_sources_only")
         || workflow_guard["external_reference_policy"]
@@ -333,6 +386,9 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             .as_bool()
             != Some(true)
         || workflow_guard["external_reference_policy"]["advisory_only"].as_bool() != Some(true)
+        || workflow_guard["external_reference_policy"]["raw_external_text_not_authoritative"]
+            .as_bool()
+            != Some(true)
         || workflow_guard["external_reference_policy"]
             ["local_corroboration_required_before_truth_or_runtime_change"]
             .as_bool()
@@ -340,9 +396,70 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         || workflow_guard["external_reference_policy"]["must_not_override_local_contracts_or_gates"]
             .as_bool()
             != Some(true)
+        || workflow_guard["team_critique"]["approval_status_code_before_implementation"]
+            .as_str()
+            != Some("approved_no_comments")
+        || workflow_guard["implementation"]["implement_after_plan_consensus"].as_bool()
+            != Some(true)
+        || workflow_guard["implementation"]["local_debug_fix_retest_required"].as_bool()
+            != Some(true)
         || workflow_guard["implementation"]["per_item_specialist_bughunter_review_required"]
             .as_bool()
             != Some(true)
+        || workflow_guard["implementation"]["prohibited_actions"]
+            != json!([
+                "unrequested_scope_change",
+                "unnecessary_complexity",
+                "architecture_breakage",
+                "hidden_assumptions",
+                "unverified_code",
+                "ignored_errors"
+            ])
+        || workflow_guard["team_verification"]["required_after_each_plan_item"].as_bool()
+            != Some(true)
+        || workflow_guard["team_verification"]["verification_dimensions"]
+            != json!([
+                "logic",
+                "errors",
+                "edge_cases",
+                "regressions",
+                "integration",
+                "security",
+                "performance",
+                "readability",
+                "maintainability",
+                "task_fit"
+            ])
+        || workflow_guard["team_verification"]["approval_status_code_after_verification"]
+            .as_str()
+            != Some("no_defects_found")
+        || workflow_guard["team_verification"]["approval_status_label_after_verification"]
+            .as_str()
+            != Some("недостатков не найдено")
+        || workflow_guard["fix_loop"]["return_to_implementation_on_code_issue"].as_bool()
+            != Some(true)
+        || workflow_guard["fix_loop"]["return_to_planning_on_plan_issue"].as_bool()
+            != Some(true)
+        || workflow_guard["fix_loop"]["return_to_analysis_on_understanding_issue"].as_bool()
+            != Some(true)
+        || workflow_guard["fix_loop"]["replay_downstream_checks_after_final_audit_issue"]
+            .as_bool()
+            != Some(true)
+        || workflow_guard["fix_loop"]["unresolved_issues_block_progress"].as_bool()
+            != Some(true)
+        || workflow_guard["integration_verification"]["required_before_final_audit"].as_bool()
+            != Some(true)
+        || workflow_guard["integration_verification"]["checklist"]
+            != json!([
+                "works_together",
+                "no_conflicts",
+                "no_regressions",
+                "architecture_preserved",
+                "security_not_worse",
+                "tests_build_checks_pass",
+                "matches_user_request"
+            ])
+        || workflow_guard["report_gate"]["before_report_guard_required"].as_bool() != Some(true)
         || workflow_guard["report_gate"]["final_specialist_bughunter_pass_required"].as_bool()
             != Some(true)
         || workflow_guard["report_gate"]["report_allowed_requires_all_green"].as_bool()
@@ -366,7 +483,28 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             != Some("$HOME/.local/share/amai/signoff-trust/allowed_signers")
         || workflow_guard["report_gate"]["specialist_signoff_anti_replay_required"].as_bool()
             != Some(true)
+        || workflow_guard["final_audit"]["team_required"].as_bool() != Some(true)
+        || workflow_guard["final_audit"]["any_issue_blocks_ready_verdict"].as_bool()
+            != Some(true)
+        || workflow_guard["report"]["required_items"]
+            != json!([
+                "done",
+                "changed",
+                "checks_run",
+                "problems_found_and_fixed",
+                "remaining_risks_or_limitations",
+                "not_verified"
+            ])
+        || workflow_guard["completion_rule"]["unresolved_issue_blocks_completion"].as_bool()
+            != Some(true)
+        || workflow_guard["completion_rule"]["must_loop_until_team_stops_finding_material_issues"]
+            .as_bool()
+            != Some(true)
         || workflow_guard["language_policy"]["user_reply_language"].as_str() != Some("ru")
+        || workflow_guard["language_policy"]["user_reply_style"].as_str()
+            != Some("simple_non_technical_when_possible")
+        || workflow_guard["language_policy"]["avoid_anglicisms_when_possible"].as_bool()
+            != Some(true)
         || workflow_guard["language_policy"]["subagent_language"].as_str() != Some("en")
     {
         return Err(anyhow!(
@@ -684,6 +822,18 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             != Some(true)
         || startup_contract["tool_runtime_reconcile"]
             ["must_request_mcp_reconnect_after_local_success"]
+            .as_bool()
+            != Some(false)
+        || startup_contract["tool_runtime_reconcile"]
+            ["same_session_continuation_allowed_after_local_success"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["tool_runtime_reconcile"]
+            ["operator_action_required_after_local_success"]
+            .as_bool()
+            != Some(false)
+        || startup_contract["tool_runtime_reconcile"]
+            ["reconnect_helper_diagnostic_only_after_local_success"]
             .as_bool()
             != Some(true)
         || startup_contract["tool_runtime_reconcile"]["must_continue_from_local_startup_payload"]
@@ -1500,6 +1650,8 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "token_savings_percent": savings_percent,
             "token_report_session_events": session_events,
             "memory_matrix_tasks_failed": memory_matrix_tasks_failed,
+            "latest_memory_task_matrix_summary": latest_memory_task_matrix_summary,
+            "latest_mcp_task_matrix_summary": latest_mcp_task_matrix_summary,
             "critical": critical,
             "unknown": unknown,
         }
@@ -2202,6 +2354,7 @@ async fn tool_continuity_handoff(
         args.resolve_current_goal,
         &args.resolved_headlines,
         &args.resolved_task_ids,
+        args.promote_active_workline,
     )
     .await?;
     let node = &payload["continuity_handoff"];
@@ -2235,6 +2388,8 @@ async fn tool_continuity_handoff(
 const CONTINUITY_STARTUP_TOOL_RUNTIME_RECONCILE_DETAIL: &str = "no continuity import found for";
 const CONTINUITY_STARTUP_TOOL_RUNTIME_RECONCILE_FORCE_ENV: &str =
     "AMAI_FORCE_CONTINUITY_STARTUP_STALE_IMPORT_MISS";
+const CONTINUITY_STARTUP_STALE_RUNTIME_ARTIFACT_FORCE_ENV: &str =
+    "AMAI_FORCE_CONTINUITY_STARTUP_STALE_RUNTIME_ARTIFACT_AFTER_SUCCESS";
 const EMBEDDED_MCP_RECONNECT_HELPER_SHELL_PATH: &str = "./scripts/reconnect_local.sh";
 const EMBEDDED_MCP_RECONNECT_HELPER_BOOTSTRAP_COMMAND: &str = "bootstrap reconnect";
 
@@ -2250,7 +2405,18 @@ async fn continuity_startup_payload_with_tool_runtime_reconcile(
         continuity::startup_payload(cfg, &args.to_cli_args()).await
     };
     match first_attempt {
-        Ok(payload) => Ok(payload),
+        Ok(payload) => {
+            force_continuity_startup_stale_runtime_artifact_after_success_for_test(args, &payload)?;
+            if continuity_startup_success_payload_requires_runtime_reconcile(args, &payload)? {
+                let (payload, reconcile) =
+                    continuity_startup_reconcile_via_local_subprocess(cfg, args).await?;
+                Ok(attach_continuity_startup_tool_runtime_reconcile(
+                    payload, reconcile,
+                ))
+            } else {
+                Ok(payload)
+            }
+        }
         Err(error)
             if error
                 .to_string()
@@ -2264,6 +2430,33 @@ async fn continuity_startup_payload_with_tool_runtime_reconcile(
         }
         Err(error) => Err(error),
     }
+}
+
+fn continuity_startup_success_payload_requires_runtime_reconcile(
+    args: &ContinuityStartupToolArgs,
+    payload: &Value,
+) -> Result<bool> {
+    let Some(repo_root) = continuity_startup_runtime_audit_repo_root(args, payload) else {
+        return Ok(false);
+    };
+    let audit = continuity::inspect_startup_runtime_state(Path::new(repo_root))?;
+    Ok(audit.status == "startup_runtime_state_drift")
+}
+
+fn continuity_startup_runtime_audit_repo_root<'a>(
+    args: &'a ContinuityStartupToolArgs,
+    payload: &'a Value,
+) -> Option<&'a str> {
+    args.repo_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            payload["continuity_startup"]["project"]["repo_root"]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
 }
 
 async fn continuity_startup_reconcile_via_local_subprocess(
@@ -2290,8 +2483,20 @@ async fn continuity_startup_reconcile_via_local_subprocess(
         .arg(&args.namespace)
         .arg("--token-source-kind")
         .arg(&args.token_source_kind)
+        .arg("--skip-live-client-budget-guard")
         .arg("--json")
         .env_remove(CONTINUITY_STARTUP_TOOL_RUNTIME_RECONCILE_FORCE_ENV)
+        .env_remove(CONTINUITY_STARTUP_STALE_RUNTIME_ARTIFACT_FORCE_ENV)
+        .env(
+            "AMAI_AGENT_SCOPE",
+            format!("{}::{}::default", project.code, args.namespace),
+        )
+        .env_remove("AMAI_CLIENT_KEY")
+        .env_remove("AMAI_CLIENT_SCOPE")
+        .env_remove("CODEX_AGENT_SCOPE")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CHATGPT_THREAD_ID")
+        .env_remove("OPENAI_THREAD_ID")
         .current_dir(&amai_repo_root)
         .output()
         .await
@@ -2322,7 +2527,10 @@ async fn continuity_startup_reconcile_via_local_subprocess(
         "applied": true,
         "classification": "stale_embedded_mcp_session",
         "continue_from_local_startup_payload": true,
-        "mcp_reconnect_required": true,
+        "same_session_continuation_allowed": true,
+        "operator_action_required": false,
+        "mcp_reconnect_required": false,
+        "reconnect_helper_diagnostic_only": true,
         "reconnect_helper": build_embedded_mcp_reconnect_helper_surface(&amai_repo_root),
         "source": "local_cli_subprocess",
         "project_code": project.code,
@@ -2359,6 +2567,13 @@ async fn continuity_startup_reconcile_project_record(
 }
 
 fn preferred_continuity_startup_reconcile_binary(repo_root: &Path, current_exe: &Path) -> PathBuf {
+    let current_manifest_dir = current_exe.parent().and_then(|dir| dir.parent());
+    let repo_target_release_dir = repo_root.join("target/release");
+    let current_is_repo_release = current_exe.starts_with(&repo_target_release_dir)
+        || current_manifest_dir.is_some_and(|dir| dir == repo_root);
+    if current_is_repo_release && current_exe.is_file() {
+        return current_exe.to_path_buf();
+    }
     let release_binary = repo_root.join("target/release/amai");
     if release_binary.is_file() {
         return release_binary;
@@ -2382,6 +2597,66 @@ fn force_continuity_startup_tool_runtime_reconcile_for_test() -> bool {
         .ok()
         .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
+}
+
+fn force_continuity_startup_stale_runtime_artifact_after_success_for_test(
+    args: &ContinuityStartupToolArgs,
+    payload: &Value,
+) -> Result<()> {
+    let Some(mode) = std::env::var(CONTINUITY_STARTUP_STALE_RUNTIME_ARTIFACT_FORCE_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let should_force = match mode.as_str() {
+        "1" | "true" | "TRUE" | "yes" | "YES" => true,
+        "once" | "ONCE" | "Once" => {
+            static FORCE_ONCE_USED: AtomicBool = AtomicBool::new(false);
+            !FORCE_ONCE_USED.swap(true, Ordering::SeqCst)
+        }
+        _ => false,
+    };
+    if !should_force {
+        return Ok(());
+    }
+    let repo_root = continuity_startup_runtime_audit_repo_root(args, payload)
+        .ok_or_else(|| anyhow!("forced stale startup runtime artifact requires repo_root"))?;
+    corrupt_startup_runtime_state_for_stale_success_proof(Path::new(repo_root))
+}
+
+fn corrupt_startup_runtime_state_for_stale_success_proof(repo_root: &Path) -> Result<()> {
+    let state_path = repo_root.join(".amai/continuity/project-chat-startup-state.json");
+    let raw = fs::read_to_string(&state_path)
+        .with_context(|| format!("failed to read {}", state_path.display()))?;
+    let mut state: Value = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse {}", state_path.display()))?;
+    if let Some(object) = state.as_object_mut() {
+        if let Some(lineage) = object
+            .get_mut("working_state_restore_lineage")
+            .and_then(Value::as_object_mut)
+        {
+            lineage.remove("authoritative_event_id");
+        }
+        if let Some(summary_lease) = object
+            .get_mut("continuity_startup_summary")
+            .and_then(|value| value.get_mut("execctl_active_lease"))
+            .and_then(Value::as_object_mut)
+        {
+            summary_lease.remove("source_event_id");
+        }
+        if let Some(lease) = object
+            .get_mut("execctl_active_lease")
+            .and_then(Value::as_object_mut)
+        {
+            lease.remove("source_event_id");
+        }
+        object.insert("gate_semantics_consistent".to_string(), json!(false));
+    }
+    fs::write(&state_path, serde_json::to_vec_pretty(&state)?)
+        .with_context(|| format!("failed to write {}", state_path.display()))?;
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -2474,7 +2749,7 @@ fn build_embedded_mcp_reconnect_helper_surface(repo_root: &Path) -> Value {
             "peer_session_safety": "orphan_only_cleanup_no_disconnect",
             "scope": "local_client_runtime",
             "supported_clients": supported_clients,
-            "note": "Этот reconnect path не делает disconnect и чистит только orphaned MCP runtimes, но всё ещё operator-driven и не равен per-session graceful reconnect внутри host."
+            "note": "Этот reconnect helper не является штатным шагом после auto self-heal stale embedded MCP startup. Он нужен только как диагностический fallback, если transport продолжает падать или повторный MCP startup снова не доходит до self-healed состояния."
         }),
         None => json!({
             "preferred_client_key": Value::Null,
@@ -2489,7 +2764,7 @@ fn build_embedded_mcp_reconnect_helper_surface(repo_root: &Path) -> Value {
             "peer_session_safety": "orphan_only_cleanup_no_disconnect",
             "scope": "local_client_runtime",
             "supported_clients": supported_clients,
-            "note": "Amai не смог честно определить текущий client_key для stale embedded MCP session. Выбери клиент явно и используй reconnect helper вместо blunt process reset."
+            "note": "Amai не смог честно определить текущий client_key для диагностического reconnect fallback. Это не штатный post-startup шаг; используй helper только если same-session auto self-heal не удержал MCP transport живым."
         }),
     }
 }
@@ -2865,55 +3140,11 @@ async fn tool_observe_snapshot(cfg: &AppConfig) -> Result<Value> {
     compatibility::assert_supported(cfg).await?;
     let snapshot = observe::collect_snapshot_preview(cfg).await?;
     let summary = observe_snapshot_summary(&snapshot);
-    let mut text = format!(
-        "observe snapshot :: pass={} alert={} critical={} unknown={}",
-        summary.pass, summary.alert, summary.critical, summary.unknown,
-    );
-    if let Some(profile) = &summary.compatibility_profile {
-        let state = if summary.compatibility_compatible == Some(true) {
-            "ok"
-        } else {
-            "drift"
-        };
-        text.push_str(&format!(" compatibility={profile}:{state}"));
-    }
-    if let Some(status) = &summary.continuity_status {
-        text.push_str(&format!(
-            " continuity={}/{}:{}",
-            summary.continuity_verified_probes, summary.continuity_total_probes, status
-        ));
-    }
-    if let Some(value) = &summary.included_reasons_summary {
-        text.push_str(&format!(" included={value}"));
-    }
-    if let Some(value) = &summary.excluded_reasons_summary {
-        text.push_str(&format!(" excluded={value}"));
-    }
-    if let Some(value) = &summary.latest_memory_task_matrix_summary {
-        text.push_str(&format!(" memory_matrix={value}"));
-    }
-    if let Some(value) = &summary.latest_mcp_task_matrix_summary {
-        text.push_str(&format!(" mcp_matrix={value}"));
-    }
-    if let Some(value) = &summary.lifecycle_risk_summary {
-        text.push_str(&format!(" lifecycle_risk={value}"));
-    }
     Ok(tool_result(
-        text,
+        observe_snapshot_summary_text(&summary),
         json!({
             "snapshot": snapshot,
-            "observe_snapshot_summary": {
-                "continuity_status": summary.continuity_status,
-                "continuity_verified_probes": summary.continuity_verified_probes,
-                "continuity_total_probes": summary.continuity_total_probes,
-                "compatibility_profile": summary.compatibility_profile,
-                "compatibility_compatible": summary.compatibility_compatible,
-                "included_reasons_summary": summary.included_reasons_summary,
-                "excluded_reasons_summary": summary.excluded_reasons_summary,
-                "latest_memory_task_matrix_summary": summary.latest_memory_task_matrix_summary,
-                "latest_mcp_task_matrix_summary": summary.latest_mcp_task_matrix_summary,
-                "lifecycle_risk_summary": summary.lifecycle_risk_summary,
-            }
+            "observe_snapshot_summary": observe_snapshot_summary_json(&summary),
         }),
     ))
 }
@@ -2934,10 +3165,16 @@ struct ObserveSnapshotSummary {
     latest_memory_task_matrix_summary: Option<String>,
     latest_mcp_task_matrix_summary: Option<String>,
     lifecycle_risk_summary: Option<String>,
+    lifecycle_policy_review_summary: Option<Value>,
+    task_graph_projection_operator_summary: Option<String>,
+    project_task_tree_summary: Option<String>,
+    project_task_ledger_summary: Option<String>,
+    task_graph_projection_validation: Option<Value>,
 }
 
 fn observe_snapshot_summary(snapshot: &Value) -> ObserveSnapshotSummary {
     let sla = &snapshot["sla"]["summary"];
+    let task_graph_restore = observe_snapshot_preferred_task_graph_restore(snapshot);
     ObserveSnapshotSummary {
         pass: sla["pass"].as_u64().unwrap_or_default(),
         alert: sla["alert"].as_u64().unwrap_or_default(),
@@ -2978,7 +3215,232 @@ fn observe_snapshot_summary(snapshot: &Value) -> ObserveSnapshotSummary {
             "mcp_task_matrix",
         ),
         lifecycle_risk_summary: observe_snapshot_lifecycle_risk_summary(snapshot),
+        lifecycle_policy_review_summary: observe_snapshot_lifecycle_policy_review_summary(snapshot),
+        task_graph_projection_operator_summary: task_graph_restore
+            .and_then(observe_snapshot_task_graph_operator_summary),
+        project_task_tree_summary: task_graph_restore
+            .filter(|restore| observe_snapshot_task_graph_projection_is_validated(restore))
+            .and_then(|restore| {
+                observe_snapshot_non_empty_string(restore, "project_task_tree_summary")
+            }),
+        project_task_ledger_summary: task_graph_restore
+            .filter(|restore| observe_snapshot_task_graph_projection_is_validated(restore))
+            .and_then(|restore| {
+                observe_snapshot_non_empty_string(restore, "project_task_ledger_summary")
+            }),
+        task_graph_projection_validation: task_graph_restore.and_then(|restore| {
+            restore["task_graph_projection_validation"]
+                .is_object()
+                .then(|| restore["task_graph_projection_validation"].clone())
+        }),
     }
+}
+
+fn observe_snapshot_summary_text(summary: &ObserveSnapshotSummary) -> String {
+    let mut text = format!(
+        "observe snapshot :: pass={} alert={} critical={} unknown={}",
+        summary.pass, summary.alert, summary.critical, summary.unknown,
+    );
+    if let Some(profile) = &summary.compatibility_profile {
+        let state = if summary.compatibility_compatible == Some(true) {
+            "ok"
+        } else {
+            "drift"
+        };
+        text.push_str(&format!(" compatibility={profile}:{state}"));
+    }
+    if let Some(status) = &summary.continuity_status {
+        text.push_str(&format!(
+            " continuity={}/{}:{}",
+            summary.continuity_verified_probes, summary.continuity_total_probes, status
+        ));
+    }
+    if let Some(value) = &summary.included_reasons_summary {
+        text.push_str(&format!(" included={value}"));
+    }
+    if let Some(value) = &summary.excluded_reasons_summary {
+        text.push_str(&format!(" excluded={value}"));
+    }
+    if let Some(value) = &summary.task_graph_projection_operator_summary {
+        text.push_str(&format!(" task_graph={value}"));
+    }
+    if let Some(value) = &summary.latest_memory_task_matrix_summary {
+        text.push_str(&format!(" memory_matrix={value}"));
+    }
+    if let Some(value) = &summary.latest_mcp_task_matrix_summary {
+        text.push_str(&format!(" mcp_matrix={value}"));
+    }
+    if let Some(value) = &summary.lifecycle_risk_summary {
+        text.push_str(&format!(" lifecycle_risk={value}"));
+    }
+    text
+}
+
+fn observe_snapshot_summary_json(summary: &ObserveSnapshotSummary) -> Value {
+    json!({
+        "continuity_status": summary.continuity_status,
+        "continuity_verified_probes": summary.continuity_verified_probes,
+        "continuity_total_probes": summary.continuity_total_probes,
+        "compatibility_profile": summary.compatibility_profile,
+        "compatibility_compatible": summary.compatibility_compatible,
+        "included_reasons_summary": summary.included_reasons_summary,
+        "excluded_reasons_summary": summary.excluded_reasons_summary,
+        "task_graph_projection_operator_summary": summary.task_graph_projection_operator_summary,
+        "project_task_tree_summary": summary.project_task_tree_summary,
+        "project_task_ledger_summary": summary.project_task_ledger_summary,
+        "task_graph_projection_validation": summary.task_graph_projection_validation,
+        "latest_memory_task_matrix_summary": summary.latest_memory_task_matrix_summary,
+        "latest_mcp_task_matrix_summary": summary.latest_mcp_task_matrix_summary,
+        "lifecycle_risk_summary": summary.lifecycle_risk_summary,
+        "lifecycle_policy_review_summary": summary.lifecycle_policy_review_summary,
+    })
+}
+
+fn observe_snapshot_preferred_task_graph_restore(snapshot: &Value) -> Option<&Value> {
+    let repo_restore = &snapshot["latest_repo_working_state_restore"]["working_state_restore"];
+    repo_restore.is_object().then_some(repo_restore)
+}
+
+fn observe_snapshot_preferred_reason_restore(snapshot: &Value) -> Option<&Value> {
+    let repo_restore = &snapshot["latest_repo_working_state_restore"]["working_state_restore"];
+    if repo_restore.is_object() {
+        return Some(repo_restore);
+    }
+    let global_restore = &snapshot["latest_working_state_restore"]["working_state_restore"];
+    global_restore.is_object().then_some(global_restore)
+}
+
+fn observe_snapshot_reason_summary_from_restore(
+    restore: &Value,
+    summary_key: &str,
+    trace_key: &str,
+) -> Option<String> {
+    if !restore.is_object() {
+        return None;
+    }
+    if let Some(value) = restore[summary_key]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        return Some(value.to_string());
+    }
+    let items = restore["latest_decision_trace"][trace_key].as_array()?;
+    let parts = items
+        .iter()
+        .take(3)
+        .filter_map(|item| {
+            let reason = item["reason"].as_str()?.trim();
+            if reason.is_empty() {
+                return None;
+            }
+            let strategy = item["strategy"].as_str().unwrap_or("unknown");
+            let count = item["count"].as_u64();
+            Some(match count {
+                Some(value) if value > 0 => format!("{strategy} ({value}) — {reason}"),
+                _ => format!("{strategy} — {reason}"),
+            })
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" • "))
+    }
+}
+
+fn observe_snapshot_non_empty_string(root: &Value, field: &str) -> Option<String> {
+    root[field]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn observe_snapshot_humanize_identifier(value: &str) -> String {
+    value
+        .split(['_', '-', '/', ':'])
+        .filter(|part| !part.trim().is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    let head = first.to_uppercase().collect::<String>();
+                    let tail = chars.as_str().to_lowercase();
+                    format!("{head}{tail}")
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn observe_snapshot_task_graph_projection_status(restore: &Value) -> Option<&str> {
+    restore["task_graph_projection_validation"]["status"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn observe_snapshot_task_graph_projection_is_validated(restore: &Value) -> bool {
+    let validation = &restore["task_graph_projection_validation"];
+    validation["status"].as_str() == Some("valid")
+        && validation["validation_state"].as_str() == Some("valid")
+        && validation["projection_source"].as_str() == Some("graph_first_sql_validated")
+        && validation["truth_claim"].as_bool() == Some(false)
+}
+
+fn observe_snapshot_task_graph_excluded_legacy_suffix(validation: &Value) -> Option<String> {
+    let excluded_total = validation["projection_excluded_sql_nodes_count"]
+        .as_u64()
+        .unwrap_or(0);
+    if excluded_total == 0 {
+        return None;
+    }
+    let deprecated_total = validation["deprecated_sql_nodes_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let quarantined_total = validation["quarantined_sql_nodes_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let detail = match (deprecated_total, quarantined_total) {
+        (deprecated, 0) if deprecated == excluded_total => format!("{excluded_total} deprecated"),
+        (0, quarantined) if quarantined == excluded_total => {
+            format!("{excluded_total} quarantined")
+        }
+        (deprecated, quarantined) if deprecated > 0 && quarantined > 0 => {
+            format!("{excluded_total}: {deprecated} deprecated, {quarantined} quarantined")
+        }
+        _ => excluded_total.to_string(),
+    };
+    Some(format!("excluded_legacy({detail})"))
+}
+
+fn observe_snapshot_task_graph_operator_summary(restore: &Value) -> Option<String> {
+    let validation = &restore["task_graph_projection_validation"];
+    if !validation.is_object() {
+        return None;
+    }
+    let status = observe_snapshot_task_graph_projection_status(restore)?;
+    if observe_snapshot_task_graph_projection_is_validated(restore) {
+        if let Some(excluded_legacy) =
+            observe_snapshot_task_graph_excluded_legacy_suffix(validation)
+        {
+            return Some(format!(
+                "validated graph-first projection • {excluded_legacy}"
+            ));
+        }
+        if validation["warnings"]["projection_preview_limited"].as_bool() == Some(true) {
+            return Some("validated graph-first projection • compact preview limited".to_string());
+        }
+        return Some("validated graph-first projection".to_string());
+    }
+    let reason = validation["reason"]
+        .as_str()
+        .map(observe_snapshot_humanize_identifier)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "причина не surfaced".to_string());
+    Some(format!("{status} • {reason}"))
 }
 
 fn observe_snapshot_lifecycle_risk_summary(snapshot: &Value) -> Option<String> {
@@ -2986,7 +3448,7 @@ fn observe_snapshot_lifecycle_risk_summary(snapshot: &Value) -> Option<String> {
     if risk["status"].as_str() != Some("advisory") {
         return None;
     }
-    Some(format!(
+    let mut summary = format!(
         "scope={}/{} next={} pending_review_7d={} archive_30d={} prune_30d={}",
         risk["project_code"].as_str().unwrap_or("unknown"),
         risk["namespace_code"].as_str().unwrap_or("unknown"),
@@ -3005,7 +3467,35 @@ fn observe_snapshot_lifecycle_risk_summary(snapshot: &Value) -> Option<String> {
             .as_f64()
             .map(|v| format!("{:.2}%", v * 100.0))
             .unwrap_or_else(|| "n/d".to_string()),
-    ))
+    );
+    let policy_review = &risk["lifecycle_policy_review_summary"];
+    if policy_review["status"].as_str() == Some("advisory") {
+        summary.push_str(&format!(
+            " review_packet={} approval={} measured={}",
+            policy_review["review_packet_state"]
+                .as_str()
+                .unwrap_or("unknown"),
+            policy_review["approval_state"]
+                .as_str()
+                .unwrap_or("unknown"),
+            policy_review["measured_improvement_state"]
+                .as_str()
+                .unwrap_or("unknown"),
+        ));
+    }
+    Some(summary)
+}
+
+fn observe_snapshot_lifecycle_policy_review_summary(snapshot: &Value) -> Option<Value> {
+    let risk = &snapshot["governance_surface"]["lifecycle_risk_summary"];
+    if risk["status"].as_str() != Some("advisory") {
+        return None;
+    }
+    let policy_review = &risk["lifecycle_policy_review_summary"];
+    if policy_review["status"].as_str() != Some("advisory") {
+        return None;
+    }
+    Some(policy_review.clone())
 }
 
 fn observe_snapshot_matrix_summary(
@@ -3040,35 +3530,8 @@ fn observe_snapshot_reason_summary(
     summary_key: &str,
     trace_key: &str,
 ) -> Option<String> {
-    let restore = &snapshot["latest_working_state_restore"]["working_state_restore"];
-    if let Some(value) = restore[summary_key]
-        .as_str()
-        .filter(|value| !value.is_empty())
-    {
-        return Some(value.to_string());
-    }
-    let items = restore["latest_decision_trace"][trace_key].as_array()?;
-    let parts = items
-        .iter()
-        .take(3)
-        .filter_map(|item| {
-            let reason = item["reason"].as_str()?.trim();
-            if reason.is_empty() {
-                return None;
-            }
-            let strategy = item["strategy"].as_str().unwrap_or("unknown");
-            let count = item["count"].as_u64();
-            Some(match count {
-                Some(value) if value > 0 => format!("{strategy} ({value}) — {reason}"),
-                _ => format!("{strategy} — {reason}"),
-            })
-        })
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" • "))
-    }
+    let restore = observe_snapshot_preferred_reason_restore(snapshot)?;
+    observe_snapshot_reason_summary_from_restore(restore, summary_key, trace_key)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3175,6 +3638,7 @@ struct ContinuityStartupSummary {
     project_task_tree_summary: Option<String>,
     project_task_ledger: Value,
     project_task_ledger_summary: Option<String>,
+    task_graph_projection_validation: Value,
     included_reasons_summary: Option<String>,
     excluded_reasons_summary: Option<String>,
 }
@@ -3190,22 +3654,13 @@ fn fallback_startup_execution_gate(payload: &Value) -> Value {
         .unwrap_or(false);
     let lease_owner_state =
         payload["chat_start_restore"]["execctl_active_lease"]["lease_owner_state"].as_str();
-    let previous_session_owner_value = resume_enforcement["previous_session_owner_value"]
-        .as_str()
-        .unwrap_or("previous_session_owner");
-    let must_resume_before_unrelated =
-        resume_enforcement["must_resume_required_return_task_before_unrelated_work"]
-            .as_bool()
-            .unwrap_or(false);
     let required_action_kind = resume_enforcement["required_action_kind_when_resume_required"]
         .as_str()
         .unwrap_or("resume_required_return_task");
     let required_task_set_count = payload["chat_start_restore"]["required_task_set"]
         .as_array()
         .map(|items| items.len());
-    let must_follow = blocking
-        || (must_resume_before_unrelated && action_kind == required_action_kind)
-        || lease_owner_state == Some(previous_session_owner_value);
+    let must_follow = true;
 
     json!({
         "gate_version": "startup-execution-gate-v1",
@@ -3235,12 +3690,48 @@ fn fallback_startup_execution_gate(payload: &Value) -> Value {
     })
 }
 
+fn normalize_execctl_resume_state_text(value: Option<&str>) -> String {
+    match value {
+        Some("pending_return_queue_present") => "return_required".to_string(),
+        Some(value) if !value.trim().is_empty() => value.to_string(),
+        _ => "clear".to_string(),
+    }
+}
+
 fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
     let required_task_set = payload["chat_start_restore"]["required_task_set"].clone();
     let required_task_set_summary = payload["chat_start_restore"]["required_task_set_summary"]
         .as_str()
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let execctl_resume_state = normalize_execctl_resume_state_text(
+        payload["chat_start_restore"]["execctl_resume_obligation"]["resume_state"]
+            .as_str()
+            .or_else(|| payload["chat_start_restore"]["execctl_resume_state"].as_str()),
+    );
+    let execctl_resume_obligation =
+        if payload["chat_start_restore"]["execctl_resume_obligation"].is_object() {
+            let mut obligation = payload["chat_start_restore"]["execctl_resume_obligation"].clone();
+            if let Some(object) = obligation.as_object_mut() {
+                object.insert(
+                    "resume_state".to_string(),
+                    Value::String(execctl_resume_state.clone()),
+                );
+            }
+            obligation
+        } else {
+            json!({
+                "resume_state": execctl_resume_state.clone(),
+                "no_silent_drop": true,
+                "pending_return_count": 0,
+                "active_task_headline": Value::Null,
+                "required_return_headline": Value::Null,
+                "required_return_next_step": Value::Null,
+                "required_task_set_count": required_task_set.as_array().map(|items| items.len()),
+                "required_task_set": required_task_set.clone(),
+                "required_task_set_summary": required_task_set_summary,
+            })
+        };
     ContinuityStartupSummary {
         project_code: payload["continuity_startup"]["project"]["code"]
             .as_str()
@@ -3268,10 +3759,7 @@ fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
         prompt_text_present: payload["chat_start_restore"]["prompt_text"]
             .as_str()
             .is_some_and(|value| !value.trim().is_empty()),
-        execctl_resume_state: payload["chat_start_restore"]["execctl_resume_state"]
-            .as_str()
-            .unwrap_or("clear")
-            .to_string(),
+        execctl_resume_state,
         pending_return_summary: payload["chat_start_restore"]["pending_return_summary"]
             .as_str()
             .filter(|value| !value.is_empty())
@@ -3281,25 +3769,7 @@ fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
                 .as_str()
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned),
-        execctl_resume_obligation: if payload["chat_start_restore"]["execctl_resume_obligation"]
-            .is_object()
-        {
-            payload["chat_start_restore"]["execctl_resume_obligation"].clone()
-        } else {
-            json!({
-                "resume_state": payload["chat_start_restore"]["execctl_resume_state"]
-                    .as_str()
-                    .unwrap_or("clear"),
-                "no_silent_drop": true,
-                "pending_return_count": 0,
-                "active_task_headline": Value::Null,
-                "required_return_headline": Value::Null,
-                "required_return_next_step": Value::Null,
-                "required_task_set_count": required_task_set.as_array().map(|items| items.len()),
-                "required_task_set": required_task_set.clone(),
-                "required_task_set_summary": required_task_set_summary,
-            })
-        },
+        execctl_resume_obligation,
         startup_execution_gate: if payload["startup_execution_gate"].is_object() {
             payload["startup_execution_gate"].clone()
         } else {
@@ -3361,6 +3831,12 @@ fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
             .as_str()
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
+        task_graph_projection_validation:
+            if payload["chat_start_restore"]["task_graph_projection_validation"].is_object() {
+                payload["chat_start_restore"]["task_graph_projection_validation"].clone()
+            } else {
+                Value::Null
+            },
         included_reasons_summary: payload["chat_start_restore"]["included_reasons_summary"]
             .as_str()
             .filter(|value| !value.is_empty())
@@ -3398,6 +3874,7 @@ pub(crate) fn continuity_startup_summary_json(payload: &Value) -> Value {
         "project_task_tree_summary": summary.project_task_tree_summary,
         "project_task_ledger": summary.project_task_ledger,
         "project_task_ledger_summary": summary.project_task_ledger_summary,
+        "task_graph_projection_validation": summary.task_graph_projection_validation,
         "included_reasons_summary": summary.included_reasons_summary,
         "excluded_reasons_summary": summary.excluded_reasons_summary,
     })
@@ -3828,9 +4305,24 @@ pub fn project_chat_startup_contract() -> Value {
 
 pub(crate) fn agent_workflow_guard_contract() -> Value {
     json!({
-        "guard_version": "agent-workflow-guard-v1",
+        "guard_version": "agent-workflow-guard-v2",
         "source_of_truth": "AGENTS.md#mandatory-specialist-team-workflow",
         "must_run_before_substantive_report": true,
+        "workflow_cycle": {
+            "ordered_stage_codes": [
+                "analysis",
+                "plan",
+                "team_critique",
+                "implementation",
+                "team_verification",
+                "fix",
+                "reverify",
+                "final_audit",
+                "report"
+            ],
+            "must_not_skip_stages": true,
+            "must_not_advance_until_current_stage_closed": true
+        },
         "promotion_identity": {
             "runtime_state_field": "workflow_promotion_state",
             "current_user_redirect_id_field": "current_user_redirect_id",
@@ -3855,15 +4347,92 @@ pub(crate) fn agent_workflow_guard_contract() -> Value {
             "local_corroboration_required_before_truth_or_runtime_change": true,
             "must_not_override_local_contracts_or_gates": true
         },
+        "analysis": {
+            "required_review_items": [
+                "user_goal",
+                "requirements",
+                "constraints",
+                "existing_code",
+                "dependencies",
+                "risks",
+                "done_criteria",
+                "verification_method"
+            ]
+        },
         "planning": {
             "plan_required": true,
             "plan_items_must_be_reviewed_one_by_one": true,
-            "specialist_consensus_required_before_implementation": true
+            "specialist_consensus_required_before_implementation": true,
+            "plan_item_required_fields": [
+                "goal",
+                "expected_result",
+                "risks",
+                "verification_method",
+                "completion_criteria"
+            ]
+        },
+        "team_critique": {
+            "roles": [
+                "architect",
+                "senior_developer",
+                "tester",
+                "security_engineer",
+                "devops_if_applicable",
+                "skeptic"
+            ],
+            "specialist_contour_policy": "local_or_explicitly_allowed_only",
+            "approval_status_code_before_implementation": "approved_no_comments",
+            "approval_status_label_before_implementation": "согласовано, замечаний нет",
+            "must_seek_errors_risks_complexity_and_gaps": true
         },
         "implementation": {
             "implement_after_plan_consensus": true,
             "per_item_specialist_bughunter_review_required": true,
-            "local_debug_fix_retest_required": true
+            "local_debug_fix_retest_required": true,
+            "prohibited_actions": [
+                "unrequested_scope_change",
+                "unnecessary_complexity",
+                "architecture_breakage",
+                "hidden_assumptions",
+                "unverified_code",
+                "ignored_errors"
+            ]
+        },
+        "team_verification": {
+            "required_after_each_plan_item": true,
+            "verification_dimensions": [
+                "logic",
+                "errors",
+                "edge_cases",
+                "regressions",
+                "integration",
+                "security",
+                "performance",
+                "readability",
+                "maintainability",
+                "task_fit"
+            ],
+            "approval_status_code_after_verification": "no_defects_found",
+            "approval_status_label_after_verification": "недостатков не найдено"
+        },
+        "fix_loop": {
+            "return_to_implementation_on_code_issue": true,
+            "return_to_planning_on_plan_issue": true,
+            "return_to_analysis_on_understanding_issue": true,
+            "replay_downstream_checks_after_final_audit_issue": true,
+            "unresolved_issues_block_progress": true
+        },
+        "integration_verification": {
+            "required_before_final_audit": true,
+            "checklist": [
+                "works_together",
+                "no_conflicts",
+                "no_regressions",
+                "architecture_preserved",
+                "security_not_worse",
+                "tests_build_checks_pass",
+                "matches_user_request"
+            ]
         },
         "report_gate": {
             "before_report_guard_required": true,
@@ -3880,8 +4449,28 @@ pub(crate) fn agent_workflow_guard_contract() -> Value {
             "final_specialist_bughunter_pass_required": true,
             "report_allowed_requires_all_green": true
         },
+        "final_audit": {
+            "team_required": true,
+            "any_issue_blocks_ready_verdict": true
+        },
+        "report": {
+            "required_items": [
+                "done",
+                "changed",
+                "checks_run",
+                "problems_found_and_fixed",
+                "remaining_risks_or_limitations",
+                "not_verified"
+            ]
+        },
+        "completion_rule": {
+            "unresolved_issue_blocks_completion": true,
+            "must_loop_until_team_stops_finding_material_issues": true
+        },
         "language_policy": {
             "user_reply_language": "ru",
+            "user_reply_style": "simple_non_technical_when_possible",
+            "avoid_anglicisms_when_possible": true,
             "subagent_language": "en"
         }
     })
@@ -3941,7 +4530,10 @@ fn protocol_manifest() -> Value {
                     "local_cli_success_classification": "stale_embedded_mcp_session",
                     "local_cli_success_replaces_mcp_failure": true,
                     "local_cli_success_replaces_transport_failure": true,
-                    "must_request_mcp_reconnect_after_local_success": true,
+                    "must_request_mcp_reconnect_after_local_success": false,
+                    "same_session_continuation_allowed_after_local_success": true,
+                    "operator_action_required_after_local_success": false,
+                    "reconnect_helper_diagnostic_only_after_local_success": true,
                     "must_continue_from_local_startup_payload": true,
                     "reconnect_helper": {
                         "shell_helper_relative_path": "./scripts/reconnect_local.sh",
@@ -4563,7 +5155,7 @@ fn prompt_result(params: Value) -> McpToolResult<Value> {
                     "content": {
                         "type": "text",
                         "text": format!(
-                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, startup_execution_gate, startup_next_action, execctl_active_lease, and execctl_active_lease_summary. Treat startup_execution_gate as the immediate return-enforcement object. Require gate_semantics_consistent = true before trusting that gate or executing startup_next_action. If amai_continuity_startup fails with tool_execution_failed and detail containing 'no continuity import found for', or if the embedded MCP transport closes before the tool returns a payload, immediately reconcile once via local CLI continuity startup for the same repo_root and namespace before declaring continuity unavailable; if local CLI startup succeeds, treat the MCP failure as a stale embedded MCP session, continue from the local startup payload, and request reconnect for the embedded MCP session. Also inspect the runtime state after any successful MCP startup; if it has a stale startup contract sha, missing agent_workflow_guard, missing workflow_promotion_state, workflow source-event mismatch, or gate_semantics_consistent != true, treat that successful MCP payload as stale_embedded_mcp_session, reconcile via local CLI, continue only from the local payload, and request MCP reconnect. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away. If execctl_active_lease.lease_owner_state is previous_session_owner, do not silently seize the workline; follow startup_next_action first."
+                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, startup_execution_gate, startup_next_action, execctl_active_lease, and execctl_active_lease_summary. Treat startup_execution_gate as the immediate return-enforcement object. Require gate_semantics_consistent = true before trusting that gate or executing startup_next_action. If amai_continuity_startup fails with tool_execution_failed and detail containing 'no continuity import found for', or if the embedded MCP transport closes before the tool returns a payload, immediately reconcile once via local CLI continuity startup for the same repo_root and namespace before declaring continuity unavailable; if local CLI startup succeeds, treat the MCP failure as a stale embedded MCP session, continue from the local startup payload, and keep the user flow on the same session without demanding reconnect. Also inspect the runtime state after any successful MCP startup; if it has a stale startup contract sha, missing agent_workflow_guard, missing workflow_promotion_state, workflow source-event mismatch, or gate_semantics_consistent != true, treat that successful MCP payload as stale_embedded_mcp_session, reconcile via local CLI, continue only from the local payload, and keep reconnect helper as diagnostic fallback only when transport stays broken or the next MCP startup still fails to self-heal. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away. If execctl_active_lease.lease_owner_state is previous_session_owner, do not silently seize the workline; follow startup_next_action first."
                         )
                     }
                 }]
@@ -4782,7 +5374,7 @@ fn continuity_handoff_input_schema() -> Value {
             },
             "details": {
                 "type": ["string", "null"],
-                "description": "Optional extra handoff details."
+                "description": "Optional extra handoff details. For a competing active-line promotion, include a line like `promotion_contract: user_redirect`, `promotion_contract: operator_redirect`, or `promotion_contract: resume_required_return_task`; `user_redirect` requires trusted user provenance such as AMAI_USER_REDIRECT_PROVENANCE from the launcher, and `operator_redirect` requires trusted operator provenance such as AMAI_OPERATOR_REDIRECT_PROVENANCE from the launcher. Side-agent and critic work must use a distinct AMAI_AGENT_SCOPE instead."
             },
             "resolved_headlines": {
                 "type": "array",
@@ -4798,6 +5390,11 @@ fn continuity_handoff_input_schema() -> Value {
                 "type": "boolean",
                 "default": false,
                 "description": "When true, resolve the current active goal while writing this handoff."
+            },
+            "promote_active_workline": {
+                "type": "boolean",
+                "default": false,
+                "description": "Required when a same-thread same-scope handoff intentionally replaces the current active workline, but not sufficient by itself: competing promotions also require a valid promotion_contract in details. Do not use this for side-agent or critic work."
             }
         },
         "required": ["project", "headline", "next_step"],
@@ -5253,10 +5850,92 @@ fn shell_escape_single_quotes(value: &str) -> String {
 }
 
 fn openclaw_cli_base_command(config_path: &Path) -> std::process::Command {
-    let mut command = std::process::Command::new("openclaw");
+    let binary = discover_openclaw_cli_binary().unwrap_or_else(|| PathBuf::from("openclaw"));
+    let mut command = std::process::Command::new(binary);
     command.env("OPENCLAW_CONFIG_PATH", config_path);
     command.env("OPENCLAW_HIDE_BANNER", "1");
     command
+}
+
+fn discover_openclaw_cli_binary_in_home(home: &Path) -> Option<PathBuf> {
+    let tools_root = home.join(".openclaw/tools");
+    let mut versioned_tool_dirs = match fs::read_dir(&tools_root) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.starts_with("node-"))
+            })
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+    versioned_tool_dirs.sort_by(|left, right| {
+        openclaw_version_sort_key(right)
+            .cmp(&openclaw_version_sort_key(left))
+            .then_with(|| right.cmp(left))
+    });
+    for tool_dir in versioned_tool_dirs {
+        let candidate = tool_dir.join("bin/openclaw");
+        if openclaw_cli_is_executable(&candidate) {
+            return Some(candidate);
+        }
+    }
+    let symlink_candidate = home.join(".openclaw/tools/node/bin/openclaw");
+    if openclaw_cli_is_executable(&symlink_candidate) {
+        return Some(symlink_candidate);
+    }
+    None
+}
+
+fn openclaw_version_sort_key(path: &Path) -> Vec<u64> {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .and_then(|value| value.strip_prefix("node-v"))
+        .map(|value| {
+            value
+                .split(|ch: char| !ch.is_ascii_digit())
+                .filter(|segment| !segment.is_empty())
+                .filter_map(|segment| segment.parse::<u64>().ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn openclaw_cli_is_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path) {
+            return meta.permissions().mode() & 0o111 != 0;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        return true;
+    }
+    false
+}
+
+fn discover_openclaw_cli_binary() -> Option<PathBuf> {
+    if std::process::Command::new("sh")
+        .arg("-c")
+        .arg("command -v openclaw >/dev/null 2>&1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+    {
+        return Some(PathBuf::from("openclaw"));
+    }
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|home| discover_openclaw_cli_binary_in_home(&home))
 }
 
 fn openclaw_cli_command_missing(error: &anyhow::Error) -> bool {
@@ -6248,6 +6927,8 @@ struct ContinuityHandoffToolArgs {
     resolved_task_ids: Vec<String>,
     #[serde(default)]
     resolve_current_goal: bool,
+    #[serde(default)]
+    promote_active_workline: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -6570,6 +7251,55 @@ mod tests {
     use std::fs::{self, File};
     use std::path::{Path, PathBuf};
     use uuid::Uuid;
+
+    #[cfg(unix)]
+    fn write_executable_file(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, "#!/bin/sh\nexit 0\n").expect("write executable file");
+        let mut perms = fs::metadata(path).expect("file metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("set executable permissions");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovers_highest_executable_openclaw_versioned_install() {
+        let temp_root = std::env::temp_dir().join(format!("amai-mcp-openclaw-{}", Uuid::new_v4()));
+        let stale = temp_root.join(".openclaw/tools/node-v9.9.9/bin/openclaw");
+        let newest = temp_root.join(".openclaw/tools/node-v22.22.0/bin/openclaw");
+        let broken = temp_root.join(".openclaw/tools/node-v99.0.0/bin/openclaw");
+        fs::create_dir_all(stale.parent().expect("stale parent")).expect("create stale parent");
+        fs::create_dir_all(newest.parent().expect("newest parent")).expect("create newest parent");
+        fs::create_dir_all(broken.parent().expect("broken parent")).expect("create broken parent");
+        write_executable_file(&stale);
+        write_executable_file(&newest);
+        fs::write(&broken, "#!/bin/sh\nexit 0\n").expect("write broken file");
+
+        assert_eq!(
+            super::discover_openclaw_cli_binary_in_home(&temp_root),
+            Some(newest.clone())
+        );
+
+        fs::remove_dir_all(&temp_root).expect("remove temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovers_openclaw_node_layout_when_versioned_install_is_missing() {
+        let temp_root = std::env::temp_dir().join(format!("amai-mcp-openclaw-{}", Uuid::new_v4()));
+        let candidate = temp_root.join(".openclaw/tools/node/bin/openclaw");
+        fs::create_dir_all(candidate.parent().expect("candidate parent"))
+            .expect("create candidate parent");
+        write_executable_file(&candidate);
+
+        assert_eq!(
+            super::discover_openclaw_cli_binary_in_home(&temp_root),
+            Some(candidate.clone())
+        );
+
+        fs::remove_dir_all(&temp_root).expect("remove temp root");
+    }
 
     #[test]
     fn renders_vscode_config() {
@@ -7315,7 +8045,13 @@ mod tests {
                     "top_expected_next_state": "pending_review",
                     "max_pending_review_risk_7d": 0.42,
                     "max_archive_risk_30d": 0.19,
-                    "max_prune_risk_30d": 0.03
+                    "max_prune_risk_30d": 0.03,
+                    "lifecycle_policy_review_summary": {
+                        "status": "advisory",
+                        "review_packet_state": "review_packet_ready",
+                        "approval_state": "pending_human_review",
+                        "measured_improvement_state": "not_measured_requires_holdout_or_post_action_outcomes"
+                    }
                 }
             }
         });
@@ -7351,8 +8087,241 @@ mod tests {
         assert_eq!(
             summary.lifecycle_risk_summary.as_deref(),
             Some(
-                "scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00%"
+                "scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00% review_packet=review_packet_ready approval=pending_human_review measured=not_measured_requires_holdout_or_post_action_outcomes"
             )
+        );
+        assert!(summary.task_graph_projection_operator_summary.is_none());
+        assert!(summary.project_task_tree_summary.is_none());
+        assert!(summary.project_task_ledger_summary.is_none());
+        assert!(summary.task_graph_projection_validation.is_none());
+    }
+
+    #[test]
+    fn observe_snapshot_summary_prefers_repo_reason_restore_over_stale_global_restore() {
+        let snapshot = json!({
+            "sla": {
+                "summary": {
+                    "pass": 2,
+                    "alert": 0,
+                    "critical": 0,
+                    "unknown": 0
+                }
+            },
+            "latest_working_state_restore": {
+                "working_state_restore": {
+                    "included_reasons_summary": "stale_global_exact (9) — Stale global reason should not win.",
+                    "latest_decision_trace": {
+                        "not_included": [{
+                            "strategy": "stale_global_semantic",
+                            "reason": "Stale global exclusion should not win."
+                        }]
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "included_reasons_summary": "repo_exact (1) — Repo-scoped exact reason must win.",
+                    "latest_decision_trace": {
+                        "not_included": [{
+                            "strategy": "repo_semantic",
+                            "count": 2,
+                            "reason": "Repo-scoped exclusion trace must win."
+                        }]
+                    }
+                }
+            }
+        });
+
+        let summary = observe_snapshot_summary(&snapshot);
+        assert_eq!(
+            summary.included_reasons_summary.as_deref(),
+            Some("repo_exact (1) — Repo-scoped exact reason must win.")
+        );
+        assert_eq!(
+            summary.excluded_reasons_summary.as_deref(),
+            Some("repo_semantic (2) — Repo-scoped exclusion trace must win.")
+        );
+    }
+
+    #[test]
+    fn observe_snapshot_summary_does_not_fall_back_to_global_reasons_when_repo_restore_exists() {
+        let snapshot = json!({
+            "sla": {
+                "summary": {
+                    "pass": 1,
+                    "alert": 0,
+                    "critical": 0,
+                    "unknown": 0
+                }
+            },
+            "latest_working_state_restore": {
+                "working_state_restore": {
+                    "included_reasons_summary": "stale_global_exact (9) — Global reason must stay hidden.",
+                    "excluded_reasons_summary": "stale_global_semantic — Global exclusion must stay hidden."
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "current_goal": "Repo-scoped restore exists, but reason data is absent."
+                }
+            }
+        });
+
+        let summary = observe_snapshot_summary(&snapshot);
+        assert!(summary.included_reasons_summary.is_none());
+        assert!(summary.excluded_reasons_summary.is_none());
+    }
+
+    #[test]
+    fn observe_snapshot_summary_prefers_repo_validated_task_graph_projection() {
+        let snapshot = json!({
+            "sla": {
+                "summary": {
+                    "pass": 3,
+                    "alert": 0,
+                    "critical": 0,
+                    "unknown": 0
+                }
+            },
+            "latest_working_state_restore": {
+                "working_state_restore": {
+                    "project_task_tree_summary": "stale global summary",
+                    "project_task_ledger_summary": "stale global ledger",
+                    "task_graph_projection_validation": {
+                        "status": "fallback_to_execctl_ledger",
+                        "reason": "legacy_hot_historical_nodes_present",
+                        "truth_claim": false
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project_task_tree_summary": "active: Real active line.; pending_return(1); excluded_legacy(2: 1 deprecated, 1 quarantined)",
+                    "project_task_ledger_summary": "active: Real active line.; open(1); pending_return(1); recently_closed(0); archive_candidates(0); excluded_legacy(2: 1 deprecated, 1 quarantined)",
+                    "task_graph_projection_validation": {
+                        "status": "valid",
+                        "validation_state": "valid",
+                        "projection_source": "graph_first_sql_validated",
+                        "truth_claim": false,
+                        "projection_excluded_sql_nodes_count": 2,
+                        "deprecated_sql_nodes_count": 1,
+                        "quarantined_sql_nodes_count": 1
+                    }
+                }
+            }
+        });
+
+        let summary = observe_snapshot_summary(&snapshot);
+        assert_eq!(
+            summary.task_graph_projection_operator_summary.as_deref(),
+            Some(
+                "validated graph-first projection • excluded_legacy(2: 1 deprecated, 1 quarantined)"
+            )
+        );
+        assert_eq!(
+            summary.project_task_tree_summary.as_deref(),
+            Some(
+                "active: Real active line.; pending_return(1); excluded_legacy(2: 1 deprecated, 1 quarantined)"
+            )
+        );
+        assert_eq!(
+            summary.project_task_ledger_summary.as_deref(),
+            Some(
+                "active: Real active line.; open(1); pending_return(1); recently_closed(0); archive_candidates(0); excluded_legacy(2: 1 deprecated, 1 quarantined)"
+            )
+        );
+        assert_eq!(
+            summary
+                .task_graph_projection_validation
+                .as_ref()
+                .and_then(|value| value["projection_source"].as_str()),
+            Some("graph_first_sql_validated")
+        );
+    }
+
+    #[test]
+    fn observe_snapshot_summary_surfaces_task_graph_fallback_without_trusting_stale_summaries() {
+        let snapshot = json!({
+            "sla": {
+                "summary": {
+                    "pass": 1,
+                    "alert": 1,
+                    "critical": 0,
+                    "unknown": 0
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project_task_tree_summary": "stale tree summary that should not be trusted",
+                    "project_task_ledger_summary": "stale ledger summary that should not be trusted",
+                    "task_graph_projection_validation": {
+                        "status": "fallback_to_execctl_ledger",
+                        "reason": "legacy_hot_historical_nodes_present",
+                        "truth_claim": false
+                    }
+                }
+            }
+        });
+
+        let summary = observe_snapshot_summary(&snapshot);
+        assert_eq!(
+            summary.task_graph_projection_operator_summary.as_deref(),
+            Some("fallback_to_execctl_ledger • Legacy Hot Historical Nodes Present")
+        );
+        assert!(summary.project_task_tree_summary.is_none());
+        assert!(summary.project_task_ledger_summary.is_none());
+        assert_eq!(
+            summary
+                .task_graph_projection_validation
+                .as_ref()
+                .and_then(|value| value["truth_claim"].as_bool()),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn observe_snapshot_summary_keeps_preview_limited_projection_validated() {
+        let snapshot = json!({
+            "sla": {
+                "summary": {
+                    "pass": 2,
+                    "alert": 0,
+                    "critical": 0,
+                    "unknown": 0
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project_task_tree_summary": "active: Real active line.; open(14)",
+                    "project_task_ledger_summary": "active: Real active line.; open(14); pending_return(0)",
+                    "task_graph_projection_validation": {
+                        "status": "valid",
+                        "validation_state": "valid",
+                        "projection_source": "graph_first_sql_validated",
+                        "truth_claim": false,
+                        "warnings": {
+                            "projection_preview_limited": true
+                        }
+                    }
+                }
+            }
+        });
+
+        let summary = observe_snapshot_summary(&snapshot);
+        assert_eq!(
+            summary.task_graph_projection_operator_summary.as_deref(),
+            Some("validated graph-first projection • compact preview limited")
+        );
+        assert_eq!(
+            summary.project_task_tree_summary.as_deref(),
+            Some("active: Real active line.; open(14)")
+        );
+        assert_eq!(
+            summary
+                .task_graph_projection_validation
+                .as_ref()
+                .and_then(|value| value["warnings"]["projection_preview_limited"].as_bool()),
+            Some(true)
         );
     }
 
@@ -8419,13 +9388,25 @@ mod tests {
             manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
                 ["guard_version"]
                 .as_str(),
-            Some("agent-workflow-guard-v1")
+            Some("agent-workflow-guard-v2")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
                 ["planning"]["specialist_consensus_required_before_implementation"]
                 .as_bool(),
             Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["team_critique"]["approval_status_label_before_implementation"]
+                .as_str(),
+            Some("согласовано, замечаний нет")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
+                ["team_verification"]["approval_status_label_after_verification"]
+                .as_str(),
+            Some("недостатков не найдено")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["agent_workflow_guard"]
@@ -8652,6 +9633,24 @@ mod tests {
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
                 ["must_request_mcp_reconnect_after_local_success"]
+                .as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["same_session_continuation_allowed_after_local_success"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["operator_action_required_after_local_success"]
+                .as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["reconnect_helper_diagnostic_only_after_local_success"]
                 .as_bool(),
             Some(true)
         );
@@ -9208,6 +10207,11 @@ mod tests {
                     ]
                 },
                 "project_task_ledger_summary": "active: Continue runtime auto-start guarantees.; pending_return(1); historical_handoffs(3)",
+                "task_graph_projection_validation": {
+                    "status": "fallback_to_execctl_ledger",
+                    "reason": "legacy_hot_historical_nodes_present",
+                    "truth_claim": false
+                },
                 "included_reasons_summary": "exact_documents (1) — Exact layer matched.",
                 "excluded_reasons_summary": "semantic_chunks — Semantic layer abstained."
             }
@@ -9215,7 +10219,7 @@ mod tests {
         let summary = continuity_startup_summary(&payload);
         assert_eq!(summary.project_code, "art");
         assert_eq!(summary.namespace_code, "continuity");
-        assert_eq!(summary.execctl_resume_state, "pending_return_queue_present");
+        assert_eq!(summary.execctl_resume_state, "return_required");
         assert!(summary.prompt_text_present);
         assert_eq!(summary.thread_count, 8);
         assert!(
@@ -9296,6 +10300,14 @@ mod tests {
                 .project_task_ledger_summary
                 .as_deref()
                 .is_some_and(|value| value.contains("historical_handoffs(3)"))
+        );
+        assert_eq!(
+            summary.task_graph_projection_validation["status"],
+            json!("fallback_to_execctl_ledger")
+        );
+        assert_eq!(
+            summary.task_graph_projection_validation["truth_claim"],
+            json!(false)
         );
     }
 
@@ -9445,6 +10457,100 @@ mod tests {
     }
 
     #[test]
+    fn continuity_startup_tool_result_preserves_reconciled_restore_payload_shape() {
+        let payload = json!({
+            "continuity_startup": {
+                "project": {
+                    "code": "amai",
+                    "display_name": "Amai",
+                    "repo_root": "/repo"
+                },
+                "namespace": {
+                    "code": "continuity",
+                    "display_name": "Continuity"
+                }
+            },
+            "chat_start_restore": {
+                "headline": "Current active line",
+                "next_step": "Continue bounded delivery-surface work.",
+                "restore_confidence": "medium",
+                "thread_count": 1,
+                "prompt_text": "CHAT_START_RESTORE\nCurrent active line",
+                "execctl_resume_state": "return_required",
+                "startup_next_action": {
+                    "action_kind": "resume_required_return_task",
+                    "blocking": true,
+                    "resume_state": "return_required",
+                    "no_silent_drop": true
+                },
+                "execctl_active_lease": {
+                    "lease_owner_state": "previous_session_owner",
+                    "source_event_id": "evt_123",
+                    "headline": "Current active line",
+                    "next_step": "Continue bounded delivery-surface work.",
+                    "storage_lane": "ami.execctl_task_leases"
+                }
+            },
+            "working_state_restore": {
+                "current_goal": "Current active line",
+                "next_step": "Continue bounded delivery-surface work.",
+                "restore_confidence": "medium",
+                "state_lineage": {
+                    "authoritative_event_id": "evt_123",
+                    "session_id": "sess_123"
+                }
+            }
+        });
+        let payload = super::attach_continuity_startup_tool_runtime_reconcile(
+            payload,
+            json!({
+                "applied": true,
+                "classification": "stale_embedded_mcp_session",
+                "continue_from_local_startup_payload": true,
+                "same_session_continuation_allowed": true,
+                "operator_action_required": false,
+                "mcp_reconnect_required": false,
+                "reconnect_helper_diagnostic_only": true
+            }),
+        );
+
+        let public_payload = continuity::compact_continuity_startup_public_payload(&payload);
+        let summary_json = super::continuity_startup_summary_json(&payload);
+        let result = super::tool_result(
+            "continuity startup :: amai::continuity".to_string(),
+            json!({
+                "continuity_startup": public_payload["continuity_startup"].clone(),
+                "chat_start_restore": public_payload["chat_start_restore"].clone(),
+                "delivery_surface_restore": public_payload["delivery_surface_restore"].clone(),
+                "working_state_restore": public_payload["working_state_restore"].clone(),
+                "tool_runtime_reconcile": public_payload["tool_runtime_reconcile"].clone(),
+                "continuity_startup_summary": summary_json
+            }),
+        );
+
+        assert_eq!(
+            result["structuredContent"]["working_state_restore"]["current_goal"],
+            json!("Current active line")
+        );
+        assert_eq!(
+            result["structuredContent"]["working_state_restore"]["state_lineage"]["authoritative_event_id"],
+            json!("evt_123")
+        );
+        assert_eq!(
+            result["structuredContent"]["continuity_startup_summary"]["execctl_resume_state"],
+            json!("return_required")
+        );
+        assert_eq!(
+            result["structuredContent"]["continuity_startup_summary"]["restore_confidence"],
+            json!("medium")
+        );
+        assert_eq!(
+            result["structuredContent"]["continuity_startup_summary"]["execctl_active_lease"]["source_event_id"],
+            json!("evt_123")
+        );
+    }
+
+    #[test]
     fn continuity_startup_reconcile_subprocess_prefers_release_binary_under_repo_root() {
         let temp_root = std::env::temp_dir().join(format!("amai-mcp-test-{}", Uuid::new_v4()));
         let target_release = temp_root.join("target/release");
@@ -9457,6 +10563,70 @@ mod tests {
             super::preferred_continuity_startup_reconcile_binary(&temp_root, &deleted_current_exe);
 
         assert_eq!(selected, release_binary);
+        fs::remove_dir_all(&temp_root).expect("remove temp root");
+    }
+
+    #[test]
+    fn continuity_startup_runtime_audit_repo_root_falls_back_to_payload_project_root() {
+        let args = ContinuityStartupToolArgs {
+            project: Some("amai".to_string()),
+            repo_root: None,
+            namespace: "continuity".to_string(),
+            token_source_kind: "proof".to_string(),
+        };
+        let payload = json!({
+            "continuity_startup": {
+                "project": {
+                    "code": "amai",
+                    "repo_root": "/repo/amai"
+                }
+            }
+        });
+
+        assert_eq!(
+            super::continuity_startup_runtime_audit_repo_root(&args, &payload),
+            Some("/repo/amai")
+        );
+    }
+
+    #[test]
+    fn stale_success_proof_corruption_removes_required_runtime_event_ids() {
+        let temp_root = std::env::temp_dir().join(format!("amai-mcp-state-{}", Uuid::new_v4()));
+        let state_dir = temp_root.join(".amai/continuity");
+        fs::create_dir_all(&state_dir).expect("create startup state dir");
+        let state_path = state_dir.join("project-chat-startup-state.json");
+        fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&json!({
+                "gate_semantics_consistent": true,
+                "working_state_restore_lineage": {
+                    "authoritative_event_id": "evt"
+                },
+                "continuity_startup_summary": {
+                    "execctl_active_lease": {
+                        "source_event_id": "evt"
+                    }
+                },
+                "execctl_active_lease": {
+                    "source_event_id": "evt"
+                }
+            }))
+            .expect("encode state"),
+        )
+        .expect("write startup state");
+
+        super::corrupt_startup_runtime_state_for_stale_success_proof(&temp_root)
+            .expect("corrupt startup state");
+
+        let payload: Value = serde_json::from_slice(&fs::read(&state_path).expect("read state"))
+            .expect("parse state");
+        assert_eq!(payload["gate_semantics_consistent"], json!(false));
+        assert!(payload["working_state_restore_lineage"]["authoritative_event_id"].is_null());
+        assert!(
+            payload["continuity_startup_summary"]["execctl_active_lease"]["source_event_id"]
+                .is_null()
+        );
+        assert!(payload["execctl_active_lease"]["source_event_id"].is_null());
         fs::remove_dir_all(&temp_root).expect("remove temp root");
     }
 
@@ -9698,12 +10868,27 @@ mod tests {
                 "profile": "vscode",
                 "compatible": true
             },
-            "reason_coverage": {
-                "included": {
-                    "included_reasons_summary": "exact_documents (1) — Exact layer matched."
-                },
-                "not_included": {
-                    "excluded_reasons_summary": "semantic_chunks — Semantic layer abstained."
+            "latest_working_state_restore": {
+                "working_state_restore": {
+                    "included_reasons_summary": "stale_global_exact (9) — Stale global reason must stay hidden.",
+                    "excluded_reasons_summary": "stale_global_semantic — Stale global exclusion must stay hidden."
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "included_reasons_summary": "exact_documents (1) — Exact layer matched.",
+                    "excluded_reasons_summary": "semantic_chunks — Semantic layer abstained.",
+                    "project_task_tree_summary": "active: Runtime auto-start guarantee.; pending_return(1); excluded_legacy(2: 1 deprecated, 1 quarantined)",
+                    "project_task_ledger_summary": "active: Runtime auto-start guarantee.; open(1); pending_return(1); recently_closed(0); archive_candidates(0); excluded_legacy(2: 1 deprecated, 1 quarantined)",
+                    "task_graph_projection_validation": {
+                        "status": "valid",
+                        "validation_state": "valid",
+                        "projection_source": "graph_first_sql_validated",
+                        "truth_claim": false,
+                        "projection_excluded_sql_nodes_count": 2,
+                        "deprecated_sql_nodes_count": 1,
+                        "quarantined_sql_nodes_count": 1
+                    }
                 }
             },
             "latest_memory_task_matrix": {
@@ -9732,35 +10917,30 @@ mod tests {
                     "top_expected_next_state": "pending_review",
                     "max_pending_review_risk_7d": 0.42,
                     "max_archive_risk_30d": 0.19,
-                    "max_prune_risk_30d": 0.03
+                    "max_prune_risk_30d": 0.03,
+                    "lifecycle_policy_review_summary": {
+                        "status": "advisory",
+                        "review_packet_state": "review_packet_ready",
+                        "approval_state": "pending_human_review",
+                        "measured_improvement_state": "not_measured_requires_holdout_or_post_action_outcomes"
+                    }
                 }
             }
         });
 
         let summary = observe_snapshot_summary(&snapshot);
         let result = tool_result(
-            "observe snapshot :: pass=7 alert=1 critical=0 unknown=2 compatibility=vscode:ok continuity=4/4:pass included=exact_documents (1) — Exact layer matched. excluded=semantic_chunks — Semantic layer abstained. memory_matrix=compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review mcp_matrix=compare=measured promotion=blocked_benchmark_gates approval=not_applicable lifecycle_risk=scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00%".to_string(),
+            super::observe_snapshot_summary_text(&summary),
             json!({
                 "snapshot": snapshot,
-                "observe_snapshot_summary": {
-                    "continuity_status": summary.continuity_status,
-                    "continuity_verified_probes": summary.continuity_verified_probes,
-                    "continuity_total_probes": summary.continuity_total_probes,
-                    "compatibility_profile": summary.compatibility_profile,
-                    "compatibility_compatible": summary.compatibility_compatible,
-                    "included_reasons_summary": summary.included_reasons_summary,
-                    "excluded_reasons_summary": summary.excluded_reasons_summary,
-                    "latest_memory_task_matrix_summary": summary.latest_memory_task_matrix_summary,
-                    "latest_mcp_task_matrix_summary": summary.latest_mcp_task_matrix_summary,
-                    "lifecycle_risk_summary": summary.lifecycle_risk_summary,
-                }
+                "observe_snapshot_summary": super::observe_snapshot_summary_json(&summary)
             }),
         );
 
         assert_eq!(
             result["content"][0]["text"],
             json!(
-                "observe snapshot :: pass=7 alert=1 critical=0 unknown=2 compatibility=vscode:ok continuity=4/4:pass included=exact_documents (1) — Exact layer matched. excluded=semantic_chunks — Semantic layer abstained. memory_matrix=compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review mcp_matrix=compare=measured promotion=blocked_benchmark_gates approval=not_applicable lifecycle_risk=scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00%"
+                "observe snapshot :: pass=7 alert=1 critical=0 unknown=2 compatibility=vscode:ok continuity=4/4:pass included=exact_documents (1) — Exact layer matched. excluded=semantic_chunks — Semantic layer abstained. task_graph=validated graph-first projection • excluded_legacy(2: 1 deprecated, 1 quarantined) memory_matrix=compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review mcp_matrix=compare=measured promotion=blocked_benchmark_gates approval=not_applicable lifecycle_risk=scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00% review_packet=review_packet_ready approval=pending_human_review measured=not_measured_requires_holdout_or_post_action_outcomes"
             )
         );
         assert_eq!(
@@ -9776,6 +10956,138 @@ mod tests {
         assert_eq!(
             result["structuredContent"]["observe_snapshot_summary"]["lifecycle_risk_summary"],
             json!(
+                "scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00% review_packet=review_packet_ready approval=pending_human_review measured=not_measured_requires_holdout_or_post_action_outcomes"
+            )
+        );
+        assert_eq!(
+            result["structuredContent"]["observe_snapshot_summary"]["task_graph_projection_operator_summary"],
+            json!(
+                "validated graph-first projection • excluded_legacy(2: 1 deprecated, 1 quarantined)"
+            )
+        );
+        assert_eq!(
+            result["structuredContent"]["observe_snapshot_summary"]["project_task_tree_summary"],
+            json!(
+                "active: Runtime auto-start guarantee.; pending_return(1); excluded_legacy(2: 1 deprecated, 1 quarantined)"
+            )
+        );
+        assert_eq!(
+            result["structuredContent"]["observe_snapshot_summary"]["task_graph_projection_validation"]
+                ["projection_source"],
+            json!("graph_first_sql_validated")
+        );
+        assert_eq!(
+            result["structuredContent"]["observe_snapshot_summary"]["lifecycle_policy_review_summary"],
+            json!({
+                "status": "advisory",
+                "review_packet_state": "review_packet_ready",
+                "approval_state": "pending_human_review",
+                "measured_improvement_state": "not_measured_requires_holdout_or_post_action_outcomes"
+            })
+        );
+    }
+
+    #[test]
+    fn observe_snapshot_tool_result_surfaces_fallback_without_tree_or_ledger_summary() {
+        let snapshot = json!({
+            "sla": {
+                "summary": {
+                    "pass": 3,
+                    "alert": 1,
+                    "critical": 0,
+                    "unknown": 0
+                }
+            },
+            "continuity_correctness_model": {
+                "summary": {
+                    "status": "pass",
+                    "verified_probes": 2,
+                    "probe_count": 2
+                }
+            },
+            "compatibility": {
+                "profile": "vscode",
+                "compatible": true
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project_task_tree_summary": "stale tree summary that should not be trusted",
+                    "project_task_ledger_summary": "stale ledger summary that should not be trusted",
+                    "task_graph_projection_validation": {
+                        "status": "fallback_to_execctl_ledger",
+                        "validation_state": "fallback_to_execctl_ledger",
+                        "projection_source": "execctl_ledger_fallback",
+                        "truth_claim": false,
+                        "reason": "legacy_hot_historical_nodes_present"
+                    }
+                }
+            }
+        });
+
+        let summary = observe_snapshot_summary(&snapshot);
+        let result = tool_result(
+            super::observe_snapshot_summary_text(&summary),
+            json!({
+                "snapshot": snapshot,
+                "observe_snapshot_summary": super::observe_snapshot_summary_json(&summary)
+            }),
+        );
+
+        assert_eq!(
+            result["content"][0]["text"],
+            json!(
+                "observe snapshot :: pass=3 alert=1 critical=0 unknown=0 compatibility=vscode:ok continuity=2/2:pass task_graph=fallback_to_execctl_ledger • Legacy Hot Historical Nodes Present"
+            )
+        );
+        assert_eq!(
+            result["structuredContent"]["observe_snapshot_summary"]["task_graph_projection_validation"]
+                ["projection_source"],
+            json!("execctl_ledger_fallback")
+        );
+        assert_eq!(
+            result["structuredContent"]["observe_snapshot_summary"]["task_graph_projection_operator_summary"],
+            json!("fallback_to_execctl_ledger • Legacy Hot Historical Nodes Present")
+        );
+        assert!(
+            result["structuredContent"]["observe_snapshot_summary"]["project_task_tree_summary"]
+                .is_null()
+        );
+        assert!(
+            result["structuredContent"]["observe_snapshot_summary"]["project_task_ledger_summary"]
+                .is_null()
+        );
+    }
+
+    #[test]
+    fn observe_snapshot_summary_omits_policy_review_when_missing() {
+        let snapshot = json!({
+            "sla": { "summary": { "pass": 1, "alert": 0, "critical": 0, "unknown": 0 } },
+            "continuity_correctness_model": {
+                "summary": {
+                    "status": "pass",
+                    "verified_probes": 1,
+                    "probe_count": 1
+                }
+            },
+            "compatibility": { "profile": "vscode", "compatible": true },
+            "governance_surface": {
+                "lifecycle_risk_summary": {
+                    "status": "advisory",
+                    "project_code": "amai",
+                    "namespace_code": "continuity",
+                    "top_expected_next_state": "pending_review",
+                    "max_pending_review_risk_7d": 0.42,
+                    "max_archive_risk_30d": 0.19,
+                    "max_prune_risk_30d": 0.03
+                }
+            }
+        });
+
+        let summary = observe_snapshot_summary(&snapshot);
+        assert!(summary.lifecycle_policy_review_summary.is_none());
+        assert_eq!(
+            summary.lifecycle_risk_summary.as_deref(),
+            Some(
                 "scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00%"
             )
         );
@@ -9853,9 +11165,9 @@ mod tests {
                 "restore_confidence": "high",
                 "thread_count": 1,
                 "prompt_text": "CHAT_START_RESTORE\nRotate now",
-                "execctl_resume_state": "pending_return_queue_present",
+                "execctl_resume_state": "return_required",
                 "execctl_resume_obligation": {
-                    "resume_state": "pending_return_queue_present",
+                    "resume_state": "return_required",
                     "no_silent_drop": true,
                     "pending_return_count": 1
                 },
@@ -9881,6 +11193,55 @@ mod tests {
             json!("rotate_chat_for_client_budget")
         );
         assert_eq!(summary.startup_execution_gate["blocking"], json!(true));
+        assert_eq!(
+            summary.startup_execution_gate["must_follow_startup_next_action"],
+            json!(true)
+        );
+        assert_eq!(
+            summary.startup_execution_gate["unrelated_work_allowed"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn continuity_startup_summary_fallback_gate_follows_clear_active_action() {
+        let payload = json!({
+            "continuity_startup": {
+                "project": { "code": "amai" },
+                "namespace": { "code": "continuity" }
+            },
+            "chat_start_restore": {
+                "headline": "Fix workflow guard execution-trace enforcement",
+                "next_step": "Continue the active workline.",
+                "restore_confidence": "high",
+                "thread_count": 1,
+                "prompt_text": "CHAT_START_RESTORE\nFix workflow guard execution-trace enforcement",
+                "execctl_resume_state": "clear",
+                "execctl_resume_obligation": {
+                    "resume_state": "clear",
+                    "no_silent_drop": true,
+                    "pending_return_count": 0
+                },
+                "startup_next_action": {
+                    "action_kind": "continue_active_workline",
+                    "blocking": false,
+                    "headline": "Fix workflow guard execution-trace enforcement",
+                    "next_step": "Continue the active workline."
+                },
+                "execctl_active_lease": {
+                    "lease_owner_state": "same_session_owner"
+                },
+                "required_return_task": null,
+                "required_task_set": []
+            }
+        });
+
+        let summary = continuity_startup_summary(&payload);
+        assert_eq!(
+            summary.startup_execution_gate["action_kind"],
+            json!("continue_active_workline")
+        );
+        assert_eq!(summary.startup_execution_gate["blocking"], json!(false));
         assert_eq!(
             summary.startup_execution_gate["must_follow_startup_next_action"],
             json!(true)

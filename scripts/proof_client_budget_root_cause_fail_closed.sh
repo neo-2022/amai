@@ -2,8 +2,10 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+source ./scripts/load_env.sh
 
 backup_dir="$(mktemp -d)"
+resolved_thread_id="$(resolve_amai_thread_id_or_empty_from_env)"
 
 move_if_exists() {
   local path="$1"
@@ -20,7 +22,7 @@ restore_all() {
     target/release/amai \
     target/debug/amai \
     state/observe/client_budget_surfaces_cache.json \
-    state/observe/client_budget_surfaces_cache.thread-${CODEX_THREAD_ID:-}.json; do
+    state/observe/client_budget_surfaces_cache.thread-${resolved_thread_id}.json; do
     if [[ -e "${backup_dir}/$path" ]]; then
       mkdir -p "$(dirname "$path")"
       mv "${backup_dir}/$path" "$path"
@@ -35,10 +37,10 @@ move_if_exists scripts/amai_exec.sh
 move_if_exists target/release/amai
 move_if_exists target/debug/amai
 move_if_exists state/observe/client_budget_surfaces_cache.json
-move_if_exists state/observe/client_budget_surfaces_cache.thread-${CODEX_THREAD_ID:-}.json
+move_if_exists state/observe/client_budget_surfaces_cache.thread-${resolved_thread_id}.json
 
 status=0
-if env -u CODEX_THREAD_ID PATH=/usr/bin:/bin AMI_OBSERVE_BIND=127.0.0.1:1 \
+if env -u AMAI_PLATFORM_THREAD_ID -u CODEX_THREAD_ID PATH=/usr/bin:/bin AMI_OBSERVE_BIND=127.0.0.1:1 \
   ./scripts/client_budget_root_cause.sh --enforce-reply-gate \
   >/tmp/proof_client_budget_root_cause_fail_closed.out \
   2>/tmp/proof_client_budget_root_cause_fail_closed.err; then

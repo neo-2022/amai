@@ -34,6 +34,7 @@ pub(crate) use self::dashboard_active_agents::collect_active_agent_live_budget_s
 use self::dashboard_active_agents::user_visible_agent_activity_is_proof_runtime;
 pub(crate) use self::dashboard_agent_scope_activity::{
     active_agent_thread_ids_from_activity, collect_agent_scope_activity,
+    collect_agent_scope_activity_with_recent_client_threads,
 };
 #[cfg(test)]
 use self::dashboard_assistant_scope::dashboard_assistant_scope_source_signature;

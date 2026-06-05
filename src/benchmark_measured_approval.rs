@@ -98,7 +98,7 @@ pub(crate) fn measured_approval_block(payload_root: &str, payload: &Value) -> Va
             (
                 "blocked",
                 "blocked_benchmark_gates",
-                false,
+                true,
                 "benchmark_gates_not_met",
                 "resolve_gate_failures_before_human_review",
                 gate_failures.clone(),
@@ -276,6 +276,55 @@ mod tests {
         assert_eq!(block["verdict"], json!("pending_human_review"));
         assert_eq!(block["state"], json!("pending_human_review"));
         assert_eq!(block["review_packet_ready"], json!(true));
+        assert_eq!(block["auto_promotion_allowed"], json!(false));
+    }
+
+    #[test]
+    fn measured_approval_fail_closes_when_benchmark_gates_block() {
+        let payload = json!({
+            "mcp_task_matrix": {
+                "statistics": {
+                    "baseline_run_id": "baseline",
+                    "candidate_run_id": "candidate",
+                    "drift_summary": {
+                        "status": "measured",
+                        "measured_methods": [
+                            "success_rate_confidence_interval",
+                            "mean_delta_confidence_interval",
+                            "median_latency_delta_confidence_interval",
+                            "p95_latency_delta_confidence_interval",
+                            "verdict_distribution_drift",
+                            "latency_distribution_drift"
+                        ],
+                        "not_measured_methods": [],
+                        "not_applicable_methods": ["score_delta_confidence_interval"],
+                    },
+                    "methods": {
+                        "success_rate_confidence_interval": { "status": "measured" },
+                        "score_delta_confidence_interval": { "status": "not_applicable" },
+                        "mean_delta_confidence_interval": { "status": "measured" },
+                        "median_latency_delta_confidence_interval": { "status": "measured" },
+                        "p95_latency_delta_confidence_interval": { "status": "measured" },
+                        "verdict_distribution_drift": { "status": "measured" },
+                        "latency_distribution_drift": { "status": "measured" }
+                    }
+                },
+                "promotion_law": {
+                    "state": "blocked_benchmark_gates",
+                    "inputs": {
+                        "gate_failures": ["p95_latency_sla_failed"]
+                    }
+                }
+            }
+        });
+        let block = measured_approval_block("mcp_task_matrix", &payload);
+
+        assert_eq!(block["verdict"], json!("blocked"));
+        assert_eq!(block["state"], json!("blocked_benchmark_gates"));
+        assert_eq!(block["fail_closed"], json!(true));
+        assert_eq!(block["reason"], json!("benchmark_gates_not_met"));
+        assert_eq!(block["blocking_reasons"], json!(["p95_latency_sla_failed"]));
+        assert_eq!(block["review_packet_ready"], json!(false));
         assert_eq!(block["auto_promotion_allowed"], json!(false));
     }
 

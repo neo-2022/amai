@@ -7,14 +7,21 @@ dsn="$(grep '^AMI_POSTGRES_DSN=' "${repo_root}/.env" | cut -d= -f2-)"
 project_code="execctl_pending_return_probe_$$"
 project_root="$(mktemp -d)"
 restore_output="$(mktemp)"
+promotion_details="$(mktemp)"
 
 cleanup() {
   psql "${dsn}" -qc "DELETE FROM ami.projects WHERE code='${project_code}'" >/dev/null 2>&1 || true
-  rm -rf "${project_root}" "${restore_output}"
+  rm -rf "${project_root}" "${restore_output}" "${promotion_details}"
 }
 trap cleanup EXIT
 
 cd "${repo_root}"
+export AMAI_OPERATOR_REDIRECT_PROVENANCE="proof_harness:$(basename "$0")"
+
+cat >"${promotion_details}" <<'EOF'
+promotion_contract: operator_redirect
+Synthetic proof explicitly switches the active main workline.
+EOF
 
 cargo run --release --quiet -- bootstrap schema >/dev/null
 
@@ -31,12 +38,16 @@ cargo run --release --quiet -- bootstrap schema >/dev/null
 ./target/release/amai continuity handoff \
   --project "${project_code}" \
   --headline "Same-meter spend control" \
-  --next-step "Materialize live assistant generation source." >/dev/null
+  --next-step "Materialize live assistant generation source." \
+  --details-file "${promotion_details}" \
+  --promote-active-workline >/dev/null
 
 ./target/release/amai continuity handoff \
   --project "${project_code}" \
   --headline "Project relocation contour" \
-  --next-step "Dovetail runtime auto-start guarantees." >/dev/null
+  --next-step "Dovetail runtime auto-start guarantees." \
+  --details-file "${promotion_details}" \
+  --promote-active-workline >/dev/null
 
 psql "${dsn}" -Atqc \
   "SELECT payload::text
@@ -47,7 +58,7 @@ psql "${dsn}" -Atqc \
     LIMIT 1" >"${restore_output}"
 
 jq -e '.working_state_restore.current_goal == "Project relocation contour"' "${restore_output}" >/dev/null
-jq -e '.working_state_restore.execctl_resume_state == "pending_return_queue_present"' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.execctl_resume_state == "return_required"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.execctl_resume_contract.resume_state == "return_required"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.pending_return_queue[0].headline == "Same-meter spend control"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.pending_return_summary | contains("Same-meter spend control")' "${restore_output}" >/dev/null
@@ -78,17 +89,53 @@ jq -e '.working_state_restore.execctl_active_lease.headline == "Project relocati
 jq -e '.working_state_restore.execctl_active_lease.storage_lane == "ami.execctl_task_leases"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.execctl_active_lease_summary | contains("Project relocation contour")' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.project_task_tree.tree_version == "project-task-tree-v1"' "${restore_output}" >/dev/null
-jq -e '.working_state_restore.project_task_tree.open_tasks_count == 2' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.project_task_tree.nodes[0].task_role == "active"' "${restore_output}" >/dev/null
-jq -e '.working_state_restore.project_task_tree.nodes[1].task_role == "pending_return"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.project_task_tree_summary | contains("pending_return(1)")' "${restore_output}" >/dev/null
+projection_status="$(jq -r '.working_state_restore.task_graph_projection_validation.status // "unavailable"' "${restore_output}")"
+case "${projection_status}" in
+  valid)
+    jq -e '.working_state_restore.project_task_tree.validation_state == "valid"' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.project_task_tree.projection_source == "graph_first_sql_validated"' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.project_task_tree.open_tasks_count == 3' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.project_task_tree.nodes | map(.task_role) | index("open") != null' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.project_task_tree.nodes | map(.task_role) | index("pending_return") != null' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.project_task_tree_summary | contains("open(1)")' "${restore_output}" >/dev/null
+    ;;
+  fallback_to_execctl_ledger)
+    jq -e '.working_state_restore.project_task_tree.open_tasks_count == 2' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.project_task_tree.nodes[1].task_role == "pending_return"' "${restore_output}" >/dev/null
+    ;;
+  *)
+    echo "proof_execctl_pending_return: unexpected task_graph_projection_validation.status=${projection_status}" >&2
+    exit 1
+    ;;
+esac
 jq -e '.working_state_restore.project_task_ledger.ledger_version == "project-task-ledger-v2"' "${restore_output}" >/dev/null
-jq -e '.working_state_restore.project_task_ledger.open_tasks_count == 2' "${restore_output}" >/dev/null
-jq -e '.working_state_restore.project_task_ledger.persistence_state == "durable_postgres"' "${restore_output}" >/dev/null
-jq -e '.working_state_restore.project_task_ledger.storage_lane == "ami.execctl_task_ledger_entries"' "${restore_output}" >/dev/null
-jq -e '.working_state_restore.project_task_ledger.entries[0].task_role == "active"' "${restore_output}" >/dev/null
-jq -e '.working_state_restore.project_task_ledger.entries[0].ledger_entry_id | length > 0' "${restore_output}" >/dev/null
-jq -e '.working_state_restore.project_task_ledger_summary | contains("historical_handoffs(0)")' "${restore_output}" >/dev/null
+case "${projection_status}" in
+  valid)
+    jq -e '.working_state_restore.project_task_ledger.open_tasks_count == 3' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.project_task_ledger.persistence_state == "graph_first_sql_validated"' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.project_task_ledger.storage_lane == "ami.task_nodes+ami.task_events"' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.project_task_ledger.entries | map(.task_role) | index("active") != null' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.project_task_ledger.entries | map(.task_role) | index("open") != null' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.project_task_ledger.entries | map(.task_role) | index("pending_return") != null' "${restore_output}" >/dev/null
+    ;;
+  fallback_to_execctl_ledger)
+    jq -e '.working_state_restore.project_task_ledger.open_tasks_count == 2' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.project_task_ledger.persistence_state == "durable_postgres"' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.project_task_ledger.storage_lane == "ami.execctl_task_ledger_entries"' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.project_task_ledger.entries[0].task_role == "active"' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.project_task_ledger.entries[0].ledger_entry_id | length > 0' "${restore_output}" >/dev/null
+    ;;
+esac
+case "${projection_status}" in
+  valid)
+    jq -e '.working_state_restore.project_task_ledger_summary | contains("pending_return(1)")' "${restore_output}" >/dev/null
+    ;;
+  fallback_to_execctl_ledger)
+    jq -e '.working_state_restore.project_task_ledger_summary | contains("historical_handoffs(0)")' "${restore_output}" >/dev/null
+    ;;
+esac
 
 lease_count="$(psql "${dsn}" -Atqc \
   "SELECT COUNT(*)

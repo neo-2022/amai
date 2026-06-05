@@ -788,6 +788,9 @@ pub(super) fn build_governance_card(snapshot: &Value) -> Value {
         .and_then(|items| items.first());
     let lifecycle_risk = &governance["lifecycle_risk_summary"];
     let lifecycle_risk_available = lifecycle_risk["status"].as_str() == Some("advisory");
+    let lifecycle_policy_review = &lifecycle_risk["lifecycle_policy_review_summary"];
+    let lifecycle_policy_review_available =
+        lifecycle_policy_review["status"].as_str() == Some("advisory");
     let headline_value = if status == "alert" {
         let mut parts = Vec::new();
         if active_quarantine > 0 {
@@ -852,9 +855,26 @@ pub(super) fn build_governance_card(snapshot: &Value) -> Value {
             } else {
                 String::new()
             };
+            let lifecycle_policy_note = if lifecycle_policy_review_available {
+                format!(
+                    " Queue 3 review packet surfaced отдельно: packet={} approval={} measured={}.",
+                    lifecycle_policy_review["review_packet_state"]
+                        .as_str()
+                        .unwrap_or("unknown"),
+                    lifecycle_policy_review["approval_state"]
+                        .as_str()
+                        .unwrap_or("unknown"),
+                    lifecycle_policy_review["measured_improvement_state"]
+                        .as_str()
+                        .unwrap_or("unknown"),
+                )
+            } else {
+                String::new()
+            };
             format!(
-                "Здесь видно, как Amai реально чистит и пересматривает память: pruning, archive, revalidation и dedup surfaced отдельно, а protected truth не должен исчезать тихо.{}",
-                lifecycle_note
+                "Здесь видно, как Amai реально чистит и пересматривает память: pruning, archive, revalidation и dedup surfaced отдельно, а protected truth не должен исчезать тихо.{}{}",
+                lifecycle_note,
+                lifecycle_policy_note
             )
         },
         status,
@@ -951,6 +971,42 @@ pub(super) fn build_governance_card(snapshot: &Value) -> Value {
                 "Prune risk 30d",
                 format_ratio_percent(lifecycle_risk["max_prune_risk_30d"].as_f64()),
                 Some("Advisory-only риск prune transition на горизонте 30 дней."),
+            ),
+            metric_row(
+                "Review packet",
+                if lifecycle_policy_review_available {
+                    lifecycle_policy_review["review_packet_state"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string()
+                } else {
+                    "ещё нет данных".to_string()
+                },
+                Some("Queue 3 advisory review packet readiness for human review. It is visible, but never grants runtime authority."),
+            ),
+            metric_row(
+                "Approval state",
+                if lifecycle_policy_review_available {
+                    lifecycle_policy_review["approval_state"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string()
+                } else {
+                    "ещё нет данных".to_string()
+                },
+                Some("Human-review status of the advisory policy packet."),
+            ),
+            metric_row(
+                "Measured improvement",
+                if lifecycle_policy_review_available {
+                    lifecycle_policy_review["measured_improvement_state"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string()
+                } else {
+                    "ещё нет данных".to_string()
+                },
+                Some("Whether the advisory contour has actual holdout/post-action improvement evidence yet."),
             ),
         ],
     )
@@ -1546,7 +1602,35 @@ mod tests {
                     "max_pending_review_risk_7d": 0.42,
                     "max_archive_risk_30d": 0.19,
                     "max_prune_risk_30d": 0.03,
-                    "top_cohort_reason_summary": "observed=active_stale cohort=summary / standard / decay / stale / medium / low sample_size=5 expected_next_state=pending_review"
+                    "top_cohort_reason_summary": "observed=active_stale cohort=summary / standard / decay / stale / medium / low sample_size=5 expected_next_state=pending_review",
+                    "lifecycle_policy_review_summary": {
+                        "status": "advisory",
+                        "project_code": "amai",
+                        "namespace_code": "continuity",
+                        "source_model_kind": "cohort-separated-empirical-markov-hazard-v1",
+                        "authority_mode": "advisory_only_no_runtime_authority",
+                        "review_packet_state": "review_packet_ready",
+                        "approval_state": "pending_human_review",
+                        "approval_reason": "Internal advisory review packet is complete enough for human review; measured improvement still requires holdout or post-action outcomes.",
+                        "measured_improvement_state": "not_measured_requires_holdout_or_post_action_outcomes",
+                        "human_review_required": true,
+                        "auto_promotion_allowed": false,
+                        "sample_size": 5,
+                        "cohort_count": 2,
+                        "actionable_review_row_count": 1,
+                        "authority_blocked_row_count": 1,
+                        "protected_or_manual_blocked_row_count": 0,
+                        "invalid_recommendation_count": 0,
+                        "invalid_urgency_count": 0,
+                        "missing_advisory_blocker_count": 0,
+                        "blocked_reasons": [],
+                        "top_observed_state": "active_stale",
+                        "top_expected_next_state": "pending_review",
+                        "top_recommended_review_action": "review_revalidation_queue",
+                        "top_urgency": "medium",
+                        "top_recommendation_reason": "Expected next state is pending_review with 7d risk 42.00% and residency 3600000 ms",
+                        "top_cohort_reason_summary": "observed=active_stale cohort=summary / standard / decay / stale / medium / low sample_size=5 expected_next_state=pending_review"
+                    }
                 },
                 "forgetting_job_breakdown": {
                     "pruning_job": 7,
@@ -1568,6 +1652,15 @@ mod tests {
         assert_eq!(card["rows"][4]["value"], json!("0"));
         assert_eq!(card["rows"][9]["value"], json!("amai/continuity"));
         assert_eq!(card["rows"][10]["value"], json!("pending_review"));
+        assert_eq!(card["rows"][14]["label"], json!("Review packet"));
+        assert_eq!(card["rows"][14]["value"], json!("review_packet_ready"));
+        assert_eq!(card["rows"][15]["label"], json!("Approval state"));
+        assert_eq!(card["rows"][15]["value"], json!("pending_human_review"));
+        assert_eq!(card["rows"][16]["label"], json!("Measured improvement"));
+        assert_eq!(
+            card["rows"][16]["value"],
+            json!("not_measured_requires_holdout_or_post_action_outcomes")
+        );
     }
 
     #[test]

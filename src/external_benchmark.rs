@@ -10,6 +10,7 @@ use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::Write;
@@ -38,6 +39,11 @@ const LONGMEMEVAL_NON_OFFICIAL_JUDGE_SOURCE_KIND: &str =
 const LONGMEMEVAL_LOCAL_JUDGE_DEFAULT_MODEL: &str = "gemma4:e4b";
 const LONGMEMEVAL_LOCAL_JUDGE_SOURCE_KIND: &str = "local_ollama_llm_judge_execution";
 const LONGMEMEVAL_LOCAL_JUDGE_TRANSPORT_KIND: &str = "ollama_api_chat";
+const LOCAL_SEMANTIC_RETRIEVAL_JUDGE_DEFAULT_MODEL: &str = "gemma4:e4b";
+const LOCAL_SEMANTIC_RETRIEVAL_JUDGE_SOURCE_KIND: &str =
+    "local_semantic_retrieval_evidence_judge_execution";
+const LOCAL_SEMANTIC_RETRIEVAL_JUDGE_TRANSPORT_KIND: &str = "ollama_api_chat";
+const LOCAL_SEMANTIC_RETRIEVAL_RANKED_PREVIEW_LIMIT: usize = 3;
 const AMAI_EXTERNAL_MEMORY_RUNTIME_TARGET_WINDOW_BYTES: usize = 32 * 1024;
 const AMAI_EXTERNAL_MEMORY_RUNTIME_TARGET_WINDOW_BYTES_ACCURATE_RETRIEVAL: usize = 12 * 1024;
 const LONGMEMEVAL_OFFICIAL_QUESTION_TYPES: [&str; 6] = [
@@ -155,6 +161,8 @@ struct MemoryRuntimeCaseMetric {
     #[serde(default)]
     retrieval_top_ranked_structural_fact_supported: Option<bool>,
     #[serde(default)]
+    retrieval_payload_ranked_previews: Vec<MemoryRuntimeRankedRetrievalPreview>,
+    #[serde(default)]
     runtime_corpus_reused_from_previous_case: bool,
     #[serde(default)]
     benchmark_specific_query_override_used: bool,
@@ -183,6 +191,71 @@ struct MemoryRuntimeStageMetrics {
     fallback_scan_ms: u128,
     final_answer_generation_ms: u128,
     total_case_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MemoryRuntimeRankedRetrievalPreview {
+    rank: usize,
+    score: usize,
+    #[serde(default)]
+    relative_path: Option<String>,
+    preview: String,
+    supports_gold_answer: bool,
+    preview_supports_gold_answer: bool,
+    structural_fact_supported: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LocalSemanticRetrievalJudgeVerdict {
+    question_relevant: bool,
+    #[serde(default)]
+    supports_gold_answer: Option<bool>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LocalSemanticRetrievalJudgeProvenance {
+    provenance_version: String,
+    source_kind: String,
+    judge_transport: String,
+    metric_model: String,
+    metric_model_family: String,
+    judge_temperature: u8,
+    prompt_sha256: Option<String>,
+    ollama_base_url: String,
+    official_upstream_provenance_eligible: bool,
+    raw_response: Option<String>,
+    completed_at_epoch_ms: Option<u128>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LocalSemanticRetrievalJudgeCaseResult {
+    case_id: String,
+    #[serde(default)]
+    bench: Option<String>,
+    #[serde(default)]
+    dataset: Option<String>,
+    question: String,
+    #[serde(default)]
+    retrieval_query: String,
+    retrieval_evidence_present: bool,
+    gold_answer_available: bool,
+    #[serde(default)]
+    top_ranked_retrieval_relative_path: Option<String>,
+    #[serde(default)]
+    top_ranked_retrieval_preview: Option<String>,
+    #[serde(default)]
+    ranked_retrieval_previews: Vec<MemoryRuntimeRankedRetrievalPreview>,
+    #[serde(default)]
+    legacy_single_preview_only_input: bool,
+    retrieval_preview_items_considered: usize,
+    status: String,
+    #[serde(default)]
+    blocking_reasons: Vec<String>,
+    #[serde(default)]
+    semantic_verdict: Option<LocalSemanticRetrievalJudgeVerdict>,
+    local_semantic_retrieval_judge_provenance: LocalSemanticRetrievalJudgeProvenance,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -352,6 +425,7 @@ struct ExtractedMemoryAnswer {
     retrieval_payload_top_ranked_gold_answer_supported: Option<bool>,
     retrieval_payload_top_ranked_preview_supports_gold_answer: Option<bool>,
     retrieval_top_ranked_structural_fact_supported: Option<bool>,
+    retrieval_payload_ranked_previews: Vec<MemoryRuntimeRankedRetrievalPreview>,
     benchmark_specific_answer_extraction_used: bool,
 }
 
@@ -364,6 +438,34 @@ struct PayloadTopRankedRetrieval {
     supports_gold_answer: bool,
     preview_supports_gold_answer: bool,
     structural_fact_supported: bool,
+}
+
+fn compare_payload_top_ranked_retrievals(
+    left: &PayloadTopRankedRetrieval,
+    right: &PayloadTopRankedRetrieval,
+) -> Ordering {
+    right
+        .score
+        .cmp(&left.score)
+        .then_with(|| right.supports_gold_answer.cmp(&left.supports_gold_answer))
+        .then_with(|| {
+            right
+                .preview_supports_gold_answer
+                .cmp(&left.preview_supports_gold_answer)
+        })
+        .then_with(|| {
+            right
+                .structural_fact_supported
+                .cmp(&left.structural_fact_supported)
+        })
+        .then_with(|| left.snippet_len.cmp(&right.snippet_len))
+        .then_with(|| left.preview.cmp(&right.preview))
+        .then_with(|| {
+            left.relative_path
+                .as_deref()
+                .unwrap_or("")
+                .cmp(right.relative_path.as_deref().unwrap_or(""))
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -1479,6 +1581,218 @@ pub async fn run_external_memory_local_judge(
     Ok(())
 }
 
+pub async fn run_external_memory_local_retrieval_judge(
+    db: Option<&tokio_postgres::Client>,
+    cases_path: &Path,
+    case_metrics_path: &Path,
+    judge_results_path: &Path,
+    summary_path: Option<&Path>,
+    ollama_base_url: &str,
+    model: &str,
+) -> Result<()> {
+    let cases = load_cases_jsonl(cases_path)?;
+    let case_metrics = load_memory_runtime_case_metrics_jsonl(case_metrics_path)?;
+    let bench = cases
+        .values()
+        .find_map(|case| case["bench"].as_str().map(|value| value.to_string()));
+    let dataset = cases
+        .values()
+        .find_map(|case| case["dataset"].as_str().map(|value| value.to_string()));
+    let mut validation_blockers = validate_local_semantic_retrieval_judge_inputs(
+        &cases,
+        &case_metrics,
+        ollama_base_url,
+        model,
+    );
+    let metrics_by_case = match map_runtime_case_metrics_by_case_id(
+        &cases,
+        &case_metrics,
+        bench.as_deref(),
+        dataset.as_deref(),
+    ) {
+        Ok(metrics) => metrics,
+        Err(err) => {
+            validation_blockers.insert(err.to_string());
+            BTreeMap::new()
+        }
+    };
+
+    let mut judge_results = Vec::new();
+    let mut judge_failure_examples = Vec::new();
+    let mut live_judge_attempts = 0usize;
+    if validation_blockers.is_empty() {
+        let client = HttpClient::builder()
+            .timeout(Duration::from_secs(120))
+            .build()
+            .context("failed to build local semantic retrieval judge HTTP client")?;
+        let normalized_ollama_base_url = normalize_local_judge_ollama_base_url(ollama_base_url);
+        for (case_id, case) in &cases {
+            let Some(metric) = metrics_by_case.get(case_id) else {
+                continue;
+            };
+            let question = case["question"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let answer = case["answer"].as_str().map(str::trim);
+            let gold_answer_available = benchmark_gold_answer_available(answer);
+            let retrieval_evidence_present = metric.retrieval_snippet_count > 0;
+            let ranked_retrieval_previews = metric.retrieval_payload_ranked_previews.clone();
+            let retrieval_preview_items_considered = ranked_retrieval_previews.len();
+            let legacy_single_preview_only_input = metric
+                .retrieval_payload_top_ranked_preview
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+                && ranked_retrieval_previews.is_empty();
+            let top_ranked_preview = ranked_retrieval_previews
+                .first()
+                .map(|item| item.preview.trim().to_string())
+                .filter(|value| !value.is_empty());
+            let mut blocking_reasons = Vec::new();
+            if !retrieval_evidence_present {
+                blocking_reasons.push("missing_retrieval_evidence".to_string());
+            }
+            if ranked_retrieval_previews.is_empty() {
+                blocking_reasons.push("missing_ranked_retrieval_preview_set".to_string());
+            }
+            validate_local_semantic_retrieval_ranked_preview_contract(
+                case_id,
+                &ranked_retrieval_previews,
+                &mut blocking_reasons,
+            );
+
+            let mut semantic_verdict = None;
+            let mut provenance = LocalSemanticRetrievalJudgeProvenance {
+                provenance_version: "external_memory_local_semantic_retrieval_judge_provenance_v1"
+                    .to_string(),
+                source_kind: LOCAL_SEMANTIC_RETRIEVAL_JUDGE_SOURCE_KIND.to_string(),
+                judge_transport: LOCAL_SEMANTIC_RETRIEVAL_JUDGE_TRANSPORT_KIND.to_string(),
+                metric_model: model.to_string(),
+                metric_model_family: "local_ollama_model".to_string(),
+                judge_temperature: 0,
+                prompt_sha256: None,
+                ollama_base_url: normalized_ollama_base_url.clone(),
+                official_upstream_provenance_eligible: false,
+                raw_response: None,
+                completed_at_epoch_ms: None,
+            };
+
+            if blocking_reasons.is_empty() {
+                let prompt = local_semantic_retrieval_judge_prompt(
+                    &question,
+                    answer.filter(|value| benchmark_gold_answer_available(Some(value))),
+                    &ranked_retrieval_previews,
+                )?;
+                provenance.prompt_sha256 = Some(hex_sha256_local(prompt.as_bytes()));
+                live_judge_attempts += 1;
+                match call_local_semantic_retrieval_judge(
+                    &client,
+                    &normalized_ollama_base_url,
+                    model,
+                    &prompt,
+                )
+                .await
+                {
+                    Ok(raw_response) => {
+                        provenance.raw_response = Some(raw_response.clone());
+                        provenance.completed_at_epoch_ms = Some(now_epoch_ms_local());
+                        match parse_local_semantic_retrieval_judge_response(
+                            &raw_response,
+                            gold_answer_available,
+                        ) {
+                            Ok(verdict) => {
+                                semantic_verdict = Some(verdict);
+                            }
+                            Err(err) => {
+                                blocking_reasons.push(
+                                    "local_semantic_retrieval_judge_response_contract_invalid"
+                                        .to_string(),
+                                );
+                                judge_failure_examples.push(format!("{case_id}: {err:#}"));
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let err = format!("{err:#}");
+                        blocking_reasons.push(
+                            classify_local_semantic_retrieval_judge_execution_failure(&err),
+                        );
+                        judge_failure_examples.push(format!("{case_id}: {err}"));
+                    }
+                }
+            }
+
+            judge_results.push(LocalSemanticRetrievalJudgeCaseResult {
+                case_id: case_id.clone(),
+                bench: metric
+                    .bench
+                    .clone()
+                    .or_else(|| case["bench"].as_str().map(|value| value.to_string())),
+                dataset: metric
+                    .dataset
+                    .clone()
+                    .or_else(|| case["dataset"].as_str().map(|value| value.to_string())),
+                question,
+                retrieval_query: metric.retrieval_query.clone(),
+                retrieval_evidence_present,
+                gold_answer_available,
+                top_ranked_retrieval_relative_path: metric
+                    .retrieval_payload_top_ranked_relative_path
+                    .clone(),
+                top_ranked_retrieval_preview: top_ranked_preview,
+                ranked_retrieval_previews,
+                legacy_single_preview_only_input,
+                retrieval_preview_items_considered,
+                status: if blocking_reasons.is_empty() {
+                    "judged".to_string()
+                } else {
+                    "blocked".to_string()
+                },
+                blocking_reasons,
+                semantic_verdict,
+                local_semantic_retrieval_judge_provenance: provenance,
+            });
+        }
+        let values = judge_results
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        write_jsonl_values(judge_results_path, &values)?;
+    }
+
+    let summary = memory_local_semantic_retrieval_judge_summary(
+        bench.as_deref(),
+        dataset.as_deref(),
+        cases_path,
+        case_metrics_path,
+        judge_results_path,
+        &cases,
+        &case_metrics,
+        &judge_results,
+        live_judge_attempts,
+        ollama_base_url,
+        model,
+        &validation_blockers,
+        &judge_failure_examples,
+    );
+    write_memory_local_judge_summary(summary_path, &summary)?;
+    if let Some(db) = db {
+        let payload = json!({
+            "memory_retrieval_semantic_evidence": summary,
+            "retrieval_science": retrieval_science::suite_metadata("memory_retrieval_semantic_evidence")?,
+        });
+        let _ = postgres::insert_observability_snapshot(
+            db,
+            "memory_retrieval_semantic_evidence",
+            &payload,
+        )
+        .await?;
+    }
+    println!("{}", serde_json::to_string_pretty(&summary)?);
+    Ok(())
+}
+
 pub async fn run_external_memory_benchmark_amai(
     cfg: &AppConfig,
     _db: &tokio_postgres::Client,
@@ -1663,6 +1977,7 @@ pub async fn run_external_memory_benchmark_amai(
                 .retrieval_payload_top_ranked_preview_supports_gold_answer,
             retrieval_top_ranked_structural_fact_supported: extracted
                 .retrieval_top_ranked_structural_fact_supported,
+            retrieval_payload_ranked_previews: extracted.retrieval_payload_ranked_previews,
             runtime_corpus_reused_from_previous_case,
             benchmark_specific_query_override_used: retrieval_pack
                 .benchmark_specific_query_override_used,
@@ -1962,6 +2277,482 @@ fn normalize_local_judge_ollama_base_url(ollama_base_url: &str) -> String {
         .trim_end_matches("/api/chat")
         .trim_end_matches('/')
         .to_string()
+}
+
+fn validate_local_semantic_retrieval_judge_inputs(
+    cases: &BTreeMap<String, Value>,
+    case_metrics: &[MemoryRuntimeCaseMetric],
+    ollama_base_url: &str,
+    model: &str,
+) -> BTreeSet<String> {
+    let mut blockers = BTreeSet::new();
+    if cases.is_empty() {
+        blockers.insert("local_semantic_retrieval_reference_cases_empty".to_string());
+    }
+    if case_metrics.is_empty() {
+        blockers.insert("local_semantic_retrieval_case_metrics_empty".to_string());
+    }
+    if normalize_local_judge_ollama_base_url(ollama_base_url).is_empty() {
+        blockers.insert("local_semantic_retrieval_judge_ollama_base_url_empty".to_string());
+    }
+    if model.trim().is_empty() {
+        blockers.insert("local_semantic_retrieval_judge_model_empty".to_string());
+    }
+    for (case_id, case) in cases {
+        if case["question"]
+            .as_str()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            blockers.insert(format!(
+                "local_semantic_retrieval_reference_question_missing:{case_id}"
+            ));
+        }
+    }
+    blockers
+}
+
+fn validate_local_semantic_retrieval_ranked_preview_contract(
+    case_id: &str,
+    ranked_retrieval_previews: &[MemoryRuntimeRankedRetrievalPreview],
+    blockers: &mut Vec<String>,
+) {
+    let mut push_blocker = |reason: String| {
+        if !blockers.iter().any(|existing| existing == &reason) {
+            blockers.push(reason);
+        }
+    };
+    if ranked_retrieval_previews.len() > LOCAL_SEMANTIC_RETRIEVAL_RANKED_PREVIEW_LIMIT {
+        push_blocker(format!(
+            "local_semantic_retrieval_ranked_preview_limit_exceeded:{case_id}"
+        ));
+    }
+    for (idx, preview) in ranked_retrieval_previews.iter().enumerate() {
+        let expected_rank = idx + 1;
+        if preview.rank != expected_rank {
+            push_blocker(format!(
+                "local_semantic_retrieval_ranked_preview_rank_mismatch:{case_id}:{expected_rank}:{}",
+                preview.rank
+            ));
+        }
+        if preview.preview.trim().is_empty() {
+            push_blocker(format!(
+                "local_semantic_retrieval_ranked_preview_empty_text:{case_id}:{}",
+                preview.rank
+            ));
+        }
+        if preview.relative_path.is_none() {
+            push_blocker(format!(
+                "local_semantic_retrieval_ranked_preview_missing_relative_path:{case_id}:{}",
+                preview.rank
+            ));
+        } else if preview
+            .relative_path
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            push_blocker(format!(
+                "local_semantic_retrieval_ranked_preview_empty_relative_path:{case_id}:{}",
+                preview.rank
+            ));
+        }
+    }
+}
+
+fn map_runtime_case_metrics_by_case_id(
+    cases: &BTreeMap<String, Value>,
+    case_metrics: &[MemoryRuntimeCaseMetric],
+    expected_bench: Option<&str>,
+    expected_dataset: Option<&str>,
+) -> Result<BTreeMap<String, MemoryRuntimeCaseMetric>> {
+    let mut metrics_by_case = BTreeMap::new();
+    for metric in case_metrics {
+        if let Some(bench) = expected_bench
+            && metric.bench.as_deref().is_some_and(|value| value != bench)
+        {
+            return Err(anyhow!(
+                "local_semantic_retrieval_case_metric_bench_mismatch:{}",
+                metric.case_id
+            ));
+        }
+        if let Some(dataset) = expected_dataset
+            && metric
+                .dataset
+                .as_deref()
+                .is_some_and(|value| value != dataset)
+        {
+            return Err(anyhow!(
+                "local_semantic_retrieval_case_metric_dataset_mismatch:{}",
+                metric.case_id
+            ));
+        }
+        if metrics_by_case
+            .insert(metric.case_id.clone(), metric.clone())
+            .is_some()
+        {
+            return Err(anyhow!(
+                "local_semantic_retrieval_case_metric_duplicate_case_id:{}",
+                metric.case_id
+            ));
+        }
+    }
+    for case_id in cases.keys() {
+        if !metrics_by_case.contains_key(case_id) {
+            return Err(anyhow!(
+                "local_semantic_retrieval_case_metric_missing_case_id:{case_id}"
+            ));
+        }
+    }
+    for case_id in metrics_by_case.keys() {
+        if !cases.contains_key(case_id) {
+            return Err(anyhow!(
+                "local_semantic_retrieval_case_metric_unknown_case_id:{case_id}"
+            ));
+        }
+    }
+    Ok(metrics_by_case)
+}
+
+fn local_semantic_retrieval_judge_prompt(
+    question: &str,
+    benchmark_answer: Option<&str>,
+    ranked_previews: &[MemoryRuntimeRankedRetrievalPreview],
+) -> Result<String> {
+    let prompt_input = json!({
+        "question": question,
+        "benchmark_answer": benchmark_answer,
+        "ranked_retrieval_previews": ranked_previews.iter().map(|item| {
+            json!({
+                "rank": item.rank,
+                "score": item.score,
+                "relative_path": item.relative_path,
+                "preview": item.preview,
+            })
+        }).collect::<Vec<_>>(),
+    });
+    Ok(format!(
+        "You are a strict retrieval-evidence judge.\n\
+Judge only the retrieved previews provided in the input JSON.\n\
+Do not use outside knowledge.\n\
+Mere term overlap is not enough.\n\
+Use the preview set as combined evidence; multiple previews may help together.\n\
+Set question_relevant=true only when the retrieved preview set contains facts that materially help answer the question.\n\
+If benchmark_answer is present, set supports_gold_answer=true only when the retrieved preview set directly supports that answer or a clear paraphrase.\n\
+If benchmark_answer is null, set supports_gold_answer to null.\n\
+Return only one JSON object with exactly these fields:\n\
+{{\"question_relevant\":true|false,\"supports_gold_answer\":true|false|null,\"reason\":\"short explanation\"}}\n\
+Input JSON:\n{}",
+        serde_json::to_string_pretty(&prompt_input)?
+    ))
+}
+
+async fn call_local_semantic_retrieval_judge(
+    client: &HttpClient,
+    ollama_base_url: &str,
+    model: &str,
+    prompt: &str,
+) -> Result<String> {
+    let endpoint = format!(
+        "{}/api/chat",
+        normalize_local_judge_ollama_base_url(ollama_base_url)
+    );
+    let payload = json!({
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        "stream": false,
+        "format": "json",
+        "options": {
+            "temperature": 0,
+        },
+    });
+    let mut last_error = None;
+    for attempt_idx in 0..LONGMEMEVAL_OFFICIAL_JUDGE_MAX_ATTEMPTS {
+        let result = client.post(&endpoint).json(&payload).send().await;
+        match result {
+            Ok(response) => {
+                let status = response.status();
+                let body = response
+                    .text()
+                    .await
+                    .context("failed to read local semantic retrieval judge response body")?;
+                if status.is_success() {
+                    let value: Value = serde_json::from_str(&body)
+                        .context("failed to parse local semantic retrieval judge response JSON")?;
+                    let content = value["message"]["content"].as_str().ok_or_else(|| {
+                        anyhow!("local semantic retrieval judge response missing message.content")
+                    })?;
+                    return Ok(content.trim().to_string());
+                }
+                last_error = Some(anyhow!(
+                    "local semantic retrieval judge HTTP {}: {}",
+                    status,
+                    body
+                ));
+                if status.as_u16() == 400 || status.as_u16() == 404 {
+                    return Err(last_error.expect("local semantic retrieval request/model failure"));
+                }
+            }
+            Err(err) => {
+                last_error = Some(
+                    anyhow!(err).context("local semantic retrieval judge HTTP request failed"),
+                );
+            }
+        }
+        if attempt_idx + 1 < LONGMEMEVAL_OFFICIAL_JUDGE_MAX_ATTEMPTS {
+            let delay_ms = 500u64 * (1u64 << attempt_idx);
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| anyhow!("local semantic retrieval judge request failed without detail")))
+}
+
+fn parse_local_semantic_retrieval_judge_response(
+    raw_response: &str,
+    gold_answer_available: bool,
+) -> Result<LocalSemanticRetrievalJudgeVerdict> {
+    let mut verdict: LocalSemanticRetrievalJudgeVerdict = serde_json::from_str(raw_response)
+        .context("failed to parse local semantic retrieval judge content JSON")?;
+    if gold_answer_available && verdict.supports_gold_answer.is_none() {
+        verdict.supports_gold_answer = Some(false);
+    }
+    if !gold_answer_available {
+        verdict.supports_gold_answer = None;
+    }
+    if let Some(reason) = verdict.reason.as_mut() {
+        *reason = reason.trim().to_string();
+        if reason.is_empty() {
+            verdict.reason = None;
+        }
+    }
+    Ok(verdict)
+}
+
+fn classify_local_semantic_retrieval_judge_execution_failure(error: &str) -> String {
+    if error.contains("HTTP 404") || error.to_lowercase().contains("not found") {
+        "local_semantic_retrieval_judge_model_unavailable".to_string()
+    } else if error.contains("HTTP 400") {
+        "local_semantic_retrieval_judge_request_invalid".to_string()
+    } else if error.contains("HTTP 429") {
+        "local_semantic_retrieval_judge_backend_rate_limited".to_string()
+    } else if error.contains("HTTP 5") {
+        "local_semantic_retrieval_judge_backend_http_error".to_string()
+    } else if error.contains("missing message.content")
+        || error.contains("parse local semantic retrieval judge response JSON")
+        || error.contains("parse local semantic retrieval judge content JSON")
+    {
+        "local_semantic_retrieval_judge_response_contract_invalid".to_string()
+    } else {
+        "local_semantic_retrieval_judge_transport_or_unknown_failure".to_string()
+    }
+}
+
+fn memory_local_semantic_retrieval_judge_summary(
+    bench: Option<&str>,
+    dataset: Option<&str>,
+    cases_path: &Path,
+    case_metrics_path: &Path,
+    judge_results_path: &Path,
+    cases: &BTreeMap<String, Value>,
+    case_metrics: &[MemoryRuntimeCaseMetric],
+    judge_results: &[LocalSemanticRetrievalJudgeCaseResult],
+    live_judge_attempts: usize,
+    ollama_base_url: &str,
+    model: &str,
+    validation_blockers: &BTreeSet<String>,
+    judge_failure_examples: &[String],
+) -> Value {
+    let normalized_ollama_base_url = normalize_local_judge_ollama_base_url(ollama_base_url);
+    let retrieval_evidence_cases = judge_results
+        .iter()
+        .filter(|item| item.retrieval_evidence_present)
+        .count();
+    let no_retrieval_evidence_cases = judge_results
+        .iter()
+        .filter(|item| !item.retrieval_evidence_present)
+        .count();
+    let judged_cases = judge_results
+        .iter()
+        .filter(|item| item.status == "judged")
+        .count();
+    let blocked_cases = judge_results.len().saturating_sub(judged_cases);
+    let question_relevant_cases = judge_results
+        .iter()
+        .filter(|item| {
+            item.status == "judged"
+                && item
+                    .semantic_verdict
+                    .as_ref()
+                    .is_some_and(|verdict| verdict.question_relevant)
+        })
+        .count();
+    let question_irrelevant_cases = judged_cases.saturating_sub(question_relevant_cases);
+    let gold_labeled_cases = judge_results
+        .iter()
+        .filter(|item| item.gold_answer_available)
+        .count();
+    let gold_labeled_judged_cases = judge_results
+        .iter()
+        .filter(|item| item.status == "judged" && item.gold_answer_available)
+        .count();
+    let gold_answer_supported_cases = judge_results
+        .iter()
+        .filter(|item| {
+            item.status == "judged"
+                && item.gold_answer_available
+                && item
+                    .semantic_verdict
+                    .as_ref()
+                    .and_then(|verdict| verdict.supports_gold_answer)
+                    == Some(true)
+        })
+        .count();
+    let gold_answer_unsupported_cases =
+        gold_labeled_judged_cases.saturating_sub(gold_answer_supported_cases);
+    let ranked_preview_items_total = judge_results
+        .iter()
+        .map(|item| item.ranked_retrieval_previews.len())
+        .sum::<usize>();
+    let ranked_preview_items_judged_total = judge_results
+        .iter()
+        .filter(|item| item.status == "judged")
+        .map(|item| item.ranked_retrieval_previews.len())
+        .sum::<usize>();
+    let ranked_preview_cases = judge_results
+        .iter()
+        .filter(|item| !item.ranked_retrieval_previews.is_empty())
+        .count();
+    let multi_preview_cases = judge_results
+        .iter()
+        .filter(|item| item.ranked_retrieval_previews.len() > 1)
+        .count();
+    let legacy_single_preview_fallback_cases = judge_results
+        .iter()
+        .filter(|item| item.legacy_single_preview_only_input)
+        .count();
+    let max_ranked_preview_items_in_case = judge_results
+        .iter()
+        .map(|item| item.ranked_retrieval_previews.len())
+        .max()
+        .unwrap_or(0);
+    let mut case_blocker_counts = BTreeMap::new();
+    for entry in judge_results {
+        for reason in &entry.blocking_reasons {
+            *case_blocker_counts.entry(reason.clone()).or_insert(0usize) += 1;
+        }
+    }
+    let validation_blocking_reasons = validation_blockers.iter().cloned().collect::<Vec<_>>();
+    let mut maturity_blocking_reasons = validation_blocking_reasons.clone();
+    for reason in [
+        "non_official_local_semantic_retrieval_judge_lane",
+        "ranked_retrieval_preview_set_only",
+        "full_dataset_runtime_not_proven_by_this_command",
+    ] {
+        if !maturity_blocking_reasons
+            .iter()
+            .any(|value| value == reason)
+        {
+            maturity_blocking_reasons.push(reason.to_string());
+        }
+    }
+    if blocked_cases > 0
+        && !maturity_blocking_reasons
+            .iter()
+            .any(|value| value == "case_level_retrieval_judge_blockers_present")
+    {
+        maturity_blocking_reasons.push("case_level_retrieval_judge_blockers_present".to_string());
+    }
+    if judged_cases < retrieval_evidence_cases
+        && !maturity_blocking_reasons
+            .iter()
+            .any(|value| value == "not_all_retrieval_evidence_cases_semantically_judged")
+    {
+        maturity_blocking_reasons
+            .push("not_all_retrieval_evidence_cases_semantically_judged".to_string());
+    }
+    if question_relevant_cases < judged_cases
+        && !maturity_blocking_reasons
+            .iter()
+            .any(|value| value == "not_all_judged_cases_semantically_relevant")
+    {
+        maturity_blocking_reasons.push("not_all_judged_cases_semantically_relevant".to_string());
+    }
+    if gold_answer_supported_cases < gold_labeled_judged_cases
+        && !maturity_blocking_reasons
+            .iter()
+            .any(|value| value == "not_all_gold_labeled_judged_cases_answer_supporting")
+    {
+        maturity_blocking_reasons
+            .push("not_all_gold_labeled_judged_cases_answer_supporting".to_string());
+    }
+    json!({
+        "boundary_version": "external_memory_local_semantic_retrieval_judge_v2",
+        "bench": bench,
+        "dataset": dataset,
+        "cases": cases_path,
+        "case_metrics": case_metrics_path,
+        "judge_results": judge_results_path,
+        "evidence_kind": "ranked_retrieval_preview_set_semantic_support_accounting",
+        "judge_kind": "local_ollama_semantic_retrieval_judge",
+        "judged_input_kind": "ranked_retrieval_preview_set",
+        "ranked_preview_limit_per_case": LOCAL_SEMANTIC_RETRIEVAL_RANKED_PREVIEW_LIMIT,
+        "status": if validation_blockers.is_empty() && blocked_cases == 0 && judged_cases > 0 {
+            "executed"
+        } else {
+            "blocked"
+        },
+        "case_count": cases.len(),
+        "runtime_case_metric_count": case_metrics.len(),
+        "judge_results_written": judge_results.len(),
+        "judge_results_materialized": validation_blockers.is_empty() && judge_results.len() == cases.len(),
+        "live_local_llm_judge_run": live_judge_attempts > 0,
+        "live_local_llm_judge_attempts": live_judge_attempts,
+        "retrieval_evidence_cases": retrieval_evidence_cases,
+        "retrieval_evidence_rate": ratio(retrieval_evidence_cases, cases.len()),
+        "no_retrieval_evidence_cases": no_retrieval_evidence_cases,
+        "ranked_preview_cases": ranked_preview_cases,
+        "ranked_preview_cases_rate": ratio(ranked_preview_cases, cases.len()),
+        "multi_preview_cases": multi_preview_cases,
+        "multi_preview_cases_rate": ratio(multi_preview_cases, cases.len()),
+        "legacy_single_preview_fallback_cases": legacy_single_preview_fallback_cases,
+        "ranked_preview_items_total": ranked_preview_items_total,
+        "ranked_preview_items_judged_total": ranked_preview_items_judged_total,
+        "avg_ranked_preview_items_per_judged_case": average_usize(
+            judge_results
+                .iter()
+                .filter(|item| item.status == "judged")
+                .map(|item| item.ranked_retrieval_previews.len())
+        ),
+        "max_ranked_preview_items_in_case": max_ranked_preview_items_in_case,
+        "judged_cases": judged_cases,
+        "judged_rate": ratio(judged_cases, retrieval_evidence_cases),
+        "blocked_cases": blocked_cases,
+        "question_relevant_cases": question_relevant_cases,
+        "question_relevant_rate": ratio(question_relevant_cases, judged_cases),
+        "question_irrelevant_cases": question_irrelevant_cases,
+        "all_judged_cases_semantically_relevant": judged_cases > 0 && question_relevant_cases == judged_cases,
+        "gold_labeled_cases": gold_labeled_cases,
+        "gold_labeled_judged_cases": gold_labeled_judged_cases,
+        "gold_answer_supported_cases": gold_answer_supported_cases,
+        "gold_answer_supported_rate": ratio(gold_answer_supported_cases, gold_labeled_judged_cases),
+        "gold_answer_unsupported_cases": gold_answer_unsupported_cases,
+        "all_gold_labeled_judged_cases_answer_supporting": gold_labeled_judged_cases > 0 && gold_answer_supported_cases == gold_labeled_judged_cases,
+        "case_blocker_counts": case_blocker_counts,
+        "validation_blocking_reasons": validation_blocking_reasons,
+        "judge_failure_examples": judge_failure_examples,
+        "requested_model": model,
+        "default_local_model": LOCAL_SEMANTIC_RETRIEVAL_JUDGE_DEFAULT_MODEL,
+        "ollama_base_url": normalized_ollama_base_url,
+        "official_upstream_provenance_eligible": false,
+        "official_upstream_scorer_parity": false,
+        "semantic_precision_maturity": false,
+        "benchmark_grade_maturity": false,
+        "maturity_blocking_reasons": maturity_blocking_reasons,
+    })
 }
 
 fn memory_local_judge_execution_summary(
@@ -2303,6 +3094,7 @@ fn load_memory_runtime_case_metrics_jsonl(path: &Path) -> Result<Vec<MemoryRunti
             "retrieval_payload_top_ranked_gold_answer_supported",
             "retrieval_payload_top_ranked_preview_supports_gold_answer",
             "retrieval_top_ranked_structural_fact_supported",
+            "retrieval_payload_ranked_previews",
             "runtime_corpus_reused_from_previous_case",
         ] {
             if value.get(required_flag).is_none() {
@@ -3198,12 +3990,14 @@ fn extract_amai_memory_answer_from_hits(
             )
         })
         .unwrap_or(false);
-    let payload_top_ranked = retrieval_payload_top_ranked_item(
+    let payload_ranked_previews = retrieval_payload_ranked_previews(
         payload,
         &request.question,
         request.expected_answer.as_deref(),
         runtime_root,
+        LOCAL_SEMANTIC_RETRIEVAL_RANKED_PREVIEW_LIMIT,
     );
+    let payload_top_ranked = payload_ranked_previews.first();
     emit_gold_support_debug_trace(
         request,
         &ranked,
@@ -3264,6 +4058,7 @@ fn extract_amai_memory_answer_from_hits(
                     retrieval_top_ranked_structural_fact_supported: payload_top_ranked
                         .as_ref()
                         .map(|item| item.structural_fact_supported),
+                    retrieval_payload_ranked_previews: payload_ranked_previews.clone(),
                     benchmark_specific_answer_extraction_used: predicted_answer.benchmark_specific,
                 };
             }
@@ -3307,6 +4102,7 @@ fn extract_amai_memory_answer_from_hits(
                 retrieval_top_ranked_structural_fact_supported: payload_top_ranked
                     .as_ref()
                     .map(|item| item.structural_fact_supported),
+                retrieval_payload_ranked_previews: payload_ranked_previews.clone(),
                 benchmark_specific_answer_extraction_used: predicted_answer.benchmark_specific,
             };
         }
@@ -3376,6 +4172,7 @@ fn extract_amai_memory_answer_from_hits(
         retrieval_top_ranked_structural_fact_supported: payload_top_ranked
             .as_ref()
             .map(|item| item.structural_fact_supported),
+        retrieval_payload_ranked_previews: payload_ranked_previews,
         benchmark_specific_answer_extraction_used: predicted_answer.benchmark_specific,
     }
 }
@@ -3386,15 +4183,20 @@ fn extend_runtime_payload_item_snippets(
     runtime_root: &Path,
     prefer_full_document: bool,
 ) {
+    if prefer_full_document && let Some(cleaned) = read_exact_document_source_body(item) {
+        extend_benchmark_candidate_snippets(snippets, &cleaned);
+        return;
+    }
     if prefer_full_document
         && let Some(relative_path) = item.get("relative_path").and_then(Value::as_str)
     {
-        let candidate_path = runtime_root.join(relative_path);
-        if let Ok(raw) = fs::read_to_string(&candidate_path) {
-            let cleaned = extract_details_body(&raw);
-            if !cleaned.is_empty() {
-                extend_benchmark_candidate_snippets(snippets, &cleaned);
-                return;
+        if let Some(candidate_path) = resolve_safe_repo_file_path(runtime_root, relative_path) {
+            if let Ok(raw) = fs::read_to_string(&candidate_path) {
+                let cleaned = extract_details_body(&raw);
+                if !cleaned.is_empty() {
+                    extend_benchmark_candidate_snippets(snippets, &cleaned);
+                    return;
+                }
             }
         }
     }
@@ -3407,6 +4209,66 @@ fn extend_runtime_payload_item_snippets(
             }
         }
     }
+}
+
+fn read_exact_document_source_body(item: &Value) -> Option<String> {
+    let candidate_path = resolve_exact_document_source_path(item)?;
+    let raw = fs::read_to_string(candidate_path).ok()?;
+    let cleaned = extract_details_body(&raw);
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+fn resolve_exact_document_source_path(item: &Value) -> Option<PathBuf> {
+    let provenance = item.get("provenance")?.as_object()?;
+    let repo_root = Path::new(provenance.get("repo_root")?.as_str()?.trim());
+    if repo_root.as_os_str().is_empty() {
+        return None;
+    }
+    for candidate in [
+        provenance.get("path").and_then(Value::as_str),
+        item.get("relative_path").and_then(Value::as_str),
+    ] {
+        let Some(candidate) = candidate else {
+            continue;
+        };
+        let candidate = candidate.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        if let Some(candidate_path) = resolve_safe_repo_file_path(repo_root, candidate) {
+            return Some(candidate_path);
+        }
+    }
+    None
+}
+
+fn retrieval_payload_item_safe_relative_path(item: &Value) -> Option<String> {
+    let provenance = item.get("provenance")?.as_object()?;
+    let repo_root = Path::new(provenance.get("repo_root")?.as_str()?.trim());
+    let canonical_repo_root = repo_root.canonicalize().ok()?;
+    let candidate_path = resolve_exact_document_source_path(item)?;
+    let relative_path = candidate_path.strip_prefix(&canonical_repo_root).ok()?;
+    let relative_path = relative_path.to_string_lossy().into_owned();
+    if relative_path.is_empty() {
+        None
+    } else {
+        Some(relative_path)
+    }
+}
+
+fn resolve_safe_repo_file_path(repo_root: &Path, candidate_path: &str) -> Option<PathBuf> {
+    let canonical_repo_root = repo_root.canonicalize().ok()?;
+    let candidate_path = Path::new(candidate_path);
+    let candidate_path = if candidate_path.is_absolute() {
+        candidate_path.to_path_buf()
+    } else {
+        repo_root.join(candidate_path)
+    };
+    let canonical_candidate = candidate_path.canonicalize().ok()?;
+    if !canonical_candidate.starts_with(&canonical_repo_root) || !canonical_candidate.is_file() {
+        return None;
+    }
+    Some(canonical_candidate)
 }
 
 fn benchmark_gold_answer_available(answer: Option<&str>) -> bool {
@@ -3554,7 +4416,8 @@ fn retrieval_payload_relevance_score(payload: &Value, question: &str) -> usize {
             continue;
         };
         for item in items {
-            for snippet in retrieval_payload_item_candidate_snippets(item) {
+            for snippet in retrieval_payload_item_candidate_snippets(item, key == "exact_documents")
+            {
                 best_score = best_score.max(score_benchmark_candidate(question, &snippet));
             }
         }
@@ -3562,8 +4425,15 @@ fn retrieval_payload_relevance_score(payload: &Value, question: &str) -> usize {
     best_score
 }
 
-fn retrieval_payload_item_candidate_snippets(item: &Value) -> Vec<String> {
+fn retrieval_payload_item_candidate_snippets(
+    item: &Value,
+    prefer_full_document: bool,
+) -> Vec<String> {
     let mut snippets = Vec::new();
+    if prefer_full_document && let Some(cleaned) = read_exact_document_source_body(item) {
+        extend_benchmark_candidate_snippets(&mut snippets, &cleaned);
+        return snippets;
+    }
     for key in ["snippet", "content", "text", "details", "body"] {
         if let Some(value) = item.get(key).and_then(Value::as_str) {
             let cleaned = extract_details_body(value);
@@ -3665,7 +4535,8 @@ fn retrieval_payload_top_candidate_snippets(payload: &Value, question: &str) -> 
             continue;
         };
         for item in items {
-            for snippet in retrieval_payload_item_candidate_snippets(item) {
+            for snippet in retrieval_payload_item_candidate_snippets(item, key == "exact_documents")
+            {
                 let score = score_benchmark_candidate(question, &snippet);
                 scored.push((score, snippet));
             }
@@ -3679,14 +4550,16 @@ fn retrieval_payload_top_candidate_snippets(payload: &Value, question: &str) -> 
     scored.into_iter().map(|(_, snippet)| snippet).collect()
 }
 
-fn retrieval_payload_top_ranked_item(
+fn retrieval_payload_ranked_previews(
     payload: &Value,
     question: &str,
     expected_answer: Option<&str>,
     runtime_root: &Path,
-) -> Option<PayloadTopRankedRetrieval> {
+    limit: usize,
+) -> Vec<MemoryRuntimeRankedRetrievalPreview> {
     let retrieval = payload.get("retrieval").and_then(Value::as_object);
-    let mut best: Option<PayloadTopRankedRetrieval> = None;
+    let mut seen: HashSet<(Option<String>, String)> = HashSet::new();
+    let mut ranked = Vec::new();
     for key in ["exact_documents", "lexical_chunks", "semantic_chunks"] {
         let Some(items) = retrieval
             .and_then(|node| node.get(key))
@@ -3695,10 +4568,7 @@ fn retrieval_payload_top_ranked_item(
             continue;
         };
         for item in items {
-            let relative_path = item
-                .get("relative_path")
-                .and_then(Value::as_str)
-                .map(|value| value.to_string());
+            let relative_path = retrieval_payload_item_safe_relative_path(item);
             let mut snippets = Vec::new();
             extend_runtime_payload_item_snippets(
                 &mut snippets,
@@ -3710,45 +4580,66 @@ fn retrieval_payload_top_ranked_item(
                 if snippet.trim().is_empty() {
                     continue;
                 }
-                let candidate = PayloadTopRankedRetrieval {
+                let preview =
+                    render_payload_top_ranked_preview(question, expected_answer, &snippet, 240);
+                let dedupe_key = (relative_path.clone(), preview.clone());
+                if !seen.insert(dedupe_key) {
+                    continue;
+                }
+                let supports_gold_answer =
+                    snippet_supports_gold_answer(question, expected_answer, &snippet);
+                ranked.push(PayloadTopRankedRetrieval {
                     score: score_benchmark_candidate(question, &snippet),
                     snippet_len: snippet.len(),
                     relative_path: relative_path.clone(),
-                    preview: render_payload_top_ranked_preview(
-                        question,
-                        expected_answer,
-                        &snippet,
-                        240,
-                    ),
-                    supports_gold_answer: snippet_supports_gold_answer(
-                        question,
-                        expected_answer,
-                        &snippet,
-                    ),
-                    preview_supports_gold_answer: false,
-                    structural_fact_supported: extract_anchored_fact_answer(question, &snippet)
-                        .is_some_and(|value| !value.benchmark_specific && !value.answer.is_empty()),
-                };
-                let candidate = PayloadTopRankedRetrieval {
                     preview_supports_gold_answer: snippet_supports_gold_answer(
                         question,
                         expected_answer,
-                        &candidate.preview,
+                        &preview,
                     ),
-                    ..candidate
-                };
-                let should_replace = best.as_ref().is_none_or(|current| {
-                    candidate.score > current.score
-                        || (candidate.score == current.score
-                            && candidate.snippet_len < current.snippet_len)
+                    preview,
+                    supports_gold_answer,
+                    structural_fact_supported: extract_anchored_fact_answer(question, &snippet)
+                        .is_some_and(|value| !value.benchmark_specific && !value.answer.is_empty()),
                 });
-                if should_replace {
-                    best = Some(candidate);
-                }
             }
         }
     }
-    best
+    ranked.sort_by(compare_payload_top_ranked_retrievals);
+    ranked
+        .into_iter()
+        .take(limit.max(1))
+        .enumerate()
+        .map(|(idx, item)| MemoryRuntimeRankedRetrievalPreview {
+            rank: idx + 1,
+            score: item.score,
+            relative_path: item.relative_path,
+            preview: item.preview,
+            supports_gold_answer: item.supports_gold_answer,
+            preview_supports_gold_answer: item.preview_supports_gold_answer,
+            structural_fact_supported: item.structural_fact_supported,
+        })
+        .collect()
+}
+
+fn retrieval_payload_top_ranked_item(
+    payload: &Value,
+    question: &str,
+    expected_answer: Option<&str>,
+    runtime_root: &Path,
+) -> Option<PayloadTopRankedRetrieval> {
+    retrieval_payload_ranked_previews(payload, question, expected_answer, runtime_root, 1)
+        .into_iter()
+        .next()
+        .map(|item| PayloadTopRankedRetrieval {
+            score: item.score,
+            snippet_len: item.preview.len(),
+            relative_path: item.relative_path,
+            preview: item.preview,
+            supports_gold_answer: item.supports_gold_answer,
+            preview_supports_gold_answer: item.preview_supports_gold_answer,
+            structural_fact_supported: item.structural_fact_supported,
+        })
 }
 
 fn render_payload_top_ranked_preview(
@@ -9674,28 +10565,30 @@ mod tests {
         AdapterStatus, AnnLiveProgress, BenchmarkContextDocument, BenchmarkRuntimeMarkers,
         ExternalBenchmarkEntry, ExternalBenchmarkFile, ExternalBenchmarkMemoryRuntimePolicy,
         ExternalBenchmarkSource, ExternalDatasetEntry, ExternalDatasetFile, ExternalDatasetStorage,
-        ExternalResultSummary, LONGMEMEVAL_LOCAL_JUDGE_SOURCE_KIND,
-        LONGMEMEVAL_LOCAL_JUDGE_TRANSPORT_KIND, LONGMEMEVAL_NON_OFFICIAL_JUDGE_SOURCE_KIND,
-        LONGMEMEVAL_OFFICIAL_JUDGE_MAX_ATTEMPTS, MemoryBenchStats, MemoryRuntimeCaseMetric,
+        ExternalResultSummary, LOCAL_SEMANTIC_RETRIEVAL_JUDGE_SOURCE_KIND,
+        LONGMEMEVAL_LOCAL_JUDGE_SOURCE_KIND, LONGMEMEVAL_LOCAL_JUDGE_TRANSPORT_KIND,
+        LONGMEMEVAL_NON_OFFICIAL_JUDGE_SOURCE_KIND, LONGMEMEVAL_OFFICIAL_JUDGE_MAX_ATTEMPTS,
+        MemoryBenchStats, MemoryRuntimeCaseMetric, MemoryRuntimeRankedRetrievalPreview,
         MemoryRuntimeStageMetrics, MemoryScoreStats, OFFICIAL_JUDGE_REDACTION_MARKER,
-        VectorDbBenchBundle, adapter_compatibility_overrides, ann_benchmark_dataset_name,
-        ann_qdrant_launch_marker, benchmark_question_prefers_context_first,
-        benchmark_relaxed_retrieval_query, benchmark_relaxed_retrieval_query_override,
-        benchmark_relaxed_retrieval_terms, benchmark_run_summary_for_qdrant_http_url,
-        benchmark_runtime_corpus_sha256, benchmark_runtime_markers,
-        benchmark_runtime_target_window_bytes, build_launch_commands,
+        PayloadTopRankedRetrieval, VectorDbBenchBundle, adapter_compatibility_overrides,
+        ann_benchmark_dataset_name, ann_qdrant_launch_marker,
+        benchmark_question_prefers_context_first, benchmark_relaxed_retrieval_query,
+        benchmark_relaxed_retrieval_query_override, benchmark_relaxed_retrieval_terms,
+        benchmark_run_summary_for_qdrant_http_url, benchmark_runtime_corpus_sha256,
+        benchmark_runtime_markers, benchmark_runtime_target_window_bytes, build_launch_commands,
         build_memory_runtime_answer_source_boundary,
         build_memory_runtime_gold_answer_relevance_boundary, build_memory_runtime_metrics_summary,
         build_memory_runtime_retrieval_relevance_boundary,
         classify_official_judge_execution_failure,
         coalesce_benchmark_runtime_documents_with_target,
         command_matches_benchmark_runtime_markers, command_output_with_timeout,
-        determine_adapter_status, execute_longmemeval_local_judge_live,
-        execute_longmemeval_official_judge_live, extend_benchmark_candidate_snippets,
-        extend_runtime_payload_item_snippets, external_memory_secret_artifact_scan_summary,
-        extract_answer_from_context, extract_origin_country_clause,
-        find_untracked_ann_benchmark_process, latest_ann_live_progress,
-        load_memory_runtime_case_metrics_jsonl, load_registry, load_requests_jsonl,
+        compare_payload_top_ranked_retrievals, determine_adapter_status,
+        execute_longmemeval_local_judge_live, execute_longmemeval_official_judge_live,
+        extend_benchmark_candidate_snippets, extend_runtime_payload_item_snippets,
+        external_memory_secret_artifact_scan_summary, extract_answer_from_context,
+        extract_origin_country_clause, find_untracked_ann_benchmark_process,
+        latest_ann_live_progress, load_memory_runtime_case_metrics_jsonl, load_registry,
+        load_requests_jsonl, local_semantic_retrieval_judge_prompt,
         longmemeval_official_answer_check_prompt, longmemeval_official_label_from_response,
         memory_local_score_reconciliation, memory_official_judge_execution_summary,
         memory_official_score_reconciliation, memory_official_scorer_boundary,
@@ -9704,8 +10597,9 @@ mod tests {
         persist_reconciled_run_status, prepare_memory_cases_from_json, recommended_datasets,
         reconcile_run_status, reconcile_run_status_with_runtime, redact_official_judge_secret,
         render_adapter_script, resolve_benchmark, resolve_dataset,
-        retrieval_payload_item_candidate_snippets, retrieval_payload_relevance_score,
-        retrieval_payload_top_ranked_item, run_external_memory_local_judge,
+        retrieval_payload_item_candidate_snippets, retrieval_payload_ranked_previews,
+        retrieval_payload_relevance_score, retrieval_payload_top_ranked_item,
+        run_external_memory_local_judge, run_external_memory_local_retrieval_judge,
         run_external_memory_official_judge, runtime_corpus_reuse_allowed,
         score_benchmark_candidate, score_case, snippet_supports_gold_answer,
         split_benchmark_context_documents, validate_longmemeval_official_judge_inputs,
@@ -9871,6 +10765,28 @@ mod tests {
             cases_path,
             predictions_path,
             eval_results_path,
+            summary_path,
+        )
+    }
+
+    fn write_single_local_semantic_retrieval_fixture(
+        temp_root: &Path,
+        case: Value,
+        case_metric: Value,
+    ) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        fs::create_dir_all(temp_root).expect("create temp root");
+        let cases_path = temp_root.join("cases.jsonl");
+        let case_metrics_path = temp_root.join("predictions.jsonl.case-metrics.jsonl");
+        let judge_results_path = temp_root.join("retrieval-judge-results.jsonl");
+        let summary_path = temp_root.join("retrieval-judge-summary.json");
+
+        write_jsonl_values(&cases_path, &[case]).expect("write cases");
+        write_jsonl_values(&case_metrics_path, &[case_metric]).expect("write case metrics");
+
+        (
+            cases_path,
+            case_metrics_path,
+            judge_results_path,
             summary_path,
         )
     }
@@ -11254,6 +12170,738 @@ query = "Norse OR Denmark OR Iceland OR Norway"
     }
 
     #[test]
+    fn local_semantic_retrieval_prompt_spells_out_overlap_guard() {
+        let mut metric = test_memory_runtime_case_metric("case-overlap", 1, 0, false);
+        metric.retrieval_payload_ranked_previews = vec![
+            MemoryRuntimeRankedRetrievalPreview {
+                rank: 1,
+                score: 2,
+                relative_path: Some("notes/day1.md".to_string()),
+                preview: "Alice mentioned Paris many times in old notes.".to_string(),
+                supports_gold_answer: false,
+                preview_supports_gold_answer: false,
+                structural_fact_supported: false,
+            },
+            MemoryRuntimeRankedRetrievalPreview {
+                rank: 2,
+                score: 1,
+                relative_path: Some("notes/day2.md".to_string()),
+                preview: "Later notes mention London in passing.".to_string(),
+                supports_gold_answer: false,
+                preview_supports_gold_answer: false,
+                structural_fact_supported: false,
+            },
+        ];
+
+        let prompt = local_semantic_retrieval_judge_prompt(
+            "Where did Alice move after Paris?",
+            Some("London"),
+            &metric.retrieval_payload_ranked_previews,
+        )
+        .expect("prompt");
+
+        assert!(prompt.contains("Mere term overlap is not enough"));
+        assert!(prompt.contains("Use the preview set as combined evidence"));
+        assert!(prompt.contains("\"benchmark_answer\": \"London\""));
+        assert!(prompt.contains("\"ranked_retrieval_previews\""));
+    }
+
+    #[tokio::test]
+    async fn local_semantic_retrieval_judge_materializes_judged_entry_and_summary() {
+        let temp_root = unique_temp_root("amai-local-semantic-retrieval-happy");
+        let case = json!({
+            "bench": "memoryagentbench",
+            "dataset": "memoryagentbench_accurate_retrieval",
+            "case_id": "case-norse",
+            "question": "From which countries did the Norse originate?",
+            "answer": "Denmark and Norway",
+        });
+        let mut case_metric =
+            serde_json::to_value(test_memory_runtime_case_metric("case-norse", 1, 0, false))
+                .expect("metric value");
+        case_metric["bench"] = json!("memoryagentbench");
+        case_metric["dataset"] = json!("memoryagentbench_accurate_retrieval");
+        case_metric["question"] = json!("From which countries did the Norse originate?");
+        case_metric["retrieval_query"] = json!("Norse countries origin");
+        case_metric["retrieval_payload_top_ranked_relative_path"] = json!("docs/norse.md");
+        case_metric["retrieval_payload_top_ranked_preview"] =
+            json!("The Norse originated from present-day Denmark and Norway.");
+        case_metric["retrieval_payload_top_ranked_gold_answer_supported"] = json!(true);
+        case_metric["retrieval_payload_top_ranked_preview_supports_gold_answer"] = json!(true);
+        case_metric["retrieval_top_ranked_structural_fact_supported"] = json!(true);
+        case_metric["retrieval_payload_ranked_previews"] = json!([
+            {
+                "rank": 1,
+                "score": 2,
+                "relative_path": "docs/norse.md",
+                "preview": "The Norse originated from present-day Denmark and Norway.",
+                "supports_gold_answer": true,
+                "preview_supports_gold_answer": true,
+                "structural_fact_supported": true
+            },
+            {
+                "rank": 2,
+                "score": 1,
+                "relative_path": "docs/context.md",
+                "preview": "Scandinavian kingdoms shaped early Norse expansion.",
+                "supports_gold_answer": false,
+                "preview_supports_gold_answer": false,
+                "structural_fact_supported": false
+            }
+        ]);
+
+        let (cases_path, case_metrics_path, judge_results_path, summary_path) =
+            write_single_local_semantic_retrieval_fixture(&temp_root, case, case_metric);
+        let (addr, server) = fake_chat_completion_server(
+            "HTTP/1.1 200 OK",
+            r#"{"message":{"content":"{\"question_relevant\":true,\"supports_gold_answer\":true,\"reason\":\"Preview directly states the origin countries.\"}"}}"#,
+            1,
+        )
+        .await;
+
+        run_external_memory_local_retrieval_judge(
+            None,
+            &cases_path,
+            &case_metrics_path,
+            &judge_results_path,
+            Some(&summary_path),
+            &format!("http://{addr}"),
+            "gemma4:e4b",
+        )
+        .await
+        .expect("semantic retrieval judge");
+        let requests = server.await.expect("server join");
+        let summary_text = fs::read_to_string(&summary_path).expect("summary text");
+        let summary: Value = serde_json::from_str(&summary_text).expect("summary json");
+        let judge_results_text =
+            fs::read_to_string(&judge_results_path).expect("judge results text");
+        let judge_result: Value =
+            serde_json::from_str(judge_results_text.lines().next().expect("one line"))
+                .expect("judge result json");
+
+        assert_eq!(summary["status"], json!("executed"));
+        assert_eq!(
+            summary["boundary_version"],
+            json!("external_memory_local_semantic_retrieval_judge_v2")
+        );
+        assert_eq!(summary["judge_results_materialized"], json!(true));
+        assert_eq!(summary["judged_cases"], json!(1));
+        assert_eq!(summary["question_relevant_cases"], json!(1));
+        assert_eq!(summary["gold_answer_supported_cases"], json!(1));
+        assert_eq!(summary["multi_preview_cases"], json!(1));
+        assert_eq!(summary["legacy_single_preview_fallback_cases"], json!(0));
+        assert_eq!(
+            summary["official_upstream_provenance_eligible"],
+            json!(false)
+        );
+        assert_eq!(judge_result["status"], json!("judged"));
+        assert_eq!(
+            judge_result["semantic_verdict"]["question_relevant"],
+            json!(true)
+        );
+        assert_eq!(
+            judge_result["semantic_verdict"]["supports_gold_answer"],
+            json!(true)
+        );
+        assert_eq!(
+            judge_result["local_semantic_retrieval_judge_provenance"]["source_kind"],
+            json!(LOCAL_SEMANTIC_RETRIEVAL_JUDGE_SOURCE_KIND)
+        );
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /api/chat "));
+        assert!(requests[0].contains(r#""format":"json""#));
+        assert!(requests[0].contains("Mere term overlap is not enough"));
+    }
+
+    #[tokio::test]
+    async fn local_semantic_retrieval_judge_blocks_invalid_response_contract_per_case() {
+        let temp_root = unique_temp_root("amai-local-semantic-retrieval-contract-failure");
+        let case = json!({
+            "bench": "longmemeval",
+            "dataset": "proof",
+            "case_id": "case-user",
+            "question": "Where did I buy coffee?",
+            "answer": "The corner shop",
+            "metadata": {
+                "question_type": "single-session-user",
+            },
+        });
+        let mut case_metric =
+            serde_json::to_value(test_memory_runtime_case_metric("case-user", 1, 0, false))
+                .expect("metric value");
+        case_metric["bench"] = json!("longmemeval");
+        case_metric["dataset"] = json!("proof");
+        case_metric["question"] = json!("Where did I buy coffee?");
+        case_metric["retrieval_query"] = json!("coffee bought");
+        case_metric["retrieval_payload_top_ranked_relative_path"] = json!("docs/coffee.md");
+        case_metric["retrieval_payload_top_ranked_preview"] =
+            json!("You bought coffee near the corner shop.");
+        case_metric["retrieval_payload_top_ranked_gold_answer_supported"] = json!(true);
+        case_metric["retrieval_payload_top_ranked_preview_supports_gold_answer"] = json!(true);
+        case_metric["retrieval_top_ranked_structural_fact_supported"] = json!(true);
+        case_metric["retrieval_payload_ranked_previews"] = json!([
+            {
+                "rank": 1,
+                "score": 2,
+                "relative_path": "docs/coffee.md",
+                "preview": "You bought coffee near the corner shop.",
+                "supports_gold_answer": true,
+                "preview_supports_gold_answer": true,
+                "structural_fact_supported": true
+            }
+        ]);
+
+        let (cases_path, case_metrics_path, judge_results_path, summary_path) =
+            write_single_local_semantic_retrieval_fixture(&temp_root, case, case_metric);
+        let (addr, server) = fake_chat_completion_server(
+            "HTTP/1.1 200 OK",
+            r#"{"message":{"content":"not-json"}}"#,
+            1,
+        )
+        .await;
+
+        run_external_memory_local_retrieval_judge(
+            None,
+            &cases_path,
+            &case_metrics_path,
+            &judge_results_path,
+            Some(&summary_path),
+            &format!("http://{addr}"),
+            "gemma4:e4b",
+        )
+        .await
+        .expect("semantic retrieval judge should summarize invalid response");
+        let requests = server.await.expect("server join");
+        let summary: Value =
+            serde_json::from_str(&fs::read_to_string(&summary_path).expect("summary text"))
+                .expect("summary json");
+        let judge_result: Value = serde_json::from_str(
+            fs::read_to_string(&judge_results_path)
+                .expect("judge results")
+                .lines()
+                .next()
+                .expect("one line"),
+        )
+        .expect("judge result json");
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(summary["status"], json!("blocked"));
+        assert_eq!(summary["live_local_llm_judge_attempts"], json!(1));
+        assert_eq!(summary["blocked_cases"], json!(1));
+        assert_eq!(
+            summary["case_blocker_counts"]["local_semantic_retrieval_judge_response_contract_invalid"],
+            json!(1)
+        );
+        assert_eq!(judge_result["status"], json!("blocked"));
+    }
+
+    #[tokio::test]
+    async fn local_semantic_retrieval_judge_skips_live_call_when_preview_missing() {
+        let temp_root = unique_temp_root("amai-local-semantic-retrieval-missing-preview");
+        let case = json!({
+            "bench": "memoryagentbench",
+            "dataset": "memoryagentbench_accurate_retrieval",
+            "case_id": "case-missing-preview",
+            "question": "From which countries did the Norse originate?",
+            "answer": "Denmark and Norway",
+        });
+        let mut case_metric = serde_json::to_value(test_memory_runtime_case_metric(
+            "case-missing-preview",
+            1,
+            0,
+            false,
+        ))
+        .expect("metric value");
+        case_metric["bench"] = json!("memoryagentbench");
+        case_metric["dataset"] = json!("memoryagentbench_accurate_retrieval");
+        case_metric["question"] = json!("From which countries did the Norse originate?");
+        case_metric["retrieval_query"] = json!("Norse countries origin");
+        case_metric["retrieval_payload_top_ranked_relative_path"] = json!("docs/norse.md");
+        case_metric["retrieval_payload_top_ranked_preview"] = Value::Null;
+        case_metric["retrieval_payload_top_ranked_gold_answer_supported"] = json!(false);
+        case_metric["retrieval_payload_top_ranked_preview_supports_gold_answer"] = Value::Null;
+        case_metric["retrieval_top_ranked_structural_fact_supported"] = Value::Null;
+        case_metric["retrieval_payload_ranked_previews"] = json!([]);
+
+        let (cases_path, case_metrics_path, judge_results_path, summary_path) =
+            write_single_local_semantic_retrieval_fixture(&temp_root, case, case_metric);
+
+        run_external_memory_local_retrieval_judge(
+            None,
+            &cases_path,
+            &case_metrics_path,
+            &judge_results_path,
+            Some(&summary_path),
+            "http://127.0.0.1:11434",
+            "gemma4:e4b",
+        )
+        .await
+        .expect("semantic retrieval judge should summarize missing preview");
+        let summary: Value =
+            serde_json::from_str(&fs::read_to_string(&summary_path).expect("summary text"))
+                .expect("summary json");
+        let judge_result: Value = serde_json::from_str(
+            fs::read_to_string(&judge_results_path)
+                .expect("judge results")
+                .lines()
+                .next()
+                .expect("one line"),
+        )
+        .expect("judge result json");
+
+        assert_eq!(summary["status"], json!("blocked"));
+        assert_eq!(summary["live_local_llm_judge_attempts"], json!(0));
+        assert_eq!(summary["blocked_cases"], json!(1));
+        assert_eq!(summary["legacy_single_preview_fallback_cases"], json!(0));
+        assert_eq!(
+            summary["case_blocker_counts"]["missing_ranked_retrieval_preview_set"],
+            json!(1)
+        );
+        assert_eq!(judge_result["status"], json!("blocked"));
+    }
+
+    #[tokio::test]
+    async fn local_semantic_retrieval_judge_rejects_legacy_only_preview_input() {
+        let temp_root = unique_temp_root("amai-local-semantic-retrieval-legacy-only-preview");
+        let case = json!({
+            "bench": "memoryagentbench",
+            "dataset": "memoryagentbench_accurate_retrieval",
+            "case_id": "case-legacy-only-preview",
+            "question": "From which countries did the Norse originate?",
+            "answer": "Denmark and Norway",
+        });
+        let mut case_metric = serde_json::to_value(test_memory_runtime_case_metric(
+            "case-legacy-only-preview",
+            1,
+            0,
+            false,
+        ))
+        .expect("metric value");
+        case_metric["bench"] = json!("memoryagentbench");
+        case_metric["dataset"] = json!("memoryagentbench_accurate_retrieval");
+        case_metric["question"] = json!("From which countries did the Norse originate?");
+        case_metric["retrieval_query"] = json!("Norse countries origin");
+        case_metric["retrieval_payload_top_ranked_relative_path"] = json!("docs/norse.md");
+        case_metric["retrieval_payload_top_ranked_preview"] =
+            json!("The Norse originated from present-day Denmark and Norway.");
+        case_metric["retrieval_payload_top_ranked_gold_answer_supported"] = json!(true);
+        case_metric["retrieval_payload_top_ranked_preview_supports_gold_answer"] = json!(true);
+        case_metric["retrieval_top_ranked_structural_fact_supported"] = json!(true);
+        case_metric["retrieval_payload_ranked_previews"] = json!([]);
+
+        let (cases_path, case_metrics_path, judge_results_path, summary_path) =
+            write_single_local_semantic_retrieval_fixture(&temp_root, case, case_metric);
+
+        run_external_memory_local_retrieval_judge(
+            None,
+            &cases_path,
+            &case_metrics_path,
+            &judge_results_path,
+            Some(&summary_path),
+            "http://127.0.0.1:11434",
+            "gemma4:e4b",
+        )
+        .await
+        .expect("semantic retrieval judge should fail closed on legacy-only preview input");
+        let summary: Value =
+            serde_json::from_str(&fs::read_to_string(&summary_path).expect("summary text"))
+                .expect("summary json");
+        let judge_result: Value = serde_json::from_str(
+            fs::read_to_string(&judge_results_path)
+                .expect("judge results")
+                .lines()
+                .next()
+                .expect("one line"),
+        )
+        .expect("judge result json");
+
+        assert_eq!(summary["status"], json!("blocked"));
+        assert_eq!(summary["live_local_llm_judge_attempts"], json!(0));
+        assert_eq!(summary["blocked_cases"], json!(1));
+        assert_eq!(summary["legacy_single_preview_fallback_cases"], json!(1));
+        assert_eq!(
+            summary["case_blocker_counts"]["missing_ranked_retrieval_preview_set"],
+            json!(1)
+        );
+        assert_eq!(judge_result["status"], json!("blocked"));
+    }
+
+    #[tokio::test]
+    async fn local_semantic_retrieval_judge_blocks_empty_inputs() {
+        let temp_root = unique_temp_root("amai-local-semantic-retrieval-empty-inputs");
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let cases_path = temp_root.join("cases.jsonl");
+        let case_metrics_path = temp_root.join("predictions.jsonl.case-metrics.jsonl");
+        let judge_results_path = temp_root.join("retrieval-judge-results.jsonl");
+        let summary_path = temp_root.join("retrieval-judge-summary.json");
+        fs::write(&cases_path, "").expect("write empty cases");
+        fs::write(&case_metrics_path, "").expect("write empty case metrics");
+
+        run_external_memory_local_retrieval_judge(
+            None,
+            &cases_path,
+            &case_metrics_path,
+            &judge_results_path,
+            Some(&summary_path),
+            "http://127.0.0.1:11434",
+            "gemma4:e4b",
+        )
+        .await
+        .expect("semantic retrieval judge should fail closed on empty inputs");
+        let summary: Value =
+            serde_json::from_str(&fs::read_to_string(&summary_path).expect("summary text"))
+                .expect("summary json");
+
+        assert_eq!(summary["status"], json!("blocked"));
+        assert_eq!(summary["judge_results_materialized"], json!(false));
+        assert_eq!(summary["live_local_llm_judge_attempts"], json!(0));
+        assert!(
+            summary["validation_blocking_reasons"]
+                .as_array()
+                .expect("validation blockers")
+                .iter()
+                .any(|value| value
+                    .as_str()
+                    .is_some_and(|text| text == "local_semantic_retrieval_reference_cases_empty"))
+        );
+        assert!(
+            summary["validation_blocking_reasons"]
+                .as_array()
+                .expect("validation blockers")
+                .iter()
+                .any(|value| value
+                    .as_str()
+                    .is_some_and(|text| text == "local_semantic_retrieval_case_metrics_empty"))
+        );
+        assert!(
+            !judge_results_path.exists(),
+            "judge results should not be materialized when inputs are empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_semantic_retrieval_judge_blocks_case_metric_dataset_mismatch() {
+        let temp_root = unique_temp_root("amai-local-semantic-retrieval-dataset-mismatch");
+        let case = json!({
+            "bench": "memoryagentbench",
+            "dataset": "memoryagentbench_accurate_retrieval",
+            "case_id": "case-corrupt",
+            "question": "From which countries did the Norse originate?",
+            "answer": "Denmark and Norway",
+        });
+        let mut case_metric =
+            serde_json::to_value(test_memory_runtime_case_metric("case-corrupt", 1, 0, false))
+                .expect("metric value");
+        case_metric["bench"] = json!("memoryagentbench");
+        case_metric["dataset"] = json!("corrupted_dataset");
+        case_metric["question"] = json!("From which countries did the Norse originate?");
+        case_metric["retrieval_query"] = json!("Norse countries origin");
+        case_metric["retrieval_payload_top_ranked_relative_path"] = json!("docs/norse.md");
+        case_metric["retrieval_payload_top_ranked_preview"] =
+            json!("The Norse originated from present-day Denmark and Norway.");
+        case_metric["retrieval_payload_top_ranked_gold_answer_supported"] = json!(true);
+        case_metric["retrieval_payload_top_ranked_preview_supports_gold_answer"] = json!(true);
+        case_metric["retrieval_top_ranked_structural_fact_supported"] = json!(true);
+        case_metric["retrieval_payload_ranked_previews"] = json!([
+            {
+                "rank": 1,
+                "score": 2,
+                "relative_path": "docs/norse.md",
+                "preview": "The Norse originated from present-day Denmark and Norway.",
+                "supports_gold_answer": true,
+                "preview_supports_gold_answer": true,
+                "structural_fact_supported": true
+            }
+        ]);
+
+        let (cases_path, case_metrics_path, judge_results_path, summary_path) =
+            write_single_local_semantic_retrieval_fixture(&temp_root, case, case_metric);
+
+        run_external_memory_local_retrieval_judge(
+            None,
+            &cases_path,
+            &case_metrics_path,
+            &judge_results_path,
+            Some(&summary_path),
+            "http://127.0.0.1:11434",
+            "gemma4:e4b",
+        )
+        .await
+        .expect("semantic retrieval judge should fail closed on case-metric dataset mismatch");
+        let summary: Value =
+            serde_json::from_str(&fs::read_to_string(&summary_path).expect("summary text"))
+                .expect("summary json");
+
+        assert_eq!(summary["status"], json!("blocked"));
+        assert_eq!(summary["judge_results_materialized"], json!(false));
+        assert_eq!(summary["live_local_llm_judge_attempts"], json!(0));
+        assert!(
+            summary["validation_blocking_reasons"]
+                .as_array()
+                .expect("validation blockers")
+                .iter()
+                .any(|value| value.as_str().is_some_and(|text| text.contains(
+                    "local_semantic_retrieval_case_metric_dataset_mismatch:case-corrupt"
+                )))
+        );
+        assert!(
+            !judge_results_path.exists(),
+            "judge results should not be materialized when case metrics mismatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_semantic_retrieval_judge_blocks_empty_ranked_preview_text() {
+        let temp_root = unique_temp_root("amai-local-semantic-retrieval-empty-preview-text");
+        let case = json!({
+            "bench": "memoryagentbench",
+            "dataset": "memoryagentbench_accurate_retrieval",
+            "case_id": "case-empty-preview",
+            "question": "From which countries did the Norse originate?",
+            "answer": "Denmark and Norway",
+        });
+        let mut case_metric = serde_json::to_value(test_memory_runtime_case_metric(
+            "case-empty-preview",
+            1,
+            0,
+            false,
+        ))
+        .expect("metric value");
+        case_metric["bench"] = json!("memoryagentbench");
+        case_metric["dataset"] = json!("memoryagentbench_accurate_retrieval");
+        case_metric["question"] = json!("From which countries did the Norse originate?");
+        case_metric["retrieval_query"] = json!("Norse countries origin");
+        case_metric["retrieval_payload_top_ranked_relative_path"] = json!("docs/norse.md");
+        case_metric["retrieval_payload_top_ranked_preview"] = json!("   ");
+        case_metric["retrieval_payload_top_ranked_gold_answer_supported"] = json!(true);
+        case_metric["retrieval_payload_top_ranked_preview_supports_gold_answer"] = json!(true);
+        case_metric["retrieval_top_ranked_structural_fact_supported"] = json!(true);
+        case_metric["retrieval_payload_ranked_previews"] = json!([
+            {
+                "rank": 1,
+                "score": 2,
+                "relative_path": "docs/norse.md",
+                "preview": "   ",
+                "supports_gold_answer": true,
+                "preview_supports_gold_answer": true,
+                "structural_fact_supported": true
+            }
+        ]);
+
+        let (cases_path, case_metrics_path, judge_results_path, summary_path) =
+            write_single_local_semantic_retrieval_fixture(&temp_root, case, case_metric);
+
+        run_external_memory_local_retrieval_judge(
+            None,
+            &cases_path,
+            &case_metrics_path,
+            &judge_results_path,
+            Some(&summary_path),
+            "http://127.0.0.1:11434",
+            "gemma4:e4b",
+        )
+        .await
+        .expect("semantic retrieval judge should fail closed on empty ranked preview text");
+        let summary: Value =
+            serde_json::from_str(&fs::read_to_string(&summary_path).expect("summary text"))
+                .expect("summary json");
+        let judge_result: Value = serde_json::from_str(
+            fs::read_to_string(&judge_results_path)
+                .expect("judge results")
+                .lines()
+                .next()
+                .expect("one line"),
+        )
+        .expect("judge result json");
+
+        assert_eq!(summary["status"], json!("blocked"));
+        assert_eq!(summary["judge_results_materialized"], json!(true));
+        assert_eq!(summary["live_local_llm_judge_attempts"], json!(0));
+        assert!(
+            summary["case_blocker_counts"]
+                .as_object()
+                .expect("case blockers")
+                .iter()
+                .any(|(key, value)| {
+                    key.contains(
+                        "local_semantic_retrieval_ranked_preview_empty_text:case-empty-preview:1",
+                    ) && value == &json!(1)
+                })
+        );
+        assert_eq!(summary["blocked_cases"], json!(1));
+        assert_eq!(summary["judge_results_written"], json!(1));
+        assert_eq!(judge_result["status"], json!("blocked"));
+    }
+
+    #[tokio::test]
+    async fn local_semantic_retrieval_judge_blocks_missing_ranked_preview_relative_path() {
+        let temp_root = unique_temp_root("amai-local-semantic-retrieval-missing-preview-path");
+        let case = json!({
+            "bench": "memoryagentbench",
+            "dataset": "memoryagentbench_accurate_retrieval",
+            "case_id": "case-missing-preview-path",
+            "question": "From which countries did the Norse originate?",
+            "answer": "Denmark and Norway",
+        });
+        let mut case_metric = serde_json::to_value(test_memory_runtime_case_metric(
+            "case-missing-preview-path",
+            1,
+            0,
+            false,
+        ))
+        .expect("metric value");
+        case_metric["bench"] = json!("memoryagentbench");
+        case_metric["dataset"] = json!("memoryagentbench_accurate_retrieval");
+        case_metric["question"] = json!("From which countries did the Norse originate?");
+        case_metric["retrieval_query"] = json!("Norse countries origin");
+        case_metric["retrieval_payload_top_ranked_relative_path"] = Value::Null;
+        case_metric["retrieval_payload_top_ranked_preview"] =
+            json!("The Norse originated from Denmark and Norway.");
+        case_metric["retrieval_payload_top_ranked_gold_answer_supported"] = json!(true);
+        case_metric["retrieval_payload_top_ranked_preview_supports_gold_answer"] = json!(true);
+        case_metric["retrieval_top_ranked_structural_fact_supported"] = json!(true);
+        case_metric["retrieval_payload_ranked_previews"] = json!([
+            {
+                "rank": 1,
+                "score": 2,
+                "preview": "The Norse originated from Denmark and Norway.",
+                "supports_gold_answer": true,
+                "preview_supports_gold_answer": true,
+                "structural_fact_supported": true
+            }
+        ]);
+
+        let (cases_path, case_metrics_path, judge_results_path, summary_path) =
+            write_single_local_semantic_retrieval_fixture(&temp_root, case, case_metric);
+
+        run_external_memory_local_retrieval_judge(
+            None,
+            &cases_path,
+            &case_metrics_path,
+            &judge_results_path,
+            Some(&summary_path),
+            "http://127.0.0.1:11434",
+            "gemma4:e4b",
+        )
+        .await
+        .expect("semantic retrieval judge should fail closed on missing ranked preview path");
+        let summary: Value =
+            serde_json::from_str(&fs::read_to_string(&summary_path).expect("summary text"))
+                .expect("summary json");
+        let judge_result: Value = serde_json::from_str(
+            fs::read_to_string(&judge_results_path)
+                .expect("judge results")
+                .lines()
+                .next()
+                .expect("one line"),
+        )
+        .expect("judge result json");
+
+        assert_eq!(summary["status"], json!("blocked"));
+        assert_eq!(summary["judge_results_materialized"], json!(true));
+        assert_eq!(summary["live_local_llm_judge_attempts"], json!(0));
+        assert!(
+            summary["case_blocker_counts"]
+                .as_object()
+                .expect("case blockers")
+                .iter()
+                .any(|(key, value)| {
+                    key.contains("local_semantic_retrieval_ranked_preview_missing_relative_path:case-missing-preview-path:1")
+                        && value == &json!(1)
+                })
+        );
+        assert_eq!(summary["blocked_cases"], json!(1));
+        assert_eq!(summary["judge_results_written"], json!(1));
+        assert_eq!(judge_result["status"], json!("blocked"));
+    }
+
+    #[tokio::test]
+    async fn local_semantic_retrieval_judge_keeps_lexical_overlap_false_positive_visible() {
+        let temp_root = unique_temp_root("amai-local-semantic-retrieval-lexical-gap");
+        let case = json!({
+            "bench": "memoryagentbench",
+            "dataset": "memoryagentbench_accurate_retrieval",
+            "case_id": "case-lexical-gap",
+            "question": "Where did Alice move after Paris?",
+            "answer": "London",
+        });
+        let mut case_metric = serde_json::to_value(test_memory_runtime_case_metric(
+            "case-lexical-gap",
+            1,
+            0,
+            false,
+        ))
+        .expect("metric value");
+        case_metric["bench"] = json!("memoryagentbench");
+        case_metric["dataset"] = json!("memoryagentbench_accurate_retrieval");
+        case_metric["question"] = json!("Where did Alice move after Paris?");
+        case_metric["retrieval_query"] = json!("Alice Paris move");
+        case_metric["retrieval_payload_top_ranked_relative_path"] = json!("docs/alice.md");
+        case_metric["retrieval_payload_top_ranked_preview"] =
+            json!("Alice kept old Paris postcards and talked about Paris often.");
+        case_metric["retrieval_payload_top_ranked_gold_answer_supported"] = json!(false);
+        case_metric["retrieval_payload_top_ranked_preview_supports_gold_answer"] = json!(false);
+        case_metric["retrieval_top_ranked_structural_fact_supported"] = json!(false);
+        case_metric["retrieval_payload_ranked_previews"] = json!([
+            {
+                "rank": 1,
+                "score": 2,
+                "relative_path": "docs/alice.md",
+                "preview": "Alice kept old Paris postcards and talked about Paris often.",
+                "supports_gold_answer": false,
+                "preview_supports_gold_answer": false,
+                "structural_fact_supported": false
+            },
+            {
+                "rank": 2,
+                "score": 1,
+                "relative_path": "docs/extra.md",
+                "preview": "Alice saved travel receipts but no move destination is stated.",
+                "supports_gold_answer": false,
+                "preview_supports_gold_answer": false,
+                "structural_fact_supported": false
+            }
+        ]);
+
+        let (cases_path, case_metrics_path, judge_results_path, summary_path) =
+            write_single_local_semantic_retrieval_fixture(&temp_root, case, case_metric);
+        let (addr, server) = fake_chat_completion_server(
+            "HTTP/1.1 200 OK",
+            r#"{"message":{"content":"{\"question_relevant\":false,\"supports_gold_answer\":false,\"reason\":\"Preview repeats Paris but does not answer the move destination.\"}"}}"#,
+            1,
+        )
+        .await;
+
+        run_external_memory_local_retrieval_judge(
+            None,
+            &cases_path,
+            &case_metrics_path,
+            &judge_results_path,
+            Some(&summary_path),
+            &format!("http://{addr}"),
+            "gemma4:e4b",
+        )
+        .await
+        .expect("semantic retrieval judge");
+        let requests = server.await.expect("server join");
+        let summary: Value =
+            serde_json::from_str(&fs::read_to_string(&summary_path).expect("summary text"))
+                .expect("summary json");
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(summary["status"], json!("executed"));
+        assert_eq!(summary["judged_cases"], json!(1));
+        assert_eq!(summary["question_relevant_cases"], json!(0));
+        assert_eq!(summary["gold_answer_supported_cases"], json!(0));
+        assert!(
+            summary["maturity_blocking_reasons"]
+                .as_array()
+                .expect("maturity blockers")
+                .contains(&json!("not_all_judged_cases_semantically_relevant"))
+        );
+    }
+
+    #[test]
     fn memory_local_score_reconciliation_accepts_valid_longmemeval_eval_log() {
         let cases = test_longmemeval_official_score_cases();
         let summary = memory_local_score_reconciliation(
@@ -11777,6 +13425,7 @@ query = "Norse OR Denmark OR Iceland OR Norway"
             retrieval_payload_top_ranked_gold_answer_supported: None,
             retrieval_payload_top_ranked_preview_supports_gold_answer: None,
             retrieval_top_ranked_structural_fact_supported: None,
+            retrieval_payload_ranked_previews: Vec::new(),
             runtime_corpus_reused_from_previous_case: false,
             benchmark_specific_query_override_used: false,
             benchmark_specific_window_override_used: false,
@@ -12432,6 +14081,155 @@ query = "Norse OR Denmark OR Iceland OR Norway"
     }
 
     #[test]
+    fn retrieval_payload_ranked_previews_collects_multiple_items_in_rank_order() {
+        let payload = json!({
+            "retrieval": {
+                "exact_documents": [
+                    {
+                        "relative_path": "winner.md",
+                        "snippet": "Normandy is a region in France with a long medieval history."
+                    },
+                    {
+                        "relative_path": "supporting.md",
+                        "snippet": "France was one of the major kingdoms of western Europe."
+                    },
+                    {
+                        "relative_path": "duplicate.md",
+                        "snippet": "Normandy is a region in France with a long medieval history."
+                    }
+                ]
+            }
+        });
+
+        let ranked = retrieval_payload_ranked_previews(
+            &payload,
+            "In what country is Normandy located?",
+            Some("France"),
+            Path::new("."),
+            3,
+        );
+
+        assert_eq!(ranked.len(), 3);
+        assert_eq!(ranked[0].rank, 1);
+        assert_eq!(ranked[0].relative_path.as_deref(), Some("duplicate.md"));
+        assert!(ranked[0].supports_gold_answer);
+        assert_eq!(ranked[1].rank, 2);
+        assert_eq!(ranked[1].relative_path.as_deref(), Some("winner.md"));
+        assert!(ranked[1].supports_gold_answer);
+        assert_eq!(ranked[2].rank, 3);
+        assert_eq!(ranked[2].relative_path.as_deref(), Some("supporting.md"));
+    }
+
+    #[test]
+    fn retrieval_payload_ranked_previews_prefers_source_repo_root_exact_document_body() {
+        let source_root = unique_temp_root("ranked-preview-source-root-exact-doc");
+        fs::create_dir_all(source_root.join("docs")).expect("create source dir");
+        fs::write(
+            source_root.join("docs/normans.md"),
+            concat!(
+                "Document 1:\n",
+                "An unrelated introduction that should not be previewed first.\n\n",
+                "The Normans were the people who in the 10th and 11th centuries gave their name to Normandy.\n"
+            ),
+        )
+        .expect("write source document");
+        let payload = json!({
+            "retrieval": {
+                "exact_documents": [
+                    {
+                        "relative_path": "docs/normans.md",
+                        "snippet": "generic leading snippet without answer",
+                        "provenance": {
+                            "repo_root": source_root,
+                            "path": "docs/normans.md"
+                        }
+                    }
+                ]
+            }
+        });
+
+        let ranked = retrieval_payload_ranked_previews(
+            &payload,
+            "When were the Normans in Normandy?",
+            Some("10th and 11th centuries"),
+            Path::new("/definitely/missing/runtime-root"),
+            1,
+        );
+
+        assert_eq!(ranked.len(), 1);
+        assert!(ranked[0].preview.contains("10th and 11th centuries"));
+        let _ = fs::remove_dir_all(&source_root);
+    }
+
+    #[test]
+    fn compare_payload_top_ranked_retrievals_prefers_support_flags_on_equal_score() {
+        let mut ranked = vec![
+            PayloadTopRankedRetrieval {
+                score: 7,
+                snippet_len: 96,
+                relative_path: Some("plain.md".to_string()),
+                preview: "Plain candidate".to_string(),
+                supports_gold_answer: false,
+                preview_supports_gold_answer: false,
+                structural_fact_supported: false,
+            },
+            PayloadTopRankedRetrieval {
+                score: 7,
+                snippet_len: 256,
+                relative_path: Some("supported.md".to_string()),
+                preview: "Supported candidate".to_string(),
+                supports_gold_answer: true,
+                preview_supports_gold_answer: true,
+                structural_fact_supported: true,
+            },
+        ];
+
+        ranked.sort_by(compare_payload_top_ranked_retrievals);
+
+        assert_eq!(ranked[0].relative_path.as_deref(), Some("supported.md"));
+        assert!(ranked[0].supports_gold_answer);
+    }
+
+    #[test]
+    fn compare_payload_top_ranked_retrievals_falls_back_to_length_then_preview() {
+        let mut ranked = vec![
+            PayloadTopRankedRetrieval {
+                score: 7,
+                snippet_len: 96,
+                relative_path: Some("short.md".to_string()),
+                preview: "zzz".to_string(),
+                supports_gold_answer: false,
+                preview_supports_gold_answer: false,
+                structural_fact_supported: false,
+            },
+            PayloadTopRankedRetrieval {
+                score: 7,
+                snippet_len: 256,
+                relative_path: Some("long-b.md".to_string()),
+                preview: "bbb".to_string(),
+                supports_gold_answer: false,
+                preview_supports_gold_answer: false,
+                structural_fact_supported: false,
+            },
+            PayloadTopRankedRetrieval {
+                score: 7,
+                snippet_len: 256,
+                relative_path: Some("long-a.md".to_string()),
+                preview: "aaa".to_string(),
+                supports_gold_answer: false,
+                preview_supports_gold_answer: false,
+                structural_fact_supported: false,
+            },
+        ];
+
+        ranked.sort_by(compare_payload_top_ranked_retrievals);
+
+        assert_eq!(ranked[0].relative_path.as_deref(), Some("short.md"));
+        assert_eq!(ranked[1].preview, "aaa");
+        assert_eq!(ranked[2].preview, "bbb");
+    }
+
+    #[test]
     fn benchmark_runtime_target_window_bytes_uses_generic_tight_window_for_short_fact_questions() {
         assert_eq!(
             benchmark_runtime_target_window_bytes("When were the Normans in Normandy?"),
@@ -12500,10 +14298,136 @@ query = "Norse OR Denmark OR Iceland OR Norway"
             "content": "Document 1:\nThe Normans were active in the 10th and 11th centuries.\n"
         });
 
-        let snippets = retrieval_payload_item_candidate_snippets(&item);
+        let snippets = retrieval_payload_item_candidate_snippets(&item, false);
 
         assert_eq!(snippets.len(), 1);
         assert!(snippets[0].contains("10th and 11th centuries"));
+    }
+
+    #[test]
+    fn retrieval_payload_relevance_score_prefers_exact_document_source_body() {
+        let source_root = unique_temp_root("retrieval-relevance-exact-doc-source");
+        fs::create_dir_all(source_root.join("docs")).expect("create source dir");
+        fs::write(
+            source_root.join("docs/normans.md"),
+            concat!(
+                "Document 1:\n",
+                "The Normans were the people who in the 10th and 11th centuries gave their name to Normandy.\n",
+            ),
+        )
+        .expect("write source doc");
+        let question = "When were the Normans in Normandy?";
+        let payload = json!({
+            "retrieval": {
+                "exact_documents": [
+                    {
+                        "snippet": "generic leading snippet without answer",
+                        "provenance": {
+                            "repo_root": source_root,
+                            "path": "docs/normans.md"
+                        }
+                    }
+                ]
+            }
+        });
+
+        assert!(retrieval_payload_relevance_score(&payload, question) > 0);
+        let _ = fs::remove_dir_all(&source_root);
+    }
+
+    #[test]
+    fn retrieval_payload_relevance_score_rejects_exact_document_path_escape() {
+        let source_root = unique_temp_root("retrieval-relevance-exact-doc-path-guard");
+        let outside_root = unique_temp_root("retrieval-relevance-exact-doc-path-outside");
+        fs::create_dir_all(source_root.join("docs")).expect("create source dir");
+        fs::create_dir_all(outside_root.join("docs")).expect("create outside dir");
+        fs::write(
+            outside_root.join("docs/normans.md"),
+            concat!(
+                "Document 1:\n",
+                "The Normans were the people who in the 10th and 11th centuries gave their name to Normandy.\n",
+            ),
+        )
+        .expect("write outside doc");
+        let question = "When were the Normans in Normandy?";
+        let absolute_path = outside_root.join("docs/normans.md");
+        let traversal_path = format!(
+            "../{}/docs/normans.md",
+            outside_root
+                .file_name()
+                .and_then(|value| value.to_str())
+                .expect("outside root name")
+        );
+        let payload = json!({
+            "retrieval": {
+                "exact_documents": [
+                    {
+                        "snippet": "generic leading snippet without answer",
+                        "provenance": {
+                            "repo_root": source_root,
+                            "path": absolute_path
+                        }
+                    },
+                    {
+                        "snippet": "generic leading snippet without answer",
+                        "provenance": {
+                            "repo_root": source_root,
+                            "path": traversal_path
+                        }
+                    }
+                ]
+            }
+        });
+
+        assert_eq!(retrieval_payload_relevance_score(&payload, question), 0);
+        let _ = fs::remove_dir_all(&source_root);
+        let _ = fs::remove_dir_all(&outside_root);
+    }
+
+    #[test]
+    fn retrieval_payload_ranked_previews_uses_provenance_path_when_relative_path_missing() {
+        let source_root = unique_temp_root("retrieval-ranked-previews-provenance-only");
+        fs::create_dir_all(source_root.join("docs")).expect("create source dir");
+        let absolute_path = source_root.join("docs/normans.md");
+        fs::write(
+            &absolute_path,
+            concat!(
+                "Document 1:\n",
+                "The Normans were the people who in the 10th and 11th centuries gave their name to Normandy.\n",
+                "They later expanded into England.\n",
+            ),
+        )
+        .expect("write source doc");
+        let question = "When were the Normans in Normandy?";
+        let payload = json!({
+            "retrieval": {
+                "exact_documents": [
+                    {
+                        "snippet": "generic leading snippet without answer",
+                        "provenance": {
+                            "repo_root": source_root,
+                            "path": absolute_path
+                        }
+                    }
+                ]
+            }
+        });
+
+        let previews = retrieval_payload_ranked_previews(
+            &payload,
+            question,
+            Some("10th and 11th centuries"),
+            Path::new("/definitely/missing/runtime-root"),
+            3,
+        );
+
+        assert_eq!(previews.len(), 1);
+        assert_eq!(
+            previews[0].relative_path.as_deref(),
+            Some("docs/normans.md")
+        );
+        assert!(previews[0].preview.contains("10th and 11th centuries"));
+        let _ = fs::remove_dir_all(&source_root);
     }
 
     #[test]
@@ -12578,6 +14502,42 @@ query = "Norse OR Denmark OR Iceland OR Norway"
         assert_eq!(snippets.len(), 1);
         assert!(snippets[0].contains("10th and 11th centuries"));
         let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn extend_runtime_payload_item_snippets_prefers_source_repo_root_for_exact_documents() {
+        let source_root = unique_temp_root("runtime-payload-source-root-exact-doc");
+        fs::create_dir_all(source_root.join("docs")).expect("create source dir");
+        fs::write(
+            source_root.join("docs/normans.md"),
+            concat!(
+                "Document 1:\n",
+                "The Normans were the people who in the 10th and 11th centuries gave their name to Normandy.\n",
+                "They later expanded into England.\n"
+            ),
+        )
+        .expect("write source runtime doc");
+        let item = json!({
+            "relative_path": "docs/normans.md",
+            "snippet": "generic leading snippet without answer",
+            "provenance": {
+                "repo_root": source_root,
+                "path": "docs/normans.md"
+            }
+        });
+        let mut snippets: Vec<String> = Vec::new();
+
+        extend_runtime_payload_item_snippets(
+            &mut snippets,
+            &item,
+            Path::new("/definitely/missing/runtime-root"),
+            true,
+        );
+
+        assert_eq!(snippets.len(), 1);
+        assert!(snippets[0].contains("10th and 11th centuries"));
+        assert!(snippets[0].contains("later expanded into England"));
+        let _ = fs::remove_dir_all(&source_root);
     }
 
     #[test]
@@ -14013,7 +15973,7 @@ query = "   "
         let metrics_path = temp_root.join("predictions.jsonl.case-metrics.jsonl");
         fs::write(
             &metrics_path,
-            "{\"case_id\":\"case-1\",\"bench\":\"memoryagentbench\",\"dataset\":\"memoryagentbench_accurate_retrieval\",\"question\":\"Q\",\"retrieval_query\":\"Q\",\"relaxed_retrieval_query_attempted\":true,\"relaxed_retrieval_query_used\":true,\"retrieval_attempts\":2,\"context_bytes\":1,\"context_lines\":1,\"session_markers\":0,\"documents_materialized\":1,\"windows_materialized\":1,\"chunk_hits\":1,\"document_hits\":0,\"retrieval_snippet_count\":1,\"retrieval_relevant_snippets\":1,\"retrieval_top_ranked_score\":2,\"gold_answer_available\":true,\"retrieval_gold_answer_supported_snippets\":1,\"retrieval_gold_answer_top_supported\":true,\"benchmark_specific_query_override_used\":false,\"benchmark_specific_window_override_used\":false,\"benchmark_specific_answer_extraction_used\":false,\"used_fallback_scan\":false,\"prediction_chars\":1,\"model_calls\":1,\"retries\":0,\"timeout_pauses\":0,\"rate_limit_pauses\":0,\"cache_enabled\":false,\"prompt_cache_enabled\":false,\"stage_ms\":{\"materialize_case_ms\":1,\"index_project_ms\":1,\"context_pack_ms\":1,\"search_ms\":0,\"fallback_scan_ms\":0,\"final_answer_generation_ms\":1,\"total_case_ms\":1},\"updated_at_epoch_ms\":1}\n",
+            "{\"case_id\":\"case-1\",\"bench\":\"memoryagentbench\",\"dataset\":\"memoryagentbench_accurate_retrieval\",\"question\":\"Q\",\"retrieval_query\":\"Q\",\"relaxed_retrieval_query_attempted\":true,\"relaxed_retrieval_query_used\":true,\"retrieval_attempts\":2,\"context_bytes\":1,\"context_lines\":1,\"session_markers\":0,\"documents_materialized\":1,\"windows_materialized\":1,\"chunk_hits\":1,\"document_hits\":0,\"retrieval_snippet_count\":1,\"retrieval_relevant_snippets\":1,\"retrieval_top_ranked_score\":2,\"gold_answer_available\":true,\"retrieval_gold_answer_supported_snippets\":1,\"retrieval_gold_answer_top_supported\":true,\"retrieval_payload_top_ranked_relative_path\":\"doc.md\",\"retrieval_payload_top_ranked_preview\":\"preview\",\"retrieval_payload_top_ranked_gold_answer_supported\":true,\"retrieval_payload_top_ranked_preview_supports_gold_answer\":true,\"retrieval_top_ranked_structural_fact_supported\":true,\"runtime_corpus_sha256\":\"sha\",\"benchmark_specific_query_override_used\":false,\"benchmark_specific_window_override_used\":false,\"benchmark_specific_answer_extraction_used\":false,\"runtime_corpus_reused_from_previous_case\":false,\"used_fallback_scan\":false,\"prediction_chars\":1,\"model_calls\":1,\"retries\":0,\"timeout_pauses\":0,\"rate_limit_pauses\":0,\"cache_enabled\":false,\"prompt_cache_enabled\":false,\"stage_ms\":{\"materialize_case_ms\":1,\"index_project_ms\":1,\"context_pack_ms\":1,\"search_ms\":0,\"fallback_scan_ms\":0,\"final_answer_generation_ms\":1,\"total_case_ms\":1},\"updated_at_epoch_ms\":1}\n",
         )
         .expect("write metrics");
 
@@ -14021,7 +15981,7 @@ query = "   "
             .expect_err("missing top-rank telemetry must fail");
         assert!(
             err.to_string()
-                .contains("must declare runtime_corpus_sha256")
+                .contains("must declare retrieval_payload_ranked_previews")
         );
         let _ = fs::remove_dir_all(&temp_root);
     }

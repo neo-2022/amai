@@ -1437,6 +1437,9 @@ Retrieval не должен сразу прыгать в сырые логи и 
 Что важно:
 - shared memory без trust and policy запрещена;
 - cross-project imports должны идти не по похожести, а по controlled transfer.
+- same-thread same-scope competing handoff не должен молча steal-ить active line; для
+  реального main-line redirect нужен explicit promotion contract, иначе side/private work
+  должен жить в distinct `AMAI_AGENT_SCOPE`.
 
 Проверка после этапа:
 - несколько агентов могут работать вместе без silent leakage;

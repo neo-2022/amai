@@ -66,6 +66,8 @@ pub(super) struct ContinuityHandoffRequest {
     pub(super) resolved_task_ids: Vec<String>,
     #[serde(default)]
     pub(super) resolve_current_goal: bool,
+    #[serde(default)]
+    pub(super) promote_active_workline: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

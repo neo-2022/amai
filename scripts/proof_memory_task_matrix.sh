@@ -8,6 +8,60 @@ source "${REPO_ROOT}/scripts/load_env.sh"
 cd "${REPO_ROOT}"
 ./scripts/benchmark_contamination_preflight.sh
 
+assert_memory_statistics_integrity() {
+    local output="$1"
+    printf '%s\n' "$output" | jq -e '
+      .memory_task_matrix.statistics.methods as $m
+      | (
+          $m.success_rate_confidence_interval.status == "measured"
+          and $m.success_rate_confidence_interval.method == "wilson_95"
+          and ($m.success_rate_confidence_interval.confidence_level | type == "number")
+          and ($m.success_rate_confidence_interval.lower | type == "number")
+          and ($m.success_rate_confidence_interval.upper | type == "number")
+        )
+      and (
+          $m.score_delta_confidence_interval.status == "measured"
+          and $m.score_delta_confidence_interval.method == "bootstrap_percentile_95"
+          and ($m.score_delta_confidence_interval.delta | type == "number")
+          and ($m.score_delta_confidence_interval.lower | type == "number")
+          and ($m.score_delta_confidence_interval.upper | type == "number")
+        )
+      and (
+          $m.mean_delta_confidence_interval.status == "not_applicable"
+          and ($m.mean_delta_confidence_interval.reason | type == "string")
+        )
+      and (
+          $m.median_latency_delta_confidence_interval.status == "measured"
+          and $m.median_latency_delta_confidence_interval.method == "bootstrap_percentile_95"
+          and ($m.median_latency_delta_confidence_interval.delta | type == "number")
+          and ($m.median_latency_delta_confidence_interval.lower | type == "number")
+          and ($m.median_latency_delta_confidence_interval.upper | type == "number")
+        )
+      and (
+          $m.p95_latency_delta_confidence_interval.status == "measured"
+          and $m.p95_latency_delta_confidence_interval.method == "bootstrap_percentile_95"
+          and ($m.p95_latency_delta_confidence_interval.delta | type == "number")
+          and ($m.p95_latency_delta_confidence_interval.lower | type == "number")
+          and ($m.p95_latency_delta_confidence_interval.upper | type == "number")
+        )
+      and (
+          $m.verdict_distribution_drift.status == "measured"
+          and $m.verdict_distribution_drift.method == "jensen_shannon_divergence"
+          and ($m.verdict_distribution_drift.value | type == "number")
+        )
+      and (
+          $m.latency_distribution_drift.status == "measured"
+          and $m.latency_distribution_drift.method == "kolmogorov_smirnov"
+          and ($m.latency_distribution_drift.value | type == "number")
+        )
+      and (
+          $m.score_distribution_drift.status == "measured"
+          and $m.score_distribution_drift.method == "kolmogorov_smirnov"
+          and ($m.score_distribution_drift.value | type == "number")
+        )
+    ' >/dev/null
+}
+
 psql "$AMI_POSTGRES_DSN" <<'SQL' >/dev/null
 DELETE FROM ami.observability_snapshots
 WHERE snapshot_kind = 'memory_task_matrix'
@@ -60,6 +114,7 @@ assert_second_output() {
     printf '%s\n' "$output" | jq -e '.memory_task_matrix.statistics.methods.p95_latency_delta_confidence_interval.status == "measured"' >/dev/null
     printf '%s\n' "$output" | jq -e '.memory_task_matrix.statistics.methods.verdict_distribution_drift.status == "measured"' >/dev/null
     printf '%s\n' "$output" | jq -e '.memory_task_matrix.statistics.methods.latency_distribution_drift.status == "measured"' >/dev/null
+    printf '%s\n' "$output" | jq -e '.memory_task_matrix.statistics.methods.score_distribution_drift.status == "measured"' >/dev/null
     printf '%s\n' "$output" | jq -e '.memory_task_matrix.statistics.drift_summary.status == "measured"' >/dev/null
     printf '%s\n' "$output" | jq -e '.memory_task_matrix.statistics.promotion.fail_closed == false' >/dev/null
     printf '%s\n' "$output" | jq -e '.memory_task_matrix.statistics.promotion.reason == "promotion_policy_not_materialized"' >/dev/null
@@ -69,6 +124,7 @@ assert_second_output() {
     printf '%s\n' "$output" | jq -e '.memory_task_matrix.measured_approval.verdict == "pending_human_review"' >/dev/null
     printf '%s\n' "$output" | jq -e '.memory_task_matrix.measured_approval.reason == "explicit_human_signoff_required"' >/dev/null
     printf '%s\n' "$output" | jq -e '.memory_task_matrix.measured_approval.review_packet_ready == true' >/dev/null
+    assert_memory_statistics_integrity "$output"
 }
 
 project_prefix="proof_memory_matrix_$(date +%s%N)"

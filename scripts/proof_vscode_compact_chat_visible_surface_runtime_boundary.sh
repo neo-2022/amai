@@ -11,7 +11,8 @@ rm -f "${state_path}"
 jq -e '
   .status == "live_launch_verified"
   and .source_bundle_capabilities.visible_surface == true
-  and .runtime_capability_drift.visible_surface_missing_from_runtime_result == true
+  and .runtime_capabilities.visible_surface_payload_present == true
+  and .runtime_capability_drift.visible_surface_missing_from_runtime_result == false
   and .bridge_result.status == "launch_requested"
   and .bridge_result.public_bridge.authority == "amai.amai-vscode-bridge"
 ' "${state_path}" >/dev/null

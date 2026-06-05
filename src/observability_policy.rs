@@ -175,6 +175,8 @@ pub fn is_benchmark_snapshot_kind(snapshot_kind: &str) -> bool {
             | "text_compare"
             | "mcp_task_matrix"
             | "memory_task_matrix"
+            | "memory_benchmark_score"
+            | "memory_retrieval_semantic_evidence"
     )
 }
 
@@ -218,6 +220,10 @@ mod tests {
         assert!(rule.ttl_hours.is_some());
         assert!(is_benchmark_snapshot_kind("retrieval_benchmark_hot"));
         assert!(is_benchmark_snapshot_kind("continuity_verification"));
+        assert!(is_benchmark_snapshot_kind("memory_benchmark_score"));
+        assert!(is_benchmark_snapshot_kind(
+            "memory_retrieval_semantic_evidence"
+        ));
     }
 
     #[test]

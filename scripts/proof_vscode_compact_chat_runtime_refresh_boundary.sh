@@ -17,11 +17,12 @@ run_refresh_probe() {
   jq -e '
     .status == "live_launch_verified"
     and .source_bundle_capabilities.visible_surface == true
-    and .runtime_capability_drift.visible_surface_missing_from_runtime_result == true
+    and .runtime_capabilities.visible_surface_payload_present == true
+    and .runtime_capability_drift.visible_surface_missing_from_runtime_result == false
     and .bridge_result.status == "launch_requested"
   ' "${state_path}" >/dev/null
 
-  printf 'proof_vscode_compact_chat_runtime_refresh_boundary: %s keeps visible_surface runtime drift (%s)\n' "${label}" "${uri}"
+  printf 'proof_vscode_compact_chat_runtime_refresh_boundary: %s keeps visible_surface runtime payload (%s)\n' "${label}" "${uri}"
 }
 
 "${repo_root}/scripts/install_vscode_amai_bridge.sh" >/dev/null

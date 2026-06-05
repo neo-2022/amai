@@ -852,7 +852,7 @@ pub(crate) async fn enrich_live_event_payload(
         .to_string();
     let is_continuity_restore_event =
         query_type == "continuity_restore" || target_kind == "continuity_restore";
-    let current_agent_scope = working_state::current_agent_scope_for(&project, &namespace);
+    let current_agent_scope = working_state::current_agent_scope_for_result(&project, &namespace)?;
     let session_gap_ms = profile.session_gap_minutes as i64 * 60_000;
     let session_lookup_limit = if is_continuity_restore_event { 8 } else { 64 };
     let mut events = load_events(db, false, Some(session_lookup_limit)).await?;
@@ -871,17 +871,17 @@ pub(crate) async fn enrich_live_event_payload(
         Value::String(current_agent_scope.clone()),
     );
     node.insert("session_id".to_string(), Value::String(session_id));
+    let live_thread_id = codex_threads::current_thread_id_result()
+        .map_err(anyhow::Error::from)?
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let thread_id = node
         .get("thread_id")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
-        .or_else(|| {
-            codex_threads::current_thread_id()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        })
+        .or(live_thread_id)
         .or(preferred_dashboard_thread_binding_hint(db, repo_root).await?);
     if let Some(thread_id) = thread_id {
         node.insert("thread_id".to_string(), Value::String(thread_id.clone()));

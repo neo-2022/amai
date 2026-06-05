@@ -2,6 +2,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+export AMAI_OPERATOR_REDIRECT_PROVENANCE="proof_harness:$(basename "$0")"
 
 handoff_path="state/continuity-imports/amai/live-handoff.md"
 tmpdir="$(mktemp -d)"
@@ -9,6 +10,7 @@ fakebin="${tmpdir}/bin"
 snapshot_path="${tmpdir}/live-handoff.snapshot"
 state_path="${tmpdir}/live-handoff.state"
 latency_path="${tmpdir}/latency.tsv"
+promotion_details="${tmpdir}/promotion-details.txt"
 mkdir -p "${fakebin}"
 
 iterations=12
@@ -44,6 +46,11 @@ if [[ ! -x ./target/release/amai ]]; then
   echo "proof_continuity_handoff_transport_fallback_bounded_soak: missing ./target/release/amai" >&2
   exit 1
 fi
+
+cat >"${promotion_details}" <<'EOF'
+promotion_contract: operator_redirect
+Synthetic transport proof explicitly switches the active main workline.
+EOF
 
 mkdir -p "${tmpdir}/scripts"
 if [[ -e scripts/ensure_observe_frontdoor.sh ]]; then
@@ -89,7 +96,9 @@ for i in $(seq 1 "${iterations}"); do
         --project amai \
         --namespace continuity \
         --headline "${headline}" \
-        --next-step "${next_step}"
+        --next-step "${next_step}" \
+        --details-file "${promotion_details}" \
+        --promote-active-workline
   )"
   ended_ms="$(./scripts/epoch_ms.sh)"
   elapsed_ms="$((ended_ms - started_ms))"

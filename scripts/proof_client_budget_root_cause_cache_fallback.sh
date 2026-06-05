@@ -3,10 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-CACHE_PATH="${REPO_ROOT}/state/observe/client_budget_surfaces_cache.json"
-THREAD_CACHE_PATH="${REPO_ROOT}/state/observe/client_budget_surfaces_cache.thread-${CODEX_THREAD_ID:-}.json"
 
 cd "${REPO_ROOT}"
+source "${SCRIPT_DIR}/load_env.sh"
+
+CACHE_PATH="${REPO_ROOT}/state/observe/client_budget_surfaces_cache.json"
+resolved_thread_id="$(resolve_amai_thread_id_or_empty_from_env)"
+THREAD_CACHE_PATH="${REPO_ROOT}/state/observe/client_budget_surfaces_cache.thread-${resolved_thread_id}.json"
 
 backup_path=""
 if [[ -f "${CACHE_PATH}" ]]; then
@@ -15,7 +18,7 @@ if [[ -f "${CACHE_PATH}" ]]; then
 fi
 
 thread_backup_path=""
-if [[ -n "${CODEX_THREAD_ID:-}" ]] && [[ -f "${THREAD_CACHE_PATH}" ]]; then
+if [[ -n "${resolved_thread_id}" ]] && [[ -f "${THREAD_CACHE_PATH}" ]]; then
   thread_backup_path="$(mktemp)"
   cp "${THREAD_CACHE_PATH}" "${thread_backup_path}"
 fi
@@ -27,7 +30,7 @@ cleanup() {
   else
     rm -f "${CACHE_PATH}"
   fi
-  if [[ -n "${CODEX_THREAD_ID:-}" ]]; then
+  if [[ -n "${resolved_thread_id}" ]]; then
     if [[ -n "${thread_backup_path}" && -f "${thread_backup_path}" ]]; then
       mkdir -p "$(dirname "${THREAD_CACHE_PATH}")"
       mv "${thread_backup_path}" "${THREAD_CACHE_PATH}"
@@ -104,7 +107,11 @@ cat >"${CACHE_PATH}" <<EOF
 }
 EOF
 
-payload="$(env -u CODEX_THREAD_ID AMI_OBSERVE_BIND=127.0.0.1:1 "${SCRIPT_DIR}/client_budget_root_cause.sh" --enforce-reply-gate)"
+payload="$(
+  env -u AMAI_PLATFORM_THREAD_ID -u CODEX_THREAD_ID \
+    AMI_OBSERVE_BIND=127.0.0.1:1 \
+    "${SCRIPT_DIR}/client_budget_root_cause.sh" --enforce-reply-gate
+)"
 
 printf '%s\n' "${payload}" | jq -e '
   .client_budget_reply_gate.reply_execution_gate.reply_prefix == "Burn guard: переплата 12.34%"

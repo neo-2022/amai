@@ -6,6 +6,7 @@ repo_root="$(pwd)"
 
 temp_home="$(mktemp -d)"
 export AMAI_INSTALL_STATE_PATH="${temp_home}/install_state.json"
+host_home="${HOME}"
 
 RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
@@ -63,6 +64,66 @@ restore_file_from_snapshot() {
   cp "${data_path}" "${path}"
 }
 
+resolve_openclaw_cli_from_home() {
+  local base_home="$1"
+  local candidate
+  candidate="$(find "${base_home}/.openclaw/tools" -maxdepth 3 -path '*/node-v*/bin/openclaw' -type f 2>/dev/null | sort -Vr | head -n 1)"
+  if [[ -n "${candidate}" ]]; then
+    printf '%s\n' "${candidate}"
+    return 0
+  fi
+  if [[ -x "${base_home}/.openclaw/tools/node/bin/openclaw" ]]; then
+    printf '%s\n' "${base_home}/.openclaw/tools/node/bin/openclaw"
+    return 0
+  fi
+  if command -v openclaw >/dev/null 2>&1; then
+    command -v openclaw
+    return 0
+  fi
+  return 1
+}
+
+sanitize_path_without_openclaw_cli() {
+  local openclaw_cli="$1"
+  local filtered=""
+  local path_entry
+  IFS=':' read -r -a path_parts <<<"${PATH}"
+  for path_entry in "${path_parts[@]}"; do
+    if [[ "${path_entry}" == "$(dirname "${openclaw_cli}")" ]]; then
+      continue
+    fi
+    if [[ -n "${host_home}" ]] && [[ "${path_entry}" == "${host_home}/.openclaw/tools/"*/bin ]]; then
+      continue
+    fi
+    if [[ -z "${filtered}" ]]; then
+      filtered="${path_entry}"
+    else
+      filtered="${filtered}:${path_entry}"
+    fi
+  done
+  printf '%s\n' "${filtered}"
+}
+
+seed_temp_home_openclaw_cli() {
+  local host_cli
+  host_cli="$(resolve_openclaw_cli_from_home "${host_home}" || true)"
+  if [[ -z "${host_cli}" ]]; then
+    return 0
+  fi
+  local relative_cli="${host_cli#"${host_home}/"}"
+  if [[ "${relative_cli}" == "${host_cli}" ]]; then
+    relative_cli=".openclaw/tools/node/bin/openclaw"
+  fi
+  mkdir -p "${temp_home}/$(dirname "${relative_cli}")"
+  ln -sf "${host_cli}" "${temp_home}/${relative_cli}"
+  export OPENCLAW_PROOF_PATH
+  OPENCLAW_PROOF_PATH="$(sanitize_path_without_openclaw_cli "${host_cli}")"
+}
+
+resolve_temp_home_openclaw_cli() {
+  resolve_openclaw_cli_from_home "${temp_home}"
+}
+
 assert_startup_contract() {
   local path="$1"
   jq -e '
@@ -117,7 +178,7 @@ assert_hermes_compact_startup() {
   local path="$1"
   local max_bytes="$2"
   assert_contains_all "${path}" \
-    'AMAI MANAGED STARTUP INSTRUCTIONS v1' \
+    'AMAI MANAGED STARTUP INSTRUCTIONS v2' \
     'compact contract-pointer' \
     'до любого другого Amai шага.' \
     './scripts/reconnect_local.sh --client hermes' \
@@ -157,7 +218,7 @@ test -f .amai/onboarding/project-chat-startup-contract.json
 assert_startup_contract .amai/onboarding/project-chat-startup-contract.json
 assert_startup_surface_sha AGENTS.md
 assert_contains_all AGENTS.md \
-  'AMAI MANAGED STARTUP INSTRUCTIONS v1' \
+  'AMAI MANAGED STARTUP INSTRUCTIONS v2' \
   'project `AGENTS.md`' \
   'execctl_resume_contract_summary' \
   'execctl_resume_obligation' \
@@ -193,7 +254,7 @@ if [[ -f "${temp_home}/.codex/config.toml" ]] && grep -q '\[mcp_servers.amai\]' 
   echo "proof_client_lifecycle: codex server entry still present after disconnect"
   exit 1
 fi
-if grep -Fq 'AMAI MANAGED STARTUP INSTRUCTIONS v1' AGENTS.md; then
+if grep -Fq 'AMAI MANAGED STARTUP INSTRUCTIONS v2' AGENTS.md; then
   echo "proof_client_lifecycle: codex managed startup block still present after disconnect"
   exit 1
 fi
@@ -255,7 +316,7 @@ assert_startup_contract .amai/onboarding/project-chat-startup-contract.json
 test -f CLAUDE.md
 assert_startup_surface_sha CLAUDE.md
 assert_contains_all CLAUDE.md \
-  'AMAI MANAGED STARTUP INSTRUCTIONS v1' \
+  'AMAI MANAGED STARTUP INSTRUCTIONS v2' \
   'amai_continuity_startup' \
   'execctl_resume_contract_summary' \
   'execctl_resume_obligation' \
@@ -291,7 +352,7 @@ if [[ -f .mcp.json ]] && grep -q '"amai"' .mcp.json; then
   echo "proof_client_lifecycle: claude-code server entry still present after disconnect"
   exit 1
 fi
-if [[ -f CLAUDE.md ]] && grep -Fq 'AMAI MANAGED STARTUP INSTRUCTIONS v1' CLAUDE.md; then
+if [[ -f CLAUDE.md ]] && grep -Fq 'AMAI MANAGED STARTUP INSTRUCTIONS v2' CLAUDE.md; then
   echo "proof_client_lifecycle: claude-code managed startup block still present after disconnect"
   exit 1
 fi
@@ -351,31 +412,38 @@ cat > "${temp_home}/.openclaw/openclaw.json" <<'EOF'
   },
 }
 EOF
+seed_temp_home_openclaw_cli
 
-HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/onboard_local.sh --client openclaw --yes --skip-stack --skip-release-build
+HOME="${temp_home}" PATH="${OPENCLAW_PROOF_PATH:-${PATH}}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/onboard_local.sh --client openclaw --yes --skip-stack --skip-release-build
 test -f "${temp_home}/.openclaw/openclaw.json"
 grep -q '"gateway"' "${temp_home}/.openclaw/openclaw.json"
-HOME="${temp_home}" openclaw mcp list | grep -q 'amai'
-HOME="${temp_home}" openclaw mcp show amai --json | grep -q 'run_mcp_stdio'
 test -f .amai/onboarding/project-chat-startup-contract.json
 assert_startup_contract .amai/onboarding/project-chat-startup-contract.json
 test -f .openclaw/AGENTS.md
 assert_startup_surface_sha .openclaw/AGENTS.md
 assert_contains_all .openclaw/AGENTS.md \
-  'AMAI MANAGED STARTUP INSTRUCTIONS v1' \
+  'AMAI MANAGED STARTUP INSTRUCTIONS v2' \
   'amai_continuity_startup' \
   './scripts/reconnect_local.sh --client openclaw' \
   './scripts/amai_exec.sh bootstrap reconnect --client openclaw --yes'
-HOME="${temp_home}" openclaw agents list --json | jq -e --arg workspace "$(pwd)/.openclaw" '.[] | select(.workspace == $workspace)' >/dev/null
-
-HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/disconnect_local.sh --client openclaw
-if HOME="${temp_home}" openclaw mcp show amai --json >/dev/null 2>&1; then
-  echo "proof_client_lifecycle: openclaw server entry still present after disconnect"
-  exit 1
+if openclaw_cli="$(resolve_temp_home_openclaw_cli)"; then
+  HOME="${temp_home}" "${openclaw_cli}" mcp list | grep -q 'amai'
+  HOME="${temp_home}" "${openclaw_cli}" mcp show amai --json | grep -q 'run_mcp_stdio'
+  HOME="${temp_home}" "${openclaw_cli}" agents list --json | jq -e --arg workspace "$(pwd)/.openclaw" '.[] | select(.workspace == $workspace)' >/dev/null
+else
+  echo "proof_client_lifecycle: OpenClaw CLI missing; skipping CLI-backed registration checks"
 fi
-if HOME="${temp_home}" openclaw agents list --json | jq -e --arg workspace "$(pwd)/.openclaw" '.[] | select(.workspace == $workspace)' >/dev/null; then
-  echo "proof_client_lifecycle: openclaw project agent still present after disconnect"
-  exit 1
+
+HOME="${temp_home}" PATH="${OPENCLAW_PROOF_PATH:-${PATH}}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/disconnect_local.sh --client openclaw
+if openclaw_cli="$(resolve_temp_home_openclaw_cli)"; then
+  if HOME="${temp_home}" "${openclaw_cli}" mcp show amai --json >/dev/null 2>&1; then
+    echo "proof_client_lifecycle: openclaw server entry still present after disconnect"
+    exit 1
+  fi
+  if HOME="${temp_home}" "${openclaw_cli}" agents list --json | jq -e --arg workspace "$(pwd)/.openclaw" '.[] | select(.workspace == $workspace)' >/dev/null; then
+    echo "proof_client_lifecycle: openclaw project agent still present after disconnect"
+    exit 1
+  fi
 fi
 if [[ -f .openclaw/AGENTS.md ]]; then
   echo "proof_client_lifecycle: openclaw startup workspace still present after disconnect"

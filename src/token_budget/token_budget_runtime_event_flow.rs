@@ -482,7 +482,8 @@ pub(crate) async fn preferred_dashboard_thread_binding_hint(
     db: &Client,
     repo_root: &Path,
 ) -> Result<Option<String>> {
-    if let Some(current_thread_id) = codex_threads::current_thread_id()
+    if let Some(current_thread_id) = codex_threads::current_thread_id_result()
+        .map_err(anyhow::Error::from)?
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
     {
@@ -513,13 +514,8 @@ pub(crate) async fn preferred_dashboard_thread_binding_hint(
     let Ok(project) = postgres::get_project_by_repo_root(db, &repo_root_display).await else {
         return Ok(None);
     };
-    let snapshot = postgres::latest_observability_snapshot_for_project(
-        db,
-        "working_state_restore",
-        "working_state_restore",
-        &project.code,
-    )
-    .await?;
+    let snapshot =
+        postgres::latest_working_state_restore_snapshot_for_project(db, &project.code).await?;
     Ok(snapshot.and_then(|value| {
         dashboard_thread_binding_hint_from_working_state_restore(&value["working_state_restore"])
     }))
@@ -533,13 +529,8 @@ pub(super) async fn client_budget_target_percent_for_repo(
     let Ok(project) = postgres::get_project_by_repo_root(db, &repo_root_display).await else {
         return Ok(working_state::default_client_budget_target_percent());
     };
-    let snapshot = postgres::latest_observability_snapshot_for_project(
-        db,
-        "working_state_restore",
-        "working_state_restore",
-        &project.code,
-    )
-    .await?;
+    let snapshot =
+        postgres::latest_working_state_restore_snapshot_for_project(db, &project.code).await?;
     Ok(snapshot
         .as_ref()
         .map(|value| {

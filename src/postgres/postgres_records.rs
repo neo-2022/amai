@@ -615,6 +615,14 @@ pub struct TaskEventRecord {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct TaskGraphRestoreProjectionNodeRecord {
+    pub task_node: TaskNodeRecord,
+    pub event_count: i64,
+    pub latest_event_kind: Option<String>,
+    pub latest_event_recorded_at_epoch_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct MemoryLinkDecisionRecord {
     pub memory_link_decision_id: Uuid,
     pub workspace_code: String,

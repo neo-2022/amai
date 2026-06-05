@@ -5,11 +5,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 cd "${REPO_ROOT}"
+source "${SCRIPT_DIR}/load_env.sh"
 
 cache1="${REPO_ROOT}/state/observe/client_budget_surfaces_cache.json"
-cache2="${REPO_ROOT}/state/observe/client_budget_surfaces_cache.thread-${CODEX_THREAD_ID:-}.json"
+resolved_thread_id="$(resolve_amai_thread_id_or_empty_from_env)"
+cache2="${REPO_ROOT}/state/observe/client_budget_surfaces_cache.thread-${resolved_thread_id}.json"
 cache3="${REPO_ROOT}/state/observe/client_budget_gate_cache.json"
-cache4="${REPO_ROOT}/state/observe/client_budget_gate_cache.thread-${CODEX_THREAD_ID:-}.json"
+cache4="${REPO_ROOT}/state/observe/client_budget_gate_cache.thread-${resolved_thread_id}.json"
 tmpdir="$(mktemp -d)"
 
 move_if_exists() {
@@ -53,7 +55,7 @@ move_if_exists "${REPO_ROOT}/target/debug/amai"
 
 set +e
 output="$(
-  env -u CODEX_THREAD_ID \
+  env -u AMAI_PLATFORM_THREAD_ID -u CODEX_THREAD_ID \
     AMI_OBSERVE_BIND=127.0.0.1:1 \
     "${SCRIPT_DIR}/client_budget_system_markers.sh" 2>&1
 )"

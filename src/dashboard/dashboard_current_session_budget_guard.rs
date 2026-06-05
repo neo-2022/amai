@@ -167,6 +167,7 @@ fn current_session_budget_guard_with_restore_context(
             same_thread_compaction_preferred,
             host_current_thread_control["thread_id"].as_str(),
             host_current_thread_control["command_id"].as_str(),
+            None,
         )
     });
     let session_client_turn_pressure = client_turn_pressure_guard_with_target(
@@ -511,6 +512,7 @@ pub(super) fn build_client_budget_reply_execution_gate_with_primary_command(
                 same_thread_compaction_preferred,
                 same_thread_thread_id,
                 same_thread_primary_command_id,
+                None,
             ),
             preserves_return_obligation,
         )
@@ -533,6 +535,7 @@ pub(super) fn build_client_budget_reply_execution_gate_with_primary_command(
                 same_thread_compaction_preferred,
                 same_thread_thread_id,
                 same_thread_primary_command_id,
+                None,
             ),
             preserves_return_obligation,
         )
@@ -555,6 +558,7 @@ pub(super) fn build_client_budget_reply_execution_gate_with_primary_command(
                 same_thread_compaction_preferred,
                 same_thread_thread_id,
                 same_thread_primary_command_id,
+                None,
             ),
             preserves_return_obligation,
         )

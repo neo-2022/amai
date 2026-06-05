@@ -205,6 +205,13 @@ query_suite_version = "memory-benchmark-score-v1"
 manifest_path = "docs/MEMORY_BENCH_RUNBOOK.md"
 reproducibility_contract = "For the same cases and predictions inputs, the baseline scorer (exact/contains + abstention) must produce the same score summary."
 
+[science.suites.memory_retrieval_semantic_evidence]
+suite_version = "external-memory-local-retrieval-judge-v2"
+dataset_version = "external-memory-benchmarks-v1"
+query_suite_version = "memory-retrieval-semantic-evidence-v2"
+manifest_path = "docs/MEMORY_BENCH_RUNBOOK.md"
+reproducibility_contract = "For the same cases and runtime case-metrics inputs, the bounded local semantic retrieval evidence lane must produce the same judged-case summary and blocker semantics."
+
 [science.suites.degradation_verification]
 suite_version = "degradation-verification-v2"
 dataset_version = "synthetic-degradation-matrix-v2"

@@ -59,7 +59,8 @@ run_release continuity handoff \
   --project "${project_code}" \
   --namespace "${namespace_code}" \
   --headline "Same line" \
-  --next-step "Replay same line twice." >/dev/null
+  --next-step "Replay same line twice." \
+  --promote-active-workline >/dev/null
 
 fetch_restore "${first_restore}"
 first_event_id="$(jq -r '.working_state_restore.state_lineage.authoritative_event_id' "${first_restore}")"
@@ -81,7 +82,8 @@ run_release continuity handoff \
   --project "${project_code}" \
   --namespace "${namespace_code}" \
   --headline "Same line" \
-  --next-step "Replay same line twice." >/dev/null
+  --next-step "Replay same line twice." \
+  --promote-active-workline >/dev/null
 
 fetch_restore "${second_restore}"
 second_event_id="$(jq -r '.working_state_restore.state_lineage.authoritative_event_id' "${second_restore}")"

@@ -241,6 +241,7 @@ Code structure plane:
 
 Его задача простая:
 - новый `continuity handoff` не должен тихо стирать предыдущую рабочую линию;
+- same-thread same-scope competing handoff должен fail-closed без explicit promotion contract;
 - если агент временно уходит на другой contour того же проекта, предыдущая линия должна
   сохраниться как machine-readable `pending return`;
 - новый startup/restore обязан поднять не только active line, но и suspended workline,
@@ -313,7 +314,16 @@ Canonical transition:
 5. Агент обязан выполнить local CLI reconcile:
    - `./scripts/continuity_startup.sh --repo-root ... --namespace ... --json`.
 6. До успешного local payload отчёт пользователю запрещён.
-7. После успешного local payload агент продолжает только от локального state и требует MCP reconnect.
+7. После успешного local payload агент продолжает от self-healed локального state в том же
+   сеансе; reconnect helper остаётся только диагностическим fallback, если transport продолжает
+   падать или следующий MCP startup снова не доходит до self-healed состояния.
+
+Отдельный обязательный случай auto-reconcile:
+- если latest `continuity_handoff` уже новее, чем последний materialized `working_state_restore`,
+  startup сначала обязан перестроить restore snapshot из текущей authoritative truth и только потом
+  собирать startup payload;
+- новый handoff не имеет права ждать ручного refresh, пока старый `next_step` просочится в startup
+  contour.
 
 Этот contour нужен не для удобства, а для truth non-regression: stale embedded tool не имеет права
 тихо перезаписать новый workflow contract старым runtime-state и тем самым обойти обязательный

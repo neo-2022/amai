@@ -175,10 +175,9 @@ pub(super) fn local_observe_http_base_url() -> String {
 }
 
 pub(super) fn local_observe_thread_id_from_env() -> Option<String> {
-    std::env::var("CODEX_THREAD_ID")
+    crate::thread_binding::current_thread_id_result()
         .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+        .flatten()
 }
 
 pub(super) fn resolved_local_observe_thread_id(explicit_thread_id: Option<&str>) -> Option<String> {

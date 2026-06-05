@@ -50,9 +50,17 @@ pub(crate) fn statistics_block_from_pair(
         })
     };
 
-    let baseline_run_id = baseline_payload
+    let baseline_run_id_raw = baseline_payload
         .and_then(|payload| payload["_observability"]["source_event_id"].as_str())
         .map(ToOwned::to_owned);
+    let baseline_run_id_invalid = baseline_run_id_raw
+        .as_deref()
+        .is_some_and(|value| Uuid::parse_str(value).is_err());
+    let baseline_run_id = baseline_run_id_raw
+        .as_deref()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .map(|value| value.to_string());
+    let effective_baseline_root = baseline_root.filter(|_| baseline_run_id.is_some());
 
     let score_seed = bootstrap_seed(baseline_run_id.as_deref(), candidate_run_id, 1);
     let mean_seed = bootstrap_seed(baseline_run_id.as_deref(), candidate_run_id, 2);
@@ -60,7 +68,7 @@ pub(crate) fn statistics_block_from_pair(
     let p95_seed = bootstrap_seed(baseline_run_id.as_deref(), candidate_run_id, 4);
 
     let score_delta_interval = bootstrap_metric_interval(
-        baseline_root,
+        effective_baseline_root,
         candidate_root,
         "score_delta",
         "mean_score",
@@ -70,7 +78,7 @@ pub(crate) fn statistics_block_from_pair(
         MetricExpectation::OptionalPerPayload,
     );
     let mean_delta_interval = bootstrap_metric_interval(
-        baseline_root,
+        effective_baseline_root,
         candidate_root,
         "mean_delta",
         "mean_ms",
@@ -80,7 +88,7 @@ pub(crate) fn statistics_block_from_pair(
         MetricExpectation::OptionalPerPayload,
     );
     let median_latency_delta_interval = bootstrap_metric_interval(
-        baseline_root,
+        effective_baseline_root,
         candidate_root,
         "median_latency_delta",
         "p50_ms",
@@ -90,7 +98,7 @@ pub(crate) fn statistics_block_from_pair(
         MetricExpectation::RequiredWhenBaselineExists,
     );
     let p95_latency_delta_interval = bootstrap_metric_interval(
-        baseline_root,
+        effective_baseline_root,
         candidate_root,
         "p95_latency_delta",
         "p95_ms",
@@ -99,8 +107,12 @@ pub(crate) fn statistics_block_from_pair(
         sample_p95,
         MetricExpectation::RequiredWhenBaselineExists,
     );
-    let verdict_distribution_drift = verdict_distribution_drift(baseline_root, candidate_root);
-    let latency_distribution_drift = latency_distribution_drift(baseline_root, candidate_root);
+    let verdict_distribution_drift =
+        verdict_distribution_drift(effective_baseline_root, candidate_root);
+    let latency_distribution_drift =
+        latency_distribution_drift(effective_baseline_root, candidate_root);
+    let score_distribution_drift =
+        score_distribution_drift(effective_baseline_root, candidate_root);
 
     let method_entries = [
         ("success_rate_confidence_interval", &success_rate_interval),
@@ -116,6 +128,7 @@ pub(crate) fn statistics_block_from_pair(
         ),
         ("verdict_distribution_drift", &verdict_distribution_drift),
         ("latency_distribution_drift", &latency_distribution_drift),
+        ("score_distribution_drift", &score_distribution_drift),
     ];
 
     let measured_methods = method_entries
@@ -159,6 +172,9 @@ pub(crate) fn statistics_block_from_pair(
     };
 
     let mut blockers = extra_blockers.to_vec();
+    if baseline_run_id_invalid {
+        blockers.push("baseline_run_id_invalid".to_string());
+    }
     if baseline_run_id.is_none() {
         blockers.extend(
             [
@@ -169,6 +185,7 @@ pub(crate) fn statistics_block_from_pair(
                 "p95_latency_delta_interval_not_measured",
                 "verdict_distribution_drift_not_measured",
                 "latency_distribution_drift_not_measured",
+                "score_distribution_drift_not_measured",
                 "drift_summary_not_measured",
             ]
             .into_iter()
@@ -198,6 +215,10 @@ pub(crate) fn statistics_block_from_pair(
         blockers.extend(method_blockers(
             "latency_distribution_drift_not_measured",
             &latency_distribution_drift,
+        ));
+        blockers.extend(method_blockers(
+            "score_distribution_drift_not_measured",
+            &score_distribution_drift,
         ));
         if drift_summary["status"].as_str() == Some("partially_measured") {
             blockers.push("drift_summary_partially_measured".to_string());
@@ -234,6 +255,7 @@ pub(crate) fn statistics_block_from_pair(
             "p95_latency_delta_confidence_interval": p95_latency_delta_interval,
             "verdict_distribution_drift": verdict_distribution_drift,
             "latency_distribution_drift": latency_distribution_drift,
+            "score_distribution_drift": score_distribution_drift,
         },
         "drift_summary": drift_summary,
         "promotion": {
@@ -343,6 +365,32 @@ fn latency_distribution_drift(baseline_root: Option<&Value>, candidate_root: &Va
     })
 }
 
+fn score_distribution_drift(baseline_root: Option<&Value>, candidate_root: &Value) -> Value {
+    let Some(baseline_root) = baseline_root else {
+        return not_measured_drift("score_distribution", "kolmogorov_smirnov");
+    };
+    let candidate = task_samples(candidate_root, "score");
+    let baseline = task_samples(baseline_root, "score");
+    let candidate_has_score =
+        candidate_root["mean_score"].as_f64().is_some() || !candidate.is_empty();
+    let baseline_has_score = baseline_root["mean_score"].as_f64().is_some() || !baseline.is_empty();
+    if !candidate_has_score && !baseline_has_score {
+        return not_applicable_drift("score_distribution", "kolmogorov_smirnov");
+    }
+    if candidate.is_empty() || baseline.is_empty() {
+        return not_measured_drift("score_distribution", "kolmogorov_smirnov");
+    }
+    let statistic = kolmogorov_smirnov_statistic(&candidate, &baseline);
+    json!({
+        "status": "measured",
+        "method": "kolmogorov_smirnov",
+        "metric": "score_distribution",
+        "value": statistic,
+        "candidate_sample_size": candidate.len(),
+        "baseline_sample_size": baseline.len(),
+    })
+}
+
 fn not_measured_delta(metric: &'static str) -> Value {
     json!({
         "status": "not_measured",
@@ -371,6 +419,15 @@ fn not_measured_drift(metric: &'static str, method: &'static str) -> Value {
         "method": method,
         "metric": metric,
         "reason": BASELINE_PAIR_REASON,
+    })
+}
+
+fn not_applicable_drift(metric: &'static str, method: &'static str) -> Value {
+    json!({
+        "status": "not_applicable",
+        "method": method,
+        "metric": metric,
+        "reason": "metric_not_available_for_payload_kind",
     })
 }
 
@@ -673,6 +730,10 @@ mod tests {
             Some("measured")
         );
         assert_eq!(
+            payload["methods"]["score_distribution_drift"]["status"].as_str(),
+            Some("measured")
+        );
+        assert_eq!(
             payload["drift_summary"]["status"].as_str(),
             Some("measured")
         );
@@ -680,6 +741,163 @@ mod tests {
         assert_eq!(
             payload["promotion"]["reason"].as_str(),
             Some(PROMOTION_POLICY_REASON)
+        );
+    }
+
+    #[test]
+    fn statistics_block_marks_score_distribution_not_applicable_for_payload_without_scores() {
+        let baseline = json!({
+            "_observability": {"source_event_id": Uuid::new_v4().to_string()},
+            "mcp_task_matrix": {
+                "tasks_total": 2,
+                "tasks_passed": 2,
+                "mean_ms": 12.0,
+                "p50_ms": 11.0,
+                "p95_ms": 13.0,
+                "tasks": [
+                    {"latency_ms": 11.0, "eval_verdict_class": "hit_correct_target", "success": true},
+                    {"latency_ms": 13.0, "eval_verdict_class": "hit_correct_target", "success": true}
+                ]
+            }
+        });
+        let candidate = json!({
+            "mcp_task_matrix": {
+                "tasks_total": 2,
+                "tasks_passed": 2,
+                "mean_ms": 9.0,
+                "p50_ms": 8.0,
+                "p95_ms": 10.0,
+                "tasks": [
+                    {"latency_ms": 8.0, "eval_verdict_class": "hit_correct_target", "success": true},
+                    {"latency_ms": 10.0, "eval_verdict_class": "hit_correct_target", "success": true}
+                ]
+            }
+        });
+        let payload = statistics_block_from_pair(
+            "mcp_task_matrix",
+            &candidate,
+            Some(&baseline),
+            Uuid::new_v4(),
+            &[],
+        );
+
+        assert_eq!(
+            payload["methods"]["score_delta_confidence_interval"]["status"].as_str(),
+            Some("not_applicable")
+        );
+        assert_eq!(
+            payload["methods"]["score_distribution_drift"]["status"].as_str(),
+            Some("not_applicable")
+        );
+        assert_eq!(
+            payload["drift_summary"]["status"].as_str(),
+            Some("measured")
+        );
+        assert_eq!(payload["promotion"]["fail_closed"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn statistics_block_fail_closes_when_score_metric_loses_task_samples() {
+        let baseline = json!({
+            "_observability": {"source_event_id": Uuid::new_v4().to_string()},
+            "memory_task_matrix": {
+                "tasks_total": 2,
+                "tasks_passed": 2,
+                "mean_score": 1.0,
+                "p50_ms": 10.0,
+                "p95_ms": 11.0,
+                "tasks": [
+                    {"latency_ms": 10.0, "eval_verdict_class": "hit_correct_target", "success": true},
+                    {"latency_ms": 11.0, "eval_verdict_class": "hit_correct_target", "success": true}
+                ]
+            }
+        });
+        let candidate = json!({
+            "memory_task_matrix": {
+                "tasks_total": 2,
+                "tasks_passed": 2,
+                "mean_score": 1.0,
+                "p50_ms": 9.0,
+                "p95_ms": 10.0,
+                "tasks": [
+                    {"latency_ms": 9.0, "eval_verdict_class": "hit_correct_target", "success": true},
+                    {"latency_ms": 10.0, "eval_verdict_class": "hit_correct_target", "success": true}
+                ]
+            }
+        });
+        let payload = statistics_block_from_pair(
+            "memory_task_matrix",
+            &candidate,
+            Some(&baseline),
+            Uuid::new_v4(),
+            &[],
+        );
+
+        assert_eq!(
+            payload["methods"]["score_distribution_drift"]["status"].as_str(),
+            Some("not_measured")
+        );
+        assert_eq!(
+            payload["drift_summary"]["status"].as_str(),
+            Some("partially_measured")
+        );
+        assert_eq!(payload["promotion"]["fail_closed"].as_bool(), Some(true));
+        assert!(
+            payload["promotion"]["blockers"]
+                .as_array()
+                .expect("blockers")
+                .contains(&json!("score_distribution_drift_not_measured"))
+        );
+    }
+
+    #[test]
+    fn statistics_block_fail_closes_on_invalid_baseline_run_id() {
+        let baseline = json!({
+            "_observability": {"source_event_id": "not-a-uuid"},
+            "memory_task_matrix": {
+                "tasks_total": 2,
+                "tasks_passed": 2,
+                "mean_score": 1.0,
+                "p50_ms": 10.0,
+                "p95_ms": 11.0,
+                "tasks": [
+                    {"score": 1.0, "latency_ms": 10.0, "eval_verdict_class": "hit_correct_target", "success": true},
+                    {"score": 1.0, "latency_ms": 11.0, "eval_verdict_class": "hit_correct_target", "success": true}
+                ]
+            }
+        });
+        let candidate = json!({
+            "memory_task_matrix": {
+                "tasks_total": 2,
+                "tasks_passed": 2,
+                "mean_score": 1.0,
+                "p50_ms": 9.0,
+                "p95_ms": 10.0,
+                "tasks": [
+                    {"score": 1.0, "latency_ms": 9.0, "eval_verdict_class": "hit_correct_target", "success": true},
+                    {"score": 1.0, "latency_ms": 10.0, "eval_verdict_class": "hit_correct_target", "success": true}
+                ]
+            }
+        });
+        let payload = statistics_block_from_pair(
+            "memory_task_matrix",
+            &candidate,
+            Some(&baseline),
+            Uuid::new_v4(),
+            &[],
+        );
+
+        assert_eq!(payload["baseline_run_id"], Value::Null);
+        assert_eq!(
+            payload["drift_summary"]["status"].as_str(),
+            Some("not_measured")
+        );
+        assert_eq!(payload["promotion"]["fail_closed"].as_bool(), Some(true));
+        assert!(
+            payload["promotion"]["blockers"]
+                .as_array()
+                .expect("blockers")
+                .contains(&json!("baseline_run_id_invalid"))
         );
     }
 }

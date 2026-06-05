@@ -44,9 +44,11 @@ mod retrieval_science;
 mod s3;
 mod status;
 mod syntax;
+mod thread_binding;
 mod token_budget;
 mod verify;
 mod warmup;
+mod workflow_trace;
 mod working_state;
 mod workspace_graph;
 
@@ -194,6 +196,20 @@ async fn main() -> Result<()> {
                         &args.cases,
                         &args.predictions,
                         &args.eval_results,
+                        args.summary.as_deref(),
+                        &args.ollama_base_url,
+                        &args.model,
+                    )
+                    .await?
+                }
+                BenchmarkCommand::ExternalMemoryLocalRetrievalJudge(args) => {
+                    let cfg = config::AppConfig::from_env()?;
+                    let db = postgres::connect_admin(&cfg).await?;
+                    external_benchmark::run_external_memory_local_retrieval_judge(
+                        Some(&db),
+                        &args.cases,
+                        &args.case_metrics,
+                        &args.judge_results,
                         args.summary.as_deref(),
                         &args.ollama_base_url,
                         &args.model,
@@ -3044,6 +3060,9 @@ async fn main() -> Result<()> {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
                 mcp::run_smoke_proof(&cfg, &args).await?;
+            }
+            VerifyCommand::WorkflowTrace(args) => {
+                workflow_trace::run_workflow_trace_verifier(&args)?;
             }
         },
         Command::Observe { command } => match command {

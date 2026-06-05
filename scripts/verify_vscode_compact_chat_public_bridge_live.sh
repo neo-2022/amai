@@ -2,10 +2,19 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+source "${repo_root}/scripts/vscode_extensions_roots.sh"
 state_path="${repo_root}/.amai/onboarding/vscode-public-bridge-live-state.json"
 timeout_seconds="${AMAI_VSCODE_BRIDGE_LIVE_TIMEOUT_SECONDS:-30}"
 record=0
 dirty_surface_pattern="untitled:${repo_root}/vscode%3A/amai\\.amai-vscode-bridge/open-clean-chat"
+tmp_root="$(mktemp -d)"
+cleanup() {
+  if [[ -n "${user_dir:-}" ]]; then
+    "${repo_root}/scripts/close_vscode_temp_host.sh" "${user_dir}" >/dev/null 2>&1 || true
+  fi
+  rm -rf "${tmp_root}"
+}
+trap cleanup EXIT
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -27,64 +36,43 @@ done
 command -v jq >/dev/null || { echo "verify_vscode_compact_chat_public_bridge_live: missing jq" >&2; exit 1; }
 command -v code >/dev/null || { echo "verify_vscode_compact_chat_public_bridge_live: missing code" >&2; exit 1; }
 
-detect_vscode_extensions_root() {
-  local reason="default"
-  if [[ -n "${AMAI_VSCODE_EXTENSIONS_ROOT:-}" ]]; then
-    reason="override_env"
-    printf '%s\t%s\n' "${AMAI_VSCODE_EXTENSIONS_ROOT}" "${reason}"
-    return 0
-  fi
-  local code_path code_realpath
-  code_path="$(command -v code 2>/dev/null || true)"
-  code_realpath=""
-  if [[ -n "${code_path}" ]]; then
-    code_realpath="$(readlink -f "${code_path}" 2>/dev/null || printf '%s' "${code_path}")"
-  fi
-
-  if [[ "${code_realpath}" == *"/snap/"* ]] || ( [[ -x /usr/bin/snap ]] && snap list code >/dev/null 2>&1 ); then
-    reason="vscode_snap"
-    if [[ -d "${HOME}/snap/code/common/.vscode" || -d "${HOME}/snap/code/common" ]]; then
-      printf '%s\t%s\n' "${HOME}/snap/code/common/.vscode/extensions" "${reason}"
-      return 0
-    fi
-    if [[ -d "${HOME}/snap/code/current/.vscode" || -d "${HOME}/snap/code/current" ]]; then
-      printf '%s\t%s\n' "${HOME}/snap/code/current/.vscode/extensions" "${reason}"
-      return 0
-    fi
-    printf '%s\t%s\n' "${HOME}/snap/code/common/.vscode/extensions" "${reason}"
-    return 0
-  fi
-
-  if [[ "${code_realpath}" == *codium* || "${code_realpath}" == *VSCodium* || -d "${HOME}/.config/VSCodium" || -d "${HOME}/.vscode-oss" ]]; then
-    reason="codium_or_oss"
-    printf '%s\t%s\n' "${HOME}/.vscode-oss/extensions" "${reason}"
-    return 0
-  fi
-  printf '%s\t%s\n' "${HOME}/.vscode/extensions" "${reason}"
-}
-
 expected_bridge_version="$(jq -r '.version // empty' "${repo_root}/tools/vscode-amai-bridge/package.json")"
 if [[ -z "${expected_bridge_version}" ]]; then
   echo "verify_vscode_compact_chat_public_bridge_live: failed to read expected bridge version" >&2
   exit 1
 fi
 
-extensions_root_with_reason="$(detect_vscode_extensions_root)"
-extensions_root="${extensions_root_with_reason%%$'\t'*}"
-extensions_root_reason="${extensions_root_with_reason#*$'\t'}"
-printf 'verify_vscode_compact_chat_public_bridge_live: extensions root: %s (reason=%s, code=%s)\n' \
-  "${extensions_root}" "${extensions_root_reason}" "$(command -v code 2>/dev/null || true)" >&2
+mapfile -t detected_roots_with_reason < <(detect_vscode_extensions_roots)
+if [[ "${#detected_roots_with_reason[@]}" -eq 0 ]]; then
+  echo "verify_vscode_compact_chat_public_bridge_live: failed to detect extensions roots" >&2
+  exit 1
+fi
+
+extensions_roots=()
+extensions_root_reasons=()
+for entry in "${detected_roots_with_reason[@]}"; do
+  extensions_roots+=("${entry%%$'\t'*}")
+  extensions_root_reasons+=("${entry#*$'\t'}")
+done
+printf 'verify_vscode_compact_chat_public_bridge_live: extensions roots: %s (reasons=%s, code=%s)\n' \
+  "$(printf '%s ' "${extensions_roots[@]}")" \
+  "$(printf '%s ' "${extensions_root_reasons[@]}")" \
+  "$(command -v code 2>/dev/null || true)" >&2
 
 find_installed_extension_dir() {
   local extension_id="$1"
-  find "${extensions_root}" -maxdepth 1 -type d -name "${extension_id}-*" | sort | tail -n1
+  local root
+  for root in "${extensions_roots[@]}"; do
+    find "${root}" -maxdepth 1 -type d -name "${extension_id}-*" | sort | tail -n1
+  done
 }
 
 count_dirty_surface_events() {
+  local logs_root="$1"
   local matches
   matches="$(
-    find "${HOME}/.config/Code/logs" -type f -path '*window*/renderer.log' -print0 2>/dev/null \
-      | xargs -0 rg -n "${dirty_surface_pattern}" 2>/dev/null || true
+    find "${logs_root}/logs" -type f -path '*window*/renderer.log' -exec rg -n "${dirty_surface_pattern}" {} + 2>/dev/null \
+      || true
   )"
   if [[ -z "${matches}" ]]; then
     echo 0
@@ -93,50 +81,66 @@ count_dirty_surface_events() {
   fi
 }
 
-bridge_dir="${extensions_root}/amai.amai-vscode-bridge-${expected_bridge_version}"
-if [[ ! -d "${bridge_dir}" ]]; then
-  echo "verify_vscode_compact_chat_public_bridge_live: expected bridge bundle ${bridge_dir} is not installed" >&2
-  exit 1
-fi
-
-bridge_package_json="${bridge_dir}/package.json"
-if [[ ! -f "${bridge_package_json}" ]]; then
-  echo "verify_vscode_compact_chat_public_bridge_live: missing ${bridge_package_json}" >&2
-  exit 1
-fi
-
-installed_bridge_version="$(jq -r '.version // empty' "${bridge_package_json}" 2>/dev/null)"
-if [[ "${installed_bridge_version}" != "${expected_bridge_version}" ]]; then
-  echo "verify_vscode_compact_chat_public_bridge_live: installed bridge bundle version mismatch under ${extensions_root} (expected ${expected_bridge_version}, got ${installed_bridge_version:-missing})" >&2
-  exit 1
-fi
-
+bridge_dir=""
 installed_bridge_supports_visible_surface=false
-if rg -q 'visible_surface|collectVisibleSurfaceState|publicBridgeIdentity' "${bridge_dir}/extension.js" 2>/dev/null; then
-  installed_bridge_supports_visible_surface=true
-fi
+chatgpt_dir=""
+for root in "${extensions_roots[@]}"; do
+  candidate_bridge_dir="${root}/amai.amai-vscode-bridge-${expected_bridge_version}"
+  candidate_chatgpt_dir="$(find "${root}" -maxdepth 1 -type d -name 'openai.chatgpt-*' | sort | tail -n1)"
+  if [[ -d "${candidate_bridge_dir}" && -d "${candidate_chatgpt_dir}" ]]; then
+    bridge_dir="${candidate_bridge_dir}"
+    chatgpt_dir="${candidate_chatgpt_dir}"
+    if rg -q 'visible_surface|collectVisibleSurfaceState|publicBridgeIdentity' "${bridge_dir}/extension.js" 2>/dev/null; then
+      installed_bridge_supports_visible_surface=true
+    fi
+    break
+  fi
+done
 
-chatgpt_dir="$(find_installed_extension_dir 'openai.chatgpt')"
-if [[ -z "${chatgpt_dir}" || ! -d "${chatgpt_dir}" ]]; then
-  echo "verify_vscode_compact_chat_public_bridge_live: openai.chatgpt extension is not installed under ${extensions_root}" >&2
+if [[ -z "${bridge_dir}" ]]; then
+  echo "verify_vscode_compact_chat_public_bridge_live: expected bridge bundle ${expected_bridge_version} is not installed in any detected extensions root" >&2
   exit 1
 fi
 
-tmpdir="$(mktemp -d)"
-trap 'rm -rf "${tmpdir}"' EXIT
+ext_dir="${tmp_root}/extensions"
+user_dir="${tmp_root}/data"
+mkdir -p "${ext_dir}" "${user_dir}"
+cp -R "${chatgpt_dir}" "${ext_dir}/"
+cp -R "${bridge_dir}" "${ext_dir}/amai.amai-vscode-bridge-${expected_bridge_version}"
 
-prompt_file="${tmpdir}/prompt.txt"
-result_file="${tmpdir}/result.json"
+prompt_file="${tmp_root}/prompt.txt"
+result_file="${tmp_root}/result.json"
+request_file="${repo_root}/.amai/onboarding/vscode-public-bridge-request.json"
 printf 'Amai live public bridge probe %s\n' "$(date -Is)" > "${prompt_file}"
 
 encode_uri_component() {
   jq -rn --arg value "$1" '$value|@uri'
 }
 
-uri="vscode://amai.amai-vscode-bridge/open-clean-chat?prompt_file=$(encode_uri_component "${prompt_file}")&result_file=$(encode_uri_component "${result_file}")&repo_root=$(encode_uri_component "${repo_root}")&target=sidebar&auto_submit=0"
-dirty_surface_before="$(count_dirty_surface_events)"
-if ! code --open-url "${uri}" >/dev/null 2>&1; then
-  echo "verify_vscode_compact_chat_public_bridge_live: code --open-url failed for vscode URI" >&2
+source_uri_text="vscode://amai.amai-vscode-bridge/open-clean-chat?prompt_file=$(encode_uri_component "${prompt_file}")&result_file=$(encode_uri_component "${result_file}")&repo_root=$(encode_uri_component "${repo_root}")&target=sidebar&auto_submit=0"
+
+dirty_surface_before="$(count_dirty_surface_events "${user_dir}")"
+mkdir -p "$(dirname "${request_file}")"
+request_tmp="$(mktemp "$(dirname "${request_file}")/vscode-public-bridge-request.XXXXXX")"
+jq -n \
+  --arg prompt_file "${prompt_file}" \
+  --arg result_file "${result_file}" \
+  --arg repo_root "${repo_root}" \
+  --arg target "sidebar" \
+  --arg source_uri_text "${source_uri_text}" \
+  '{
+    kind: "open-clean-chat",
+    prompt_file: $prompt_file,
+    result_file: $result_file,
+    repo_root: $repo_root,
+    target: $target,
+    auto_submit: false,
+    source_uri_text: $source_uri_text
+  }' > "${request_tmp}"
+mv "${request_tmp}" "${request_file}"
+
+if ! code --user-data-dir "${user_dir}" --extensions-dir "${ext_dir}" --new-window "${repo_root}" >/dev/null 2>&1; then
+  echo "verify_vscode_compact_chat_public_bridge_live: code --new-window failed for isolated bridge workspace request" >&2
   exit 1
 fi
 
@@ -151,7 +155,7 @@ for _ in $(seq 1 "${timeout_seconds}"); do
     ui_cleanup_matching_tabs_after="$(jq -r '.ui_cleanup.matching_tabs_after // -1' "${result_file}")"
     ui_cleanup_active_bridge_after="$(jq -r 'if .ui_cleanup.active_editor_matches_bridge_uri_after == null then "missing" else (.ui_cleanup.active_editor_matches_bridge_uri_after | tostring) end' "${result_file}")"
     if [[ "${status}" == "launch_requested" && "${authority}" == "amai.amai-vscode-bridge" ]]; then
-      dirty_surface_after="$(count_dirty_surface_events)"
+      dirty_surface_after="$(count_dirty_surface_events "${user_dir}")"
       if [[ "${runtime_bridge_version}" != "${expected_bridge_version}" ]]; then
         printf '%s\n' "${result_json}" >&2
         echo "verify_vscode_compact_chat_public_bridge_live: bridge runtime version mismatch (expected ${expected_bridge_version}, got ${runtime_bridge_version:-missing})" >&2

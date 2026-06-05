@@ -69,7 +69,7 @@ EOF
 
 set +e
 output="$(
-  env -u CODEX_THREAD_ID \
+  env -u AMAI_PLATFORM_THREAD_ID -u CODEX_THREAD_ID \
     AMI_OBSERVE_BIND=127.0.0.1:1 \
     "${SCRIPT_DIR}/client_budget_reply_gate.sh" 2>&1
 )"

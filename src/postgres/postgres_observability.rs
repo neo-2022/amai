@@ -718,6 +718,48 @@ pub async fn latest_observability_snapshot_for_project(
     Ok(legacy_row.map(|row| row.get(0)))
 }
 
+pub(crate) const LATEST_WORKING_STATE_RESTORE_SCOPED_SQL: &str = r#"
+    SELECT payload
+    FROM ami.observability_snapshots
+    WHERE snapshot_kind = 'working_state_restore'
+      AND scope_project_code = $1
+    ORDER BY created_at DESC
+    LIMIT 1
+"#;
+
+pub(crate) const LATEST_WORKING_STATE_RESTORE_LEGACY_SQL: &str = r#"
+    SELECT payload
+    FROM ami.observability_snapshots
+    WHERE snapshot_kind = 'working_state_restore'
+      AND scope_project_code IS NULL
+      AND scope_namespace_code IS NULL
+      AND payload #>> '{working_state_restore,project,code}' = $1
+    ORDER BY created_at DESC
+    LIMIT 1
+"#;
+
+pub async fn latest_working_state_restore_snapshot_for_project(
+    client: &Client,
+    project_code: &str,
+) -> Result<Option<Value>> {
+    // Scoped working_state_restore rows are authoritative once available. Legacy null-scope rows
+    // only exist for compatibility with pre-scope snapshots, so they remain a bounded fallback
+    // when no scoped row exists for the project.
+    let scoped_row = client
+        .query_opt(LATEST_WORKING_STATE_RESTORE_SCOPED_SQL, &[&project_code])
+        .await?;
+    if let Some(row) = scoped_row {
+        return Ok(Some(row.get(0)));
+    }
+
+    // Legacy working_state_restore rows predate scoped observability metadata. Keep the fallback
+    // bounded to those rows so a miss for an unrelated project does not scan every restore snapshot.
+    let legacy_row = client
+        .query_opt(LATEST_WORKING_STATE_RESTORE_LEGACY_SQL, &[&project_code])
+        .await?;
+    Ok(legacy_row.map(|row| row.get(0)))
+}
+
 pub async fn list_observability_snapshots_by_kinds(
     client: &Client,
     kinds: &[&str],
@@ -1571,7 +1613,9 @@ pub(super) fn observability_source_class(snapshot_kind: &str, payload: &Value) -
         | "token_benchmark_suite"
         | "text_compare"
         | "mcp_task_matrix"
-        | "memory_task_matrix" => "benchmark",
+        | "memory_task_matrix"
+        | "memory_benchmark_score"
+        | "memory_retrieval_semantic_evidence" => "benchmark",
         "system_snapshot" => "live_system",
         _ => "operational",
     }

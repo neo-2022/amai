@@ -38,3 +38,56 @@ amai_unique_suffix() {
   fi
   printf '%s%s%05d\n' "$(date +%s)" "$$" "${RANDOM}"
 }
+
+amai_trim_shell_value() {
+  local value="${1-}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "${value}"
+}
+
+resolve_amai_thread_id_from_env() {
+  local platform_value legacy_value
+  platform_value="$(amai_trim_shell_value "${AMAI_PLATFORM_THREAD_ID-}")"
+  legacy_value="$(amai_trim_shell_value "${CODEX_THREAD_ID-}")"
+  if [[ -n "${platform_value}" && -n "${legacy_value}" && "${platform_value}" != "${legacy_value}" ]]; then
+    printf '%s\n' "conflicting thread identity aliases: AMAI_PLATFORM_THREAD_ID and CODEX_THREAD_ID differ" >&2
+    return 2
+  fi
+  if [[ -n "${platform_value}" ]]; then
+    printf '%s\n' "${platform_value}"
+    return 0
+  fi
+  if [[ -n "${legacy_value}" ]]; then
+    printf '%s\n' "${legacy_value}"
+    return 0
+  fi
+  return 1
+}
+
+resolve_amai_thread_id_or_empty_from_env() {
+  local resolved status errexit_was_set=0
+  case "$-" in
+    *e*)
+      errexit_was_set=1
+      set +e
+      ;;
+  esac
+  resolved="$(resolve_amai_thread_id_from_env)"
+  status=$?
+  if [[ "${errexit_was_set}" -eq 1 ]]; then
+    set -e
+  fi
+  case "${status}" in
+    0)
+      printf '%s\n' "${resolved}"
+      return 0
+      ;;
+    1)
+      return 0
+      ;;
+    *)
+      return "${status}"
+      ;;
+  esac
+}

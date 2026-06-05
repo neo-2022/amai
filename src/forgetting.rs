@@ -338,12 +338,53 @@ pub struct LifecyclePolicySimulationRow {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct LifecyclePolicySimulationGuardrails {
+    pub truth_authority: bool,
+    pub routing_authority: bool,
+    pub forgetting_authority: bool,
+    pub promotion_authority: bool,
+    pub destructive_authority: bool,
+    pub runtime_authority: bool,
+    pub auto_apply_allowed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LifecyclePolicySimulationValidation {
+    pub contract_version: String,
+    pub validation_kind: String,
+    pub review_packet_state: String,
+    pub approval_state: String,
+    pub approval_reason: String,
+    pub evidence_scope: String,
+    pub baseline_kind: String,
+    pub candidate_kind: String,
+    pub measured_improvement_state: String,
+    pub improvement_measured: bool,
+    pub human_review_required: bool,
+    pub auto_promotion_allowed: bool,
+    pub minimum_sample_size: i64,
+    pub sample_size: i64,
+    pub cohort_count: i64,
+    pub actionable_review_row_count: i64,
+    pub authority_blocked_row_count: i64,
+    pub protected_or_manual_blocked_row_count: i64,
+    pub invalid_recommendation_count: i64,
+    pub invalid_urgency_count: i64,
+    pub missing_advisory_blocker_count: i64,
+    pub recommendation_counts: BTreeMap<String, i64>,
+    pub urgency_counts: BTreeMap<String, i64>,
+    pub blocked_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct LifecyclePolicySimulationReport {
     pub contract_version: String,
     pub project_code: String,
     pub namespace_code: String,
     pub source_model_kind: String,
     pub authority_mode: String,
+    pub guardrails: LifecyclePolicySimulationGuardrails,
+    pub measured_validation: LifecyclePolicySimulationValidation,
     pub rows: Vec<LifecyclePolicySimulationRow>,
 }
 
@@ -509,6 +550,142 @@ const LIFECYCLE_QUEUE_TWO_STATES: [&str; 8] = [
     "protected",
     "quarantined",
 ];
+
+const LIFECYCLE_POLICY_VALIDATION_MIN_SAMPLE_SIZE: i64 = 3;
+const LIFECYCLE_POLICY_REVIEW_ACTIONS: [&str; 5] = [
+    "hold_current_policy",
+    "review_revalidation_queue",
+    "review_archive_candidate",
+    "review_prune_candidate",
+    "observe_only",
+];
+const LIFECYCLE_POLICY_URGENCIES: [&str; 4] = ["manual_only", "high", "medium", "low"];
+
+fn lifecycle_policy_simulation_guardrails() -> LifecyclePolicySimulationGuardrails {
+    LifecyclePolicySimulationGuardrails {
+        truth_authority: false,
+        routing_authority: false,
+        forgetting_authority: false,
+        promotion_authority: false,
+        destructive_authority: false,
+        runtime_authority: false,
+        auto_apply_allowed: false,
+    }
+}
+
+fn count_string_value(counts: &mut BTreeMap<String, i64>, value: &str) {
+    *counts.entry(value.to_string()).or_insert(0) += 1;
+}
+
+fn lifecycle_policy_simulation_validation(
+    rows: &[LifecyclePolicySimulationRow],
+) -> LifecyclePolicySimulationValidation {
+    let mut recommendation_counts = BTreeMap::new();
+    let mut urgency_counts = BTreeMap::new();
+    let mut sample_size = 0_i64;
+    let mut actionable_review_row_count = 0_i64;
+    let mut authority_blocked_row_count = 0_i64;
+    let mut protected_or_manual_blocked_row_count = 0_i64;
+    let mut invalid_recommendation_count = 0_i64;
+    let mut invalid_urgency_count = 0_i64;
+    let mut missing_advisory_blocker_count = 0_i64;
+
+    for row in rows {
+        sample_size += row.sample_size.max(0);
+        count_string_value(&mut recommendation_counts, &row.recommended_review_action);
+        count_string_value(&mut urgency_counts, &row.urgency);
+
+        if !LIFECYCLE_POLICY_REVIEW_ACTIONS.contains(&row.recommended_review_action.as_str()) {
+            invalid_recommendation_count += 1;
+        }
+        if !LIFECYCLE_POLICY_URGENCIES.contains(&row.urgency.as_str()) {
+            invalid_urgency_count += 1;
+        }
+        if row
+            .blocking_reasons
+            .iter()
+            .any(|reason| reason == "advisory_only_no_runtime_authority")
+        {
+            authority_blocked_row_count += 1;
+        } else {
+            missing_advisory_blocker_count += 1;
+        }
+        if row.blocking_reasons.iter().any(|reason| {
+            reason == "protected_or_retained_cohort"
+                || reason == "quarantined_requires_manual_truth_review"
+        }) {
+            protected_or_manual_blocked_row_count += 1;
+        }
+        if matches!(
+            row.recommended_review_action.as_str(),
+            "review_revalidation_queue" | "review_archive_candidate" | "review_prune_candidate"
+        ) {
+            actionable_review_row_count += 1;
+        }
+    }
+
+    let mut blocked_reasons = Vec::new();
+    if rows.is_empty() {
+        blocked_reasons.push("blocked_no_policy_rows".to_string());
+    }
+    if sample_size < LIFECYCLE_POLICY_VALIDATION_MIN_SAMPLE_SIZE {
+        blocked_reasons.push("blocked_statistics_incomplete".to_string());
+    }
+    if invalid_recommendation_count > 0 {
+        blocked_reasons.push("invalid_recommendation_action".to_string());
+    }
+    if invalid_urgency_count > 0 {
+        blocked_reasons.push("invalid_urgency".to_string());
+    }
+    if missing_advisory_blocker_count > 0 {
+        blocked_reasons.push("missing_advisory_only_blocker".to_string());
+    }
+
+    let review_packet_ready = blocked_reasons.is_empty();
+    let review_packet_state = if review_packet_ready {
+        "review_packet_ready"
+    } else {
+        "blocked_statistics_incomplete"
+    };
+    let approval_state = if review_packet_ready {
+        "pending_human_review"
+    } else {
+        "blocked_statistics_incomplete"
+    };
+    let approval_reason = if review_packet_ready {
+        "Internal advisory review packet is complete enough for human review; measured improvement still requires holdout or post-action outcomes."
+    } else {
+        "Policy simulation validation failed closed before human review because required evidence or advisory guardrails are incomplete."
+    };
+
+    LifecyclePolicySimulationValidation {
+        contract_version: "lifecycle-policy-simulate-validation-v1".to_string(),
+        validation_kind: "internal_advisory_review_packet_validation".to_string(),
+        review_packet_state: review_packet_state.to_string(),
+        approval_state: approval_state.to_string(),
+        approval_reason: approval_reason.to_string(),
+        evidence_scope: "same_transition_dataset_internal_validation".to_string(),
+        baseline_kind: "queue_3_cohort_risk_without_policy_review_mapping".to_string(),
+        candidate_kind: "lifecycle_policy_simulate_v1".to_string(),
+        measured_improvement_state: "not_measured_requires_holdout_or_post_action_outcomes"
+            .to_string(),
+        improvement_measured: false,
+        human_review_required: true,
+        auto_promotion_allowed: false,
+        minimum_sample_size: LIFECYCLE_POLICY_VALIDATION_MIN_SAMPLE_SIZE,
+        sample_size,
+        cohort_count: rows.len() as i64,
+        actionable_review_row_count,
+        authority_blocked_row_count,
+        protected_or_manual_blocked_row_count,
+        invalid_recommendation_count,
+        invalid_urgency_count,
+        missing_advisory_blocker_count,
+        recommendation_counts,
+        urgency_counts,
+        blocked_reasons,
+    }
+}
 
 fn rounded_ratio(numerator: i64, denominator: i64) -> f64 {
     if denominator <= 0 {
@@ -912,17 +1089,20 @@ pub async fn policy_simulate(
     namespace_code: &str,
 ) -> Result<LifecyclePolicySimulationReport> {
     let cohort_risk = cohort_risk(client, project_code, namespace_code).await?;
-    let rows = cohort_risk
+    let rows: Vec<LifecyclePolicySimulationRow> = cohort_risk
         .rows
         .iter()
         .map(|row| lifecycle_policy_simulation_row(row))
         .collect();
+    let measured_validation = lifecycle_policy_simulation_validation(&rows);
     Ok(LifecyclePolicySimulationReport {
         contract_version: "lifecycle-policy-simulate-v1".to_string(),
         project_code: cohort_risk.project_code,
         namespace_code: cohort_risk.namespace_code,
         source_model_kind: cohort_risk.model_kind,
         authority_mode: "advisory_only_no_runtime_authority".to_string(),
+        guardrails: lifecycle_policy_simulation_guardrails(),
+        measured_validation,
         rows,
     })
 }
@@ -1672,5 +1852,216 @@ mod tests {
             simulation.authority_mode,
             "advisory_only_no_runtime_authority"
         );
+    }
+
+    fn lifecycle_policy_test_row(
+        expected_next_state: &str,
+        pending_review_risk_7d: f64,
+        archive_risk_30d: f64,
+        prune_risk_30d: f64,
+        sample_size: i64,
+        expected_residency_ms: i64,
+    ) -> LifecycleCohortRiskRow {
+        LifecycleCohortRiskRow {
+            observed_state: "active_stale".to_string(),
+            derivation_kind: "summary".to_string(),
+            retention_class: "standard".to_string(),
+            decay_policy: "default".to_string(),
+            freshness_band: "stale".to_string(),
+            utility_band: "medium".to_string(),
+            access_band: "low".to_string(),
+            sample_size,
+            expected_next_state: expected_next_state.to_string(),
+            pending_review_risk_7d,
+            archive_risk_30d,
+            prune_risk_30d,
+            expected_residency_ms,
+            dwell_p50_ms: 1_000,
+            dwell_p75_ms: 1_000,
+            dwell_p90_ms: 1_000,
+            transition_probabilities: BTreeMap::new(),
+            cohort_reason_summary: "test cohort".to_string(),
+        }
+    }
+
+    #[test]
+    fn lifecycle_policy_simulation_recommends_archive_and_prune_review_without_authority() {
+        let archive_row =
+            lifecycle_policy_test_row("archived", 0.02, 0.35, 0.05, 5, 4 * 24 * 60 * 60 * 1000);
+        let archive_simulation = lifecycle_policy_simulation_row(&archive_row);
+        assert_eq!(
+            archive_simulation.recommended_review_action,
+            "review_archive_candidate"
+        );
+        assert_eq!(
+            archive_simulation.authority_mode,
+            "advisory_only_no_runtime_authority"
+        );
+        assert!(
+            archive_simulation
+                .blocking_reasons
+                .contains(&"advisory_only_no_runtime_authority".to_string())
+        );
+
+        let prune_row =
+            lifecycle_policy_test_row("pruned", 0.02, 0.05, 0.45, 5, 4 * 24 * 60 * 60 * 1000);
+        let prune_simulation = lifecycle_policy_simulation_row(&prune_row);
+        assert_eq!(
+            prune_simulation.recommended_review_action,
+            "review_prune_candidate"
+        );
+        assert_eq!(
+            prune_simulation.authority_mode,
+            "advisory_only_no_runtime_authority"
+        );
+    }
+
+    #[test]
+    fn lifecycle_policy_simulation_observe_only_stays_advisory() {
+        let row =
+            lifecycle_policy_test_row("active_hot", 0.01, 0.02, 0.03, 5, 10 * 24 * 60 * 60 * 1000);
+        let simulation = lifecycle_policy_simulation_row(&row);
+
+        assert_eq!(simulation.recommended_review_action, "observe_only");
+        assert_eq!(simulation.urgency, "low");
+        assert!(
+            simulation
+                .blocking_reasons
+                .contains(&"advisory_only_no_runtime_authority".to_string())
+        );
+    }
+
+    #[test]
+    fn lifecycle_policy_simulation_validation_surfaces_review_packet_ready() {
+        let rows = vec![
+            lifecycle_policy_simulation_row(&lifecycle_policy_test_row(
+                "pending_review",
+                0.42,
+                0.02,
+                0.01,
+                5,
+                2 * 24 * 60 * 60 * 1000,
+            )),
+            lifecycle_policy_simulation_row(&lifecycle_policy_test_row(
+                "active_hot",
+                0.01,
+                0.02,
+                0.03,
+                4,
+                10 * 24 * 60 * 60 * 1000,
+            )),
+        ];
+
+        let validation = lifecycle_policy_simulation_validation(&rows);
+
+        assert_eq!(
+            validation.contract_version,
+            "lifecycle-policy-simulate-validation-v1"
+        );
+        assert_eq!(validation.review_packet_state, "review_packet_ready");
+        assert_eq!(validation.approval_state, "pending_human_review");
+        assert_eq!(
+            validation.measured_improvement_state,
+            "not_measured_requires_holdout_or_post_action_outcomes"
+        );
+        assert!(!validation.improvement_measured);
+        assert!(validation.human_review_required);
+        assert!(!validation.auto_promotion_allowed);
+        assert_eq!(validation.sample_size, 9);
+        assert_eq!(validation.cohort_count, 2);
+        assert_eq!(validation.authority_blocked_row_count, 2);
+        assert_eq!(validation.missing_advisory_blocker_count, 0);
+        assert!(validation.blocked_reasons.is_empty());
+        assert_eq!(
+            validation
+                .recommendation_counts
+                .get("review_revalidation_queue"),
+            Some(&1)
+        );
+        assert_eq!(
+            validation.recommendation_counts.get("observe_only"),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn lifecycle_policy_simulation_validation_fails_closed_for_empty_or_tiny_sample() {
+        let empty_validation = lifecycle_policy_simulation_validation(&[]);
+        assert_eq!(
+            empty_validation.review_packet_state,
+            "blocked_statistics_incomplete"
+        );
+        assert_eq!(
+            empty_validation.approval_state,
+            "blocked_statistics_incomplete"
+        );
+        assert!(
+            empty_validation
+                .blocked_reasons
+                .contains(&"blocked_no_policy_rows".to_string())
+        );
+        assert!(
+            empty_validation
+                .blocked_reasons
+                .contains(&"blocked_statistics_incomplete".to_string())
+        );
+
+        let rows = vec![lifecycle_policy_simulation_row(&lifecycle_policy_test_row(
+            "pending_review",
+            0.42,
+            0.02,
+            0.01,
+            1,
+            2 * 24 * 60 * 60 * 1000,
+        ))];
+        let tiny_validation = lifecycle_policy_simulation_validation(&rows);
+        assert_eq!(
+            tiny_validation.review_packet_state,
+            "blocked_statistics_incomplete"
+        );
+        assert!(
+            tiny_validation
+                .blocked_reasons
+                .contains(&"blocked_statistics_incomplete".to_string())
+        );
+    }
+
+    #[test]
+    fn lifecycle_policy_simulation_validation_fails_closed_without_advisory_blocker() {
+        let mut row = lifecycle_policy_simulation_row(&lifecycle_policy_test_row(
+            "pending_review",
+            0.42,
+            0.02,
+            0.01,
+            5,
+            2 * 24 * 60 * 60 * 1000,
+        ));
+        row.blocking_reasons.clear();
+
+        let validation = lifecycle_policy_simulation_validation(&[row]);
+
+        assert_eq!(
+            validation.review_packet_state,
+            "blocked_statistics_incomplete"
+        );
+        assert_eq!(validation.missing_advisory_blocker_count, 1);
+        assert!(
+            validation
+                .blocked_reasons
+                .contains(&"missing_advisory_only_blocker".to_string())
+        );
+    }
+
+    #[test]
+    fn lifecycle_policy_simulation_report_guardrails_deny_runtime_authority() {
+        let guardrails = lifecycle_policy_simulation_guardrails();
+
+        assert!(!guardrails.truth_authority);
+        assert!(!guardrails.routing_authority);
+        assert!(!guardrails.forgetting_authority);
+        assert!(!guardrails.promotion_authority);
+        assert!(!guardrails.destructive_authority);
+        assert!(!guardrails.runtime_authority);
+        assert!(!guardrails.auto_apply_allowed);
     }
 }

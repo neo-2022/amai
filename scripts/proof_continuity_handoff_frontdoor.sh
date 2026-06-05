@@ -2,12 +2,14 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+export AMAI_OPERATOR_REDIRECT_PROVENANCE="proof_harness:$(basename "$0")"
 
 handoff_path="state/continuity-imports/amai/live-handoff.md"
 ensure_observe_frontdoor_path="./scripts/ensure_observe_frontdoor.sh"
 tmpdir="$(mktemp -d)"
 snapshot_path="${tmpdir}/live-handoff.snapshot"
 state_path="${tmpdir}/live-handoff.state"
+promotion_details="${tmpdir}/promotion-details.txt"
 ensure_observe_frontdoor_mode_before="$(stat -c '%a' "${ensure_observe_frontdoor_path}")"
 ensure_observe_frontdoor_backup="$(mktemp ./scripts/ensure_observe_frontdoor.sh.backup.XXXXXX)"
 startup_state_json="$(
@@ -15,6 +17,10 @@ startup_state_json="$(
 )"
 original_headline="$(printf '%s\n' "${startup_state_json}" | jq -r '.startup_runtime_state.execctl_active_lease.headline // empty' 2>/dev/null || true)"
 original_next_step="$(printf '%s\n' "${startup_state_json}" | jq -r '.startup_runtime_state.execctl_active_lease.next_step // empty' 2>/dev/null || true)"
+cat >"${promotion_details}" <<'EOF'
+promotion_contract: operator_redirect
+Synthetic frontdoor proof explicitly switches the active main workline.
+EOF
 mv "${ensure_observe_frontdoor_path}" "${ensure_observe_frontdoor_backup}"
 cat > "${ensure_observe_frontdoor_path}" <<'EOF'
 #!/usr/bin/env bash
@@ -35,6 +41,8 @@ cleanup() {
         --namespace continuity \
         --headline "${original_headline}" \
         --next-step "${original_next_step}" \
+        --details-file "${promotion_details}" \
+        --promote-active-workline \
         --resolve-current-goal >/dev/null 2>&1 || true
   elif [[ -f "${state_path}" ]] && [[ "$(cat "${state_path}")" == "present" ]]; then
     mkdir -p "$(dirname "${handoff_path}")"
@@ -69,11 +77,13 @@ next_step="prove shell fallback uses canonical launcher"
 start_epoch_ms="$(./scripts/epoch_ms.sh)"
 api_payload="$(
   AMI_OBSERVE_BIND=127.0.0.1:1 \
-    timeout 8s ./scripts/continuity_handoff.sh \
+  timeout 8s ./scripts/continuity_handoff.sh \
       --project amai \
       --namespace continuity \
       --headline "${headline}" \
-      --next-step "${next_step}"
+      --next-step "${next_step}" \
+      --details-file "${promotion_details}" \
+      --promote-active-workline
 )"
 end_epoch_ms="$(./scripts/epoch_ms.sh)"
 elapsed_ms="$((end_epoch_ms - start_epoch_ms))"

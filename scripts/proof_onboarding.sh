@@ -60,7 +60,10 @@ jq -e '.startup_contract.tool_runtime_reconcile.local_cli.requires_namespace_arg
 jq -e '.startup_contract.tool_runtime_reconcile.local_cli.json_required == true' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.tool_runtime_reconcile.local_cli_success_classification == "stale_embedded_mcp_session"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.tool_runtime_reconcile.local_cli_success_replaces_transport_failure == true' "${startup_contract}" >/dev/null
-jq -e '.startup_contract.tool_runtime_reconcile.must_request_mcp_reconnect_after_local_success == true' "${startup_contract}" >/dev/null
+jq -e '.startup_contract.tool_runtime_reconcile.must_request_mcp_reconnect_after_local_success == false' "${startup_contract}" >/dev/null
+jq -e '.startup_contract.tool_runtime_reconcile.same_session_continuation_allowed_after_local_success == true' "${startup_contract}" >/dev/null
+jq -e '.startup_contract.tool_runtime_reconcile.operator_action_required_after_local_success == false' "${startup_contract}" >/dev/null
+jq -e '.startup_contract.tool_runtime_reconcile.reconnect_helper_diagnostic_only_after_local_success == true' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.tool_runtime_reconcile.must_continue_from_local_startup_payload == true' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.tool_runtime_reconcile.reconnect_helper.shell_helper_relative_path == "./scripts/reconnect_local.sh"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.tool_runtime_reconcile.reconnect_helper.bootstrap_command == "bootstrap reconnect"' "${startup_contract}" >/dev/null
@@ -112,7 +115,10 @@ grep -q './scripts/continuity_startup.sh --repo-root' "${startup_output}"
 grep -q 'requires_namespace_argument = true' "${startup_output}"
 grep -q 'stale_embedded_mcp_session' "${startup_output}"
 grep -q 'local_cli_success_replaces_transport_failure = true' "${startup_output}"
-grep -q 'must_request_mcp_reconnect_after_local_success = true' "${startup_output}"
+grep -q 'same_session_continuation_allowed_after_local_success = true' "${startup_output}"
+grep -q 'operator_action_required_after_local_success = false' "${startup_output}"
+grep -q 'must_request_mcp_reconnect_after_local_success = false' "${startup_output}"
+grep -q 'reconnect_helper_diagnostic_only_after_local_success = true' "${startup_output}"
 grep -q 'must_continue_from_local_startup_payload = true' "${startup_output}"
 grep -q './scripts/reconnect_local.sh --client vscode' "${startup_output}"
 grep -q './scripts/amai_exec.sh bootstrap reconnect --client vscode --yes' "${startup_output}"

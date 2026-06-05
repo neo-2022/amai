@@ -205,13 +205,8 @@ pub(super) async fn current_workspace_live_response_scope(
     let Ok(project) = postgres::get_project_by_repo_root(db, &repo_root_display).await else {
         return Ok(None);
     };
-    let snapshot = postgres::latest_observability_snapshot_for_project(
-        db,
-        "working_state_restore",
-        "working_state_restore",
-        &project.code,
-    )
-    .await?;
+    let snapshot =
+        postgres::latest_working_state_restore_snapshot_for_project(db, &project.code).await?;
     let namespace_code = snapshot
         .as_ref()
         .and_then(|value| value["working_state_restore"]["namespace"]["code"].as_str())
@@ -315,11 +310,13 @@ pub(super) fn build_live_response_latency_surface(
     now_epoch_ms: i64,
 ) -> Result<Value> {
     let repo_root_str = repo_root.to_str().unwrap_or_default();
-    let current_thread_id = codex_threads::current_thread_id().or_else(|| {
-        codex_threads::preferred_thread_id_for_repo(repo_root_str)
+    let env_thread_id = codex_threads::current_thread_id_result()?;
+    let current_thread_id = match env_thread_id {
+        Some(thread_id) => Some(thread_id),
+        None => codex_threads::preferred_thread_id_for_repo(repo_root_str)
             .ok()
-            .flatten()
-    });
+            .flatten(),
+    };
     let mut missing_thread_id = 0u64;
     let mut quality_rejected = 0u64;
     let mut invalid_latency = 0u64;

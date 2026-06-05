@@ -27,6 +27,14 @@ done
 
 command -v curl >/dev/null 2>&1 || exit 1
 
+frontdoor_pid_is_stale() {
+  local pid="${1:-}"
+  local exe_path=""
+  [[ -n "${pid}" ]] || return 1
+  exe_path="$(readlink "/proc/${pid}/exe" 2>/dev/null || true)"
+  [[ -n "${exe_path}" ]] && [[ "${exe_path}" == *" (deleted)" ]]
+}
+
 observe_bind="${AMI_OBSERVE_BIND:-0.0.0.0:9464}"
 observe_host="${observe_bind%:*}"
 observe_port="${observe_bind##*:}"
@@ -43,16 +51,35 @@ esac
 ready_url="http://${observe_host}:${observe_port}${path}"
 base_url="http://${observe_host}:${observe_port}/"
 curl_max_time="${AMAI_OBSERVE_FRONTDOOR_CURL_MAX_TIME:-0.5}"
+binary="./target/release/amai"
 
-if curl --silent --show-error --fail --max-time "$curl_max_time" "$ready_url" >/dev/null 2>&1; then
-  exit 0
+stale_pid=""
+if command -v pgrep >/dev/null 2>&1 && command -v readlink >/dev/null 2>&1; then
+  stale_pid="$(
+    pgrep -fo "^${binary//\//\\/} observe serve --bind ${observe_bind}$" 2>/dev/null || true
+  )"
+  if [[ -n "${stale_pid}" ]]; then
+    if ! kill -0 "${stale_pid}" >/dev/null 2>&1; then
+      stale_pid=""
+    elif ! frontdoor_pid_is_stale "${stale_pid}"; then
+      stale_pid=""
+    fi
+  fi
 fi
 
-if curl --silent --show-error --fail --max-time "$curl_max_time" "$base_url" >/dev/null 2>&1; then
-  exit 0
+if [[ -z "${stale_pid}" ]]; then
+  if curl --silent --show-error --fail --max-time "$curl_max_time" "$ready_url" >/dev/null 2>&1; then
+    exit 0
+  fi
+
+  if curl --silent --show-error --fail --max-time "$curl_max_time" "$base_url" >/dev/null 2>&1; then
+    exit 0
+  fi
+else
+  echo "ensure_observe_frontdoor: stale dashboard process pid=${stale_pid} detected; restarting" >&2
 fi
 
-if [[ ! -x "./target/release/amai" ]]; then
+if [[ ! -x "${binary}" ]]; then
   exit 1
 fi
 

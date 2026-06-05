@@ -2,12 +2,14 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+export AMAI_OPERATOR_REDIRECT_PROVENANCE="proof_harness:$(basename "$0")"
 
 handoff_path="state/continuity-imports/amai/live-handoff.md"
 tmpdir="$(mktemp -d)"
 snapshot_path="${tmpdir}/live-handoff.snapshot"
 state_path="${tmpdir}/live-handoff.state"
 proof_tmp="${tmpdir}/runs"
+promotion_details="${tmpdir}/promotion-details.txt"
 mkdir -p "${proof_tmp}"
 
 cleanup() {
@@ -33,6 +35,11 @@ if [[ ! -x ./target/release/amai ]]; then
   exit 1
 fi
 
+cat >"${promotion_details}" <<'EOF'
+promotion_contract: operator_redirect
+Synthetic concurrent proof explicitly switches the active main workline.
+EOF
+
 declare -a pids=()
 declare -a headlines=()
 declare -a next_steps=()
@@ -50,6 +57,8 @@ for i in $(seq 1 "${workers}"); do
         --namespace continuity \
         --headline "${headline}" \
         --next-step "${next_step}" \
+        --details-file "${promotion_details}" \
+        --promote-active-workline \
       >"${proof_tmp}/handoff-${i}.out" \
       2>"${proof_tmp}/handoff-${i}.err"
   ) &

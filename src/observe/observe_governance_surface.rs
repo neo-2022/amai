@@ -59,6 +59,56 @@ fn summarize_lifecycle_risk_report(
     })
 }
 
+fn summarize_lifecycle_policy_review_report(
+    report: &forgetting::LifecyclePolicySimulationReport,
+) -> Option<Value> {
+    let top_row = report.rows.iter().max_by(|left, right| {
+        let left_peak = left
+            .pending_review_risk_7d
+            .max(left.archive_risk_30d)
+            .max(left.prune_risk_30d);
+        let right_peak = right
+            .pending_review_risk_7d
+            .max(right.archive_risk_30d)
+            .max(right.prune_risk_30d);
+        left_peak
+            .partial_cmp(&right_peak)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left.sample_size.cmp(&right.sample_size))
+    })?;
+
+    Some(json!({
+        "summary_version": "lifecycle-policy-review-summary-v1",
+        "status": "advisory",
+        "project_code": report.project_code.clone(),
+        "namespace_code": report.namespace_code.clone(),
+        "source_model_kind": report.source_model_kind.clone(),
+        "authority_mode": report.authority_mode.clone(),
+        "review_packet_state": report.measured_validation.review_packet_state.clone(),
+        "approval_state": report.measured_validation.approval_state.clone(),
+        "approval_reason": report.measured_validation.approval_reason.clone(),
+        "measured_improvement_state": report.measured_validation.measured_improvement_state.clone(),
+        "human_review_required": report.measured_validation.human_review_required,
+        "auto_promotion_allowed": report.measured_validation.auto_promotion_allowed,
+        "sample_size": report.measured_validation.sample_size,
+        "cohort_count": report.measured_validation.cohort_count,
+        "actionable_review_row_count": report.measured_validation.actionable_review_row_count,
+        "authority_blocked_row_count": report.measured_validation.authority_blocked_row_count,
+        "protected_or_manual_blocked_row_count": report.measured_validation.protected_or_manual_blocked_row_count,
+        "invalid_recommendation_count": report.measured_validation.invalid_recommendation_count,
+        "invalid_urgency_count": report.measured_validation.invalid_urgency_count,
+        "missing_advisory_blocker_count": report.measured_validation.missing_advisory_blocker_count,
+        "blocked_reasons": report.measured_validation.blocked_reasons.clone(),
+        "top_observed_state": top_row.observed_state.clone(),
+        "top_expected_next_state": top_row.expected_next_state.clone(),
+        "top_recommended_review_action": top_row.recommended_review_action.clone(),
+        "top_urgency": top_row.urgency.clone(),
+        "top_recommendation_reason": top_row.recommendation_reason.clone(),
+        "top_cohort_reason_summary": top_row.cohort_reason_summary.clone(),
+        "note": "Queue 3 advisory-only lifecycle policy review packet. It informs review and planning but does not authorize prune/archive/policy actions.",
+    }))
+}
+
 async fn collect_lifecycle_risk_summary(db: &Client, repo_root: &Path) -> Result<Value> {
     let project = match postgres::get_project_by_repo_root(db, &repo_root.display().to_string())
         .await
@@ -120,8 +170,28 @@ async fn collect_lifecycle_risk_summary(db: &Client, repo_root: &Path) -> Result
             "note": "Queue 3 advisory lifecycle risk surface appears only after Queue 2 transition events exist for at least one namespace."
         }));
     };
+    let policy_report =
+        forgetting::policy_simulate(db, &summary.project_code, &summary.namespace_code)
+            .await
+            .with_context(|| {
+                format!(
+                    "governance: collect lifecycle policy review summary for {}/{}",
+                    summary.project_code, summary.namespace_code
+                )
+            })?;
+    let lifecycle_policy_review_summary =
+        summarize_lifecycle_policy_review_report(&policy_report).unwrap_or_else(|| {
+            json!({
+                "summary_version": "lifecycle-policy-review-summary-v1",
+                "status": "not_available",
+                "project_code": summary.project_code,
+                "namespace_code": summary.namespace_code,
+                "reason": "policy_simulate_report_missing_or_empty",
+                "note": "Queue 3 advisory policy review packet stays visible only when the review contour has rows."
+            })
+        });
     Ok(json!({
-        "summary_version": "lifecycle-risk-summary-v1",
+        "summary_version": "lifecycle-risk-summary-v2",
         "status": "advisory",
         "project_code": summary.project_code,
         "namespace_code": summary.namespace_code,
@@ -135,7 +205,8 @@ async fn collect_lifecycle_risk_summary(db: &Client, repo_root: &Path) -> Result
         "max_prune_risk_30d": summary.max_prune_risk_30d,
         "expected_residency_ms": summary.expected_residency_ms,
         "top_cohort_reason_summary": summary.top_cohort_reason_summary,
-        "note": "Queue 3 advisory-only lifecycle risk summary over the highest-risk scoped cohort. It informs review and planning but does not authorize prune/archive/policy actions."
+        "note": "Queue 3 advisory-only lifecycle risk summary over the highest-risk scoped cohort. It informs review and planning but does not authorize prune/archive/policy actions.",
+        "lifecycle_policy_review_summary": lifecycle_policy_review_summary
     }))
 }
 
@@ -413,7 +484,7 @@ pub(super) async fn collect_governance_surface(db: &Client, repo_root: &Path) ->
     let lifecycle_risk_summary = collect_lifecycle_risk_summary(db, repo_root).await?;
 
     Ok(json!({
-        "governance_surface_version": "governance-surface-v3",
+        "governance_surface_version": "governance-surface-v4",
         "wrong_link_rate": {
             "open_conflict_count": open_conflicts,
             "note": "wrong-link rate is proxied by open memory_conflicts with kind='scope' or 'truth'"

@@ -1,7 +1,6 @@
 use crate::codex_threads;
 use serde_json::{Value, json};
 
-use super::current_thread_id;
 use super::working_state_shell_commands::{
     can_use_workspace_continuity_defaults, shell_join_command,
 };
@@ -193,12 +192,14 @@ fn host_current_thread_control_selection_reason(
 pub(crate) fn build_host_current_thread_control_surface_for_stage(
     stage: HostContextCompactionStage,
 ) -> Value {
-    let current_thread = current_thread_id();
-    build_host_current_thread_control_surface_for_thread_and_stage_with_primary_command(
-        current_thread.as_deref(),
-        stage,
-        None,
-    )
+    let (current_thread, thread_binding_conflict) = current_thread_id_for_host_control_surface();
+    let surface =
+        build_host_current_thread_control_surface_for_thread_and_stage_with_primary_command(
+            current_thread.as_deref(),
+            stage,
+            None,
+        );
+    with_thread_binding_conflict(surface, thread_binding_conflict.as_deref())
 }
 
 #[allow(dead_code)]
@@ -206,12 +207,48 @@ pub(crate) fn build_host_current_thread_control_surface_for_stage_and_primary_co
     stage: HostContextCompactionStage,
     primary_command_id: Option<&str>,
 ) -> Value {
-    let current_thread = current_thread_id();
-    build_host_current_thread_control_surface_for_thread_and_stage_with_primary_command(
-        current_thread.as_deref(),
-        stage,
-        primary_command_id,
-    )
+    let (current_thread, thread_binding_conflict) = current_thread_id_for_host_control_surface();
+    let surface =
+        build_host_current_thread_control_surface_for_thread_and_stage_with_primary_command(
+            current_thread.as_deref(),
+            stage,
+            primary_command_id,
+        );
+    with_thread_binding_conflict(surface, thread_binding_conflict.as_deref())
+}
+
+fn current_thread_id_for_host_control_surface() -> (Option<String>, Option<String>) {
+    match crate::thread_binding::current_thread_id_result() {
+        Ok(thread_id) => (thread_id, None),
+        Err(error) => (None, Some(error.to_string())),
+    }
+}
+
+fn with_thread_binding_conflict(mut surface: Value, conflict: Option<&str>) -> Value {
+    let Some(conflict) = conflict else {
+        return surface;
+    };
+    if let Some(root) = surface.as_object_mut() {
+        root.insert(
+            "thread_binding_state".to_string(),
+            json!("conflicting_thread_identity_aliases"),
+        );
+        root.insert("thread_binding_error".to_string(), json!(conflict));
+        root.insert("automation_ready".to_string(), json!(false));
+        if let Some(external_uri_launch) = root
+            .get_mut("external_uri_launch")
+            .and_then(Value::as_object_mut)
+        {
+            external_uri_launch.insert(
+                "verification_state".to_string(),
+                json!("thread_binding_conflict"),
+            );
+            external_uri_launch.insert("platform_launch_command".to_string(), Value::Null);
+            external_uri_launch.insert("uri".to_string(), Value::Null);
+            external_uri_launch.insert("route_path".to_string(), Value::Null);
+        }
+    }
+    surface
 }
 
 fn build_host_current_thread_control_route_path_for_command(
@@ -363,6 +400,11 @@ pub(crate) fn build_host_current_thread_control_surface_for_thread_and_command(
     let observe_api_launch_available = launch_command.is_some();
     json!({
         "available": true,
+        "thread_binding_state": if thread_id.is_some() {
+            "current_thread_bound"
+        } else {
+            "current_thread_unbound"
+        },
         "control_kind": host_current_thread_control_kind_for_command_id(command_id),
         "host_surface_kind": host_current_thread_control_host_surface_kind_for_command_id(command_id),
         "command_id": command_id,

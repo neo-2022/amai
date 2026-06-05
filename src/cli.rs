@@ -129,6 +129,7 @@ pub enum BenchmarkCommand {
     ExternalMemoryOfficialJudge(BenchmarkExternalMemoryOfficialJudgeArgs),
     ExternalMemoryOfficialScore(BenchmarkExternalMemoryOfficialScoreArgs),
     ExternalMemoryLocalJudge(BenchmarkExternalMemoryLocalJudgeArgs),
+    ExternalMemoryLocalRetrievalJudge(BenchmarkExternalMemoryLocalRetrievalJudgeArgs),
     ExternalMemoryLocalScore(BenchmarkExternalMemoryLocalScoreArgs),
     ExternalMemorySecretScan(BenchmarkExternalMemorySecretScanArgs),
     ExternalMemorySchema(BenchmarkExternalMemorySchemaArgs),
@@ -763,6 +764,7 @@ pub enum VerifyCommand {
     Load(Box<VerifyLoadArgs>),
     Hostile(VerifyHostileArgs),
     Mcp(Box<VerifyMcpArgs>),
+    WorkflowTrace(Box<VerifyWorkflowTraceArgs>),
 }
 
 #[derive(Debug, Subcommand)]
@@ -1020,6 +1022,30 @@ pub struct BenchmarkExternalMemoryLocalJudgeArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct BenchmarkExternalMemoryLocalRetrievalJudgeArgs {
+    #[arg(long)]
+    pub cases: PathBuf,
+    #[arg(long)]
+    pub case_metrics: PathBuf,
+    #[arg(long)]
+    pub judge_results: PathBuf,
+    #[arg(long)]
+    pub summary: Option<PathBuf>,
+    #[arg(
+        long,
+        default_value = "http://127.0.0.1:11434",
+        help = "Local Ollama base URL for the non-official retrieval-evidence semantic judge lane."
+    )]
+    pub ollama_base_url: String,
+    #[arg(
+        long,
+        default_value = "gemma4:e4b",
+        help = "Local Ollama model for the non-official retrieval-evidence semantic judge lane; default matches the repo proof harness."
+    )]
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct BenchmarkExternalMemoryLocalScoreArgs {
     #[arg(long)]
     pub cases: PathBuf,
@@ -1176,6 +1202,8 @@ pub struct ContinuityHandoffArgs {
     pub resolved_task_ids: Vec<String>,
     #[arg(long, default_value_t = false)]
     pub resolve_current_goal: bool,
+    #[arg(long, default_value_t = false)]
+    pub promote_active_workline: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -2951,6 +2979,29 @@ pub struct VerifyContinuityArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct VerifyWorkflowTraceArgs {
+    #[arg(long, default_value = ".")]
+    pub repo_root: PathBuf,
+    #[arg(
+        long,
+        default_value = ".amai/continuity/project-chat-startup-state.json"
+    )]
+    pub state: PathBuf,
+    #[arg(
+        long,
+        default_value = ".amai/onboarding/project-chat-startup-contract.json"
+    )]
+    pub startup_contract: PathBuf,
+    #[arg(
+        long,
+        default_value = ".amai/continuity/specialist-team-signoff-input.json"
+    )]
+    pub input: PathBuf,
+    #[arg(long, default_value_t = false)]
+    pub fail_on_blocking_startup_gate: bool,
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct ObserveServeArgs {
     #[arg(long, default_value = "0.0.0.0:9464")]
     pub bind: String,
@@ -3756,6 +3807,7 @@ mod tests {
             "Soft rotate recommendation no longer hard-blocks replies",
             "--resolved-task-id",
             "task::event-123",
+            "--promote-active-workline",
         ]);
         let Command::Continuity { command } = cli.command else {
             panic!("expected continuity command");
@@ -3772,6 +3824,7 @@ mod tests {
             ]
         );
         assert_eq!(args.resolved_task_ids, vec!["task::event-123".to_string()]);
+        assert!(args.promote_active_workline);
     }
 
     #[test]

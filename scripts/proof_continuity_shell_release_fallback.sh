@@ -2,12 +2,14 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+export AMAI_OPERATOR_REDIRECT_PROVENANCE="proof_harness:$(basename "$0")"
 
 handoff_path="state/continuity-imports/amai/live-handoff.md"
 compact_chat_prompt_path=".amai/continuity/compact-chat-prompt.txt"
 tmpdir="$(mktemp -d)"
 handoff_snapshot_path="${tmpdir}/live-handoff.snapshot"
 handoff_state_path="${tmpdir}/live-handoff.state"
+promotion_details="${tmpdir}/promotion-details.txt"
 compact_chat_prompt_snapshot_path="${tmpdir}/compact-chat-prompt.snapshot"
 compact_chat_prompt_state_path="${tmpdir}/compact-chat-prompt.state"
 launcher_path="./scripts/amai_exec.sh"
@@ -44,6 +46,10 @@ startup_state_json="$(
 original_headline="$(printf '%s\n' "${startup_state_json}" | jq -r '.startup_runtime_state.execctl_active_lease.headline // empty' 2>/dev/null || true)"
 original_next_step="$(printf '%s\n' "${startup_state_json}" | jq -r '.startup_runtime_state.execctl_active_lease.next_step // empty' 2>/dev/null || true)"
 original_target_percent="$(printf '%s\n' "${startup_state_json}" | jq -r '.startup_runtime_state.client_budget_guard.client_budget_target_percent // empty' 2>/dev/null || true)"
+cat >"${promotion_details}" <<'EOF'
+promotion_contract: operator_redirect
+Synthetic shell fallback proof explicitly switches the active main workline.
+EOF
 
 cleanup() {
   if [[ -f "${backup}" ]]; then
@@ -78,6 +84,8 @@ cleanup() {
         --namespace continuity \
         --headline "${original_headline}" \
         --next-step "${original_next_step}" \
+        --details-file "${promotion_details}" \
+        --promote-active-workline \
         --resolve-current-goal >/dev/null 2>&1 || true
   elif [[ -f "${handoff_state_path}" ]] && [[ "$(cat "${handoff_state_path}")" == "present" ]]; then
     mkdir -p "$(dirname "${handoff_path}")"
@@ -164,6 +172,8 @@ AMI_OBSERVE_BIND=127.0.0.1:1 \
     --namespace continuity \
     --headline "${launcher_handoff_headline}" \
     --next-step "${launcher_handoff_next_step}" \
+    --details-file "${promotion_details}" \
+    --promote-active-workline \
     >/tmp/proof_continuity_handoff_release_only.out \
     2>/tmp/proof_continuity_handoff_release_only.err
 jq -e \

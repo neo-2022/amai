@@ -158,8 +158,8 @@ while (($# > 0)); do
   esac
 done
 
-if [[ -z "$thread_id" ]] && [[ -n "${CODEX_THREAD_ID:-}" ]]; then
-  thread_id="${CODEX_THREAD_ID}"
+if [[ -z "$thread_id" ]]; then
+  thread_id="$(resolve_amai_thread_id_or_empty_from_env)"
 fi
 
 observe_bind="${AMI_OBSERVE_BIND:-0.0.0.0:9464}"

@@ -13,6 +13,759 @@ fail() {
   exit 1
 }
 
+policy_simulate_projection_snapshot() {
+  psql "${dsn}" \
+    -v ON_ERROR_STOP=1 \
+    -v project_code="${project_code}" \
+    -v namespace_code="${namespace_code}" \
+    -v suffix="${suffix}" \
+    -tA <<'SQL'
+WITH watched_scopes AS (
+    SELECT p.project_id, n.namespace_id
+    FROM ami.projects p
+    JOIN ami.namespaces n ON n.project_id = p.project_id
+    WHERE (p.code = :'project_code'
+           AND n.code IN (:'namespace_code', 'proof-policy-simulate-foreign-ns-' || :'suffix'))
+       OR (p.code = 'proof-policy-simulate-foreign-project-' || :'suffix'
+           AND n.code = :'namespace_code')
+),
+memory_items_rows AS (
+    SELECT mi.memory_item_id::text AS row_id, to_jsonb(mi)::text AS row_payload
+    FROM ami.memory_items mi
+    JOIN watched_scopes s ON s.project_id = mi.project_id
+                         AND s.namespace_id = mi.namespace_id
+),
+forgetting_audit_rows AS (
+    SELECT fal.audit_id::text AS row_id, to_jsonb(fal)::text AS row_payload
+    FROM ami.forgetting_audit_log fal
+    WHERE (fal.project_code = :'project_code'
+           AND fal.namespace_code IN (:'namespace_code', 'proof-policy-simulate-foreign-ns-' || :'suffix'))
+       OR (fal.project_code = 'proof-policy-simulate-foreign-project-' || :'suffix'
+           AND fal.namespace_code = :'namespace_code')
+),
+task_node_rows AS (
+    SELECT tn.task_node_id::text AS row_id, to_jsonb(tn)::text AS row_payload
+    FROM ami.task_nodes tn
+    JOIN watched_scopes s ON s.project_id = tn.project_id
+                         AND s.namespace_id = tn.namespace_id
+),
+task_event_rows AS (
+    SELECT te.task_event_id::text AS row_id, to_jsonb(te)::text AS row_payload
+    FROM ami.task_events te
+    JOIN watched_scopes s ON s.project_id = te.project_id
+                         AND s.namespace_id = te.namespace_id
+),
+memory_link_decision_rows AS (
+    SELECT mld.memory_link_decision_id::text AS row_id, to_jsonb(mld)::text AS row_payload
+    FROM ami.memory_link_decisions mld
+    JOIN watched_scopes s ON s.project_id = mld.project_id
+                         AND s.namespace_id = mld.namespace_id
+),
+pending_link_proposal_rows AS (
+    SELECT plp.pending_link_proposal_id::text AS row_id, to_jsonb(plp)::text AS row_payload
+    FROM ami.pending_link_proposals plp
+    JOIN watched_scopes s ON s.project_id = plp.project_id
+                         AND s.namespace_id = plp.namespace_id
+),
+execctl_ledger_rows AS (
+    SELECT etle.ledger_entry_id::text AS row_id, to_jsonb(etle)::text AS row_payload
+    FROM ami.execctl_task_ledger_entries etle
+    JOIN watched_scopes s ON s.project_id = etle.project_id
+                         AND s.namespace_id = etle.namespace_id
+),
+execctl_lease_rows AS (
+    SELECT etl.lease_id::text AS row_id, to_jsonb(etl)::text AS row_payload
+    FROM ami.execctl_task_leases etl
+    JOIN watched_scopes s ON s.project_id = etl.project_id
+                         AND s.namespace_id = etl.namespace_id
+),
+snapshots AS (
+    SELECT 'memory_items' AS lane, COUNT(*) AS row_count,
+           encode(digest(COALESCE(string_agg(row_payload, E'\n' ORDER BY row_id), ''), 'sha256'), 'hex') AS row_hash
+    FROM memory_items_rows
+    UNION ALL
+    SELECT 'forgetting_audit_log', COUNT(*),
+           encode(digest(COALESCE(string_agg(row_payload, E'\n' ORDER BY row_id), ''), 'sha256'), 'hex')
+    FROM forgetting_audit_rows
+    UNION ALL
+    SELECT 'task_nodes', COUNT(*),
+           encode(digest(COALESCE(string_agg(row_payload, E'\n' ORDER BY row_id), ''), 'sha256'), 'hex')
+    FROM task_node_rows
+    UNION ALL
+    SELECT 'task_events', COUNT(*),
+           encode(digest(COALESCE(string_agg(row_payload, E'\n' ORDER BY row_id), ''), 'sha256'), 'hex')
+    FROM task_event_rows
+    UNION ALL
+    SELECT 'memory_link_decisions', COUNT(*),
+           encode(digest(COALESCE(string_agg(row_payload, E'\n' ORDER BY row_id), ''), 'sha256'), 'hex')
+    FROM memory_link_decision_rows
+    UNION ALL
+    SELECT 'pending_link_proposals', COUNT(*),
+           encode(digest(COALESCE(string_agg(row_payload, E'\n' ORDER BY row_id), ''), 'sha256'), 'hex')
+    FROM pending_link_proposal_rows
+    UNION ALL
+    SELECT 'execctl_task_ledger_entries', COUNT(*),
+           encode(digest(COALESCE(string_agg(row_payload, E'\n' ORDER BY row_id), ''), 'sha256'), 'hex')
+    FROM execctl_ledger_rows
+    UNION ALL
+    SELECT 'execctl_task_leases', COUNT(*),
+           encode(digest(COALESCE(string_agg(row_payload, E'\n' ORDER BY row_id), ''), 'sha256'), 'hex')
+    FROM execctl_lease_rows
+)
+SELECT jsonb_object_agg(
+    lane,
+    jsonb_build_object('row_count', row_count, 'row_hash', row_hash)
+    ORDER BY lane
+)::text
+FROM snapshots;
+SQL
+}
+
+create_policy_simulate_durable_sentinels() {
+  local policy_simulate_agent_scope="proof-policy-simulate-${suffix}"
+
+  psql "${dsn}" \
+    -v ON_ERROR_STOP=1 \
+    -v project_code="${project_code}" \
+    -v namespace_code="${namespace_code}" \
+    -v suffix="${suffix}" \
+    -v agent_scope="${policy_simulate_agent_scope}" \
+    -tA <<'SQL'
+WITH scope AS (
+    SELECT w.workspace_id, p.project_id, n.namespace_id
+    FROM ami.projects p
+    JOIN ami.workspaces w ON w.workspace_id = p.workspace_id
+    JOIN ami.namespaces n ON n.project_id = p.project_id
+    WHERE p.code = :'project_code'
+      AND n.code = :'namespace_code'
+),
+task_node AS (
+    INSERT INTO ami.task_nodes(
+        workspace_id,
+        project_id,
+        namespace_id,
+        task_key,
+        task_role,
+        headline,
+        summary,
+        next_step,
+        execution_state,
+        lifecycle_state,
+        confidence,
+        current_score,
+        source_event_ids,
+        artifact_refs,
+        evidence_span,
+        candidate_class,
+        derivation_kind,
+        source_kind,
+        hot_path_write_eligible,
+        background_consolidation_recommended,
+        status_payload,
+        metadata,
+        opened_at_epoch_ms
+    )
+    SELECT
+        workspace_id,
+        project_id,
+        namespace_id,
+        'policy-simulate-sentinel-' || :'suffix',
+        'workline',
+        'Policy simulate non-mutation sentinel',
+        'Proof fixture that must survive advisory policy simulation unchanged.',
+        'Remain unchanged before and after memory policy-simulate.',
+        'active',
+        'hot',
+        1.0,
+        1.0,
+        jsonb_build_array('proof-policy-simulate-task-node-' || :'suffix'),
+        jsonb_build_array('artifact://proof/forgetting/policy-simulate/' || :'suffix' || '/task-node'),
+        jsonb_build_object('source', 'proof_forgetting_consolidation', 'suffix', :'suffix'),
+        'commitment',
+        'operator_write',
+        'proof_forgetting_consolidation',
+        FALSE,
+        FALSE,
+        jsonb_build_object('proof_lane', 'policy_simulate_projection_non_mutation'),
+        jsonb_build_object('sentinel', TRUE, 'agent_scope', :'agent_scope'),
+        1000
+    FROM scope
+    RETURNING task_node_id, workspace_id, project_id, namespace_id
+),
+task_event AS (
+    INSERT INTO ami.task_events(
+        workspace_id,
+        project_id,
+        namespace_id,
+        task_node_id,
+        source_event_id,
+        event_kind,
+        next_execution_state,
+        next_lifecycle_state,
+        source_kind,
+        artifact_refs,
+        message_refs,
+        evidence_span,
+        derivation_kind,
+        schema_version,
+        event_payload,
+        recorded_at_epoch_ms
+    )
+    SELECT
+        workspace_id,
+        project_id,
+        namespace_id,
+        task_node_id,
+        'proof-policy-simulate-task-event-' || :'suffix',
+        'created',
+        'active',
+        'hot',
+        'proof_forgetting_consolidation',
+        jsonb_build_array('artifact://proof/forgetting/policy-simulate/' || :'suffix' || '/task-event'),
+        jsonb_build_array('message:proof-policy-simulate:' || :'suffix'),
+        jsonb_build_object('source', 'proof_forgetting_consolidation', 'suffix', :'suffix'),
+        'operator_write',
+        'task-event-envelope-v1',
+        jsonb_build_object('sentinel', TRUE, 'append_only_guard_required', TRUE),
+        1001
+    FROM task_node
+    RETURNING task_event_id
+),
+memory_link_decision AS (
+    INSERT INTO ami.memory_link_decisions(
+        workspace_id,
+        project_id,
+        namespace_id,
+        task_node_id,
+        decision_outcome,
+        legality_passed,
+        scope_filter_passed,
+        evidence_sufficient,
+        classifier_label,
+        classifier_score,
+        decision_reason,
+        decision_payload,
+        source_event_ids,
+        artifact_refs,
+        message_refs,
+        evidence_span,
+        derivation_kind,
+        schema_version,
+        recorded_at_epoch_ms
+    )
+    SELECT
+        workspace_id,
+        project_id,
+        namespace_id,
+        task_node_id,
+        'abstain',
+        FALSE,
+        FALSE,
+        FALSE,
+        'policy_simulate_sentinel',
+        0.0,
+        'Sentinel link decision must remain unchanged by advisory policy simulation.',
+        jsonb_build_object('sentinel', TRUE, 'advisory_only', TRUE),
+        jsonb_build_array('proof-policy-simulate-link-decision-' || :'suffix'),
+        jsonb_build_array('artifact://proof/forgetting/policy-simulate/' || :'suffix' || '/link-decision'),
+        jsonb_build_array('message:proof-policy-simulate:' || :'suffix'),
+        jsonb_build_object('source', 'proof_forgetting_consolidation', 'suffix', :'suffix'),
+        'operator_write',
+        'memory-link-decision-envelope-v1',
+        1002
+    FROM task_node
+    RETURNING memory_link_decision_id
+),
+pending_link_proposal AS (
+    INSERT INTO ami.pending_link_proposals(
+        workspace_id,
+        project_id,
+        namespace_id,
+        task_node_id,
+        proposal_state,
+        proposal_reason,
+        evidence_request,
+        evidence_payload,
+        classifier_score,
+        ttl_epoch_ms,
+        source_event_ids,
+        artifact_refs,
+        message_refs,
+        evidence_span,
+        derivation_kind,
+        schema_version
+    )
+    SELECT
+        workspace_id,
+        project_id,
+        namespace_id,
+        task_node_id,
+        'pending',
+        'Sentinel pending-link proposal must remain unchanged by advisory policy simulation.',
+        'Do not resolve from policy-simulate.',
+        jsonb_build_object('sentinel', TRUE, 'advisory_only', TRUE),
+        0.0,
+        9999999999999,
+        jsonb_build_array('proof-policy-simulate-pending-link-' || :'suffix'),
+        jsonb_build_array('artifact://proof/forgetting/policy-simulate/' || :'suffix' || '/pending-link'),
+        jsonb_build_array('message:proof-policy-simulate:' || :'suffix'),
+        jsonb_build_object('source', 'proof_forgetting_consolidation', 'suffix', :'suffix'),
+        'operator_write',
+        'pending-link-proposal-envelope-v1'
+    FROM task_node
+    RETURNING pending_link_proposal_id
+),
+ledger_entry AS (
+    INSERT INTO ami.execctl_task_ledger_entries(
+        project_id,
+        namespace_id,
+        agent_scope,
+        session_id,
+        thread_id,
+        source_event_id,
+        event_kind,
+        source_kind,
+        headline,
+        next_step,
+        summary,
+        active_files,
+        open_questions,
+        materialized_notes,
+        pending_return_queue,
+        local_path,
+        recorded_at_epoch_ms
+    )
+    SELECT
+        project_id,
+        namespace_id,
+        :'agent_scope',
+        'proof-session-' || :'suffix',
+        'proof-thread-' || :'suffix',
+        'proof-policy-simulate-ledger-' || :'suffix',
+        'continuity_handoff',
+        'proof_forgetting_consolidation',
+        'Policy simulate ExecCtl sentinel',
+        'Remain unchanged before and after advisory policy simulation.',
+        'Proof fixture for ExecCtl non-mutation.',
+        jsonb_build_array('scripts/proof_forgetting_consolidation.sh'),
+        '[]'::jsonb,
+        jsonb_build_array(jsonb_build_object('sentinel', TRUE, 'suffix', :'suffix')),
+        jsonb_build_array(jsonb_build_object('headline', 'pending sentinel', 'next_step', 'remain unchanged')),
+        '/home/art/agent-memory-index/scripts/proof_forgetting_consolidation.sh',
+        1003
+    FROM scope
+    RETURNING ledger_entry_id
+),
+lease_entry AS (
+    INSERT INTO ami.execctl_task_leases(
+        project_id,
+        namespace_id,
+        agent_scope,
+        owner_session_id,
+        owner_thread_id,
+        source_event_id,
+        source_kind,
+        lease_state,
+        headline,
+        next_step,
+        local_path,
+        acquired_at_epoch_ms,
+        heartbeat_at_epoch_ms,
+        expires_at_epoch_ms
+    )
+    SELECT
+        project_id,
+        namespace_id,
+        :'agent_scope',
+        'proof-session-' || :'suffix',
+        'proof-thread-' || :'suffix',
+        'proof-policy-simulate-lease-' || :'suffix',
+        'proof_forgetting_consolidation',
+        'active',
+        'Policy simulate ExecCtl lease sentinel',
+        'Remain unchanged before and after advisory policy simulation.',
+        '/home/art/agent-memory-index/scripts/proof_forgetting_consolidation.sh',
+        1004,
+        1005,
+        9999999999999
+    FROM scope
+    RETURNING lease_id
+)
+SELECT
+    task_node.task_node_id::text || '|' ||
+    task_event.task_event_id::text || '|' ||
+    memory_link_decision.memory_link_decision_id::text || '|' ||
+    pending_link_proposal.pending_link_proposal_id::text || '|' ||
+    ledger_entry.ledger_entry_id::text || '|' ||
+    lease_entry.lease_id::text
+FROM task_node, task_event, memory_link_decision, pending_link_proposal, ledger_entry, lease_entry;
+SQL
+}
+
+create_policy_simulate_scope_isolation_sentinels() {
+  psql "${dsn}" \
+    -v ON_ERROR_STOP=1 \
+    -v project_code="${project_code}" \
+    -v namespace_code="${namespace_code}" \
+    -v suffix="${suffix}" \
+    -tA <<'SQL'
+WITH workspace_scope AS (
+    SELECT workspace_id
+    FROM ami.workspaces
+    WHERE code = 'default'
+),
+foreign_project AS (
+    INSERT INTO ami.projects(
+        workspace_id,
+        code,
+        display_name,
+        repo_root,
+        visibility_scope
+    )
+    SELECT
+        workspace_id,
+        'proof-policy-simulate-foreign-project-' || :'suffix',
+        'Proof policy simulate foreign project ' || :'suffix',
+        '/tmp/amai-proof-policy-simulate-foreign-project-' || :'suffix',
+        'project_shared'
+    FROM workspace_scope
+    ON CONFLICT (code) DO UPDATE SET
+        display_name = EXCLUDED.display_name,
+        repo_root = EXCLUDED.repo_root,
+        updated_at = now()
+    RETURNING workspace_id, project_id
+),
+same_project_foreign_namespace AS (
+    INSERT INTO ami.namespaces(
+        project_id,
+        code,
+        display_name,
+        retrieval_mode
+    )
+    SELECT
+        p.project_id,
+        'proof-policy-simulate-foreign-ns-' || :'suffix',
+        'Proof policy simulate foreign namespace ' || :'suffix',
+        'local_strict'
+    FROM ami.projects p
+    WHERE p.code = :'project_code'
+    ON CONFLICT (project_id, code) DO UPDATE SET
+        display_name = EXCLUDED.display_name,
+        retrieval_mode = EXCLUDED.retrieval_mode,
+        updated_at = now()
+    RETURNING project_id, namespace_id
+),
+foreign_project_same_namespace AS (
+    INSERT INTO ami.namespaces(
+        project_id,
+        code,
+        display_name,
+        retrieval_mode
+    )
+    SELECT
+        fp.project_id,
+        :'namespace_code',
+        'Proof policy simulate same namespace code in foreign project ' || :'suffix',
+        'local_strict'
+    FROM foreign_project fp
+    ON CONFLICT (project_id, code) DO UPDATE SET
+        display_name = EXCLUDED.display_name,
+        retrieval_mode = EXCLUDED.retrieval_mode,
+        updated_at = now()
+    RETURNING project_id, namespace_id
+),
+watched_scope AS (
+    SELECT
+        'same_project_foreign_namespace' AS scope_label,
+        p.workspace_id,
+        p.project_id,
+        spfn.namespace_id
+    FROM same_project_foreign_namespace spfn
+    JOIN ami.projects p ON p.project_id = spfn.project_id
+    UNION ALL
+    SELECT
+        'foreign_project_same_namespace' AS scope_label,
+        fp.workspace_id,
+        fp.project_id,
+        fpsn.namespace_id
+    FROM foreign_project_same_namespace fpsn
+    JOIN foreign_project fp ON fp.project_id = fpsn.project_id
+),
+task_nodes AS (
+    INSERT INTO ami.task_nodes(
+        workspace_id,
+        project_id,
+        namespace_id,
+        task_key,
+        task_role,
+        headline,
+        summary,
+        next_step,
+        execution_state,
+        lifecycle_state,
+        confidence,
+        current_score,
+        source_event_ids,
+        artifact_refs,
+        evidence_span,
+        candidate_class,
+        derivation_kind,
+        source_kind,
+        hot_path_write_eligible,
+        background_consolidation_recommended,
+        status_payload,
+        metadata,
+        opened_at_epoch_ms
+    )
+    SELECT
+        workspace_id,
+        project_id,
+        namespace_id,
+        'policy-simulate-scope-sentinel-' || scope_label || '-' || :'suffix',
+        'workline',
+        'Policy simulate scope isolation sentinel',
+        'Foreign-scope proof fixture that must remain unchanged.',
+        'Remain unchanged when policy-simulate targets the primary proof namespace.',
+        'active',
+        'hot',
+        1.0,
+        1.0,
+        jsonb_build_array('proof-policy-simulate-scope-task-node-' || scope_label || '-' || :'suffix'),
+        jsonb_build_array('artifact://proof/forgetting/policy-simulate/' || :'suffix' || '/' || scope_label || '/task-node'),
+        jsonb_build_object('source', 'proof_forgetting_consolidation', 'scope_label', scope_label, 'suffix', :'suffix'),
+        'commitment',
+        'operator_write',
+        'proof_forgetting_consolidation',
+        FALSE,
+        FALSE,
+        jsonb_build_object('proof_lane', 'policy_simulate_scope_isolation_non_mutation'),
+        jsonb_build_object('sentinel', TRUE, 'scope_label', scope_label),
+        2000
+    FROM watched_scope
+    RETURNING task_node_id, workspace_id, project_id, namespace_id, task_key
+),
+task_events AS (
+    INSERT INTO ami.task_events(
+        workspace_id,
+        project_id,
+        namespace_id,
+        task_node_id,
+        source_event_id,
+        event_kind,
+        next_execution_state,
+        next_lifecycle_state,
+        source_kind,
+        artifact_refs,
+        message_refs,
+        evidence_span,
+        derivation_kind,
+        schema_version,
+        event_payload,
+        recorded_at_epoch_ms
+    )
+    SELECT
+        workspace_id,
+        project_id,
+        namespace_id,
+        task_node_id,
+        'proof-policy-simulate-scope-task-event-' || task_key,
+        'created',
+        'active',
+        'hot',
+        'proof_forgetting_consolidation',
+        jsonb_build_array('artifact://proof/forgetting/policy-simulate/' || :'suffix' || '/scope-task-event'),
+        jsonb_build_array('message:proof-policy-simulate:' || :'suffix'),
+        jsonb_build_object('source', 'proof_forgetting_consolidation', 'suffix', :'suffix'),
+        'operator_write',
+        'task-event-envelope-v1',
+        jsonb_build_object('sentinel', TRUE, 'scope_isolation', TRUE),
+        2001
+    FROM task_nodes
+    RETURNING task_event_id
+),
+memory_link_decisions AS (
+    INSERT INTO ami.memory_link_decisions(
+        workspace_id,
+        project_id,
+        namespace_id,
+        task_node_id,
+        decision_outcome,
+        legality_passed,
+        scope_filter_passed,
+        evidence_sufficient,
+        classifier_label,
+        classifier_score,
+        decision_reason,
+        decision_payload,
+        source_event_ids,
+        artifact_refs,
+        message_refs,
+        evidence_span,
+        derivation_kind,
+        schema_version,
+        recorded_at_epoch_ms
+    )
+    SELECT
+        workspace_id,
+        project_id,
+        namespace_id,
+        task_node_id,
+        'abstain',
+        FALSE,
+        FALSE,
+        FALSE,
+        'policy_simulate_scope_sentinel',
+        0.0,
+        'Foreign-scope link decision must remain unchanged.',
+        jsonb_build_object('sentinel', TRUE, 'scope_isolation', TRUE),
+        jsonb_build_array('proof-policy-simulate-scope-link-decision-' || task_key),
+        jsonb_build_array('artifact://proof/forgetting/policy-simulate/' || :'suffix' || '/scope-link-decision'),
+        jsonb_build_array('message:proof-policy-simulate:' || :'suffix'),
+        jsonb_build_object('source', 'proof_forgetting_consolidation', 'suffix', :'suffix'),
+        'operator_write',
+        'memory-link-decision-envelope-v1',
+        2002
+    FROM task_nodes
+    RETURNING memory_link_decision_id
+),
+pending_link_proposals AS (
+    INSERT INTO ami.pending_link_proposals(
+        workspace_id,
+        project_id,
+        namespace_id,
+        task_node_id,
+        proposal_state,
+        proposal_reason,
+        evidence_request,
+        evidence_payload,
+        classifier_score,
+        ttl_epoch_ms,
+        source_event_ids,
+        artifact_refs,
+        message_refs,
+        evidence_span,
+        derivation_kind,
+        schema_version
+    )
+    SELECT
+        workspace_id,
+        project_id,
+        namespace_id,
+        task_node_id,
+        'pending',
+        'Foreign-scope pending-link proposal must remain unchanged.',
+        'Do not resolve from policy-simulate.',
+        jsonb_build_object('sentinel', TRUE, 'scope_isolation', TRUE),
+        0.0,
+        9999999999999,
+        jsonb_build_array('proof-policy-simulate-scope-pending-link-' || task_key),
+        jsonb_build_array('artifact://proof/forgetting/policy-simulate/' || :'suffix' || '/scope-pending-link'),
+        jsonb_build_array('message:proof-policy-simulate:' || :'suffix'),
+        jsonb_build_object('source', 'proof_forgetting_consolidation', 'suffix', :'suffix'),
+        'operator_write',
+        'pending-link-proposal-envelope-v1'
+    FROM task_nodes
+    RETURNING pending_link_proposal_id
+),
+ledger_entries AS (
+    INSERT INTO ami.execctl_task_ledger_entries(
+        project_id,
+        namespace_id,
+        agent_scope,
+        session_id,
+        thread_id,
+        source_event_id,
+        event_kind,
+        source_kind,
+        headline,
+        next_step,
+        summary,
+        active_files,
+        open_questions,
+        materialized_notes,
+        pending_return_queue,
+        local_path,
+        recorded_at_epoch_ms
+    )
+    SELECT
+        project_id,
+        namespace_id,
+        'proof-policy-simulate-scope-' || task_key,
+        'proof-session-' || :'suffix',
+        'proof-thread-' || :'suffix',
+        'proof-policy-simulate-scope-ledger-' || task_key,
+        'continuity_handoff',
+        'proof_forgetting_consolidation',
+        'Policy simulate scope ExecCtl sentinel',
+        'Remain unchanged by policy simulation in another scope.',
+        'Foreign-scope ExecCtl proof fixture.',
+        jsonb_build_array('scripts/proof_forgetting_consolidation.sh'),
+        '[]'::jsonb,
+        jsonb_build_array(jsonb_build_object('sentinel', TRUE, 'suffix', :'suffix')),
+        jsonb_build_array(jsonb_build_object('headline', 'scope pending sentinel', 'next_step', 'remain unchanged')),
+        '/home/art/agent-memory-index/scripts/proof_forgetting_consolidation.sh',
+        2003
+    FROM task_nodes
+    RETURNING ledger_entry_id
+),
+lease_entries AS (
+    INSERT INTO ami.execctl_task_leases(
+        project_id,
+        namespace_id,
+        agent_scope,
+        owner_session_id,
+        owner_thread_id,
+        source_event_id,
+        source_kind,
+        lease_state,
+        headline,
+        next_step,
+        local_path,
+        acquired_at_epoch_ms,
+        heartbeat_at_epoch_ms,
+        expires_at_epoch_ms
+    )
+    SELECT
+        project_id,
+        namespace_id,
+        'proof-policy-simulate-scope-' || task_key,
+        'proof-session-' || :'suffix',
+        'proof-thread-' || :'suffix',
+        'proof-policy-simulate-scope-lease-' || task_key,
+        'proof_forgetting_consolidation',
+        'active',
+        'Policy simulate scope ExecCtl lease sentinel',
+        'Remain unchanged by policy simulation in another scope.',
+        '/home/art/agent-memory-index/scripts/proof_forgetting_consolidation.sh',
+        2004,
+        2005,
+        9999999999999
+    FROM task_nodes
+    RETURNING lease_id
+)
+SELECT jsonb_build_object(
+    'task_nodes', (SELECT COUNT(*) FROM task_nodes),
+    'task_events', (SELECT COUNT(*) FROM task_events),
+    'memory_link_decisions', (SELECT COUNT(*) FROM memory_link_decisions),
+    'pending_link_proposals', (SELECT COUNT(*) FROM pending_link_proposals),
+    'execctl_task_ledger_entries', (SELECT COUNT(*) FROM ledger_entries),
+    'execctl_task_leases', (SELECT COUNT(*) FROM lease_entries)
+)::text;
+SQL
+}
+
+assert_task_events_append_only_guard() {
+  local task_event_id="$1"
+  local update_error
+  local delete_error
+
+  update_error="$(psql "${dsn}" -v ON_ERROR_STOP=1 -c "UPDATE ami.task_events SET event_kind='continued' WHERE task_event_id='${task_event_id}'" 2>&1 || true)"
+  [[ "${update_error}" == *"ami.task_events is append-only"* ]] || fail "task_events update was not rejected by append-only guard"
+
+  delete_error="$(psql "${dsn}" -v ON_ERROR_STOP=1 -c "DELETE FROM ami.task_events WHERE task_event_id='${task_event_id}'" 2>&1 || true)"
+  [[ "${delete_error}" == *"ami.task_events is append-only"* ]] || fail "task_events delete was not rejected by append-only guard"
+}
+
 project_code="amai"
 suffix="$(amai_unique_suffix)"
 namespace_code="proof-forgetting-${suffix}"
@@ -547,9 +1300,52 @@ cohort_risk_nonzero="$(printf '%s' "${cohort_risk_output}" | jq '[.rows[] | sele
 step "lifecycle cohort-risk CLI surfaces Queue 3 advisory contract (pass)"
 
 step "verify lifecycle policy-simulate CLI surfaces Queue 3 approval contour without authority"
+step "seed policy-simulate durable lane sentinels"
+policy_simulate_sentinel_ids="$(create_policy_simulate_durable_sentinels)"
+IFS='|' read -r policy_simulate_task_node_id policy_simulate_task_event_id policy_simulate_link_decision_id policy_simulate_pending_link_proposal_id policy_simulate_ledger_entry_id policy_simulate_lease_id <<< "${policy_simulate_sentinel_ids}"
+[[ -n "${policy_simulate_task_node_id}" ]] || fail "policy simulate task node sentinel was not created"
+[[ -n "${policy_simulate_task_event_id}" ]] || fail "policy simulate task event sentinel was not created"
+[[ -n "${policy_simulate_link_decision_id}" ]] || fail "policy simulate link decision sentinel was not created"
+[[ -n "${policy_simulate_pending_link_proposal_id}" ]] || fail "policy simulate pending link proposal sentinel was not created"
+[[ -n "${policy_simulate_ledger_entry_id}" ]] || fail "policy simulate ExecCtl ledger sentinel was not created"
+[[ -n "${policy_simulate_lease_id}" ]] || fail "policy simulate ExecCtl lease sentinel was not created"
+policy_simulate_scope_isolation_output="$(create_policy_simulate_scope_isolation_sentinels)"
+policy_simulate_scope_isolation_ok="$(printf '%s' "${policy_simulate_scope_isolation_output}" | jq -r '
+  .task_nodes == 2
+  and .task_events == 2
+  and .memory_link_decisions == 2
+  and .pending_link_proposals == 2
+  and .execctl_task_ledger_entries == 2
+  and .execctl_task_leases == 2
+')"
+[[ "${policy_simulate_scope_isolation_ok}" == "true" ]] || fail "policy simulate scope-isolation sentinels were not fully created"
+assert_task_events_append_only_guard "${policy_simulate_task_event_id}"
+policy_simulate_projection_snapshot_before="$(policy_simulate_projection_snapshot)"
+memory_count_before_policy_simulate="$(psql "${dsn}" -tA -c "
+  SELECT COUNT(*)
+  FROM ami.memory_items mi
+  JOIN ami.projects p ON p.project_id = mi.project_id
+  JOIN ami.namespaces n ON n.namespace_id = mi.namespace_id
+  WHERE p.code = '${project_code}'
+    AND n.code = '${namespace_code}'
+")"
+audit_count_before_policy_simulate="$(psql "${dsn}" -tA -c "SELECT COUNT(*) FROM ami.forgetting_audit_log WHERE project_code = '${project_code}' AND namespace_code = '${namespace_code}'")"
 policy_simulate_output="$(cargo run --quiet -- memory policy-simulate \
   --project "${project_code}" \
   --namespace "${namespace_code}")"
+memory_count_after_policy_simulate="$(psql "${dsn}" -tA -c "
+  SELECT COUNT(*)
+  FROM ami.memory_items mi
+  JOIN ami.projects p ON p.project_id = mi.project_id
+  JOIN ami.namespaces n ON n.namespace_id = mi.namespace_id
+  WHERE p.code = '${project_code}'
+    AND n.code = '${namespace_code}'
+")"
+audit_count_after_policy_simulate="$(psql "${dsn}" -tA -c "SELECT COUNT(*) FROM ami.forgetting_audit_log WHERE project_code = '${project_code}' AND namespace_code = '${namespace_code}'")"
+policy_simulate_projection_snapshot_after="$(policy_simulate_projection_snapshot)"
+[[ "${memory_count_after_policy_simulate}" == "${memory_count_before_policy_simulate}" ]] || fail "policy simulate must not mutate memory item count"
+[[ "${audit_count_after_policy_simulate}" == "${audit_count_before_policy_simulate}" ]] || fail "policy simulate must not write forgetting audit actions"
+[[ "${policy_simulate_projection_snapshot_after}" == "${policy_simulate_projection_snapshot_before}" ]] || fail "policy simulate mutated memory/task-memory/ExecCtl projection lanes"
 policy_simulate_contract="$(printf '%s' "${policy_simulate_output}" | jq -r '.contract_version')"
 [[ "${policy_simulate_contract}" == "lifecycle-policy-simulate-v1" ]] || fail "unexpected policy simulate contract: ${policy_simulate_contract}"
 policy_simulate_authority="$(printf '%s' "${policy_simulate_output}" | jq -r '.authority_mode')"
@@ -562,6 +1358,38 @@ policy_simulate_invalid_urgency="$(printf '%s' "${policy_simulate_output}" | jq 
 [[ "${policy_simulate_invalid_urgency}" -eq 0 ]] || fail "policy simulate surfaced invalid urgency"
 policy_simulate_missing_blocker="$(printf '%s' "${policy_simulate_output}" | jq '[.rows[] | select((.blocking_reasons | index("advisory_only_no_runtime_authority")) == null)] | length')"
 [[ "${policy_simulate_missing_blocker}" -eq 0 ]] || fail "policy simulate rows lost advisory-only blocker"
+policy_simulate_guardrails_ok="$(printf '%s' "${policy_simulate_output}" | jq -r '
+  .guardrails.truth_authority == false
+  and .guardrails.routing_authority == false
+  and .guardrails.forgetting_authority == false
+  and .guardrails.promotion_authority == false
+  and .guardrails.destructive_authority == false
+  and .guardrails.runtime_authority == false
+  and .guardrails.auto_apply_allowed == false
+')"
+[[ "${policy_simulate_guardrails_ok}" == "true" ]] || fail "policy simulate guardrails gained forbidden authority"
+policy_simulate_validation_contract="$(printf '%s' "${policy_simulate_output}" | jq -r '.measured_validation.contract_version')"
+[[ "${policy_simulate_validation_contract}" == "lifecycle-policy-simulate-validation-v1" ]] || fail "unexpected policy simulate validation contract: ${policy_simulate_validation_contract}"
+policy_simulate_review_packet_state="$(printf '%s' "${policy_simulate_output}" | jq -r '.measured_validation.review_packet_state')"
+[[ "${policy_simulate_review_packet_state}" == "review_packet_ready" ]] || fail "policy simulate review packet not ready on controlled fixture: ${policy_simulate_review_packet_state}"
+policy_simulate_approval_state="$(printf '%s' "${policy_simulate_output}" | jq -r '.measured_validation.approval_state')"
+[[ "${policy_simulate_approval_state}" == "pending_human_review" ]] || fail "policy simulate approval state must stay human-gated, got: ${policy_simulate_approval_state}"
+policy_simulate_validation_flags_ok="$(printf '%s' "${policy_simulate_output}" | jq -r '
+  .measured_validation.human_review_required == true
+  and .measured_validation.auto_promotion_allowed == false
+  and .measured_validation.improvement_measured == false
+  and .measured_validation.measured_improvement_state == "not_measured_requires_holdout_or_post_action_outcomes"
+  and .measured_validation.missing_advisory_blocker_count == 0
+  and .measured_validation.invalid_recommendation_count == 0
+  and .measured_validation.invalid_urgency_count == 0
+')"
+[[ "${policy_simulate_validation_flags_ok}" == "true" ]] || fail "policy simulate validation flags lost fail-closed/human-gated contract"
+policy_simulate_validation_sample="$(printf '%s' "${policy_simulate_output}" | jq '.measured_validation.sample_size')"
+[[ "${policy_simulate_validation_sample}" -ge 3 ]] || fail "policy simulate validation sample too small on controlled fixture: ${policy_simulate_validation_sample}"
+policy_simulate_validation_cohorts="$(printf '%s' "${policy_simulate_output}" | jq '.measured_validation.cohort_count')"
+[[ "${policy_simulate_validation_cohorts}" -ge 1 ]] || fail "policy simulate validation cohort count missing"
+policy_simulate_authority_blocked_rows="$(printf '%s' "${policy_simulate_output}" | jq '.measured_validation.authority_blocked_row_count')"
+[[ "${policy_simulate_authority_blocked_rows}" == "${policy_simulate_rows}" ]] || fail "policy simulate validation did not count every row as authority-blocked"
 step "lifecycle policy-simulate CLI stays advisory-only and surfaces approval contour (pass)"
 
 # ────────────────────────────────────────────────────────────────────────

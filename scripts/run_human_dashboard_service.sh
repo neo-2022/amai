@@ -24,22 +24,88 @@ compose_file="./compose.yaml"
 lock_dir="./state/observe"
 lock_file="${lock_dir}/run_human_dashboard_service.lock"
 
+observe_frontdoor_pid_is_stale() {
+  local pid="${1:-}"
+  local exe_path=""
+  [[ -n "${pid}" ]] || return 1
+  exe_path="$(readlink "/proc/${pid}/exe" 2>/dev/null || true)"
+  [[ -n "${exe_path}" ]] && [[ "${exe_path}" == *" (deleted)" ]]
+}
+
+restart_after_stale_lock_holder() {
+  local stale_pid="${1:-}"
+  [[ -n "${stale_pid}" ]] || return 1
+  echo "run_human_dashboard_service: stale dashboard process pid=${stale_pid} detected while lock held; restarting" >&2
+  kill "${stale_pid}" >/dev/null 2>&1 || true
+  for _ in $(seq 1 20); do
+    if ! kill -0 "${stale_pid}" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.1
+  done
+  if kill -0 "${stale_pid}" >/dev/null 2>&1; then
+    kill -9 "${stale_pid}" >/dev/null 2>&1 || true
+    for _ in $(seq 1 20); do
+      if ! kill -0 "${stale_pid}" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.1
+    done
+  fi
+  if kill -0 "${stale_pid}" >/dev/null 2>&1; then
+    echo "run_human_dashboard_service: unable to stop stale dashboard process pid=${stale_pid}" >&2
+    exit 1
+  fi
+  if ! flock -n 9; then
+    echo "run_human_dashboard_service: stale dashboard process pid=${stale_pid} disappeared but lock did not release" >&2
+    exit 1
+  fi
+}
+
 mkdir -p "${lock_dir}"
 exec 9>"${lock_file}"
 if ! flock -n 9; then
-  if curl -fsS "${health_url}" >/dev/null 2>&1; then
+  existing_pid="$(
+    pgrep -fo "^${binary//\//\\/} observe serve --bind ${bind}$" 2>/dev/null || true
+  )"
+  if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" >/dev/null 2>&1 && observe_frontdoor_pid_is_stale "${existing_pid}"; then
+    restart_after_stale_lock_holder "${existing_pid}"
+  elif curl -fsS "${health_url}" >/dev/null 2>&1; then
     echo "Amai human dashboard already running at ${health_url}" >&2
     exit 0
+  else
+    echo "run_human_dashboard_service: another launcher instance is already active" >&2
+    exit 1
   fi
-  echo "run_human_dashboard_service: another launcher instance is already active" >&2
-  exit 1
 fi
 
 existing_pid="$(
   pgrep -fo "^${binary//\//\\/} observe serve --bind ${bind}$" 2>/dev/null || true
 )"
 if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" >/dev/null 2>&1; then
-  if curl -fsS "${health_url}" >/dev/null 2>&1; then
+  if observe_frontdoor_pid_is_stale "${existing_pid}"; then
+    echo "run_human_dashboard_service: stale dashboard process pid=${existing_pid} detected; restarting" >&2
+    kill "${existing_pid}" >/dev/null 2>&1 || true
+    for _ in $(seq 1 20); do
+      if ! kill -0 "${existing_pid}" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.1
+    done
+    if kill -0 "${existing_pid}" >/dev/null 2>&1; then
+      kill -9 "${existing_pid}" >/dev/null 2>&1 || true
+      for _ in $(seq 1 20); do
+        if ! kill -0 "${existing_pid}" >/dev/null 2>&1; then
+          break
+        fi
+        sleep 0.1
+      done
+    fi
+    if kill -0 "${existing_pid}" >/dev/null 2>&1; then
+      echo "run_human_dashboard_service: unable to stop stale dashboard process pid=${existing_pid}" >&2
+      exit 1
+    fi
+  elif curl -fsS "${health_url}" >/dev/null 2>&1; then
     echo "Amai human dashboard already running at ${health_url} (pid=${existing_pid})" >&2
     exit 0
   fi

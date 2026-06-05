@@ -42,7 +42,9 @@ headline=""
 next_step=""
 details_file=""
 resolve_current_goal=false
+promote_active_workline=false
 declare -a resolved_headlines=()
+declare -a resolved_task_ids=()
 api_supported=true
 
 while (($# > 0)); do
@@ -95,8 +97,20 @@ while (($# > 0)); do
       resolved_headlines+=("$2")
       shift 2
       ;;
+    --resolved-task-id)
+      if (($# < 2)); then
+        api_supported=false
+        break
+      fi
+      resolved_task_ids+=("$2")
+      shift 2
+      ;;
     --resolve-current-goal)
       resolve_current_goal=true
+      shift
+      ;;
+    --promote-active-workline)
+      promote_active_workline=true
       shift
       ;;
     *)
@@ -142,6 +156,14 @@ if [[ "$api_supported" == "true" ]] \
     )"
     [[ -n "$resolved_headlines_json" ]] || resolved_headlines_json='[]'
   fi
+  if ((${#resolved_task_ids[@]} == 0)); then
+    resolved_task_ids_json='[]'
+  else
+    resolved_task_ids_json="$(
+      printf '%s\n' "${resolved_task_ids[@]}" | jq -Rsc 'split("\n")[:-1]' 2>/dev/null || true
+    )"
+    [[ -n "$resolved_task_ids_json" ]] || resolved_task_ids_json='[]'
+  fi
   json_payload="$(
     jq -n \
       --arg project "$project" \
@@ -150,7 +172,9 @@ if [[ "$api_supported" == "true" ]] \
       --arg next_step "$next_step" \
       --arg details "$details_text" \
       --argjson resolve_current_goal "$([[ "$resolve_current_goal" == "true" ]] && echo true || echo false)" \
-      --argjson resolved_headlines "$resolved_headlines_json" '
+      --argjson promote_active_workline "$([[ "$promote_active_workline" == "true" ]] && echo true || echo false)" \
+      --argjson resolved_headlines "$resolved_headlines_json" \
+      --argjson resolved_task_ids "$resolved_task_ids_json" '
         {
           project: $project,
           namespace: $namespace,
@@ -158,7 +182,9 @@ if [[ "$api_supported" == "true" ]] \
           next_step: $next_step,
           details: (if ($details | length) > 0 then $details else null end),
           resolve_current_goal: $resolve_current_goal,
-          resolved_headlines: $resolved_headlines
+          promote_active_workline: $promote_active_workline,
+          resolved_headlines: $resolved_headlines,
+          resolved_task_ids: $resolved_task_ids
         }
       ' 2>/dev/null || true
   )"

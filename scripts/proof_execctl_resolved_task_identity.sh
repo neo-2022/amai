@@ -10,10 +10,11 @@ restore_output="$(mktemp)"
 namespace_code="continuity"
 agent_scope="proof_execctl_resolved_task_identity_${project_code}"
 thread_id="proof-execctl-resolved-task-identity-${project_code}"
+promotion_details="$(mktemp)"
 
 cleanup() {
   psql "${dsn}" -qc "DELETE FROM ami.projects WHERE code='${project_code}'" >/dev/null 2>&1 || true
-  rm -rf "${project_root}" "${restore_output}"
+  rm -rf "${project_root}" "${restore_output}" "${promotion_details}"
 }
 trap cleanup EXIT
 
@@ -35,6 +36,12 @@ fetch_restore() {
 }
 
 cd "${repo_root}"
+export AMAI_OPERATOR_REDIRECT_PROVENANCE="proof_harness:$(basename "$0")"
+
+cat >"${promotion_details}" <<'EOF'
+promotion_contract: operator_redirect
+Synthetic proof explicitly switches the active main workline.
+EOF
 
 cargo run --release --quiet -- bootstrap schema >/dev/null
 
@@ -52,7 +59,9 @@ run_release continuity handoff \
   --project "${project_code}" \
   --namespace "${namespace_code}" \
   --headline "Shared headline" \
-  --next-step "First incarnation."
+  --next-step "First incarnation." \
+  --details-file "${promotion_details}" \
+  --promote-active-workline
 fetch_restore
 task_a_event_id="$(jq -r '.working_state_restore.state_lineage.authoritative_event_id' "${restore_output}")"
 task_a_id="$(jq -r '.working_state_restore.project_task_tree.nodes[0].task_id' "${restore_output}")"
@@ -61,13 +70,17 @@ run_release continuity handoff \
   --project "${project_code}" \
   --namespace "${namespace_code}" \
   --headline "Interrupt one" \
-  --next-step "Suspend the first shared line."
+  --next-step "Suspend the first shared line." \
+  --details-file "${promotion_details}" \
+  --promote-active-workline
 
 run_release continuity handoff \
   --project "${project_code}" \
   --namespace "${namespace_code}" \
   --headline "Shared headline" \
-  --next-step "Second incarnation."
+  --next-step "Second incarnation." \
+  --details-file "${promotion_details}" \
+  --promote-active-workline
 fetch_restore
 task_c_event_id="$(jq -r '.working_state_restore.state_lineage.authoritative_event_id' "${restore_output}")"
 task_c_id="$(jq -r '.working_state_restore.project_task_tree.nodes[0].task_id' "${restore_output}")"
@@ -76,13 +89,15 @@ run_release continuity handoff \
   --project "${project_code}" \
   --namespace "${namespace_code}" \
   --headline "Interrupt two" \
-  --next-step "Suspend the second shared line."
+  --next-step "Suspend the second shared line." \
+  --details-file "${promotion_details}" \
+  --promote-active-workline
 fetch_restore
 
 jq -e '
   .working_state_restore.current_goal == "Interrupt two"
-  and (.working_state_restore.pending_return_queue | length) == 3
-  and (.working_state_restore.pending_return_queue | map(select(.headline == "Shared headline")) | length) == 2
+  and (.working_state_restore.pending_return_queue | length) == 2
+  and (.working_state_restore.pending_return_queue | map(select(.headline == "Shared headline")) | length) == 1
 ' "${restore_output}" >/dev/null
 
 pending_latest_shared_event_id="$(jq -r '.working_state_restore.pending_return_queue[0].authoritative_event_id' "${restore_output}")"
@@ -95,18 +110,19 @@ run_release continuity handoff \
   --namespace "${namespace_code}" \
   --headline "Post-resolve verification" \
   --next-step "Verify only one duplicate headline entry was removed." \
-  --resolved-task-id "${task_c_event_id}"
+  --resolved-task-id "${task_c_event_id}" \
+  --details-file "${promotion_details}" \
+  --promote-active-workline
 fetch_restore
 
 jq -e \
-  --arg task_a_id "${task_a_id}" \
   --arg task_c_id "${task_c_id}" \
   '
   .working_state_restore.current_goal == "Post-resolve verification"
-  and (.working_state_restore.pending_return_queue | length) == 3
+  and (.working_state_restore.pending_return_queue | length) == 2
   and (.working_state_restore.pending_return_queue[0].headline == "Interrupt two")
-  and (.working_state_restore.pending_return_queue | map(select(.headline == "Shared headline")) | length) == 1
-  and (.working_state_restore.pending_return_queue | any(.task_id == $task_a_id))
+  and (.working_state_restore.pending_return_queue[1].headline == "Interrupt one")
+  and (.working_state_restore.pending_return_queue | map(select(.headline == "Shared headline")) | length) == 0
   and (.working_state_restore.pending_return_queue | all(.task_id != $task_c_id))
   and .working_state_restore.required_return_task.task_id == .working_state_restore.pending_return_queue[0].task_id
 ' "${restore_output}" >/dev/null
@@ -118,13 +134,17 @@ run_release continuity handoff \
   --namespace "${namespace_code}" \
   --headline "Resolved current goal identity path" \
   --next-step "Verify resolved current goal does not requeue itself." \
-  --resolved-task-id "${post_resolve_event_id}"
+  --resolved-task-id "${post_resolve_event_id}" \
+  --details-file "${promotion_details}" \
+  --promote-active-workline
 fetch_restore
 
 jq -e '
   .working_state_restore.current_goal == "Resolved current goal identity path"
   and (.working_state_restore.pending_return_queue | map(select(.headline == "Post-resolve verification")) | length) == 0
-  and (.working_state_restore.pending_return_queue | length) == 3
+  and (.working_state_restore.pending_return_queue | length) == 2
+  and .working_state_restore.pending_return_queue[0].headline == "Interrupt two"
+  and .working_state_restore.pending_return_queue[1].headline == "Interrupt one"
 ' "${restore_output}" >/dev/null
 
 printf 'proof_execctl_resolved_task_identity: PASS\n'

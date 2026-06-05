@@ -858,6 +858,275 @@ pub(super) fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
         memory_card = with_status_tooltip(memory_card, &tooltip);
     }
 
+    let memory_semantic_evidence = &snapshot["latest_memory_retrieval_semantic_evidence"]["memory_retrieval_semantic_evidence"];
+    let semantic_status = memory_semantic_evidence["status"]
+        .as_str()
+        .unwrap_or("waiting");
+    let semantic_retrieval_evidence_cases = memory_semantic_evidence["retrieval_evidence_cases"]
+        .as_u64()
+        .unwrap_or(0);
+    let semantic_judged_cases = memory_semantic_evidence["judged_cases"]
+        .as_u64()
+        .unwrap_or(0);
+    let semantic_relevant_cases = memory_semantic_evidence["question_relevant_cases"]
+        .as_u64()
+        .unwrap_or(0);
+    let semantic_gold_labeled_judged_cases = memory_semantic_evidence["gold_labeled_judged_cases"]
+        .as_u64()
+        .unwrap_or(0);
+    let semantic_gold_supported_cases = memory_semantic_evidence["gold_answer_supported_cases"]
+        .as_u64()
+        .unwrap_or(0);
+    let semantic_blocked_cases = memory_semantic_evidence["blocked_cases"]
+        .as_u64()
+        .unwrap_or(0);
+    let semantic_legacy_single_preview_fallback_cases =
+        memory_semantic_evidence["legacy_single_preview_fallback_cases"]
+            .as_u64()
+            .unwrap_or(0);
+    let semantic_ranked_preview_avg =
+        memory_semantic_evidence["avg_ranked_preview_items_per_judged_case"].as_f64();
+    let semantic_scope = format!(
+        "bench={} / dataset={}",
+        memory_semantic_evidence["bench"]
+            .as_str()
+            .unwrap_or("ещё нет данных"),
+        memory_semantic_evidence["dataset"]
+            .as_str()
+            .unwrap_or("ещё нет данных"),
+    );
+    let semantic_card_status =
+        if semantic_judged_cases == 0 && semantic_retrieval_evidence_cases == 0 {
+            "waiting"
+        } else if semantic_status == "executed"
+            && semantic_blocked_cases == 0
+            && semantic_legacy_single_preview_fallback_cases == 0
+            && memory_semantic_evidence["all_judged_cases_semantically_relevant"].as_bool()
+                == Some(true)
+            && (semantic_gold_labeled_judged_cases == 0
+                || memory_semantic_evidence["all_gold_labeled_judged_cases_answer_supporting"]
+                    .as_bool()
+                    == Some(true))
+        {
+            "pass"
+        } else {
+            "critical"
+        };
+    let mut memory_semantic_card = compare_table_card(
+        "Смысловая проверка найденных фрагментов",
+        "Контур данных: latest_memory_retrieval_semantic_evidence.memory_retrieval_semantic_evidence. Это отдельная локальная проверка по набору верхних найденных фрагментов. Она не подменяет memory score и не заявляет official scorer parity."
+            .to_string(),
+        semantic_card_status,
+        Some(source_label(
+            &benchmark_source_sentence(BenchmarkSourceKind::Snapshot {
+                snapshot_key: "latest_memory_retrieval_semantic_evidence",
+                payload_root: "memory_retrieval_semantic_evidence",
+                scope: Some(&semantic_scope),
+                suffix: Some("Это repo-owned bounded semantic evidence lane, а не legacy memory score"),
+            }),
+            snapshot["latest_memory_retrieval_semantic_evidence"]["_observability"]
+                ["captured_at_epoch_ms"]
+                .as_u64(),
+        )),
+        Some("Карточка показывает, насколько верхние найденные фрагменты реально помогают ответить на вопрос и подтверждают эталонный ответ там, где он есть.".to_string()),
+        Some(if semantic_judged_cases == 0 {
+            "ещё нет данных".to_string()
+        } else {
+            format!(
+                "{} judged • relevant {}/{} • support {}/{}",
+                format_u64(Some(semantic_judged_cases)),
+                format_u64(Some(semantic_relevant_cases)),
+                format_u64(Some(semantic_judged_cases)),
+                format_u64(Some(semantic_gold_supported_cases)),
+                format_u64(Some(semantic_gold_labeled_judged_cases)),
+            )
+        }),
+        vec![
+            compare_table_row(
+                "Bench",
+                "Какой benchmark породил этот отдельный локальный semantic-evidence snapshot.",
+                compare_pair(
+                    "memory benchmark".to_string(),
+                    memory_semantic_evidence["bench"]
+                        .as_str()
+                        .unwrap_or("ещё нет данных")
+                        .to_string(),
+                ),
+            ),
+            compare_table_row(
+                "Dataset",
+                "На каком dataset собран этот bounded semantic-evidence contour.",
+                compare_pair(
+                    "bounded dataset slice".to_string(),
+                    memory_semantic_evidence["dataset"]
+                        .as_str()
+                        .unwrap_or("ещё нет данных")
+                        .to_string(),
+                ),
+            ),
+            compare_table_row(
+                "Judge status",
+                "Удалось ли завершить локальную смысловую проверку без блокеров на уровне кейсов и входных данных.",
+                compare_pair("executed".to_string(), semantic_status.to_string()),
+            ),
+            compare_table_row(
+                "Retrieval cases",
+                "Сколько кейсов вообще пришли в этот контур с ненулевым retrieval evidence.",
+                compare_pair(
+                    "bounded retrieval slice".to_string(),
+                    format_u64(Some(semantic_retrieval_evidence_cases)),
+                ),
+            ),
+            compare_table_row(
+                "Judged cases",
+                "Сколько retrieval-evidence кейсов реально дошли до локального смыслового вердикта по набору верхних фрагментов.",
+                compare_pair(
+                    "= retrieval cases".to_string(),
+                    format!(
+                        "{} из {}",
+                        format_u64(Some(semantic_judged_cases)),
+                        format_u64(Some(semantic_retrieval_evidence_cases)),
+                    ),
+                ),
+            ),
+            compare_table_row(
+                "Question relevant",
+                "Сколько проверенных кейсов найденный набор верхних фрагментов действительно помогает ответить на вопрос.",
+                compare_pair(
+                    "= judged".to_string(),
+                    format!(
+                        "{} из {}",
+                        format_u64(Some(semantic_relevant_cases)),
+                        format_u64(Some(semantic_judged_cases)),
+                    ),
+                ),
+            ),
+            compare_table_row(
+                "Gold-answer support",
+                "Сколько gold-labeled кейсов найденный набор верхних фрагментов действительно поддерживает по смыслу.",
+                compare_pair(
+                    "= gold judged".to_string(),
+                    format!(
+                        "{} из {}",
+                        format_u64(Some(semantic_gold_supported_cases)),
+                        format_u64(Some(semantic_gold_labeled_judged_cases)),
+                    ),
+                ),
+            ),
+            compare_table_row(
+                "Blocked cases",
+                "Сколько кейсов не удалось честно оценить из-за отсутствующего набора фрагментов или проблем локального judge-контура.",
+                compare_pair("= 0".to_string(), format_u64(Some(semantic_blocked_cases))),
+            ),
+            compare_table_row(
+                "Legacy fallback",
+                "Сколько кейсов старый контур ещё смог бы оценивать только по одному верхнему preview вместо полного ranked preview set. Здесь должен оставаться ноль.",
+                compare_pair(
+                    "= 0".to_string(),
+                    format_u64(Some(semantic_legacy_single_preview_fallback_cases)),
+                ),
+            ),
+            compare_table_row(
+                "Preview set width",
+                "Сколько верхних найденных фрагментов в среднем попадает в одну смысловую проверку.",
+                compare_pair(
+                    format!(
+                        "top {}",
+                        format_u64(
+                            memory_semantic_evidence["ranked_preview_limit_per_case"].as_u64()
+                        )
+                    ),
+                    semantic_ranked_preview_avg
+                        .map(|value| format!("{value:.2}"))
+                        .unwrap_or_else(|| "ещё нет данных".to_string()),
+                ),
+            ),
+            compare_table_row(
+                "Max previews",
+                "Максимальная ширина набора верхних фрагментов в одном кейсе этого snapshot.",
+                compare_pair(
+                    format!(
+                        "<= {}",
+                        format_u64(
+                            memory_semantic_evidence["ranked_preview_limit_per_case"].as_u64()
+                        )
+                    ),
+                    format_u64(
+                        memory_semantic_evidence["max_ranked_preview_items_in_case"].as_u64()
+                    ),
+                ),
+            ),
+        ],
+    );
+    if let Some(object) = memory_semantic_card.as_object_mut() {
+        object.insert(
+            "memory_retrieval_semantic_evidence".to_string(),
+            memory_semantic_evidence.clone(),
+        );
+    }
+    if let Some(tooltip) = status_reason_tooltip(
+        semantic_card_status,
+        vec![
+            if semantic_status != "executed" {
+                Some(format!(
+                    "Локальный semantic-evidence contour не дошёл до executed: текущий статус {}.",
+                    semantic_status
+                ))
+            } else {
+                None
+            },
+            if semantic_judged_cases < semantic_retrieval_evidence_cases {
+                Some(format!(
+                    "Не все retrieval-evidence кейсы были реально оценены: {} из {}.",
+                    format_u64(Some(semantic_judged_cases)),
+                    format_u64(Some(semantic_retrieval_evidence_cases)),
+                ))
+            } else {
+                None
+            },
+            if semantic_relevant_cases < semantic_judged_cases {
+                Some(format!(
+                    "Часть judged кейсов не выглядит смыслово полезной для вопроса: {} из {}.",
+                    format_u64(Some(semantic_relevant_cases)),
+                    format_u64(Some(semantic_judged_cases)),
+                ))
+            } else {
+                None
+            },
+            if semantic_gold_supported_cases < semantic_gold_labeled_judged_cases {
+                Some(format!(
+                    "Часть gold-labeled кейсов не имеет смысловой опоры в наборе фрагментов: {} из {}.",
+                    format_u64(Some(semantic_gold_supported_cases)),
+                    format_u64(Some(semantic_gold_labeled_judged_cases)),
+                ))
+            } else {
+                None
+            },
+            if semantic_legacy_single_preview_fallback_cases > 0 {
+                Some(format!(
+                    "Остались кейсы, где контур всё ещё упирается в legacy single-preview fallback: {}.",
+                    format_u64(Some(semantic_legacy_single_preview_fallback_cases))
+                ))
+            } else {
+                None
+            },
+            if semantic_blocked_cases > 0 {
+                Some(format!(
+                    "Есть blocked кейсы в semantic-evidence contour: {}.",
+                    format_u64(Some(semantic_blocked_cases))
+                ))
+            } else {
+                None
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        "Semantic retrieval evidence contour вышел из своей нормы, но детальные причины пока не удалось собрать.",
+    ) {
+        memory_semantic_card = with_status_tooltip(memory_semantic_card, &tooltip);
+    }
+
     let procedural = &snapshot["latest_procedural_benchmark"]["procedural_benchmark"];
     let procedural_total = procedural["summary"]["total_metrics"].as_u64().unwrap_or(0);
     let procedural_passed = procedural["summary"]["passed_metrics"]
@@ -1138,6 +1407,7 @@ pub(super) fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
             "transposed",
         ),
         memory_card,
+        memory_semantic_card,
         procedural_card,
         benchmark_statistics_card(
             snapshot,
@@ -1230,7 +1500,7 @@ fn benchmark_statistics_card(
     });
     let source_epoch_ms = snapshot[snapshot_key]["_observability"]["captured_at_epoch_ms"].as_u64();
     let statistics_payload_root = format!("{payload_root}.statistics");
-    compare_table_card(
+    let mut card = compare_table_card(
         title,
         note.to_string(),
         status,
@@ -1341,6 +1611,16 @@ fn benchmark_statistics_card(
                 ),
             ),
             compare_table_row(
+                "Score drift",
+                "Kolmogorov-Smirnov statistic для score distribution между baseline и candidate. Для payload без score обязан быть not_applicable.",
+                compare_pair(
+                    "kolmogorov_smirnov".to_string(),
+                    format_statistics_method_summary(
+                        &statistics["methods"]["score_distribution_drift"],
+                    ),
+                ),
+            ),
+            compare_table_row(
                 "Drift summary",
                 "Честный aggregate status статистического compare/drift contour.",
                 compare_pair(
@@ -1365,7 +1645,20 @@ fn benchmark_statistics_card(
                 ),
             ),
         ],
-    )
+    );
+    card["source_identity"] = json!({
+        "snapshot_key": snapshot_key,
+        "payload_root": payload_root,
+        "matrix": root["matrix"].clone(),
+        "source_event_id": snapshot[snapshot_key]["_observability"]["source_event_id"].clone(),
+        "scope_project_code": snapshot[snapshot_key]["_observability"]["scope_project_code"].clone(),
+        "scope_namespace_code": snapshot[snapshot_key]["_observability"]["scope_namespace_code"].clone(),
+        "captured_at_epoch_ms": snapshot[snapshot_key]["_observability"]["captured_at_epoch_ms"].clone(),
+        "payload_sha256": snapshot[snapshot_key]["_observability"]["payload_sha256"].clone(),
+        "baseline_run_id": statistics["baseline_run_id"].clone(),
+        "candidate_run_id": statistics["candidate_run_id"].clone(),
+    });
+    card
 }
 
 fn format_baseline_pair(baseline_run_id: Option<&str>, candidate_run_id: Option<&str>) -> String {
@@ -2208,6 +2501,28 @@ mod tests {
                     }
                 }
             },
+            "latest_memory_retrieval_semantic_evidence": {
+                "_observability": {
+                    "captured_at_epoch_ms": 6
+                },
+                "memory_retrieval_semantic_evidence": {
+                    "bench": "longmemeval",
+                    "dataset": "longmemeval_s_cleaned",
+                    "status": "executed",
+                    "retrieval_evidence_cases": 3,
+                    "judged_cases": 3,
+                    "question_relevant_cases": 3,
+                    "gold_labeled_judged_cases": 2,
+                    "gold_answer_supported_cases": 2,
+                    "blocked_cases": 0,
+                    "ranked_preview_limit_per_case": 3,
+                    "avg_ranked_preview_items_per_judged_case": 2.67,
+                    "max_ranked_preview_items_in_case": 3,
+                    "legacy_single_preview_fallback_cases": 0,
+                    "all_judged_cases_semantically_relevant": true,
+                    "all_gold_labeled_judged_cases_answer_supporting": true
+                }
+            },
             "latest_memory_task_matrix": {
                 "_observability": {
                     "captured_at_epoch_ms": 7
@@ -2260,6 +2575,11 @@ mod tests {
                                 "status": "measured",
                                 "metric": "latency_distribution",
                                 "value": 0.1011
+                            },
+                            "score_distribution_drift": {
+                                "status": "measured",
+                                "metric": "score_distribution",
+                                "value": 0.0711
                             }
                         },
                         "drift_summary": {
@@ -2270,7 +2590,8 @@ mod tests {
                                 "median_latency_delta_confidence_interval",
                                 "p95_latency_delta_confidence_interval",
                                 "verdict_distribution_drift",
-                                "latency_distribution_drift"
+                                "latency_distribution_drift",
+                                "score_distribution_drift"
                             ],
                             "not_applicable_methods": [
                                 "mean_delta_confidence_interval"
@@ -2315,9 +2636,9 @@ mod tests {
                                 "upper": 0.92
                             },
                             "score_delta_confidence_interval": {
-                                "status": "not_applicable",
+                                "status": "not_measured",
                                 "metric": "score_delta",
-                                "reason": "metric_not_available_for_payload_kind"
+                                "reason": "baseline_candidate_pair_not_materialized"
                             },
                             "mean_delta_confidence_interval": {
                                 "status": "not_measured",
@@ -2343,6 +2664,11 @@ mod tests {
                                 "status": "not_measured",
                                 "metric": "latency_distribution",
                                 "reason": "baseline_candidate_pair_not_materialized"
+                            },
+                            "score_distribution_drift": {
+                                "status": "not_measured",
+                                "metric": "score_distribution",
+                                "reason": "baseline_candidate_pair_not_materialized"
                             }
                         },
                         "drift_summary": {
@@ -2350,15 +2676,15 @@ mod tests {
                             "measured_methods": [
                                 "success_rate_confidence_interval"
                             ],
-                            "not_applicable_methods": [
-                                "score_delta_confidence_interval"
-                            ],
+                            "not_applicable_methods": [],
                             "not_measured_methods": [
+                                "score_delta_confidence_interval",
                                 "mean_delta_confidence_interval",
                                 "median_latency_delta_confidence_interval",
                                 "p95_latency_delta_confidence_interval",
                                 "verdict_distribution_drift",
-                                "latency_distribution_drift"
+                                "latency_distribution_drift",
+                                "score_distribution_drift"
                             ]
                         },
                         "promotion": {
@@ -2592,150 +2918,188 @@ mod tests {
                 .unwrap_or_default()
                 .contains("Missing predictions")
         );
-        assert_eq!(cards[5]["title"].as_str(), Some("Навыки и память действий"));
+        assert_eq!(
+            cards[5]["title"].as_str(),
+            Some("Смысловая проверка найденных фрагментов")
+        );
+        assert_eq!(cards[5]["status"].as_str(), Some("pass"));
         assert_eq!(
             cards[5]["headline_value"].as_str(),
+            Some("3 judged • relevant 3/3 • support 2/2")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][2]["values"][1].as_str(),
+            Some("executed")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][4]["values"][1].as_str(),
+            Some("3 из 3")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][6]["values"][1].as_str(),
+            Some("2 из 2")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][8]["values"][1].as_str(),
+            Some("0")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][9]["values"][1].as_str(),
+            Some("2.67")
+        );
+        assert_eq!(
+            cards[5]["table"]["rows"][10]["values"][1].as_str(),
+            Some("3")
+        );
+        assert_eq!(cards[6]["title"].as_str(), Some("Навыки и память действий"));
+        assert_eq!(
+            cards[6]["headline_value"].as_str(),
             Some(
                 "5 из 5 skill-метрик подтверждены с Amai (100.00%); линия без Amai materialized отдельно"
             )
         );
-        assert_eq!(cards[5]["status"].as_str(), Some("pass"));
+        assert_eq!(cards[6]["status"].as_str(), Some("pass"));
         assert!(
-            cards[5]["note"]
+            cards[6]["note"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("generic memory score запрещён")
         );
         assert!(
-            cards[5]["note"]
+            cards[6]["note"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("Линия без Amai materialized отдельно")
         );
         assert_eq!(
-            cards[5]["benchmark_metric_kind"].as_str(),
+            cards[6]["benchmark_metric_kind"].as_str(),
             Some("procedural_skill_metrics")
         );
         assert_eq!(
-            cards[5]["benchmark_run_state"].as_str(),
+            cards[6]["benchmark_run_state"].as_str(),
             Some("dual_line_materialized")
         );
         assert_eq!(
-            cards[5]["without_amai_series_available"].as_bool(),
+            cards[6]["without_amai_series_available"].as_bool(),
             Some(true)
         );
         assert_eq!(
-            cards[5]["table"]["rows"][0]["label"].as_str(),
+            cards[6]["table"]["rows"][0]["label"].as_str(),
             Some("Metric kind")
         );
         assert_eq!(
-            cards[5]["table"]["rows"][0]["values"][1].as_str(),
+            cards[6]["table"]["rows"][0]["values"][1].as_str(),
             Some("procedural_skill_metrics")
         );
         assert_eq!(
-            cards[5]["table"]["rows"][1]["values"][1].as_str(),
+            cards[6]["table"]["rows"][1]["values"][1].as_str(),
             Some("dual_line_materialized (обе benchmark-линии materialized)")
         );
         assert_eq!(
-            cards[5]["table"]["rows"][3]["values"][1].as_str(),
+            cards[6]["table"]["rows"][3]["values"][1].as_str(),
             Some("materialized")
         );
         assert_eq!(
-            cards[5]["table"]["rows"][4]["values"][1].as_str(),
+            cards[6]["table"]["rows"][4]["values"][1].as_str(),
             Some("5")
         );
         assert_eq!(
-            cards[5]["table"]["rows"][5]["values"][1].as_str(),
+            cards[6]["table"]["rows"][5]["values"][1].as_str(),
             Some("materialized")
         );
         assert_eq!(
-            cards[5]["table"]["rows"][6]["values"][1].as_str(),
+            cards[6]["table"]["rows"][6]["values"][1].as_str(),
             Some("platform-neutral benchmark snapshot")
         );
         assert_eq!(
-            cards[5]["table"]["rows"][7]["label"].as_str(),
+            cards[6]["table"]["rows"][7]["label"].as_str(),
             Some("История benchmark")
         );
         assert_eq!(
-            cards[5]["table"]["rows"][7]["values"][1].as_str(),
+            cards[6]["table"]["rows"][7]["values"][1].as_str(),
             Some("2")
         );
         assert_eq!(
-            cards[5]["table"]["rows"][8]["values"][1].as_str(),
+            cards[6]["table"]["rows"][8]["values"][1].as_str(),
             Some("2")
         );
         assert_eq!(
-            cards[5]["table"]["rows"][9]["values"][1].as_str(),
+            cards[6]["table"]["rows"][9]["values"][1].as_str(),
             Some("2")
         );
         assert_eq!(
-            cards[5]["table"]["rows"][10]["label"].as_str(),
+            cards[6]["table"]["rows"][10]["label"].as_str(),
             Some("Reuse quality")
         );
         assert_eq!(
-            cards[5]["table"]["rows"][14]["values"][1].as_str(),
+            cards[6]["table"]["rows"][14]["values"][1].as_str(),
             Some("pass")
         );
         assert_eq!(
-            cards[5]["benchmark_with_amai_history_series"]
+            cards[6]["benchmark_with_amai_history_series"]
                 .as_array()
                 .map(|items| items.len()),
             Some(2)
         );
         assert_eq!(
-            cards[5]["benchmark_without_amai_history_series"]
+            cards[6]["benchmark_without_amai_history_series"]
                 .as_array()
                 .map(|items| items.len()),
             Some(2)
         );
         assert_eq!(
-            cards[6]["title"].as_str(),
+            cards[7]["title"].as_str(),
             Some("Memory task matrix compare")
         );
-        assert_eq!(cards[6]["status"].as_str(), Some("pass"));
+        assert_eq!(cards[7]["status"].as_str(), Some("pass"));
         assert_eq!(
-            cards[6]["headline_value"].as_str(),
+            cards[7]["headline_value"].as_str(),
             Some(
                 "7 задач • drift measured • promotion candidate_ready_for_measured_approval • approval pending_human_review"
             )
         );
         assert_eq!(
-            cards[6]["table"]["rows"][2]["values"][1].as_str(),
+            cards[7]["table"]["rows"][2]["values"][1].as_str(),
             Some("11111111 → 22222222")
         );
         assert_eq!(
-            cards[6]["table"]["rows"][5]["values"][1].as_str(),
+            cards[7]["table"]["rows"][5]["values"][1].as_str(),
             Some("not_applicable • metric_not_available_for_payload_kind")
         );
-        assert_eq!(cards[7]["title"].as_str(), Some("MCP task matrix compare"));
-        assert_eq!(cards[7]["status"].as_str(), Some("waiting"));
+        assert_eq!(cards[8]["title"].as_str(), Some("MCP task matrix compare"));
+        assert_eq!(cards[8]["status"].as_str(), Some("waiting"));
         assert_eq!(
-            cards[7]["headline_value"].as_str(),
+            cards[8]["headline_value"].as_str(),
             Some("5 задач • baseline pair ещё не materialized")
         );
         assert_eq!(
-            cards[7]["table"]["rows"][2]["values"][1].as_str(),
+            cards[8]["table"]["rows"][2]["values"][1].as_str(),
             Some("ещё нет baseline → 33333333")
         );
         assert_eq!(
-            cards[7]["table"]["rows"][10]["values"][1].as_str(),
-            Some("not_measured • measured 1 • not_applicable 1 • not_measured 5")
+            cards[8]["table"]["rows"][10]["values"][1].as_str(),
+            Some("not_measured • baseline_candidate_pair_not_materialized")
         );
         assert_eq!(
-            cards[7]["table"]["rows"][11]["values"][1].as_str(),
+            cards[8]["table"]["rows"][11]["values"][1].as_str(),
+            Some("not_measured • measured 1 • not_applicable 0 • not_measured 7")
+        );
+        assert_eq!(
+            cards[8]["table"]["rows"][12]["values"][1].as_str(),
             Some(
                 "not_promotable • blocked_statistics_incomplete • fail_closed • statistics_incomplete"
             )
         );
         assert_eq!(
-            cards[6]["table"]["rows"][12]["values"][1].as_str(),
+            cards[7]["table"]["rows"][13]["values"][1].as_str(),
             Some("pending_human_review • review_packet_ready • explicit_human_signoff_required")
         );
         assert_eq!(
-            cards[7]["table"]["rows"][12]["values"][1].as_str(),
+            cards[8]["table"]["rows"][13]["values"][1].as_str(),
             Some("blocked • blocked_statistics_incomplete • fail_closed • statistics_incomplete")
         );
         assert!(titles.contains(&"Память и изоляция"));
+        assert!(titles.contains(&"Смысловая проверка найденных фрагментов"));
         assert!(titles.contains(&"Memory task matrix compare"));
         assert!(titles.contains(&"MCP task matrix compare"));
     }
@@ -3156,11 +3520,11 @@ mod tests {
             Some("3 задач • drift measured • promotion not_promotable • approval ещё нет данных")
         );
         assert_eq!(
-            card["table"]["rows"][11]["values"][1].as_str(),
+            card["table"]["rows"][12]["values"][1].as_str(),
             Some("not_promotable • not_fail_closed • promotion_policy_not_materialized")
         );
         assert_eq!(
-            card["table"]["rows"][12]["values"][1].as_str(),
+            card["table"]["rows"][13]["values"][1].as_str(),
             Some("ещё не materialized")
         );
     }
@@ -3232,7 +3596,7 @@ mod tests {
             )
         );
         assert_eq!(
-            card["table"]["rows"][12]["values"][1].as_str(),
+            card["table"]["rows"][13]["values"][1].as_str(),
             Some("blocked • blocked_promotion_law_missing • fail_closed • promotion_law_missing")
         );
     }
@@ -3275,13 +3639,13 @@ mod tests {
                     "promotion_law": {
                         "verdict": "not_promotable",
                         "state": "blocked_benchmark_gates",
-                        "fail_closed": false,
+                        "fail_closed": true,
                         "reason": "benchmark_gates_not_met"
                     },
                     "measured_approval": {
                         "verdict": "blocked",
                         "state": "blocked_benchmark_gates",
-                        "fail_closed": false,
+                        "fail_closed": true,
                         "reason": "benchmark_gates_not_met"
                     }
                 }
@@ -3304,8 +3668,8 @@ mod tests {
             )
         );
         assert_eq!(
-            card["table"]["rows"][12]["values"][1].as_str(),
-            Some("blocked • blocked_benchmark_gates • not_fail_closed • benchmark_gates_not_met")
+            card["table"]["rows"][13]["values"][1].as_str(),
+            Some("blocked • blocked_benchmark_gates • fail_closed • benchmark_gates_not_met")
         );
     }
 

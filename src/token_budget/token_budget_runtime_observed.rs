@@ -724,8 +724,9 @@ pub(crate) fn build_continuity_restore_observed_event(
     let timestamp_utc = current_epoch_ms()?;
     let event_id = Uuid::new_v4().to_string();
     let traffic_class = derive_traffic_class(source_kind);
-    let agent_scope = working_state::current_agent_scope_for(project_code, namespace_code);
-    let thread_id = codex_threads::current_thread_id()
+    let agent_scope = working_state::current_agent_scope_for_result(project_code, namespace_code)?;
+    let thread_id = codex_threads::current_thread_id_result()
+        .map_err(anyhow::Error::from)?
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let turn_id = thread_id

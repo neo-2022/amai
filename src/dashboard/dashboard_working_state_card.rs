@@ -60,6 +60,173 @@ fn summarize_working_state_result(value: Option<&str>) -> String {
     compact_dashboard_text(Some(raw), 108, "ещё нет данных")
 }
 
+fn working_state_task_graph_projection_status(restore: &Value) -> Option<&str> {
+    restore["task_graph_projection_validation"]["status"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn working_state_task_graph_projection_is_validated(restore: &Value) -> bool {
+    let validation = &restore["task_graph_projection_validation"];
+    validation["status"].as_str() == Some("valid")
+        && validation["validation_state"].as_str() == Some("valid")
+        && validation["projection_source"].as_str() == Some("graph_first_sql_validated")
+        && validation["truth_claim"].as_bool() == Some(false)
+}
+
+fn russian_count_form<'a>(
+    count: u64,
+    singular: &'a str,
+    paucal: &'a str,
+    plural: &'a str,
+) -> &'a str {
+    let remainder_10 = count % 10;
+    let remainder_100 = count % 100;
+    if remainder_10 == 1 && remainder_100 != 11 {
+        singular
+    } else if (2..=4).contains(&remainder_10) && !(12..=14).contains(&remainder_100) {
+        paucal
+    } else {
+        plural
+    }
+}
+
+fn working_state_task_graph_legacy_debt_summary(validation: &Value) -> Option<String> {
+    let deprecated = validation["deprecated_sql_nodes_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let quarantined = validation["quarantined_sql_nodes_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let excluded_total = validation["projection_excluded_sql_nodes_count"]
+        .as_u64()
+        .unwrap_or(0);
+    if excluded_total == 0 && deprecated == 0 && quarantined == 0 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if deprecated > 0 {
+        parts.push(format!(
+            "{} {}",
+            format_u64(Some(deprecated)),
+            russian_count_form(deprecated, "устаревший", "устаревших", "устаревших",)
+        ));
+    }
+    if quarantined > 0 {
+        parts.push(format!(
+            "{} {}",
+            format_u64(Some(quarantined)),
+            russian_count_form(quarantined, "карантинный", "карантинных", "карантинных",)
+        ));
+    }
+    if parts.is_empty() {
+        parts.push(format!("{} legacy", format_u64(Some(excluded_total))));
+    }
+    Some(format!("отфильтровано из legacy: {}", parts.join(", ")))
+}
+
+fn working_state_task_graph_projection_operator_summary(restore: &Value) -> Option<String> {
+    let validation = &restore["task_graph_projection_validation"];
+    if !validation.is_object() {
+        return None;
+    }
+    let status = working_state_task_graph_projection_status(restore)?;
+    if working_state_task_graph_projection_is_validated(restore) {
+        if let Some(debt) = working_state_task_graph_legacy_debt_summary(validation) {
+            return Some(format!("validated graph-first projection • {debt}"));
+        }
+        if validation["warnings"]["projection_preview_limited"].as_bool() == Some(true) {
+            return Some("validated graph-first projection • compact preview limited".to_string());
+        }
+        return Some("validated graph-first projection".to_string());
+    }
+    let reason = validation["reason"]
+        .as_str()
+        .map(humanize_identifier)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "причина не surfaced".to_string());
+    Some(format!("{status} • {reason}"))
+}
+
+#[derive(Debug, Clone, Default)]
+struct WorkingStateTaskGraphSurface {
+    validated: bool,
+    requires_attention: bool,
+    operator_summary: Option<String>,
+    note_sentence: Option<String>,
+    tooltip_sentence: Option<String>,
+    status_label: Option<String>,
+    tree_summary: Option<String>,
+    ledger_summary: Option<String>,
+}
+
+fn build_working_state_task_graph_surface(restore: &Value) -> WorkingStateTaskGraphSurface {
+    let mut surface = WorkingStateTaskGraphSurface::default();
+    let Some(operator_summary) = working_state_task_graph_projection_operator_summary(restore)
+    else {
+        return surface;
+    };
+    let validation = &restore["task_graph_projection_validation"];
+    let validated = working_state_task_graph_projection_is_validated(restore);
+    surface.validated = validated;
+    surface.requires_attention = !validated;
+    surface.operator_summary = Some(operator_summary);
+    if validated {
+        surface.tree_summary = restore["project_task_tree_summary"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        surface.ledger_summary = restore["project_task_ledger_summary"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        if let Some(debt) = working_state_task_graph_legacy_debt_summary(validation) {
+            surface.note_sentence = Some(format!(
+                "В compact-проекции задач legacy-долг уже отфильтрован: {debt}."
+            ));
+            surface.tooltip_sentence = Some(format!(
+                "Validated graph-first path уже отфильтровал legacy-долг: {debt}."
+            ));
+        } else if validation["warnings"]["projection_preview_limited"].as_bool() == Some(true) {
+            surface.note_sentence = Some(
+                "Полный validated SQL-набор уже дочитан, а compact preview просто ужат до короткой операторской формы."
+                    .to_string(),
+            );
+            surface.tooltip_sentence = Some(
+                "compact preview limited не означает fallback: validated graph-first projection уже materialized."
+                    .to_string(),
+            );
+        }
+        return surface;
+    }
+
+    let reason = validation["reason"]
+        .as_str()
+        .map(humanize_identifier)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "причина не surfaced".to_string());
+    let status = working_state_task_graph_projection_status(restore).unwrap_or("unknown");
+    surface.status_label = Some("граф через fallback".to_string());
+    surface.note_sentence = Some(format!(
+        "Граф задач сейчас идёт не по validated SQL-проекции, а через {status}: {reason}."
+    ));
+    surface.tooltip_sentence = Some(format!(
+        "Task-graph projection сейчас degraded: validated graph-first projection недоступна и surfaced как {status}. Причина: {reason}."
+    ));
+    surface
+}
+
+fn worsen_working_state_status<'a>(current: &'a str, candidate: &'a str) -> &'a str {
+    match candidate {
+        "alert" => "alert",
+        "waiting" if current == "pass" || current == "unknown" => "waiting",
+        _ => current,
+    }
+}
+
 pub(super) fn summarize_working_state_goal(
     value: Option<&str>,
     last_command: Option<&str>,
@@ -286,15 +453,17 @@ pub(super) fn working_state_live_card(snapshot: &Value) -> Value {
         } else {
             "unknown"
         };
+        let source_label = if status == "waiting" {
+            "Источник: current_live_turn same-thread; latest_repo_working_state_restore.working_state_restore ещё не materialized.".to_string()
+        } else {
+            "Источник: latest_repo_working_state_restore.working_state_restore".to_string()
+        };
         let mut card = card_with_rows(
             "Текущая работа",
             "ещё нет данных".to_string(),
             note,
             status,
-            Some(
-                "Источник: latest_repo_working_state_restore.working_state_restore + current_live_turn"
-                    .to_string(),
-            ),
+            Some(source_label),
             Some("Показывает простую сводку по текущей работе в этом репозитории: что сейчас делаем, что дальше и когда это обновлялось.".to_string()),
             rows,
         );
@@ -312,42 +481,6 @@ pub(super) fn working_state_live_card(snapshot: &Value) -> Value {
         );
     }
     let restore = restore_root;
-    if !restore.is_object() {
-        let mut rows = Vec::new();
-        let mut note = "Пока ещё нет последнего рабочего снимка.".to_string();
-        let status = if let Some((row, note_sentence)) = live_turn_activity.as_ref() {
-            rows.push(row.clone());
-            note = format!(
-                "Последний рабочий снимок ещё не появился, но текущий chat turn уже показывает активность Amai. {}",
-                note_sentence
-            );
-            "waiting"
-        } else {
-            "unknown"
-        };
-        let mut card = card_with_rows(
-            "Текущая работа",
-            "ещё нет данных".to_string(),
-            note,
-            status,
-            Some("Источник: latest_working_state_restore.working_state_restore + current_live_turn".to_string()),
-            Some("Показывает простую сводку по текущей работе: что сейчас делаем, что дальше и когда это обновлялось.".to_string()),
-            rows,
-        );
-        if status == "waiting" {
-            card = with_status_label(card, "живой turn уже виден");
-            card = with_status_tooltip(
-                card,
-                "Статус пока не может считаться полностью нормальным по следующим причинам:\n- Последний рабочий снимок ещё не появился.\n- Но текущий thread уже observed свежую активность Amai, поэтому панель показывает live-turn отдельно.",
-            );
-            return card;
-        }
-        return with_status_tooltip(
-            card,
-            "Статус пока не может считаться нормальным по следующим причинам:\n- Последний рабочий снимок ещё не появился.\n- Без этого снимка панель не видит текущую рабочую линию Amai.",
-        );
-    }
-
     let current_goal = summarize_working_state_goal(
         restore["current_goal"].as_str(),
         restore["last_command"].as_str(),
@@ -362,6 +495,7 @@ pub(super) fn working_state_live_card(snapshot: &Value) -> Value {
     let restore_confidence = restore["restore_confidence"]
         .as_str()
         .unwrap_or("preliminary");
+    let task_graph_surface = build_working_state_task_graph_surface(restore);
     let recent_queries = restore["recent_queries"]
         .as_array()
         .map(|items| items.len() as u64)
@@ -420,6 +554,9 @@ pub(super) fn working_state_live_card(snapshot: &Value) -> Value {
         _ if events_count.unwrap_or(0) > 0 => "waiting",
         _ => "unknown",
     };
+    if task_graph_surface.requires_attention {
+        status = worsen_working_state_status(status, "alert");
+    }
     if live_turn_activity.is_some() && status == "unknown" {
         status = "waiting";
     }
@@ -438,6 +575,17 @@ pub(super) fn working_state_live_card(snapshot: &Value) -> Value {
             "Что дальше",
             next_step.clone(),
             Some("Какой следующий шаг сейчас считается основным."),
+        ),
+        metric_row(
+            "Состояние проекции",
+            compact_dashboard_text(
+                task_graph_surface.operator_summary.as_deref(),
+                108,
+                "ещё нет данных",
+            ),
+            Some(
+                "Показывает, validated ли текущая task-graph truth-проекция и есть ли surfaced legacy-долг или fallback.",
+            ),
         ),
         metric_row(
             "Последний результат",
@@ -482,6 +630,24 @@ pub(super) fn working_state_live_card(snapshot: &Value) -> Value {
             Some("Сколько подтверждённых событий уже есть у этой рабочей линии."),
         ),
     ];
+    if task_graph_surface.validated {
+        if let Some(tree_summary) = task_graph_surface.tree_summary.as_deref() {
+            rows.push(metric_row(
+                "Сводка графа",
+                compact_dashboard_text(Some(tree_summary), 108, "ещё нет данных"),
+                Some("Короткая operator-facing сводка по текущей validated task-graph проекции."),
+            ));
+        }
+        if let Some(ledger_summary) = task_graph_surface.ledger_summary.as_deref() {
+            rows.push(metric_row(
+                "Сводка ленты",
+                compact_dashboard_text(Some(ledger_summary), 108, "ещё нет данных"),
+                Some(
+                    "Короткая operator-facing сводка по active/historical state этой рабочей линии.",
+                ),
+            ));
+        }
+    }
     if recent_queries > 0 {
         rows.push(metric_row(
             "Недавние запросы",
@@ -495,7 +661,18 @@ pub(super) fn working_state_live_card(snapshot: &Value) -> Value {
     }
 
     let live_turn_note_present = live_turn_note_sentence.is_some();
+    let projection_note_sentence = task_graph_surface.note_sentence.clone();
     let card_note = if let Some(ref note_sentence) = live_turn_note_sentence {
+        format!(
+            "Короткая сводка по текущей работе. Следующий шаг: {}. {}{}",
+            next_step,
+            note_sentence,
+            projection_note_sentence
+                .as_deref()
+                .map(|value| format!(" {value}"))
+                .unwrap_or_default()
+        )
+    } else if let Some(note_sentence) = projection_note_sentence.as_deref() {
         format!(
             "Короткая сводка по текущей работе. Следующий шаг: {}. {}",
             next_step, note_sentence
@@ -518,6 +695,9 @@ pub(super) fn working_state_live_card(snapshot: &Value) -> Value {
         Some("Показывает простую сводку по текущей работе в этом репозитории: что делаем, что дальше и на чём сейчас сфокусированы.".to_string()),
         rows,
     );
+    if let Some(status_label) = task_graph_surface.status_label.as_deref() {
+        card = with_status_label(card, status_label);
+    }
     if status == "waiting" {
         let waiting_label = if live_turn_note_sentence
             .as_deref()
@@ -532,6 +712,11 @@ pub(super) fn working_state_live_card(snapshot: &Value) -> Value {
         card = with_status_label(card, waiting_label);
     }
     if status != "pass" {
+        let projection_tooltip_suffix = task_graph_surface
+            .tooltip_sentence
+            .as_deref()
+            .map(|value| format!("\n- {value}"))
+            .unwrap_or_default();
         let tooltip = if status == "alert" {
             format!(
                 "Статус требует внимания по следующим причинам:\n- Уверенность в этом рабочем снимке пока {}.\n- Последний локальный снимок сделан {}.\n- Рабочая линия уже содержит {}, но снимок ещё недостаточно устойчив.\n- Следующий обязательный шаг сейчас: {}.",
@@ -539,7 +724,7 @@ pub(super) fn working_state_live_card(snapshot: &Value) -> Value {
                 snapshot_age,
                 format_count_with_word(events_count.unwrap_or(0), "событие", "события", "событий"),
                 next_step
-            )
+            ) + &projection_tooltip_suffix
         } else if status == "waiting" {
             if live_turn_note_sentence
                 .as_deref()
@@ -555,7 +740,7 @@ pub(super) fn working_state_live_card(snapshot: &Value) -> Value {
                         "событий"
                     ),
                     next_step
-                )
+                ) + &projection_tooltip_suffix
             } else {
                 format!(
                     "Статус пока не может считаться нормальным по следующим причинам:\n- Уверенность в этом рабочем снимке пока {}.\n- Последний локальный снимок сделан {}.\n- Рабочая линия уже содержит {}, но для устойчивого локального снимка нужно больше подтверждённых событий.\n- Следующий обязательный шаг сейчас: {}.",
@@ -568,10 +753,11 @@ pub(super) fn working_state_live_card(snapshot: &Value) -> Value {
                         "событий"
                     ),
                     next_step
-                )
+                ) + &projection_tooltip_suffix
             }
         } else {
             "Статус пока не может считаться нормальным по следующим причинам:\n- Рабочая линия ещё не накопила достаточно надёжный рабочий снимок.\n- Пока панель видит только предварительный или почти пустой след текущей работы.".to_string()
+                + &projection_tooltip_suffix
         };
         card = with_status_tooltip(card, &tooltip);
     }
@@ -639,6 +825,10 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("нет свежего локального снимка")
+        );
+        assert_eq!(
+            unknown_card["source_label"].as_str(),
+            Some("Источник: latest_repo_working_state_restore.working_state_restore")
         );
     }
 
@@ -862,6 +1052,49 @@ mod tests {
             live_turn_row["value"].as_str(),
             Some("2 context-pack • turn ещё открыт")
         );
+        assert_eq!(
+            card["source_label"].as_str(),
+            Some(
+                "Источник: current_live_turn same-thread; latest_repo_working_state_restore.working_state_restore ещё не materialized."
+            )
+        );
+    }
+
+    #[test]
+    fn working_state_card_does_not_mix_stale_global_restore_when_repo_restore_is_missing() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_live_turn": {
+                        "status": "thread_activity_observed_turn_open",
+                        "retrieval_context_pack_count": 1,
+                        "matched_context_pack_ids_count": 1,
+                        "note": "Observed new retrieval_context_pack after the last completed turn."
+                    }
+                }
+            },
+            "latest_working_state_restore": {
+                "working_state_restore": {
+                    "current_goal": "stale foreign global goal",
+                    "next_step": "stale foreign global next step"
+                }
+            },
+            "latest_repo_working_state_restore": null
+        });
+
+        let card = working_state_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("waiting"));
+        assert_eq!(card["value"].as_str(), Some("ещё нет данных"));
+        assert!(card["note"].as_str().is_some_and(|note| {
+            note.contains("Локальный рабочий снимок ещё не materialized")
+                && !note.contains("stale foreign global")
+        }));
+        assert_eq!(
+            card["source_label"].as_str(),
+            Some(
+                "Источник: current_live_turn same-thread; latest_repo_working_state_restore.working_state_restore ещё не materialized."
+            )
+        );
     }
 
     #[test]
@@ -984,5 +1217,170 @@ mod tests {
             )),
             "заполнить в карточке текущей работы последнюю команду из живого Amai-turn"
         );
+    }
+
+    #[test]
+    fn working_state_card_surfaces_validated_task_graph_debt() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1775412360000u64,
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "captured_at_epoch_ms": 1775412359000u64,
+                    "project": { "code": "amai" },
+                    "namespace": { "code": "continuity" },
+                    "events_count": 4u64,
+                    "current_goal": "Keep startup and dashboard truth aligned",
+                    "next_step": "Surface excluded legacy debt in the current-work card.",
+                    "last_command": "continuity handoff",
+                    "last_results_summary": "graph-first runtime artifact already carries excluded legacy debt",
+                    "active_files": [],
+                    "recent_queries": [],
+                    "restore_confidence": "high",
+                    "project_task_tree_summary": "active: Real Amai work first; open(14); excluded_legacy(2396 deprecated)",
+                    "project_task_ledger_summary": "active: Real Amai work first; open(14); pending_return(0); excluded_legacy(2396 deprecated)",
+                    "task_graph_projection_validation": {
+                        "status": "valid",
+                        "validation_state": "valid",
+                        "projection_source": "graph_first_sql_validated",
+                        "truth_claim": false,
+                        "projection_excluded_sql_nodes_count": 2396,
+                        "deprecated_sql_nodes_count": 2396,
+                        "quarantined_sql_nodes_count": 0
+                    }
+                }
+            }
+        });
+
+        let card = working_state_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("pass"));
+        let rows = card["rows"].as_array().expect("rows");
+        let projection_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Состояние проекции"))
+            .expect("projection row");
+        assert!(projection_row["value"].as_str().is_some_and(|value| {
+            value.contains("validated graph-first projection")
+                && value.contains("2396")
+                && value.contains("устаревших")
+        }));
+        let tree_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Сводка графа"))
+            .expect("tree row");
+        assert!(
+            tree_row["value"]
+                .as_str()
+                .is_some_and(|value| value.contains("excluded_legacy(2396 deprecated)"))
+        );
+        let ledger_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Сводка ленты"))
+            .expect("ledger row");
+        assert!(
+            ledger_row["value"]
+                .as_str()
+                .is_some_and(|value| value.contains("excluded_legacy(2396 deprecated)"))
+        );
+        assert!(card["note"].as_str().is_some_and(|value| {
+            value.contains("legacy-долг уже отфильтрован")
+                || value.contains("legacy долг уже отфильтрован")
+        }));
+    }
+
+    #[test]
+    fn working_state_card_marks_task_graph_fallback_as_alert_without_trusting_stale_summaries() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1775412360000u64,
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "captured_at_epoch_ms": 1775412359000u64,
+                    "project": { "code": "amai" },
+                    "namespace": { "code": "continuity" },
+                    "events_count": 4u64,
+                    "current_goal": "Keep startup and dashboard truth aligned",
+                    "next_step": "Surface fallback explicitly in the current-work card.",
+                    "last_command": "continuity handoff",
+                    "last_results_summary": "task graph projection fell back to execctl ledger",
+                    "active_files": [],
+                    "recent_queries": [],
+                    "restore_confidence": "high",
+                    "project_task_tree_summary": "active: stale compact summary that should not be trusted",
+                    "project_task_ledger_summary": "active: stale compact ledger summary that should not be trusted",
+                    "task_graph_projection_validation": {
+                        "status": "fallback_to_execctl_ledger",
+                        "validation_state": "fallback_to_execctl_ledger",
+                        "projection_source": "execctl_ledger_fallback",
+                        "reason": "control_invariant_mismatch"
+                    }
+                }
+            }
+        });
+
+        let card = working_state_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("alert"));
+        assert_eq!(card["status_label"].as_str(), Some("граф через fallback"));
+        let rows = card["rows"].as_array().expect("rows");
+        let projection_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Состояние проекции"))
+            .expect("projection row");
+        assert!(projection_row["value"].as_str().is_some_and(|value| {
+            value.contains("fallback_to_execctl_ledger")
+                && value.contains("Control Invariant Mismatch")
+        }));
+        assert!(
+            rows.iter()
+                .all(|row| row["label"].as_str() != Some("Сводка графа"))
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row["label"].as_str() != Some("Сводка ленты"))
+        );
+    }
+
+    #[test]
+    fn working_state_card_keeps_preview_limited_projection_as_validated() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1775412360000u64,
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "captured_at_epoch_ms": 1775412359000u64,
+                    "project": { "code": "amai" },
+                    "namespace": { "code": "continuity" },
+                    "events_count": 4u64,
+                    "current_goal": "Keep startup and dashboard truth aligned",
+                    "next_step": "Explain preview-limited without surfacing fallback.",
+                    "last_command": "observe snapshot",
+                    "last_results_summary": "validated graph-first projection still has compact preview pressure",
+                    "active_files": [],
+                    "recent_queries": [],
+                    "restore_confidence": "high",
+                    "project_task_tree_summary": "active: Real Amai work first; open(14)",
+                    "project_task_ledger_summary": "active: Real Amai work first; open(14); pending_return(0)",
+                    "task_graph_projection_validation": {
+                        "status": "valid",
+                        "validation_state": "valid",
+                        "projection_source": "graph_first_sql_validated",
+                        "truth_claim": false,
+                        "warnings": {
+                            "projection_preview_limited": true
+                        }
+                    }
+                }
+            }
+        });
+
+        let card = working_state_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("pass"));
+        let rows = card["rows"].as_array().expect("rows");
+        let projection_row = rows
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Состояние проекции"))
+            .expect("projection row");
+        assert!(projection_row["value"].as_str().is_some_and(|value| {
+            value.contains("validated graph-first projection")
+                && value.contains("compact preview limited")
+        }));
+        assert_ne!(card["status_label"].as_str(), Some("граф через fallback"));
     }
 }

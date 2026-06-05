@@ -5,6 +5,10 @@ cd "$(dirname "$0")/.."
 source "./scripts/stage2_fixture_roots.sh"
 stage2_prepare_fixture_roots "$PWD"
 
+# This proof intentionally exercises continuity/MCP flows on reusable fixture
+# projects, so each run must isolate its own ExecCtl lease scope.
+export AMAI_AGENT_SCOPE="proof-mcp-$(./scripts/epoch_ms.sh)"
+
 ./scripts/bootstrap_stack.sh
 
 cargo run --release --quiet -- project register \

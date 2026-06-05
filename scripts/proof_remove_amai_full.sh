@@ -33,9 +33,9 @@ printf 'nats\n' > "${temp_repo}/tmp/nats/server.conf"
 
 mkdir -p "${temp_repo}/.github/instructions" "${temp_repo}/.amai/onboarding"
 cat >"${temp_repo}/.github/instructions/amai-continuity-startup.instructions.md" <<'EOF'
-<!-- AMAI MANAGED STARTUP INSTRUCTIONS v1 -->
+<!-- AMAI MANAGED STARTUP INSTRUCTIONS v2 -->
 managed startup
-<!-- /AMAI MANAGED STARTUP INSTRUCTIONS v1 -->
+<!-- /AMAI MANAGED STARTUP INSTRUCTIONS v2 -->
 EOF
 cat >"${temp_repo}/.amai/onboarding/project-chat-startup-contract.json" <<'EOF'
 {"artifact_version":"workspace-startup-contract-v1"}

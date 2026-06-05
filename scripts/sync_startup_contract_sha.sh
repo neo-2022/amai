@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 contract_path="${repo_root}/.amai/onboarding/project-chat-startup-contract.json"
-startup_marker="AMAI MANAGED STARTUP INSTRUCTIONS v1"
+startup_marker="AMAI MANAGED STARTUP INSTRUCTIONS v2"
 sha_field_label='startup_contract_sha256 = "'
 
 startup_targets=(

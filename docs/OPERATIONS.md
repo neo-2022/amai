@@ -538,6 +538,21 @@ cd <amai-repo-root>
 
 Если агент один, это обычно уже работает без ручной настройки.
 Если агентов несколько, задавайте каждому свой `AMAI_AGENT_SCOPE`.
+Write-side ownership law для continuity жёстче, чем просто scope-изоляция:
+- threadless/shared handoff не даёт foreign thread права записывать поверх него;
+- foreign thread не имеет права тихо забирать active/threadless line через `continuity handoff`,
+  `continuity startup` или background guard;
+- эти три write/control path теперь обязаны проходить через один advisory-lock contour по
+  `(namespace_id, agent_scope)`, чтобы stale restore не переиграл более новый live owner или
+  новый `source_event_id` в read-then-write окне;
+- current-session budget guard не имеет права использовать raw `working_state_restore.thread_id`
+  как trustable shortcut: допустим только fresh lease-bound thread hint;
+- если линия уже принадлежит другому thread или ownership нельзя доказать, canonical remediation
+  только такой:
+  - сначала `continuity startup`;
+  - либо отдельный `AMAI_AGENT_SCOPE` для side-agent/private work.
+- closure/report truth для этого ownership contour идёт не по одному shell proof, а по
+  companion bundle из `docs/IMPLEMENTATION_GATES.md` и финальному `./scripts/proof_before_report.sh`.
 
 Для вопросов вида `на чём остановились` теперь есть отдельный read-only путь:
 
@@ -564,8 +579,14 @@ cd <amai-repo-root>
   --messages-count 2
 ```
 
-Если runtime даёт `CODEX_THREAD_ID`, `Amai` использует его как first-class chat scope,
-чтобы не спутать текущий thread с предыдущим внутри одного project-space.
+Если runtime даёт platform thread binding через `AMAI_PLATFORM_THREAD_ID`, `Amai`
+использует этот id как first-class chat scope. Legacy `CODEX_THREAD_ID`
+остаётся compatibility alias для Codex-style adapter path, чтобы не спутать
+текущий thread с предыдущим внутри одного project-space.
+Это именно внешний chat/thread id платформы, а не внутренний Amai-local
+`thread_id` из restore/projection surfaces.
+Если live thread-bound env отсутствует, этот ingress не имеет права молча
+подменяться просто самым свежим repo-thread из Codex SQLite.
 `previous chat` при этом означает ближайший thread по времени в том же
 `project + namespace + agent_scope`, включая уже архивные чаты.
 
@@ -2688,7 +2709,9 @@ representative shapes:
 - materialize-ить временные proof projects и relation;
 - для каждого shape отдельно поднять временный `thread_id` в `~/.codex/state_5.sqlite`;
 - записать временный rollout JSONL с `task_started / token_count / task_complete`;
-- запустить обычный `context pack` под `CODEX_THREAD_ID=<proof-thread>`;
+- для текущего Codex compatibility harness запустить обычный `context pack` под
+  `CODEX_THREAD_ID=<proof-thread>`; это adapter-specific proof path, а не общий
+  live ingress contract;
 - проверить именно `observe snapshot -> token_budget_report.current_live_turn`;
 - считать PASS только если для каждого shape отдельно:
   - `exact_pair_available = true`;
@@ -2838,7 +2861,8 @@ already-measured strict same-meter slice и не выглядела как об�
   обязана fail-closed показывать `не доказано` и не имеет права переносить процент из
   внутреннего Amai-slice на полную шкалу клиента;
 - human dashboard service не имеет права silently терять этот surface только потому,
-  что он запущен вне `CODEX_THREAD_ID`: если thread-bound env отсутствует, service обязан
+  что он запущен вне live thread-bound env (`AMAI_PLATFORM_THREAD_ID`, legacy
+  `CODEX_THREAD_ID`): если такой env отсутствует, service обязан
   сначала взять `thread_id` из latest repo `working_state_restore`, а не просто самый свежий
   repo-thread из SQLite;
 - запрещено использовать `total_token_usage.total_tokens` как surrogate для текущего

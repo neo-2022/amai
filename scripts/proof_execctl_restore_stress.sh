@@ -9,6 +9,7 @@ project_root="$(mktemp -d)"
 tmp_dir="$(mktemp -d)"
 restore_output="${tmp_dir}/restore.json"
 latency_jsonl="${tmp_dir}/latency.jsonl"
+promotion_details="${tmp_dir}/promotion-details.txt"
 namespace_code="continuity"
 primary_scope="proof_execctl_restore_primary_${project_code}"
 primary_thread="proof-execctl-restore-primary-${project_code}"
@@ -73,6 +74,12 @@ measure_fetch_restore() {
 }
 
 cd "${repo_root}"
+export AMAI_OPERATOR_REDIRECT_PROVENANCE="proof_harness:$(basename "$0")"
+
+cat >"${promotion_details}" <<'EOF'
+promotion_contract: operator_redirect
+Synthetic stress proof explicitly switches the active main workline.
+EOF
 
 cargo run --release --quiet -- bootstrap schema >/dev/null
 
@@ -91,7 +98,9 @@ measure_release "handoff" "${primary_scope}" "${primary_thread}" \
   --project "${project_code}" \
   --namespace "${namespace_code}" \
   --headline "Seed active line" \
-  --next-step "Seed the execctl restore burst."
+  --next-step "Seed the execctl restore burst." \
+  --details-file "${promotion_details}" \
+  --promote-active-workline
 
 measure_fetch_restore "${primary_scope}"
 jq -e \
@@ -123,7 +132,9 @@ for round in $(seq 1 "${rounds}"); do
     --project "${project_code}" \
     --namespace "${namespace_code}" \
     --headline "${headline}" \
-    --next-step "${next_step}"
+    --next-step "${next_step}" \
+    --details-file "${promotion_details}" \
+    --promote-active-workline
 
   measure_fetch_restore "${primary_scope}"
   jq -e \
@@ -180,7 +191,9 @@ measure_release "handoff" "${foreign_scope}" "${foreign_thread}" \
   --project "${project_code}" \
   --namespace "${namespace_code}" \
   --headline "Foreign scope line" \
-  --next-step "This line must stay isolated from the primary scope."
+  --next-step "This line must stay isolated from the primary scope." \
+  --details-file "${promotion_details}" \
+  --promote-active-workline
 
 measure_fetch_restore "${foreign_scope}"
 jq -e \

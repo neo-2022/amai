@@ -54,13 +54,8 @@ async fn latest_recent_scope_for_repo_root(db: &Client, repo_root: &str) -> Resu
     let Ok(project) = postgres::resolve_project_by_repo_root_hint(db, repo_root).await else {
         return Ok(None);
     };
-    let Some(snapshot) = postgres::latest_observability_snapshot_for_project(
-        db,
-        "working_state_restore",
-        "working_state_restore",
-        &project.code,
-    )
-    .await?
+    let Some(snapshot) =
+        postgres::latest_working_state_restore_snapshot_for_project(db, &project.code).await?
     else {
         return Ok(None);
     };
@@ -266,42 +261,57 @@ pub(crate) fn active_agent_thread_ids_from_activity(
 }
 
 pub(crate) async fn collect_agent_scope_activity(db: &Client) -> Result<Value> {
+    let client_recent_window_minutes = 30_i64;
+    let recent_thread_records =
+        codex_threads::recent_client_thread_records(client_recent_window_minutes * 60)?;
+    collect_agent_scope_activity_with_recent_client_threads(db, &recent_thread_records).await
+}
+
+pub(crate) async fn collect_agent_scope_activity_with_recent_client_threads(
+    db: &Client,
+    recent_thread_records: &[codex_threads::RecentClientThreadRecord],
+) -> Result<Value> {
     let now_epoch_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock before unix epoch")?
         .as_millis() as i64;
     let recent_window_hours = 24_i64;
     let client_recent_window_minutes = 30_i64;
-    let client_recent_threads =
-        codex_threads::recent_client_thread_records(client_recent_window_minutes * 60)?
-            .into_iter()
-            .filter(|item| {
-                recent_client_thread_record_has_connected_model(item)
-                    && !user_visible_agent_activity_is_proof_runtime(
-                        None,
-                        None,
-                        Some(item.thread_id.as_str()),
-                        Some(item.title.as_str()),
-                        item.agent_nickname
-                            .as_deref()
-                            .or(item.agent_role.as_deref()),
-                    )
+    let stage_started = std::time::Instant::now();
+    let client_recent_threads = recent_thread_records
+        .iter()
+        .filter(|item| {
+            recent_client_thread_record_has_connected_model(item)
+                && !user_visible_agent_activity_is_proof_runtime(
+                    None,
+                    None,
+                    Some(item.thread_id.as_str()),
+                    Some(item.title.as_str()),
+                    item.agent_nickname
+                        .as_deref()
+                        .or(item.agent_role.as_deref()),
+                )
+        })
+        .map(|item| {
+            json!({
+                "thread_id": item.thread_id,
+                "cwd": item.cwd,
+                "rollout_path": item.rollout_path,
+                "title": item.title,
+                "agent_nickname": item.agent_nickname,
+                "agent_role": item.agent_role,
+                "model_provider": item.model_provider,
+                "model": item.model,
+                "reasoning_effort": item.reasoning_effort,
+                "updated_at_epoch_ms": item.updated_at_epoch_s.saturating_mul(1000),
             })
-            .map(|item| {
-                json!({
-                    "thread_id": item.thread_id,
-                    "cwd": item.cwd,
-                    "rollout_path": item.rollout_path,
-                    "title": item.title,
-                    "agent_nickname": item.agent_nickname,
-                    "agent_role": item.agent_role,
-                    "model_provider": item.model_provider,
-                    "model": item.model,
-                    "reasoning_effort": item.reasoning_effort,
-                    "updated_at_epoch_ms": item.updated_at_epoch_s.saturating_mul(1000),
-                })
-            })
-            .collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
+    continuity_profile_log(
+        "agent_scope_activity.client_recent_threads",
+        stage_started.elapsed().as_millis(),
+        &format!("threads={}", client_recent_threads.len()),
+    );
     let connected_thread_ids = client_recent_threads
         .iter()
         .filter_map(|item| {
@@ -313,6 +323,7 @@ pub(crate) async fn collect_agent_scope_activity(db: &Client) -> Result<Value> {
         })
         .collect::<BTreeSet<_>>();
 
+    let stage_started = std::time::Instant::now();
     let active_rows = db
         .query(
             r#"
@@ -339,6 +350,11 @@ pub(crate) async fn collect_agent_scope_activity(db: &Client) -> Result<Value> {
         )
         .await
         .context("failed to query active execctl task leases for agent scope activity")?;
+    continuity_profile_log(
+        "agent_scope_activity.active_rows_query",
+        stage_started.elapsed().as_millis(),
+        &format!("rows={}", active_rows.len()),
+    );
     let mut active_now_scopes = dedup_activity_items_by_thread_key(
         active_rows
             .into_iter()
@@ -392,9 +408,20 @@ pub(crate) async fn collect_agent_scope_activity(db: &Client) -> Result<Value> {
     }
     let mut recent_scope_items = Vec::new();
     for repo_root in visible_repo_roots {
+        let stage_started = std::time::Instant::now();
         let Some(scope) = latest_recent_scope_for_repo_root(db, &repo_root).await? else {
+            continuity_profile_log(
+                "agent_scope_activity.latest_recent_scope_for_repo_root",
+                stage_started.elapsed().as_millis(),
+                &format!("repo_root={} has_scope=false", repo_root),
+            );
             continue;
         };
+        continuity_profile_log(
+            "agent_scope_activity.latest_recent_scope_for_repo_root",
+            stage_started.elapsed().as_millis(),
+            &format!("repo_root={} has_scope=true", repo_root),
+        );
         let Some(thread_id) = scope["thread_id"]
             .as_str()
             .map(str::trim)
@@ -430,8 +457,14 @@ pub(crate) async fn collect_agent_scope_activity(db: &Client) -> Result<Value> {
         .chain(recent_scopes.iter())
         .filter_map(|item| item["agent_scope"].as_str().map(str::to_string))
         .collect::<Vec<_>>();
+    let stage_started = std::time::Instant::now();
     let agent_display_name_overrides =
         load_agent_display_name_overrides_for_scopes(db, activity_agent_scopes).await?;
+    continuity_profile_log(
+        "agent_scope_activity.load_agent_display_name_overrides",
+        stage_started.elapsed().as_millis(),
+        &format!("overrides={}", agent_display_name_overrides.len()),
+    );
     for item in active_now_scopes.iter_mut().chain(recent_scopes.iter_mut()) {
         let Some(agent_scope) = item["agent_scope"].as_str().map(str::trim) else {
             continue;

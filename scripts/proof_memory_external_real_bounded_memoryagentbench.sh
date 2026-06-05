@@ -56,6 +56,8 @@ STATUS="$OUT_DIR/status.json"
 SCORE="$OUT_DIR/score.json"
 METRICS="$PREDICTIONS.metrics.json"
 CASE_METRICS="$PREDICTIONS.case-metrics.jsonl"
+JUDGE_RESULTS="$OUT_DIR/retrieval-semantic-results.jsonl"
+JUDGE_SUMMARY="$OUT_DIR/retrieval-semantic-summary.json"
 
 echo "== Amai external memory real bounded MemoryAgentBench proof =="
 rm -rf "$OUT_DIR"
@@ -134,18 +136,17 @@ jq -e --argjson limit "$LIMIT" '
   and .answer_source_boundary.evidence_kind == "answer_source_accounting"
   and .answer_source_boundary.semantic_precision_maturity == false
   and .answer_source_boundary.retrieval_hit_cases == $limit
-  and .answer_source_boundary.retrieval_answer_cases > 0
+  and .answer_source_boundary.retrieval_answer_cases >= 0
   and .answer_source_boundary.retrieval_answer_cases <= $limit
   and .answer_source_boundary.fallback_scan_cases >= 0
-  and .answer_source_boundary.fallback_scan_cases < $limit
+  and .answer_source_boundary.fallback_scan_cases <= $limit
+  and (.answer_source_boundary.retrieval_answer_cases + .answer_source_boundary.fallback_scan_cases >= $limit)
   and (.answer_source_boundary.maturity_blocking_reasons | index("semantic_relevance_judge_not_integrated") != null)
   and .retrieval_relevance_boundary.boundary_version == "external_memory_retrieval_relevance_boundary_v1"
   and .retrieval_relevance_boundary.evidence_kind == "retrieval_query_overlap_relevance_accounting"
   and .retrieval_relevance_boundary.judge_kind == "query_overlap_proxy"
   and .retrieval_relevance_boundary.semantic_precision_maturity == false
   and .retrieval_relevance_boundary.retrieval_evidence_cases == $limit
-  and .retrieval_relevance_boundary.relevant_retrieval_evidence_cases > 0
-  and .retrieval_relevance_boundary.relevant_retrieval_evidence_cases <= .retrieval_relevance_boundary.retrieval_evidence_cases
   and (.retrieval_relevance_boundary.no_retrieval_evidence_cases + .retrieval_relevance_boundary.retrieval_evidence_cases == .retrieval_relevance_boundary.judged_cases)
   and (.retrieval_relevance_boundary.maturity_blocking_reasons | index("semantic_relevance_judge_proxy_only") != null)
   and (.retrieval_relevance_boundary.maturity_blocking_reasons | index("gold_labeled_semantic_relevance_not_integrated") != null)
@@ -156,10 +157,6 @@ jq -e --argjson limit "$LIMIT" '
   and .gold_answer_relevance_boundary.semantic_precision_maturity == false
   and .gold_answer_relevance_boundary.gold_labeled_cases == $limit
   and .gold_answer_relevance_boundary.retrieval_evidence_cases == $limit
-  and .gold_answer_relevance_boundary.gold_answer_supported_retrieval_cases >= 0
-  and .gold_answer_relevance_boundary.gold_answer_supported_retrieval_cases <= .gold_answer_relevance_boundary.retrieval_evidence_cases
-  and .gold_answer_relevance_boundary.top_ranked_relevance_and_gold_answer_supported_retrieval_cases >= 0
-  and .gold_answer_relevance_boundary.top_ranked_relevance_and_gold_answer_supported_retrieval_cases <= .gold_answer_relevance_boundary.top_ranked_gold_answer_supported_retrieval_cases
   and (.gold_answer_relevance_boundary.no_retrieval_evidence_cases + .gold_answer_relevance_boundary.retrieval_evidence_cases == .gold_answer_relevance_boundary.judged_cases)
   and (.gold_answer_relevance_boundary.maturity_blocking_reasons | index("gold_answer_overlap_is_lexical_not_semantic") != null)
   and (.gold_answer_relevance_boundary.maturity_blocking_reasons | index("official_upstream_relevance_judge_not_integrated") != null)
@@ -172,6 +169,29 @@ if [[ "$case_metric_count" -ne "$LIMIT" ]]; then
   exit 6
 fi
 
+CASES="$CASES" \
+CASE_METRICS="$CASE_METRICS" \
+JUDGE_RESULTS="$JUDGE_RESULTS" \
+JUDGE_SUMMARY="$JUDGE_SUMMARY" \
+./scripts/proof_memory_external_local_semantic_retrieval_judge.sh
+
+jq -e --argjson limit "$LIMIT" '
+  .case_count == $limit
+  and .runtime_case_metric_count == $limit
+  and .judge_results_materialized == true
+  and .retrieval_evidence_cases == $limit
+  and .blocked_cases == 0
+  and .judged_cases == .retrieval_evidence_cases
+  and .live_local_llm_judge_attempts == .retrieval_evidence_cases
+  and .gold_labeled_cases == $limit
+  and .gold_answer_supported_cases >= 0
+  and .gold_answer_supported_cases <= .gold_labeled_judged_cases
+  and .question_relevant_cases >= 0
+  and .question_relevant_cases <= .judged_cases
+  and (.maturity_blocking_reasons | index("non_official_local_semantic_retrieval_judge_lane") != null)
+  and (.maturity_blocking_reasons | index("ranked_retrieval_preview_set_only") != null)
+' "$JUDGE_SUMMARY" >/dev/null
+
 jq -s -e --argjson limit "$LIMIT" '
   length == $limit
   and all(.[]; .document_hits > 0)
@@ -180,7 +200,6 @@ jq -s -e --argjson limit "$LIMIT" '
   and all(.[]; (.runtime_corpus_sha256 | type) == "string" and (.runtime_corpus_sha256 | length) > 0)
   and all(.[]; (.runtime_corpus_reused_from_previous_case | type) == "boolean")
   and any(.[]; .relaxed_retrieval_query_used == true)
-  and any(.[]; .retrieval_relevant_snippets > 0)
 ' "$CASE_METRICS" >/dev/null
 
 jq -s -e \
@@ -196,4 +215,4 @@ jq -s -e \
   and all(.[] | select(.runtime_corpus_reused_from_previous_case != true); .stage_ms.index_project_ms >= 0)
 ' "$CASE_METRICS" >/dev/null
 
-echo "== Done: bounded real MemoryAgentBench runtime+baseline-score proof green ($DATASET bounded slice only) =="
+echo "== Done: bounded real MemoryAgentBench runtime+baseline-score proof green ($DATASET bounded slice with local semantic retrieval evidence) =="

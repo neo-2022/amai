@@ -94,4 +94,27 @@ resolved_cargo_broken_active="$(
 [[ -f "${state_dir}/active-toolchain" ]]
 [[ -f "${state_dir}/toolchain-usable" ]]
 
+hang_bin_dir="${tmpdir}/hang-bin"
+mkdir -p "${hang_bin_dir}"
+cat >"${hang_bin_dir}/cargo" <<'EOF'
+#!/usr/bin/env bash
+sleep 60
+EOF
+
+cat >"${hang_bin_dir}/rustup" <<'EOF'
+#!/usr/bin/env bash
+sleep 60
+EOF
+
+chmod +x "${hang_bin_dir}/cargo" "${hang_bin_dir}/rustup"
+
+set +e
+PATH="${hang_bin_dir}:${PATH}" \
+  AMAI_CARGO_CHECK_TIMEOUT_SECONDS=1 \
+  AMAI_RUSTUP_REPAIR_TIMEOUT_SECONDS=1 \
+  timeout 12s ./scripts/resolve_cargo.sh >"${tmpdir}/hanging-resolver.out" 2>"${tmpdir}/hanging-resolver.err"
+hanging_status=$?
+set -e
+[[ "${hanging_status}" != "124" ]]
+
 printf 'proof_rustup_default_toolchain_autorepair: ok\n'

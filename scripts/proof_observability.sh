@@ -149,6 +149,7 @@ if curl -fsS "http://127.0.0.1:${observe_port}/" | rg '/api/active-agent-budget-
 fi
 curl -fsS "http://127.0.0.1:${observe_port}/api/dashboard" | rg '"top_cards"|"service_cards"|"glossary"' >/dev/null
 dashboard_json="$(curl -fsS "http://127.0.0.1:${observe_port}/api/dashboard")"
+printf '%s' "$dashboard_json" > tmp/proof_observability_dashboard.json
 printf '%s' "$dashboard_json" | jq -e '
   .service_cards
   | any(.title == "Жизненный цикл памяти")
@@ -198,9 +199,24 @@ printf '%s' "$dashboard_json" | jq -e '
   | any(
       .title == "Memory task matrix compare"
       and (.headline_value | type == "string")
-      and (.headline_value | contains("drift "))
-      and (.headline_value | contains("promotion "))
-      and (.headline_value | contains("approval "))
+      and (.headline_value | contains("drift measured"))
+      and (.headline_value | contains("promotion candidate_ready_for_measured_approval"))
+      and (.headline_value | contains("approval pending_human_review"))
+      and (.table.rows | any(
+        .label == "Score drift"
+        and (.values[1] | type == "string")
+        and (.values[1] | startswith("measured"))
+      ))
+      and (.table.rows | any(
+        .label == "Promotion"
+        and (.values[1] | type == "string")
+        and (.values[1] | contains("candidate_ready_for_measured_approval"))
+      ))
+      and (.table.rows | any(
+        .label == "Measured approval"
+        and (.values[1] | type == "string")
+        and (.values[1] | contains("pending_human_review"))
+      ))
     )
 ' >/dev/null
 printf '%s' "$dashboard_json" | jq -e '
@@ -208,14 +224,24 @@ printf '%s' "$dashboard_json" | jq -e '
   | any(
       .title == "MCP task matrix compare"
       and (.headline_value | type == "string")
-      and (
-        (.headline_value | contains("baseline pair ещё не materialized"))
-        or (
-          (.headline_value | contains("drift "))
-          and (.headline_value | contains("promotion "))
-          and (.headline_value | contains("approval "))
-        )
-      )
+      and (.headline_value | contains("drift measured"))
+      and (.headline_value | contains("promotion candidate_ready_for_measured_approval"))
+      and (.headline_value | contains("approval pending_human_review"))
+      and (.table.rows | any(
+        .label == "Score drift"
+        and (.values[1] | type == "string")
+        and (.values[1] | startswith("not_applicable"))
+      ))
+      and (.table.rows | any(
+        .label == "Promotion"
+        and (.values[1] | type == "string")
+        and (.values[1] | contains("candidate_ready_for_measured_approval"))
+      ))
+      and (.table.rows | any(
+        .label == "Measured approval"
+        and (.values[1] | type == "string")
+        and (.values[1] | contains("pending_human_review"))
+      ))
     )
 ' >/dev/null
 curl -fsS "http://127.0.0.1:${observe_port}/api/dashboard-live-summary" | rg '"headline"|"active_agent_card"|"top_cards"' >/dev/null
@@ -270,20 +296,95 @@ else:
         raise SystemExit(1)
 PY
 snapshot_json="$(curl -fsS "http://127.0.0.1:${observe_port}/api/snapshot")"
+printf '%s' "$snapshot_json" > tmp/proof_observability_snapshot.json
 printf '%s' "$snapshot_json" | rg '"sla"|"postgres"|"token_budget_report"' >/dev/null
 printf '%s' "$snapshot_json" | jq -e '
-  .governance_surface.governance_surface_version == "governance-surface-v3"
+  .governance_surface.governance_surface_version == "governance-surface-v4"
   and (.governance_surface.forgetting_job_breakdown.pruning_job != null)
   and (.governance_surface.forgetting_job_breakdown.cold_archive_job != null)
   and (.governance_surface.forgetting_job_breakdown.revalidation_job != null)
   and (.governance_surface.forgetting_job_breakdown.de_duplication_job != null)
   and (.governance_surface.forgetting_job_breakdown.summarization_job != null)
   and (.governance_surface.forgetting_action_breakdown != null)
+  and (.governance_surface.lifecycle_risk_summary.lifecycle_policy_review_summary.summary_version == "lifecycle-policy-review-summary-v1")
+  and (.governance_surface.lifecycle_risk_summary.lifecycle_policy_review_summary.status == "advisory")
+  and (.governance_surface.lifecycle_risk_summary.lifecycle_policy_review_summary.review_packet_state == "review_packet_ready")
+  and (.governance_surface.lifecycle_risk_summary.lifecycle_policy_review_summary.approval_state == "pending_human_review")
+  and (.governance_surface.lifecycle_risk_summary.lifecycle_policy_review_summary.measured_improvement_state == "not_measured_requires_holdout_or_post_action_outcomes")
 ' >/dev/null
 printf '%s' "$snapshot_json" | jq -e '
   (.latest_memory_task_matrix.memory_task_matrix.statistics.statistics_version == "benchmark-statistics-v1")
   and (.latest_mcp_task_matrix.mcp_task_matrix.statistics.statistics_version == "benchmark-statistics-v1")
+  and (.latest_memory_task_matrix.memory_task_matrix.statistics.methods.score_distribution_drift.status == "measured")
+  and (.latest_mcp_task_matrix.mcp_task_matrix.statistics.methods.score_distribution_drift.status == "not_applicable")
+  and (.latest_memory_task_matrix.memory_task_matrix.statistics.drift_summary.status == "measured")
+  and (.latest_mcp_task_matrix.mcp_task_matrix.statistics.drift_summary.status == "measured")
+  and (.latest_memory_task_matrix.memory_task_matrix.measured_approval.verdict == "pending_human_review")
+	  and (.latest_mcp_task_matrix.mcp_task_matrix.measured_approval.verdict == "pending_human_review")
+	' >/dev/null
+printf '%s' "$snapshot_json" | jq -e '
+  .latest_memory_task_matrix.memory_task_matrix.statistics.methods as $memory
+  | .latest_mcp_task_matrix.mcp_task_matrix.statistics.methods as $mcp
+  | (
+      $memory.score_delta_confidence_interval.status == "measured"
+      and ($memory.score_delta_confidence_interval.delta | type == "number")
+      and ($memory.score_delta_confidence_interval.lower | type == "number")
+      and ($memory.score_delta_confidence_interval.upper | type == "number")
+    )
+  and (
+      $memory.score_distribution_drift.status == "measured"
+      and ($memory.score_distribution_drift.value | type == "number")
+    )
+  and (
+      $mcp.mean_delta_confidence_interval.status == "measured"
+      and ($mcp.mean_delta_confidence_interval.delta | type == "number")
+      and ($mcp.mean_delta_confidence_interval.lower | type == "number")
+      and ($mcp.mean_delta_confidence_interval.upper | type == "number")
+    )
+  and (
+      $mcp.score_distribution_drift.status == "not_applicable"
+      and ($mcp.score_distribution_drift.reason | type == "string")
+    )
 ' >/dev/null
+dashboard_snapshot_pair="$(jq -n \
+  --slurpfile dashboard tmp/proof_observability_dashboard.json \
+  --slurpfile snapshot tmp/proof_observability_snapshot.json \
+  '
+  $dashboard[0] as $dashboard
+  | $snapshot[0] as $snapshot
+  |
+  def card($title):
+    $dashboard.benchmark_cards[] | select(.title == $title);
+  {
+    memory_card: card("Memory task matrix compare").source_identity,
+    memory_snapshot: {
+      snapshot_key: "latest_memory_task_matrix",
+      payload_root: "memory_task_matrix",
+      matrix: $snapshot.latest_memory_task_matrix.memory_task_matrix.matrix,
+      source_event_id: $snapshot.latest_memory_task_matrix._observability.source_event_id,
+      scope_project_code: $snapshot.latest_memory_task_matrix._observability.scope_project_code,
+      scope_namespace_code: $snapshot.latest_memory_task_matrix._observability.scope_namespace_code,
+      captured_at_epoch_ms: $snapshot.latest_memory_task_matrix._observability.captured_at_epoch_ms,
+      payload_sha256: $snapshot.latest_memory_task_matrix._observability.payload_sha256,
+      baseline_run_id: $snapshot.latest_memory_task_matrix.memory_task_matrix.statistics.baseline_run_id,
+      candidate_run_id: $snapshot.latest_memory_task_matrix.memory_task_matrix.statistics.candidate_run_id
+    },
+    mcp_card: card("MCP task matrix compare").source_identity,
+    mcp_snapshot: {
+      snapshot_key: "latest_mcp_task_matrix",
+      payload_root: "mcp_task_matrix",
+      matrix: $snapshot.latest_mcp_task_matrix.mcp_task_matrix.matrix,
+      source_event_id: $snapshot.latest_mcp_task_matrix._observability.source_event_id,
+      scope_project_code: $snapshot.latest_mcp_task_matrix._observability.scope_project_code,
+      scope_namespace_code: $snapshot.latest_mcp_task_matrix._observability.scope_namespace_code,
+      captured_at_epoch_ms: $snapshot.latest_mcp_task_matrix._observability.captured_at_epoch_ms,
+      payload_sha256: $snapshot.latest_mcp_task_matrix._observability.payload_sha256,
+      baseline_run_id: $snapshot.latest_mcp_task_matrix.mcp_task_matrix.statistics.baseline_run_id,
+      candidate_run_id: $snapshot.latest_mcp_task_matrix.mcp_task_matrix.statistics.candidate_run_id
+    }
+  }
+')"
+printf '%s' "$dashboard_snapshot_pair" | jq -e '.memory_card == .memory_snapshot and .mcp_card == .mcp_snapshot' >/dev/null
 printf '%s' "$snapshot_json" | jq -e '
   .capacity_forecast.model_version == "capacity-forecast-v1"
   and .capacity_forecast.surface_role == "read_only_capacity_forecast"

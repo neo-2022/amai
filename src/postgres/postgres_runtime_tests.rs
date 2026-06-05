@@ -22305,6 +22305,371 @@ async fn working_state_restore_update_connection_loss_preserves_existing_row() {
     );
 }
 
+#[tokio::test]
+async fn latest_working_state_restore_snapshot_for_project_uses_legacy_null_scope_rows() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    bootstrap_schema(&client, &cfg)
+        .await
+        .expect("bootstrap schema");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let project_code = format!("legacy_restore_project_{suffix}");
+    let event_key = format!("legacy-working-state-restore:{suffix}");
+    let payload = json!({
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "continuity"},
+            "captured_at_epoch_ms": 123,
+            "current_goal": "legacy restore line"
+        }
+    });
+    let payload_text = payload.to_string();
+
+    client
+        .execute(
+            r#"
+            INSERT INTO ami.observability_snapshots(
+                snapshot_kind,
+                payload,
+                event_key,
+                source_kind,
+                source_class,
+                captured_at_epoch_ms,
+                payload_sha256,
+                last_seen_at
+            )
+            VALUES (
+                'working_state_restore',
+                $1,
+                $2,
+                'working_state_restore_runtime',
+                'operational',
+                123,
+                encode(digest($3, 'sha256'), 'hex'),
+                now()
+            )
+            "#,
+            &[&payload, &event_key, &payload_text],
+        )
+        .await
+        .expect("insert legacy restore row");
+
+    let snapshot =
+        crate::postgres::latest_working_state_restore_snapshot_for_project(&client, &project_code)
+            .await
+            .expect("latest legacy restore lookup")
+            .expect("legacy restore snapshot");
+    assert_eq!(
+        snapshot["working_state_restore"]["current_goal"],
+        json!("legacy restore line")
+    );
+}
+
+#[tokio::test]
+async fn latest_working_state_restore_snapshot_for_project_prefers_scoped_row_over_legacy_fallback()
+{
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    bootstrap_schema(&client, &cfg)
+        .await
+        .expect("bootstrap schema");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let project_code = format!("scoped_restore_precedence_{suffix}");
+    let repo_root = format!("/tmp/{project_code}");
+    std::fs::create_dir_all(&repo_root).expect("repo root");
+    let project = upsert_project(
+        &client,
+        &project_code,
+        "Scoped Restore Precedence",
+        &repo_root,
+        Some("main"),
+        "default",
+        "project_shared",
+        "local_strict",
+    )
+    .await
+    .expect("project");
+    ensure_namespace(
+        &client,
+        project.project_id,
+        "default",
+        Some("Default"),
+        "local_strict",
+    )
+    .await
+    .expect("namespace");
+
+    let scoped_event_id = format!("scoped-restore-precedence:{suffix}");
+    let scoped_payload = json!({
+        "_observability": {
+            "source_event_id": scoped_event_id,
+            "source_kind": "working_state_restore_runtime"
+        },
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 100,
+            "current_goal": "scoped restore wins",
+            "state_lineage": {
+                "authoritative_event_id": scoped_event_id,
+                "authoritative_event_kind": "continuity_handoff"
+            }
+        }
+    });
+    insert_observability_snapshot(&client, "working_state_restore", &scoped_payload)
+        .await
+        .expect("insert scoped restore row");
+
+    let legacy_payload = json!({
+        "working_state_restore": {
+            "project": {"code": project_code},
+            "namespace": {"code": "default"},
+            "captured_at_epoch_ms": 999,
+            "current_goal": "legacy fallback must not override scoped restore"
+        }
+    });
+    let legacy_payload_text = legacy_payload.to_string();
+    let legacy_event_key = format!("legacy-scoped-restore-precedence:{suffix}");
+    client
+        .execute(
+            r#"
+            INSERT INTO ami.observability_snapshots(
+                snapshot_kind,
+                payload,
+                event_key,
+                source_kind,
+                source_class,
+                captured_at_epoch_ms,
+                payload_sha256,
+                last_seen_at
+            )
+            VALUES (
+                'working_state_restore',
+                $1,
+                $2,
+                'working_state_restore_runtime',
+                'operational',
+                999,
+                encode(digest($3, 'sha256'), 'hex'),
+                now()
+            )
+            "#,
+            &[&legacy_payload, &legacy_event_key, &legacy_payload_text],
+        )
+        .await
+        .expect("insert legacy restore row");
+
+    let snapshot =
+        crate::postgres::latest_working_state_restore_snapshot_for_project(&client, &project_code)
+            .await
+            .expect("latest restore lookup")
+            .expect("restore snapshot");
+    assert_eq!(
+        snapshot["working_state_restore"]["current_goal"],
+        json!("scoped restore wins")
+    );
+}
+
+#[tokio::test]
+async fn legacy_working_state_restore_lookup_query_shape_uses_compatibility_index() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    bootstrap_schema(&client, &cfg)
+        .await
+        .expect("bootstrap schema");
+    client
+        .batch_execute("SET enable_seqscan = off;")
+        .await
+        .expect("disable sequential scan for query-shape proof");
+    let explain_row = client
+        .query_one(
+            &format!(
+                "EXPLAIN (FORMAT JSON) {}",
+                crate::postgres::LATEST_WORKING_STATE_RESTORE_LEGACY_SQL
+            ),
+            &[&"missing_legacy_restore_project_for_query_shape_proof"],
+        )
+        .await
+        .expect("explain legacy restore lookup");
+    client
+        .batch_execute("RESET enable_seqscan;")
+        .await
+        .expect("reset planner flags");
+    let explain_plan: Value = explain_row.get(0);
+    let explain_plan_text = explain_plan.to_string();
+    assert!(
+        explain_plan_text
+            .contains("idx_ami_observability_legacy_working_state_restore_project_crea"),
+        "legacy working_state_restore lookup must stay on the compatibility index instead of regressing to a broad scan: {explain_plan}"
+    );
+}
+
+#[tokio::test]
+async fn scoped_mcp_task_matrix_lookup_ignores_unscoped_rows() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once('=') {
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim_matches('\"'));
+                }
+            }
+        }
+    }
+
+    let cfg = AppConfig::from_env().expect("config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    bootstrap_schema(&client, &cfg)
+        .await
+        .expect("bootstrap schema");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let matrix_code = format!("scoped_mcp_matrix_test_{suffix}");
+    let payload_only = json!({
+        "mcp_task_matrix": {
+            "matrix": matrix_code,
+            "summary": format!("payload-only-{suffix}")
+        }
+    });
+    let payload_only_text = payload_only.to_string();
+    let payload_only_event_key = format!("payload-only-mcp-matrix:{suffix}");
+    client
+        .execute(
+            r#"
+            INSERT INTO ami.observability_snapshots(
+                snapshot_kind,
+                payload,
+                event_key,
+                source_kind,
+                source_class,
+                captured_at_epoch_ms,
+                payload_sha256,
+                last_seen_at
+            )
+            VALUES (
+                'mcp_task_matrix',
+                $1,
+                $2,
+                'mcp_task_matrix_run',
+                'benchmark',
+                100,
+                encode(digest($3, 'sha256'), 'hex'),
+                now()
+            )
+            "#,
+            &[&payload_only, &payload_only_event_key, &payload_only_text],
+        )
+        .await
+        .expect("insert unscoped mcp task matrix row");
+
+    let before_scoped = crate::postgres::list_observability_snapshots_by_kind_for_scope_index_only(
+        &client,
+        "mcp_task_matrix",
+        "amai",
+        &matrix_code,
+        Some(1),
+    )
+    .await
+    .expect("query scoped mcp task matrix before scoped row");
+    assert!(
+        before_scoped.is_empty(),
+        "exact-scope mcp matrix lookup must ignore unscoped rows instead of recovering them via payload fallback"
+    );
+
+    let scoped_payload = json!({
+        "_observability": {
+            "source_event_id": format!("scoped-mcp-matrix:{suffix}"),
+            "source_kind": "mcp_task_matrix_run",
+            "scope_project_code": "amai",
+            "scope_namespace_code": matrix_code,
+            "captured_at_epoch_ms": 200,
+        },
+        "mcp_task_matrix": {
+            "matrix": matrix_code,
+            "summary": format!("scoped-{suffix}")
+        }
+    });
+    insert_observability_snapshot(&client, "mcp_task_matrix", &scoped_payload)
+        .await
+        .expect("insert scoped mcp task matrix row");
+
+    let after_scoped = crate::postgres::list_observability_snapshots_by_kind_for_scope_index_only(
+        &client,
+        "mcp_task_matrix",
+        "amai",
+        &matrix_code,
+        Some(1),
+    )
+    .await
+    .expect("query scoped mcp task matrix after scoped row");
+    assert_eq!(after_scoped.len(), 1);
+    assert_eq!(
+        after_scoped[0].payload["mcp_task_matrix"]["summary"],
+        json!(format!("scoped-{suffix}"))
+    );
+}
+
 #[test]
 fn observability_payload_marks_live_context_benchmark_as_contaminated() {
     let payload = json!({
@@ -22340,6 +22705,14 @@ fn observability_source_class_defaults_to_benchmark_for_clean_load_snapshot() {
     );
     assert_eq!(
         observability_source_class("continuity_verification", &json!({})),
+        "benchmark"
+    );
+    assert_eq!(
+        observability_source_class("memory_benchmark_score", &json!({})),
+        "benchmark"
+    );
+    assert_eq!(
+        observability_source_class("memory_retrieval_semantic_evidence", &json!({})),
         "benchmark"
     );
 }
@@ -23145,6 +23518,8 @@ fn bootstrap_schema_cache_roundtrips() {
 async fn bootstrap_schema_marks_app_role_grants_current() {
     let cfg = AppConfig::from_env().expect("env config");
     let client = connect_admin(&cfg).await.expect("postgres");
+    let legacy_restore_index =
+        "ami.idx_ami_observability_legacy_working_state_restore_project_created";
 
     with_restore_pack_source_identity_schema_test_lock(&client, || async {
         bootstrap_schema(&client, &cfg).await.expect("schema");
@@ -23160,6 +23535,15 @@ async fn bootstrap_schema_marks_app_role_grants_current() {
                 .await
                 .expect("app role grant sentinel"),
             "bootstrap schema must leave app role grants current so hot-path bootstraps do not repeat table-wide GRANT/REVOKE"
+        );
+        let index_present: bool = client
+            .query_one("SELECT to_regclass($1) IS NOT NULL", &[&legacy_restore_index])
+            .await
+            .expect("legacy restore index presence")
+            .get(0);
+        assert!(
+            index_present,
+            "bootstrap schema must materialize the legacy working_state_restore compatibility index"
         );
 
         let user = sql_ident(&cfg.app_db_user).expect("safe app role identifier");
@@ -23191,6 +23575,42 @@ async fn bootstrap_schema_marks_app_role_grants_current() {
         assert!(
             repaired,
             "bootstrap schema must repair drift in app role default privileges"
+        );
+
+        let drop_legacy_restore_index_sql =
+            format!("DROP INDEX IF EXISTS {legacy_restore_index};");
+        let (schema_drift_detected, schema_repaired, index_repaired) = with_postgres_advisory_lock(
+            &client,
+            BOOTSTRAP_SCHEMA_ADVISORY_LOCK_KEY,
+            "failed to acquire schema drift repair test lock",
+            "failed to release schema drift repair test lock",
+            || async {
+                client
+                    .batch_execute(&drop_legacy_restore_index_sql)
+                    .await?;
+                let schema_drift_detected = bootstrap_schema_is_current(&client).await?;
+                bootstrap_schema(&client, &cfg).await?;
+                let schema_repaired = bootstrap_schema_is_current(&client).await?;
+                let index_repaired: bool = client
+                    .query_one("SELECT to_regclass($1) IS NOT NULL", &[&legacy_restore_index])
+                    .await?
+                    .get(0);
+                Ok((schema_drift_detected, schema_repaired, index_repaired))
+            },
+        )
+        .await
+        .expect("schema drift repair test lock");
+        assert!(
+            !schema_drift_detected,
+            "schema sentinel must go false when the legacy working_state_restore compatibility index is missing"
+        );
+        assert!(
+            schema_repaired,
+            "bootstrap schema must restore schema-current sentinel after recreating the missing legacy working_state_restore compatibility index"
+        );
+        assert!(
+            index_repaired,
+            "bootstrap schema must recreate the missing legacy working_state_restore compatibility index on already-materialized databases"
         );
         Ok(())
     })

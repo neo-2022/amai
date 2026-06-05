@@ -4,6 +4,18 @@ pub(crate) fn human_dashboard_base_url(bind: &str) -> String {
     dashboard::browser_base_url(bind)
 }
 
+fn observe_profile_log(stage: &str, elapsed_ms: u128, extra: &str) {
+    let enabled = std::env::var("AMAI_PROFILE_CONTINUITY")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !normalized.is_empty() && normalized != "0" && normalized != "false"
+        })
+        .unwrap_or(false);
+    if enabled {
+        eprintln!("[amai-continuity-profile] stage={stage} elapsed_ms={elapsed_ms} {extra}");
+    }
+}
+
 pub(crate) async fn collect_snapshot(cfg: &AppConfig) -> Result<Value> {
     build_snapshot(cfg, true).await
 }
@@ -14,7 +26,8 @@ pub(crate) async fn collect_snapshot_preview(cfg: &AppConfig) -> Result<Value> {
 
 pub(super) async fn collect_budget_snapshot_preview(cfg: &AppConfig) -> Result<Value> {
     let repo_root = discover_repo_root(None)?;
-    if let Some(thread_id) = codex_threads::current_thread_id() {
+    let thread_id = codex_threads::current_thread_id_result()?;
+    if let Some(thread_id) = thread_id.as_deref() {
         if let Some(snapshot) = load_shared_budget_snapshot_preview(&repo_root, Some(&thread_id)) {
             return Ok(snapshot);
         }
@@ -22,7 +35,7 @@ pub(super) async fn collect_budget_snapshot_preview(cfg: &AppConfig) -> Result<V
     collect_client_budget_snapshot_with_thread_hint(
         cfg,
         &repo_root,
-        codex_threads::current_thread_id().as_deref(),
+        thread_id.as_deref(),
         None,
         None,
     )
@@ -46,13 +59,8 @@ pub(super) async fn latest_repo_working_state_restore_payload(
         Ok(project) => project,
         Err(_) => return Ok(None),
     };
-    let latest_snapshot = postgres::latest_observability_snapshot_for_project(
-        db,
-        "working_state_restore",
-        "working_state_restore",
-        &project.code,
-    )
-    .await?;
+    let latest_snapshot =
+        postgres::latest_working_state_restore_snapshot_for_project(db, &project.code).await?;
     let Some(snapshot_payload) = latest_snapshot else {
         return Ok(None);
     };
@@ -90,13 +98,8 @@ async fn continuity_restore_bundle_for_repo_root(
         Ok(project) => project,
         Err(_) => return Ok(None),
     };
-    let latest_snapshot = postgres::latest_observability_snapshot_for_project(
-        db,
-        "working_state_restore",
-        "working_state_restore",
-        &project.code,
-    )
-    .await?;
+    let latest_snapshot =
+        postgres::latest_working_state_restore_snapshot_for_project(db, &project.code).await?;
     if let Some(mut snapshot_payload) = latest_snapshot {
         working_state::ensure_runtime_workspace_restore_pack(&mut snapshot_payload);
         return Ok(Some(json!({
@@ -111,14 +114,17 @@ async fn continuity_restore_bundle_for_repo_root(
     working_state::load_recent_restore_bundle_without_live_guard(db, &project, &namespace).await
 }
 
-async fn reconcile_visible_recent_thread_execctl_activity(db: &Client) -> Result<()> {
+async fn reconcile_visible_recent_thread_execctl_activity(
+    db: &Client,
+    recent_thread_records: &[codex_threads::RecentClientThreadRecord],
+) -> Result<()> {
     let mut latest_visible_thread_by_repo_root: std::collections::BTreeMap<
         String,
         codex_threads::RecentClientThreadRecord,
     > = std::collections::BTreeMap::new();
-    for thread in codex_threads::recent_client_thread_records(30 * 60)?
-        .into_iter()
-        .filter(observe_user_visible_client_thread)
+    for thread in recent_thread_records
+        .iter()
+        .filter(|thread| observe_user_visible_client_thread(thread))
     {
         let key = thread.cwd.trim().to_string();
         if key.is_empty() {
@@ -127,7 +133,7 @@ async fn reconcile_visible_recent_thread_execctl_activity(db: &Client) -> Result
         match latest_visible_thread_by_repo_root.get(&key) {
             Some(existing) if existing.updated_at_epoch_s >= thread.updated_at_epoch_s => {}
             _ => {
-                latest_visible_thread_by_repo_root.insert(key, thread);
+                latest_visible_thread_by_repo_root.insert(key, thread.clone());
             }
         }
     }
@@ -136,14 +142,35 @@ async fn reconcile_visible_recent_thread_execctl_activity(db: &Client) -> Result
         .collect::<Vec<_>>();
     recent_threads.sort_by_key(|thread| thread.updated_at_epoch_s);
     for thread in &recent_threads {
+        let step_started = Instant::now();
         let repo_root = Path::new(&thread.cwd);
         let restore = continuity_restore_bundle_for_repo_root(db, repo_root).await?;
+        observe_profile_log(
+            "observe.reconcile_visible_recent_thread.restore_for_repo_root",
+            step_started.elapsed().as_millis(),
+            &format!(
+                "repo_root={} thread_id={} has_restore={}",
+                repo_root.display(),
+                thread.thread_id,
+                restore.is_some()
+            ),
+        );
+        let step_started = Instant::now();
         working_state::maintain_same_thread_execctl_active_lease_for_guard(
             db,
             restore.as_ref(),
             Some(thread.thread_id.as_str()),
         )
         .await?;
+        observe_profile_log(
+            "observe.reconcile_visible_recent_thread.maintain_lease",
+            step_started.elapsed().as_millis(),
+            &format!(
+                "repo_root={} thread_id={}",
+                repo_root.display(),
+                thread.thread_id
+            ),
+        );
     }
     Ok(())
 }
@@ -152,6 +179,7 @@ pub(super) async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> R
     let profile = load_profile()?;
     let repo_root = discover_repo_root(None)?;
     let db = postgres::connect_admin(cfg).await?;
+    postgres::bootstrap_schema(&db, cfg).await?;
     if persist_snapshot {
         return with_postgres_advisory_lock(
             &db,
@@ -190,10 +218,16 @@ async fn build_snapshot_with_connected_admin_db(
         .duration_since(UNIX_EPOCH)
         .context("system clock before unix epoch")?
         .as_millis() as u64;
+    let recent_thread_records = timed_future(
+        &mut observe_refresh_stage_ms,
+        "recent_client_thread_records",
+        async { codex_threads::recent_client_thread_records(30 * 60) },
+    )
+    .await?;
     timed_future(
         &mut observe_refresh_stage_ms,
         "reconcile_recent_visible_thread_execctl_activity",
-        reconcile_visible_recent_thread_execctl_activity(db),
+        reconcile_visible_recent_thread_execctl_activity(db, &recent_thread_records),
     )
     .await?;
 
@@ -300,16 +334,28 @@ async fn build_snapshot_with_connected_admin_db(
         postgres::latest_observability_snapshot(db, "memory_benchmark_score"),
     )
     .await?;
+    let latest_memory_retrieval_semantic_evidence = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_memory_retrieval_semantic_evidence",
+        postgres::latest_observability_snapshot(db, "memory_retrieval_semantic_evidence"),
+    )
+    .await?;
     let latest_memory_task_matrix = timed_future(
         &mut observe_refresh_stage_ms,
         "latest_memory_task_matrix",
         postgres::latest_observability_snapshot(db, "memory_task_matrix"),
     )
     .await?;
+    let latest_mcp_task_matrix_raw_latest = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_mcp_task_matrix_raw_latest",
+        postgres::latest_observability_snapshot(db, "mcp_task_matrix"),
+    )
+    .await?;
     let latest_mcp_task_matrix = timed_future(
         &mut observe_refresh_stage_ms,
         "latest_mcp_task_matrix",
-        postgres::latest_observability_snapshot(db, "mcp_task_matrix"),
+        latest_mcp_task_matrix_compare_snapshot(db),
     )
     .await?;
     let latest_cold_path_benchmark = timed_future(
@@ -340,7 +386,10 @@ async fn build_snapshot_with_connected_admin_db(
     let agent_scope_activity = timed_future(
         &mut observe_refresh_stage_ms,
         "agent_scope_activity",
-        token_budget::collect_agent_scope_activity(db),
+        token_budget::collect_agent_scope_activity_with_recent_client_threads(
+            db,
+            &recent_thread_records,
+        ),
     )
     .await?;
     let active_agent_budget = timed_future(
@@ -366,7 +415,7 @@ async fn build_snapshot_with_connected_admin_db(
     )
     .await?;
     let token_budget_report = if !persist_snapshot {
-        if let Some(thread_id) = codex_threads::current_thread_id()
+        if let Some(thread_id) = codex_threads::current_thread_id_result()?
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -437,8 +486,10 @@ async fn build_snapshot_with_connected_admin_db(
         "latest_procedural_benchmark": latest_procedural_benchmark,
         "procedural_benchmark_history": procedural_benchmark_history,
         "latest_memory_benchmark_score": latest_memory_benchmark_score,
+        "latest_memory_retrieval_semantic_evidence": latest_memory_retrieval_semantic_evidence,
         "latest_memory_task_matrix": latest_memory_task_matrix,
         "latest_mcp_task_matrix": latest_mcp_task_matrix,
+        "latest_mcp_task_matrix_raw_latest": latest_mcp_task_matrix_raw_latest,
         "latest_cold_path_benchmark": latest_cold_path_benchmark,
         "cold_path_benchmark_progress": cold_path_benchmark_progress,
         "latest_working_state_restore": latest_working_state_restore,
@@ -488,8 +539,10 @@ async fn build_snapshot_with_connected_admin_db(
         "latest_procedural_benchmark": payload["latest_procedural_benchmark"].clone(),
         "procedural_benchmark_history": payload["procedural_benchmark_history"].clone(),
         "latest_memory_benchmark_score": payload["latest_memory_benchmark_score"].clone(),
+        "latest_memory_retrieval_semantic_evidence": payload["latest_memory_retrieval_semantic_evidence"].clone(),
         "latest_memory_task_matrix": payload["latest_memory_task_matrix"].clone(),
         "latest_mcp_task_matrix": payload["latest_mcp_task_matrix"].clone(),
+        "latest_mcp_task_matrix_raw_latest": payload["latest_mcp_task_matrix_raw_latest"].clone(),
         "latest_cold_path_benchmark": payload["latest_cold_path_benchmark"].clone(),
         "cold_path_benchmark_progress": payload["cold_path_benchmark_progress"].clone(),
         "latest_working_state_restore": payload["latest_working_state_restore"].clone(),
@@ -540,4 +593,32 @@ async fn resolve_observe_scope(db: &Client, repo_root: &Path) -> Result<Option<(
         Err(_) => return Ok(None),
     };
     Ok(Some((project.code, "observe".to_string())))
+}
+
+async fn latest_mcp_task_matrix_compare_snapshot(db: &Client) -> Result<Option<Value>> {
+    const PUBLIC_COMPARE_PROJECT: &str = "amai";
+    const PUBLIC_COMPARE_MATRIX: &str = "live_mcpbench_local";
+
+    let record = postgres::list_observability_snapshots_by_kind_for_scope_index_only(
+        db,
+        "mcp_task_matrix",
+        PUBLIC_COMPARE_PROJECT,
+        PUBLIC_COMPARE_MATRIX,
+        Some(1),
+    )
+    .await?
+    .into_iter()
+    .next();
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let payload_matrix = record.payload["mcp_task_matrix"]["matrix"]
+        .as_str()
+        .unwrap_or_default();
+    if payload_matrix != PUBLIC_COMPARE_MATRIX {
+        bail!(
+            "scoped MCP compare snapshot matrix mismatch: expected {PUBLIC_COMPARE_MATRIX}, got {payload_matrix}"
+        );
+    }
+    Ok(Some(record.payload))
 }

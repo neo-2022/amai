@@ -81,7 +81,8 @@ for i in $(seq 1 "${iterations}"); do
     --project "${project_code}" \
     --namespace "${namespace_code}" \
     --headline "Same line" \
-    --next-step "Replay same line twice." >/dev/null
+    --next-step "Replay same line twice." \
+    --promote-active-workline >/dev/null
   ended_ms="$(./scripts/epoch_ms.sh)"
   elapsed_ms="$((ended_ms - started_ms))"
   total_ms="$((total_ms + elapsed_ms))"

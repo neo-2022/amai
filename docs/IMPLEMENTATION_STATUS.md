@@ -308,7 +308,7 @@ Fresh proof-refresh 2026-04-25:
 - `./scripts/proof_observability.sh` — green for observability/dashboard guardrails, including Queue 4 `Regression explain` and Queue 5 `Capacity forecast` cards plus raw snapshot contracts. This refresh proves read-only/fail-closed surface presence, not measured regression quality or durable measured capacity quality.
 
 Fresh bounded real runtime proof 2026-04-26:
-- `./scripts/proof_memory_external_real_bounded.sh` — green for bounded, dataset-specific LongMemEval `longmemeval_s_cleaned` runtime+baseline-score evidence: limited real normalized requests, real `external-memory-run` predictions, completed runtime status, case metrics, retrieval-backed relaxed query retry and `external-memory-score` output.
+- `./scripts/proof_memory_external_real_bounded.sh` — green for bounded, dataset-specific LongMemEval `longmemeval_s_cleaned` runtime+baseline-score evidence: limited real normalized requests, real `external-memory-run` predictions, completed runtime status, case metrics, retrieval-backed relaxed query retry, `external-memory-score` output, and repo-owned local semantic retrieval-evidence judgment over the ranked preview set.
 - The bounded runtime metrics now include `answer_source_boundary` (`external_memory_answer_source_boundary_v1`) so retrieval-backed answers and fallback-scan-assisted answers are accounted separately; this is answer-source accounting, not semantic precision maturity.
 - The bounded runtime metrics now also include `retrieval_relevance_boundary` (`external_memory_retrieval_relevance_boundary_v1`) so retrieved snippets are checked by a query-overlap proxy; this is retrieval relevance accounting, not gold-labeled semantic precision maturity.
 - The bounded runtime metrics now also include `gold_answer_relevance_boundary` (`external_memory_gold_answer_relevance_boundary_v1`) so retrieved snippets are checked for lexical support of the benchmark `answer` label; this proves bounded gold-label data flow only, not semantic precision maturity. The current bounded proof keeps zero support cases blocker-visible instead of pretending answer-bearing retrieval has been proven.
@@ -320,6 +320,8 @@ Fresh bounded real runtime proof 2026-04-26:
 - The bounded live-operator lane now has a six-type variant, `./scripts/proof_memory_external_official_judge_live_balanced.sh`: it selects one raw LongMemEval record for each official question type, normalizes via `external-memory-prepare --source-path`, runs six Amai predictions, and then proves the same no-key official judge fail-closed boundary. This fixes the first-N sample gap where the first 3 cases covered only `single-session-user`.
 - The provider-path diagnostic lane now also exists as `./scripts/proof_memory_external_provider_diagnostic.sh`. It keeps two truths separate: whether a configured OpenAI-compatible relay is live for the current client model, and whether that same relay actually exposes the official LongMemEval judge model/path. Fresh live diagnostic on June 1, 2026 against the current `codexcn.top/v1` path showed `responses` working for the current client model family while the relay catalog did not list `gpt-4o-2024-08-06` and `/chat/completions` still failed for both the official model (`503 model_not_found`) and an available GPT-5 family chat probe (`504 channel:response_time_exceeded`). This closes the earlier ambiguity: the relay can be live for Codex and still be incompatible with the official LongMemEval judge lane.
 - A new provider-independent local LongMemEval judge lane now exists as Rust-only `external-memory-local-judge`, `external-memory-local-score`, and `./scripts/proof_memory_external_local_gemma_judge_live_balanced.sh`. Fresh live proof on June 1, 2026 against local Ollama default model `gemma4:e4b` stayed green across all six official question types, wrote a local eval log, reconciled local metrics, and kept `official_upstream_provenance_eligible=false` plus `official_upstream_scorer_parity=false` by contract. This lane is valid for local diagnostics/regression only; it does not claim upstream parity or official provenance.
+- A new repo-owned bounded semantic retrieval-evidence lane now also exists as Rust-only `external-memory-local-retrieval-judge` plus `./scripts/proof_memory_external_local_semantic_retrieval_judge.sh`. It judges the ranked preview set against the benchmark question and, when a gold answer exists, against the benchmark answer through local Ollama. The judge now also validates the ranked-preview contract itself: empty cases, empty case-metrics, blank base URL or model, and case-metric bench/dataset mismatches fail closed before any live judge attempt, while malformed ranked preview rows (for example empty preview text, missing or empty relative paths, rank mismatches, or over-limit preview sets) are surfaced as case-level blockers in `case_blocker_counts` rather than being silently accepted. Bounded real proof scripts now use this local semantic summary as the primary retrieval-evidence layer, while the older query-overlap and lexical answer-support boundaries remain secondary accounting only.
+- Fresh proof 2026-06-05: `./scripts/proof_memory_external_real_bounded.sh` reran green on `longmemeval_s_cleaned` with the repo-owned local semantic judge lane exercised inside the bounded proof path; the ranked-preview verdict stayed blocker-visible (`question_relevant_cases=0/3`, `gold_answer_supported_cases=0/3`), and the lane now fail-closes on empty inputs plus case-metric / dataset identity mismatch before any live judge call, so the lane is materialized and proofed, but still not semantically mature.
 - Root cause found while materializing that local lane: shared `external-memory-run` no longer registers a nested synthetic `benchrt_*` project under `state/external-benchmarks/runtime/**/repo`. It now indexes the temporary benchmark runtime corpus into the already bound caller project plus the requested namespace, which keeps the repo-root binding law intact and removes the descendant-alias failure that blocked the new local balanced proof.
 - The key-backed official judge guard now has a Rust-native secret non-persistence verifier: every regular file in the proof output directory is checked for the configured API key value, and any match is a hard proof failure. Local no-key proof still cannot exercise that branch without an authorized key.
 - The no-key/offline official judge guard now also asserts that `[REDACTED_OFFICIAL_JUDGE_API_KEY]` is absent from default proof, missing-key bounded and balanced summaries; the marker is valid only when a materialized key value was actually removed from hostile fake-provider or key-backed response output.
@@ -338,8 +340,8 @@ External memory benchmark status-truth from the same audit:
 - fixed proof-harness defect: LoCoMo no longer passes as `10` empty cases with missing question/context/answer; converter now expands `qa[]` and renders `conversation.session_*` as context;
 - materialized prep lanes: LongMemEval, MemoryAgentBench and LoCoMo have non-empty normalized cases and requests guarded by `proof_memory_external_benchmarks.sh`;
 - materialized command-contract smoke: `external-memory-run` and `external-memory-score` are exercised on one synthetic exact-match case;
-- materialized bounded real runtime+score lanes: LongMemEval `longmemeval_s_cleaned`, AMA-Bench `ama_bench_manual`, and MemoryAgentBench `memoryagentbench_conflict_resolution` plus `memoryagentbench_long_range_understanding` and `memoryagentbench_test_time_learning` now have initial, bounded, dataset-specific real runtime prediction, answer-source accounting and baseline-score proof through `proof_memory_external_real_bounded.sh`, `proof_memory_external_real_bounded_ama_bench.sh`, and `proof_memory_external_real_bounded_memoryagentbench.sh`; fresh reruns also materialize and bounded-proof-check the joint invariant `top_ranked_relevance_and_gold_answer_supported_retrieval_cases <= top_ranked_gold_answer_supported_retrieval_cases` for those named MemoryAgentBench profiles, plus explicit boolean-typed `runtime_corpus_sha256` / `runtime_corpus_reused_from_previous_case` accounting. On the current default bounded slice (`AMAI_EXTERNAL_MEMORY_REAL_LIMIT=3`), the truthful split is profile-specific rather than global: `memoryagentbench_conflict_resolution` and `memoryagentbench_test_time_learning` prove same-run identical-corpus reuse (`runtime_corpus_unique_sha_count=1`, `runtime_corpus_reused_cases=2`, reused cases keep `index_project_ms=0`), while `memoryagentbench_long_range_understanding` proves the opposite bounded fact (`runtime_corpus_unique_sha_count=3`, `runtime_corpus_reused_cases=0`) because each bounded case materializes a different runtime corpus. This remains bounded operational evidence only and is not a general cache/reproducibility maturity gate;
-- materialized bounded blocked profile: MemoryAgentBench `memoryagentbench_accurate_retrieval` now has a bounded end-to-end runtime+baseline-score blocked proof through `proof_memory_external_real_bounded_memoryagentbench_accurate_retrieval_blocked.sh`; the current default bounded run (`AMAI_EXTERNAL_MEMORY_REAL_LIMIT=3`) completes with `memoryagentbench_overall_score=1.0` and `exact_match=3/3`, and the bounded slice materializes proxy evidence of retrieval participation for every bounded case (`retrieval_answer_cases=3`, `fallback_scan_cases=0`). Retrieval relevance proxy is green across the slice (`relevant_retrieval_evidence_cases=3`, `top_ranked_relevant_retrieval_cases=3/3`), and the current bounded run also materializes lexical/structural proxy support signals `gold_answer_supported_retrieval_cases=3/3`, `top_ranked_gold_answer_supported_retrieval_cases=3/3`, `top_ranked_relevance_and_gold_answer_supported_retrieval_cases=3/3`, plus a stronger top-ranked `anchored_fact_shape_proxy` layer with `top_ranked_structural_fact_supported_cases=3/3`. The key new state change is that benchmark-specific shaping is no longer present in the bounded slice: `benchmark_specific_query_override_cases=0`, `benchmark_specific_window_override_cases=0`, `benchmark_specific_answer_extraction_cases=0`, `benchmark_specific_shaping_present=false`, `generic_runtime_maturity=true`. Query shaping is now generic on this bounded slice, answer extraction is generic, and the shaping boundary is driven by explicit runtime metric flags instead of re-deriving shaping from question text. The runtime now also proves identical-corpus reuse on the current default `3-case` slice: `runtime_corpus_unique_sha_count=1`, `runtime_corpus_reused_cases=2`, reused cases keep `index_project_ms=0`. A fresh profiling-guided runtime fix then corrected the synthetic-runtime edge-cache skip gate so it matches the actual `.md` bounded runtime corpus instead of a non-existent `source_kind=markdown` path: on the current bounded slice this drops cold first-case `index_project_ms` to about `0.87s`, bounded `index_project_ms.avg` to about `0.29s`, and bounded `total_case_ms.avg` to about `0.91s`, while preserving the same bounded proof/truth contract. `latency_maturity=false` still remains honest, but the blocker changed shape: the contour is still not latency-grade because this is only a fixed bounded slice, not because `index_project_ms` still dominates the slice average. The remaining blocker is therefore no longer benchmark-specific shaping, bounded top-rank proxy support, or the old cold-index-dominance story, but semantic relevance maturity, missing benchmark-grade scorer parity, and bounded-only latency evidence. The runtime/restore code path is fail-closed for resume artifacts: `requests.jsonl` must carry non-empty `bench` and `dataset`, and persisted `.case-metrics.jsonl` rows must carry the explicit benchmark-specific shaping flags plus the top-ranked retrieval telemetry fields, otherwise resume/reuse is rejected rather than silently downgrading the shaping boundary. The proof now also re-runs targeted Rust negative tests for those reject paths and for the `paths.txt`/same-hash reuse gate; those tests prove the reject-path contract for malformed identity/reuse artifacts, not a broader filesystem-stability guarantee. `bounded-proof-contract.json` keeps the bounded blocked scope, non-semantic interpretation of retrieval-hit rates, structural-fact proxy ceiling, measured reuse, and non-benchmark-grade maturity machine-readable rather than implicit;
+- materialized bounded real runtime+score lanes: LongMemEval `longmemeval_s_cleaned`, AMA-Bench `ama_bench_manual`, and MemoryAgentBench `memoryagentbench_conflict_resolution` plus `memoryagentbench_long_range_understanding` and `memoryagentbench_test_time_learning` now have initial, bounded, dataset-specific real runtime prediction, answer-source accounting, baseline-score proof, and repo-owned local semantic retrieval-evidence judgment through `proof_memory_external_real_bounded.sh`, `proof_memory_external_real_bounded_ama_bench.sh`, and `proof_memory_external_real_bounded_memoryagentbench.sh`. The query-overlap and lexical answer-support boundaries remain in the runtime metrics as blocker-visible secondary accounting. Fresh reruns also materialize explicit boolean-typed `runtime_corpus_sha256` / `runtime_corpus_reused_from_previous_case` accounting. On the current default bounded slice (`AMAI_EXTERNAL_MEMORY_REAL_LIMIT=3`), the truthful split is profile-specific rather than global: `memoryagentbench_conflict_resolution` and `memoryagentbench_test_time_learning` prove same-run identical-corpus reuse (`runtime_corpus_unique_sha_count=1`, `runtime_corpus_reused_cases=2`, reused cases keep `index_project_ms=0`), while `memoryagentbench_long_range_understanding` proves the opposite bounded fact (`runtime_corpus_unique_sha_count=3`, `runtime_corpus_reused_cases=0`) because each bounded case materializes a different runtime corpus. This remains bounded operational evidence only and is not a general cache/reproducibility maturity gate;
+- materialized bounded blocked profile: MemoryAgentBench `memoryagentbench_accurate_retrieval` now has a bounded end-to-end runtime+baseline-score blocked proof through `proof_memory_external_real_bounded_memoryagentbench_accurate_retrieval_blocked.sh`; the current default bounded run (`AMAI_EXTERNAL_MEMORY_REAL_LIMIT=3`) completes with `memoryagentbench_overall_score=1.0` and `exact_match=3/3`, but the truthful bounded retrieval story is mixed rather than positive. The bounded slice materializes repo-owned local semantic retrieval evidence on the local top-ranked-preview judge lane with `question_relevant_cases=0/3` and `gold_answer_supported_cases=0/3`. Runtime proxy/accounting remains blocker-visible secondary evidence only: `retrieval_answer_cases=2`, `fallback_scan_cases=1`, `top_ranked_relevant_retrieval_cases=2`, `gold_answer_supported_retrieval_cases=0`, and `top_ranked_structural_fact_supported_cases=0` on the current bounded slice. The key new state change is still real: benchmark-specific shaping is no longer present in the bounded slice (`benchmark_specific_query_override_cases=0`, `benchmark_specific_window_override_cases=0`, `benchmark_specific_answer_extraction_cases=0`, `benchmark_specific_shaping_present=false`, `generic_runtime_maturity=true`). Query shaping is generic on this bounded slice, answer extraction is generic, and the shaping boundary is driven by explicit runtime metric flags instead of re-deriving shaping from question text. The runtime now also proves identical-corpus reuse on the current default `3-case` slice: `runtime_corpus_unique_sha_count=1`, `runtime_corpus_reused_cases=2`, reused cases keep `index_project_ms=0`. A fresh profiling-guided runtime fix then corrected the synthetic-runtime edge-cache skip gate so it matches the actual `.md` bounded runtime corpus instead of a non-existent `source_kind=markdown` path: on the current bounded slice this drops cold first-case `index_project_ms` to about `0.87s`, bounded `index_project_ms.avg` to about `0.29s`, and bounded `total_case_ms.avg` to about `0.91s`, while preserving the same bounded proof/truth contract. `latency_maturity=false` still remains honest, but the blocker changed shape: the contour is still not latency-grade because this is only a fixed bounded slice, not because `index_project_ms` still dominates the slice average. The remaining blocker is therefore negative primary local semantic evidence on the ranked-preview-set lane, missing benchmark-grade scorer parity, and bounded-only latency evidence. The runtime/restore code path is fail-closed for resume artifacts: `requests.jsonl` must carry non-empty `bench` and `dataset`, and persisted `.case-metrics.jsonl` rows must carry the explicit benchmark-specific shaping flags plus the top-ranked retrieval telemetry fields, otherwise resume/reuse is rejected rather than silently downgrading the shaping boundary. The proof now also re-runs targeted Rust negative tests for those reject paths and for the `paths.txt`/same-hash reuse gate; those tests prove the reject-path contract for malformed identity/reuse artifacts, not a broader filesystem-stability guarantee. `bounded-proof-contract.json` keeps the bounded blocked scope, primary local semantic retrieval verdicts, measured reuse, and non-benchmark-grade maturity machine-readable rather than implicit;
 - AMA-Bench keeps this evidence explicitly bounded: prep and small runtime+baseline-score proof are materialized from the manual HF dataset install, but full dataset runtime and benchmark-grade maturity remain separate open work;
 - stale runtime attempts under `state/external-benchmarks/memory/**/status.json` are not closure evidence while their stage remains `running`;
 - therefore Stage 0-10 stays internal-closed, bounded LongMemEval runtime+baseline-score evidence exists only for the named dataset/limit, but `external benchmark-grade long-term memory maturity` remains `not-fully-materialized` until full dataset runtime+score, semantic retrieval precision and upstream scorer parity are proven.
@@ -389,11 +391,11 @@ Consensus records for the external memory benchmark audit:
   - `required_implementation_action`: expand from the bounded `conflict_resolution`, `long_range_understanding`, and `test_time_learning` slices to more MemoryAgentBench datasets and broader real runtime evidence before any benchmark-grade maturity claim.
 - `AMAI-AUDIT-EXTMEM-007`
   - `claim_owner`: bounded `memoryagentbench_accurate_retrieval` runtime/score must not be promoted as retrieval-backed bounded maturity just because the 3-case slice completes or because baseline score becomes non-zero;
-  - `implementation_verifier`: the bounded slice now materializes prep, runtime completion, generic tight-window runtime shaping, generic bounded answer extraction, generic bounded relaxed-query behavior and perfect bounded baseline score output, with `answer_source_boundary.retrieval_answer_cases=3`, `fallback_scan_cases=0`, `retrieval_relevance_boundary.relevant_retrieval_evidence_cases=3`, `gold_answer_relevance_boundary.gold_answer_supported_retrieval_cases=3`, and `gold_answer_relevance_boundary.top_ranked_gold_answer_supported_retrieval_cases=3`; `benchmark_specific_shaping_boundary` is now clean in the bounded run (`query_override_cases=0`, `window_override_cases=0`, `answer_extraction_cases=0`, `generic_runtime_maturity=true`). The gold-answer/retrieval relevance boundaries still remain lexical/proxy rather than semantic, so the contour is stronger bounded runtime evidence than before but still not semantic maturity;
+  - `implementation_verifier`: the bounded slice now materializes prep, runtime completion, generic tight-window runtime shaping, generic bounded answer extraction, generic bounded relaxed-query behavior and perfect bounded baseline score output, but the primary local semantic lane is still negative on the current default bounded run: repo-owned local semantic retrieval evidence yields `question_relevant_cases=0/3` and `gold_answer_supported_cases=0/3`, while runtime proxy/accounting remains mixed with `answer_source_boundary.retrieval_answer_cases=2`, `fallback_scan_cases=1`, `retrieval_relevance_boundary.relevant_retrieval_evidence_cases=2`, `gold_answer_relevance_boundary.gold_answer_supported_retrieval_cases=0`, and `structural_fact_relevance_boundary.top_ranked_structural_fact_supported_cases=0`. `benchmark_specific_shaping_boundary` is now clean in the bounded run (`query_override_cases=0`, `window_override_cases=0`, `answer_extraction_cases=0`, `generic_runtime_maturity=true`), so the old shaping blocker is gone, but the contour still does not show semantic retrieval support on the ranked-preview-set lane;
   - `proof_owner`: `./scripts/proof_memory_external_real_bounded_memoryagentbench_accurate_retrieval_blocked.sh` validates this blocker-visible bounded profile;
   - `consensus_verdict`: `bounded_blocked_profile`;
   - `required_doc_action`: `keep_blocker_visible_not_whitelisted`;
-  - `required_implementation_action`: replace lexical/proxy relevance accounting with semantic relevance evidence and establish upstream scorer parity before promoting `accurate_retrieval` from bounded generic-runtime proof into benchmark-grade or fully trusted maturity.
+  - `required_implementation_action`: improve the real retrieval distribution so the primary local semantic lane stops coming back negative on the bounded ranked-preview-set proof, then add broader semantic retrieval evidence and upstream scorer parity before promoting `accurate_retrieval` from bounded generic-runtime proof into benchmark-grade or fully trusted maturity.
 
 Consensus records for the scientific Queue 4/5 status-truth audit:
 - `AMAI-AUDIT-SCI-Q45-001`
@@ -474,7 +476,8 @@ Claim inventory snapshot 2026-04-25 for the current status-truth audit cluster:
 | `AMAI-AUDIT-BRIDGE-001` | compatibility `memory search` prints hits plus `Почему вошло` and `Почему часть не вошла`. | `src/bin/memory.rs::print_search_state`, `src/onboarding.rs::install_memory_bridge` | `./scripts/proof_memory_bridge_search.sh`, `cargo test --quiet --bin memory` | release bridge stdout from `target/release/memory search` | 2026-04-25 | Verified output/explainability contract only; retrieval relevance quality remains governed by context-pack/retrieval proofs. |
 | `AMAI-AUDIT-MCP-LAUNCHER-001` | stdio MCP launcher prefers `cargo run --release --quiet -- mcp serve` when `cargo` exists and keeps stdout protocol-clean. | `scripts/run_mcp_stdio.sh`, `scripts/run_mcp_stdio.ps1`, generated MCP configs | `./scripts/proof_mcp_launcher_freshness.sh` | JSON-RPC initialize plus cargo-shim command trace | 2026-04-25 | Verified shared stdio launcher path only; cross-client live-host behavior remains separate. |
 | `AMAI-AUDIT-MCP-CONTRACT-001/002` | MCP handshake/runtime contract exposes the expected prompts, tools, startup artifact shape and proof-scoped token attach. | `src/mcp.rs`, `src/token_budget/token_budget_runtime_support.rs`, `.amai/onboarding/project-chat-startup-contract.json`, `.amai/onboarding/project-chat-startup-agent-contract.json` | `./scripts/proof_mcp.sh` | MCP `prompts/list`, startup runtime artifact, proof-session token lane | 2026-04-25 | Verified MCP runtime/proof-session contract only; live-client UX is not covered. |
-| `AMAI-AUDIT-EXTMEM-001..005` | external memory benchmark lane has dataset/source prep, normalized cases for materialized datasets, synthetic command-contract smoke, bounded LongMemEval and AMA-Bench runtime+baseline-score evidence, answer-source/query-overlap/gold-answer support accounting, official scorer contract boundary, official judge execution/log fail-closed lane, provider diagnostic truth, local non-official Ollama/Gemma judge+score lane, bounded and six-type live-operator guards, and official eval-log reconciliation. | `src/external_benchmark.rs`, `config/external_benchmark_targets.toml`, `config/external_benchmark_datasets.toml`, `docs/MEMORY_BENCH_RUNBOOK.md` | `./scripts/proof_memory_external_benchmarks.sh`, `./scripts/proof_memory_external_real_bounded.sh`, `./scripts/proof_memory_external_real_bounded_ama_bench.sh`, `./scripts/proof_memory_external_official_judge.sh`, `./scripts/proof_memory_external_official_judge_api_failure.sh`, `./scripts/proof_memory_external_official_judge_live_bounded.sh`, `./scripts/proof_memory_external_official_judge_live_balanced.sh`, `./scripts/proof_memory_external_provider_diagnostic.sh`, `./scripts/proof_memory_external_local_gemma_judge_live_balanced.sh`, `./scripts/proof_memory_external_official_score_reconcile.sh` | `state/external-benchmarks/memory/**/latest/{cases,requests,manifest}.json*`, synthetic predictions/score output, `tmp/external-memory-real-bounded/**/{predictions,status,score,metrics,official-live-judge-summary}.json*`, `tmp/external-memory-official-live-balanced/**`, `tmp/external-memory-official-judge/**`, `tmp/external-memory-official-score-reconcile/**`, `tmp/external-memory-local-gemma-live-balanced/**` | 2026-06-01 | `bounded_real_runtime_score`: bounded real LongMemEval and AMA-Bench proofs are materialized only for the named datasets/limits; `answer_source_boundary` makes fallback-scan dependence visible; `retrieval_relevance_boundary` is query-overlap proxy only; `gold_answer_relevance_boundary` is benchmark-answer lexical support only; LongMemEval `official_scorer_boundary` records the upstream scorer contract, while AMA-Bench keeps `official_scorer_boundary.source_kind=official_scorer_contract_unavailable`; `external-memory-official-judge` embeds prompt templates and proves fail-closed no-live/missing-key/non-official-model behavior; fake-provider API-failure proof validates rate-limit/upstream-error/response-contract/transport blocked summaries without eval-log materialization; provider diagnostic proof keeps relay-availability truth separate from official-judge availability; the local Ollama/Gemma lane proves provider-independent LongMemEval judge execution plus local score reconciliation while explicitly keeping `official_upstream_provenance_eligible=false` and `official_upstream_scorer_parity=false`; bounded live-operator proof currently proves missing-key fail-closed behavior on real bounded artifacts without writing eval-results and key-backed runs add Rust-native proof output secret scanning; six-type live-operator proof covers every official LongMemEval question type in a bounded curated sample and currently proves the same no-key blocker; `external-memory-official-score` reconciles upstream-style eval logs; full benchmark-grade maturity remains blocked on an authorized real live judge run, full dataset runtime+score, gold-labeled semantic retrieval precision and upstream scorer parity. |
+| `AMAI-AUDIT-WORKFLOW-GUARD-001` | before-report workflow guard now validates the execution trace, six-role workflow, stable workline identity, strict startup return gate, signed v2 specialist signoff and evidence-manifest-backed proof artifacts instead of accepting static prose or self-attested hashes. The same guard now also treats continuity ownership and startup/report drift as first-class report blockers rather than side proofs. | `src/workflow_trace.rs`, `src/cli.rs`, `src/continuity.rs`, `src/continuity/continuity_startup_runtime_state.rs`, `src/mcp.rs`, `src/postgres.rs`, `src/token_budget/dashboard_current_session_report.rs`, `src/working_state.rs`, `scripts/materialize_specialist_signoff.sh`, `scripts/proof_workflow_before_report.sh`, `scripts/proof_specialist_signoff.sh`, `scripts/proof_startup_redirect_freshness.sh`, `scripts/proof_startup_runtime_state_fail_closed.sh`, `scripts/proof_continuity_reconcile_reconnect_hostile.sh`, `scripts/proof_continuity_threadless_handoff_fail_closed.sh`, `scripts/proof_graph_first_startup_restore_projection.sh`, `scripts/proof_mcp_continuity_startup_stale_success_reconcile.sh`, `.amai/continuity/specialist-team-signoff-input.json` | `cargo run -- verify workflow-trace`, `cargo test --quiet startup_gate`, `cargo test --quiet continuity_startup_summary_fallback_gate`, `cargo test --quiet inspect_startup_runtime_state_fails_closed_on_missing_execctl_active_lease_source_event_id`, `cargo test --quiet startup_refresh_does_not_rebind_without_live_thread_binding`, `cargo test --quiet startup_refresh_does_not_rebind_threadless_lease_to_foreign_thread`, `cargo test --quiet startup_refresh_reloads_live_source_event_after_scope_lock_wait`, `cargo test --quiet guard_maintenance_does_not_rebind_without_live_thread_binding`, `cargo test --quiet guard_maintenance_does_not_rebind_threadless_lease_to_foreign_thread`, `cargo test --quiet guard_maintenance_reloads_live_owner_after_scope_lock_wait`, `cargo test --quiet restore_context_thread_id_hint_accepts_fresh_lease_bound_restore`, `cargo test --quiet restore_context_thread_id_hint_rejects_unbound_restore_thread_id`, `./scripts/proof_startup_redirect_freshness.sh`, `./scripts/proof_workflow_before_report.sh`, `./scripts/proof_startup_runtime_state_fail_closed.sh`, `./scripts/proof_continuity_reconcile_reconnect_hostile.sh`, `./scripts/proof_continuity_threadless_handoff_fail_closed.sh`, `./scripts/proof_graph_first_startup_restore_projection.sh`, `./scripts/proof_mcp_continuity_startup_stale_success_reconcile.sh`, `./scripts/proof_specialist_signoff.sh`, `./scripts/proof_before_report.sh` | `.amai/continuity/specialist-team-signoff*.json`, `.amai/continuity/workflow-evidence/**`, `.amai/continuity/project-chat-startup-state.json` | 2026-06-03 | Verified local report-gate integrity only: startup gate must keep `must_follow_startup_next_action=true` and `unrelated_work_allowed=false`; startup-contract proof now recomputes the object-scope SHA and matches the literal AGENTS pin before report claims are allowed; missing persisted `execctl_active_lease.source_event_id` must audit as `startup_runtime_state_drift`; continuity handoff/startup/guard now serialize through a shared advisory-lock contour so stale restore cannot win a read-then-write race after a newer live owner/source event lands; current-session budget guard now reuses restore thread identity only after fresh lease-bound validation; evidence hashes must resolve to regular JSON files under `.amai/continuity/workflow-evidence/`, match `workflow-evidence-v1`, bind manifest `kind` to file `kind`, and bind file content to the stage/proof/specialist/final record fields; `proof_before_report.sh` now directly runs the full targeted startup-gate, ownership and graph-first projection bundle plus stale runtime-state fail-closed detection, local startup reconcile, reconnect assist materialization, and stale embedded MCP success replacement; stale-MCP proof now keeps reconnect assist diagnostic-only, requires `same_session_continuation_allowed=true` plus `operator_action_required=false`, and proves same-session follow-up startup calls return without a second reconcile payload after the first self-heal; this is still a local trust-root boundary, not non-repudiation against a compromised local signer. |
+| `AMAI-AUDIT-EXTMEM-001..005` | external memory benchmark lane has dataset/source prep, normalized cases for materialized datasets, synthetic command-contract smoke, bounded LongMemEval and AMA-Bench runtime+baseline-score evidence, answer-source/query-overlap/gold-answer support accounting, official scorer contract boundary, official judge execution/log fail-closed lane, provider diagnostic truth, local non-official Ollama/Gemma judge+score lane, repo-owned bounded semantic retrieval-evidence lane, bounded and six-type live-operator guards, and official eval-log reconciliation. | `src/external_benchmark.rs`, `config/external_benchmark_targets.toml`, `config/external_benchmark_datasets.toml`, `docs/MEMORY_BENCH_RUNBOOK.md` | `./scripts/proof_memory_external_benchmarks.sh`, `./scripts/proof_memory_external_real_bounded.sh`, `./scripts/proof_memory_external_real_bounded_ama_bench.sh`, `./scripts/proof_memory_external_official_judge.sh`, `./scripts/proof_memory_external_official_judge_api_failure.sh`, `./scripts/proof_memory_external_official_judge_live_bounded.sh`, `./scripts/proof_memory_external_official_judge_live_balanced.sh`, `./scripts/proof_memory_external_provider_diagnostic.sh`, `./scripts/proof_memory_external_local_gemma_judge_live_balanced.sh`, `./scripts/proof_memory_external_local_semantic_retrieval_judge.sh`, `./scripts/proof_memory_external_official_score_reconcile.sh` | `state/external-benchmarks/memory/**/latest/{cases,requests,manifest}.json*`, synthetic predictions/score output, `tmp/external-memory-real-bounded/**/{predictions,status,score,metrics,official-live-judge-summary}.json*`, `tmp/external-memory-official-live-balanced/**`, `tmp/external-memory-official-judge/**`, `tmp/external-memory-official-score-reconcile/**`, `tmp/external-memory-local-gemma-live-balanced/**` | 2026-06-01 | `bounded_real_runtime_score`: bounded real LongMemEval and AMA-Bench proofs are materialized only for the named datasets/limits; `answer_source_boundary` makes fallback-scan dependence visible; `retrieval_relevance_boundary` is query-overlap proxy only; `gold_answer_relevance_boundary` is benchmark-answer lexical support only; LongMemEval `official_scorer_boundary` records the upstream scorer contract, while AMA-Bench keeps `official_scorer_boundary.source_kind=official_scorer_contract_unavailable`; `external-memory-official-judge` embeds prompt templates and proves fail-closed no-live/missing-key/non-official-model behavior; fake-provider API-failure proof validates rate-limit/upstream-error/response-contract/transport blocked summaries without eval-log materialization; provider diagnostic proof keeps relay-availability truth separate from official-judge availability; the local Ollama/Gemma lane proves provider-independent LongMemEval judge execution plus local score reconciliation while explicitly keeping `official_upstream_provenance_eligible=false` and `official_upstream_scorer_parity=false`; the repo-owned bounded semantic retrieval judge proves ranked-preview contract validation plus per-case blocker accounting while staying non-official and non-semantic-maturity; bounded live-operator proof currently proves missing-key fail-closed behavior on real bounded artifacts without writing eval-results and key-backed runs add Rust-native proof output secret scanning; six-type live-operator proof covers every official LongMemEval question type in a bounded curated sample and currently proves the same no-key blocker; `external-memory-official-score` reconciles upstream-style eval logs; full benchmark-grade maturity remains blocked on an authorized real live judge run, full dataset runtime+score, gold-labeled semantic retrieval precision and upstream scorer parity. |
 
 No checkbox is removed by this snapshot: current audit found downgraded broad claims and open proof lanes, but not a fresh failing proof or absent implementation surface for the internal Stage 0-10 checkboxes.
 
@@ -1996,6 +1999,10 @@ Stage status после fresh proof-refresh 2026-04-24:
   - он уже пишет machine-readable manifest baseline artifact set, exact command ledger, checksums, initial/final worktree fingerprints и strict `--require-clean-worktree` preflight-fail path.
   - dedicated launcher-contract proof теперь тоже materialized: `./scripts/proof_scientific_queue0_baseline_freeze.sh`
     - он держит `--print-plan` contract, dirty-worktree fail-closed path, symlink на `latest` run и machine-readable manifest shape для `preflight_failed_dirty_worktree`.
+  - fresh proof-refresh 2026-06-02:
+    - `./scripts/proof_scientific_queue0_baseline_freeze.sh` — green;
+    - `./scripts/scientific_queue0_baseline_freeze.sh` — green, wrote `state/scientific/queue0_baseline_freeze/run_20260602T084149Z/queue0_baseline_manifest.json`;
+    - manifest status: `baseline_captured_green`, command_count `7`, passed `7`, current_failure `0`, pre_existing_known_failure `0`, initial/final worktree fingerprints match.
 - `confidence/calibration`
   - `partially_materialized`
   - measured approval overlay уже materialized как отдельный layer поверх compare/promotion plane, но финальный promotion всё ещё требует явного human sign-off.
@@ -2003,10 +2010,10 @@ Stage status после fresh proof-refresh 2026-04-24:
   - `in_progress`
   - materialized Queue 1 slices сейчас такие:
     - `memory_task_matrix` и `mcp_task_matrix` теперь публикуют unified fail-closed `statistics` block (`benchmark-statistics-v1`);
-    - block теперь несёт `sample_size`, explicit `baseline_run_id / candidate_run_id`, measured Wilson 95% CI для success-rate, measured bootstrap percentile 95% intervals для pairwise deltas и measured JSD/KS drift methods по second-run baseline pair;
+    - block теперь несёт `sample_size`, explicit `baseline_run_id / candidate_run_id`, measured Wilson 95% CI для success-rate, measured bootstrap percentile 95% intervals для pairwise deltas и measured JSD/KS drift methods по second-run baseline pair, включая отдельный `score_distribution_drift`;
     - applicability теперь surface-ится truthfully:
-      - `memory_task_matrix` materialize-ит measured `score_delta`, `median_latency_delta`, `p95_latency_delta`, `verdict_distribution_drift`, `latency_distribution_drift`, а `mean_delta` честно маркирует `not_applicable`;
-      - `mcp_task_matrix` materialize-ит measured `mean_delta`, `median_latency_delta`, `p95_latency_delta`, `verdict_distribution_drift`, `latency_distribution_drift`, а `score_delta` честно маркирует `not_applicable`;
+      - `memory_task_matrix` materialize-ит measured `score_delta`, `median_latency_delta`, `p95_latency_delta`, `verdict_distribution_drift`, `latency_distribution_drift`, `score_distribution_drift`, а `mean_delta` честно маркирует `not_applicable`;
+      - `mcp_task_matrix` materialize-ит measured `mean_delta`, `median_latency_delta`, `p95_latency_delta`, `verdict_distribution_drift`, `latency_distribution_drift`, а `score_delta` и `score_distribution_drift` честно маркирует `not_applicable`;
     - promotion внутри этого block больше не fail-closed из-за missing pairwise contour, но остаётся compatibility/completeness signal, а не final approval law:
       - отдельный `promotion_law` block (`benchmark-promotion-law-v1`) теперь materialized рядом со `statistics` и fail-closed различает:
         - `blocked_statistics_incomplete`
@@ -2022,7 +2029,7 @@ Stage status после fresh proof-refresh 2026-04-24:
       - MCP tool summary для `amai_observe_snapshot` теперь тоже не скрывает scientific lifecycle внутри raw snapshot only:
         - `observe_snapshot_summary.latest_memory_task_matrix_summary` и `latest_mcp_task_matrix_summary` materialize-ят compact lifecycle string вида `compare=<drift_status> promotion=<promotion_law_state> approval=<measured_approval_state>`;
         - `verify mcp` теперь держит этот raw-result contract явно, а не только green SLA/unknown=0;
-      - dashboard benchmark plane теперь честно materialize-ит отдельные карточки `Memory task matrix compare` и `MCP task matrix compare`, где видны `baseline/candidate` pair state, measured/not_applicable/not_measured methods, `drift_summary` и separate `promotion_law` state/reason вместо старого implicit promotion summary.
+      - dashboard benchmark plane теперь честно materialize-ит отдельные карточки `Memory task matrix compare` и `MCP task matrix compare`, где видны `baseline/candidate` pair state, measured/not_applicable/not_measured methods, `Score drift`, `drift_summary` и separate `promotion_law` state/reason вместо старого implicit promotion summary.
       - MCP tool summary для `amai_memory_matrix` теперь тоже больше не остаётся на old point-estimate headline only:
         - high-signal summary string materialize-ит `compare=<drift_status>`, `promotion=<promotion_law_state>` и `approval=<measured_approval_state>`;
         - structured `memory_matrix_summary` тоже surface-ит эти три поля, так что operator не обязан раскрывать весь raw payload, чтобы увидеть scientific lifecycle state.
@@ -2031,6 +2038,24 @@ Stage status после fresh proof-refresh 2026-04-24:
     - `./scripts/proof_benchmark_contamination_preflight.sh` — green;
     - `./scripts/proof_mcp_task_matrix.sh` — green after strict-heavy contamination preflight and explicit failed-run artifact handling;
     - `./scripts/proof_observability.sh` — green; dashboard `MCP task matrix compare` no longer degrades to `ещё нет данных` after the MCP matrix proof path.
+  - fresh proof-refresh 2026-06-02:
+    - Queue 0 baseline freeze reran the Queue 1 companion bundle through `./scripts/scientific_queue0_baseline_freeze.sh`;
+    - `./scripts/proof_benchmark_contamination_preflight.sh` reran green;
+    - `amai_observe_snapshot` surfaced `latest_memory_task_matrix_summary = compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review`;
+    - MCP task matrix root cause was localized in `observe snapshot` selection semantics: the public `latest_mcp_task_matrix` row used raw latest `snapshot_kind=mcp_task_matrix`, so the later `mcp_universe_local` blocked first-run row hid the already measured `live_mcpbench_local` compare lane.
+    - `observe snapshot` now selects the latest `live_mcpbench_local` row for the public compare lane and preserves raw chronological truth separately as `latest_mcp_task_matrix_raw_latest`;
+    - the public MCP compare selector is scoped, not global-by-matrix: it must select `scope_project_code=amai` and `scope_namespace_code=live_mcpbench_local`, while a foreign project row with the same matrix name must not be eligible for `latest_mcp_task_matrix`;
+    - `./scripts/proof_mcp_task_matrix.sh` now proves both sides of that contract: public `latest_mcp_task_matrix` is `matrix=live_mcpbench_local`, `compare=measured`, `approval=pending_human_review`, while `latest_mcp_task_matrix_raw_latest` remains `matrix=mcp_universe_local` with `blocked_statistics_incomplete`;
+  - Queue 1 hardening proof-refresh 2026-06-02:
+    - `src/benchmark_statistics.rs` now materializes `score_distribution_drift`;
+    - `src/benchmark_promotion.rs` now fail-closes forged ready statistics when required method statuses are missing or unaccepted, including missing `score_distribution_drift`;
+    - `./scripts/proof_memory_task_matrix.sh` now asserts memory `score_distribution_drift.status == measured` and numeric `lower / upper / delta / value` fields for measured statistics methods;
+    - `./scripts/proof_mcp_task_matrix.sh` now asserts MCP `score_distribution_drift.status == not_applicable`, numeric measured method fields, an exact MCP-facing summary string and a hostile foreign `live_mcpbench_local` row that must not be selected by the public compare lane;
+    - dashboard benchmark cards now surface `source_identity` for the raw snapshot key, payload root, matrix, scope, source event, captured time, payload SHA and baseline/candidate ids;
+    - `./scripts/proof_observability.sh` now fail-closes if dashboard `Memory task matrix compare` or `MCP task matrix compare` stays on missing baseline after the matrix proof path, and now checks Score drift dashboard parity, numeric method integrity and dashboard `source_identity` equality with raw `/api/snapshot`;
+    - default dashboard exporter on `127.0.0.1:9464` was restarted after a liveness timeout; post-restart `/healthz` returned `status=up`, `cache_stale=false`, and both Queue 1 dashboard cards showed measured compare with pending human review.
+    - `./scripts/proof_observability.sh` reran green after the selection fix;
+    - after `./scripts/reconnect_local.sh --client codex` and Codex `Reload Window`, live `amai_observe_snapshot` surfaced `latest_mcp_task_matrix_summary = compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review`.
     - historical fixed tails, still useful as root-cause context:
       - первый честный latency tail был локализован не в matrix threshold, а в `observe_snapshot_green -> token_budget_dashboard_report -> assistant_scope`;
       - его корень был в false cache-miss law: `assistant_scope` source cache инвалидировался по global `working_state_event / token_budget_event / assistant_generation_turn_observed` summaries и ловил чужой observability noise;
@@ -2394,11 +2419,11 @@ Stage status после fresh proof-refresh 2026-04-24:
 - закрыт ещё один truth-sensitive defect: bounded live proof раньше считал default `code --list-extensions --show-versions` authoritative precheck и мог ложно падать на `amai.amai-vscode-bridge@0.0.3`, хотя source bundle, disk install contour и сам живой bridge runtime уже были `0.0.2`;
 - прямой runtime probe на этой машине подтвердил корневой факт: default profile registration шумит stale version string, но `code --open-url vscode://amai.amai-vscode-bridge/...` пишет result payload с `public_bridge.version = 0.0.2`, `status = launch_requested` и green `ui_cleanup`;
 - закрыт ещё один proof-artifact truth gap: live state для публичного VS Code bridge теперь сохраняет полный `bridge_result` и machine-readable capability drift вместо того, чтобы отбрасывать всё выше `public_bridge.version/ui_cleanup`;
-- это материализовало более точную beta-boundary: установленный bridge bundle уже поддерживает `visible_surface`, но текущий loaded runtime на этой машине всё ещё не возвращает `visible_surface` в live result, поэтому higher clean-surface UX proof нельзя честно объявлять закрытым;
+- это материализовало более точную beta-boundary: installed bridge bundle и loaded runtime уже materialize-ят `visible_surface` payload truth, поэтому higher clean-surface UX proof теперь опирается на `runtime_capabilities.visible_surface_payload_present = true` и `runtime_capability_drift.visible_surface_missing_from_runtime_result = false`, а не на старую missing-сurface формулировку;
 - bounded proof для этой границы теперь отдельный и зелёный: [scripts/proof_vscode_compact_chat_visible_surface_runtime_boundary.sh](../scripts/proof_vscode_compact_chat_visible_surface_runtime_boundary.sh).
-- закрыт ещё один blocker-sharpening gap над тем же runtime drift: public refresh candidates сами по себе уже не “неизвестный следующий шаг”, а проверенная тупиковая ветка для этой машины;
-- новый bounded proof [scripts/proof_vscode_compact_chat_runtime_refresh_boundary.sh](../scripts/proof_vscode_compact_chat_runtime_refresh_boundary.sh) подтверждает, что `code --open-url 'command:workbench.action.restartExtensionHost'` и `code --open-url 'command:workbench.action.reloadWindow'` не снимают `visible_surface` runtime drift: после каждого refresh probe lower live bridge lane остаётся зелёным, но `runtime_capability_drift.visible_surface_missing_from_runtime_result` всё ещё `true`;
-- это ещё уже локализует remaining beta-blocker: нужен уже не generic “попробовать reload/restart”, а другой truthful front-door для runtime pickup или новый startup contour, который реально меняет loaded bridge runtime contract.
+- закрыт ещё один blocker-sharpening gap над тем же runtime payload: public refresh candidates сами по себе уже не “неизвестный следующий шаг”, а проверенная тупиковая ветка для этой машины;
+- новый bounded proof [scripts/proof_vscode_compact_chat_runtime_refresh_boundary.sh](../scripts/proof_vscode_compact_chat_runtime_refresh_boundary.sh) подтверждает, что `code --open-url 'command:workbench.action.restartExtensionHost'` и `code --open-url 'command:workbench.action.reloadWindow'` не ломают `visible_surface` runtime payload: после каждого refresh probe lower live bridge lane остаётся зелёным, `runtime_capabilities.visible_surface_payload_present` остаётся `true`, а `runtime_capability_drift.visible_surface_missing_from_runtime_result` остаётся `false`;
+- это уже не локализация missing-surface blocker, а подтверждение сохранения payload truth на текущем host.
 - [scripts/verify_vscode_compact_chat_public_bridge_live.sh](../scripts/verify_vscode_compact_chat_public_bridge_live.sh) теперь использует disk install truth under `~/.vscode/extensions` plus runtime result version as source of truth и больше не валит live lane только из-за stale default-profile registration drift;
 - bounded negative path теперь fail-closed сформулирован честно: verifier режет lane при missing bridge bundle, missing `openai.chatgpt` bundle, disk/source version mismatch или runtime/source version mismatch, но не подменяет эти классы риска шумным default-profile extension listing.
 
@@ -2509,6 +2534,188 @@ Stage status после fresh proof-refresh 2026-04-24:
   - GitHub/public package contour is no longer the blocker;
   - OpenVSX namespace provisioning is no longer the blocker;
   - searchable install through extension registries is now blocked only by missing project license selection/materialization, and Marketplace still remains a separate registry contour.
+
+## Fresh update 2026-06-02 — bounded graph-first startup/runtime parity fix
+
+- закрыт узкий startup/runtime artifact parity defect в graph-first task restore surface:
+  - `project_task_tree` и `project_task_ledger` уже приходили в `chat_start_restore` как compact
+    summary-projections;
+  - `build_startup_runtime_state_artifact` повторно прогонял их через startup compact helpers;
+  - повторная компактизация считала отсутствующие `nodes / edges / entries` как пустые массивы и
+    превращала валидные counts в ложные `nodes_total = 0`, `entries_count = 0`,
+    `full_shape_preserved_in_working_state_restore = false`;
+  - [src/continuity.rs](../src/continuity.rs) теперь делает `compact_project_task_tree_for_startup`
+    и `compact_project_task_ledger_for_startup` idempotent для уже compacted `summary_only`
+    inputs: preserved counts/flags не пересчитываются в нули.
+- добавлен targeted regression:
+  - `compact_project_task_surfaces_preserve_already_compacted_counts`.
+- fresh local verification после фикса:
+  - `cargo test --quiet compact_project_task_surfaces_preserve_already_compacted_counts`;
+  - `cargo test --quiet compact_compact_chat_chat_start_restore_keeps_multi_line_obligations`;
+  - `cargo test --quiet startup_runtime_state_artifact`;
+  - `cargo test --quiet continuity_startup_summary_fallback_gate`;
+  - `./scripts/continuity_startup.sh --repo-root "$(pwd)" --namespace continuity --json`;
+  - `./scripts/continuity_startup_state.sh --repo-root "$(pwd)" --json`;
+  - `./scripts/proof_startup_runtime_state_fail_closed.sh`;
+  - `./scripts/proof_mcp_continuity_startup_stale_success_reconcile.sh`;
+  - `./scripts/proof_execctl_pending_return.sh`;
+  - `./scripts/proof_execctl_restore_stress.sh`;
+  - `./scripts/proof_startup_redirect_freshness.sh`;
+  - `./scripts/proof_workspace_restore_pack_hardening.sh`.
+- live startup-state after the fix now reports the Amai runtime artifact task projection as:
+  - `project_task_tree.nodes_total = 1`;
+  - `project_task_tree.edges_total = 1`;
+  - `project_task_ledger.entries_count = 256`;
+  - `project_task_ledger.historical_handoffs_count = 255`;
+  - `full_shape_preserved_in_working_state_restore = true`;
+  - `startup_runtime_state.status = ok`.
+- this update is deliberately bounded:
+  - it proves startup/runtime artifact and fallback CLI no longer corrupt compact task tree/ledger
+    counts during projection;
+  - it does not prove full graph-first restore from canonical `ami.task_nodes / ami.task_events`;
+  - current restore still contains a projection/ExecCtl baseline and must not be described as the
+    complete `AMAI_TASK_TREE_PLAN.md` graph-first implementation.
+- not counted as evidence for this bounded fix:
+  - `./scripts/proof_art_continuity_startup.sh` is currently environment-blocked because
+    `/home/art/Art` resolves to `/home/art/Archives/VPN/chimera-pq` and the expected
+    `scripts/tools/amai_art_project_bootstrap.py` helper is absent; this is an external Art harness
+    availability gap, not proof of failure in the Amai-local startup artifact fix.
+
+## Fresh update 2026-06-03 — graph-first startup/restore projection fail-closed shadow path
+
+- `working_state` startup/restore path now materializes a bounded graph-first read-model over
+  canonical `ami.task_nodes / ami.task_events`, but only as a shadow/projection surface:
+  - source-of-truth remains ExecCtl lease/ledger plus canonical SQL tables;
+  - projection metadata now explicitly carries `projection_kind`,
+    `projection_source`, `source_truth_tables`, `validation_state` and `truth_claim=false`;
+  - compact startup/MCP surfaces preserve these projection/fallback fields instead of silently
+    dropping them.
+- live control promotion is now fail-closed instead of optimistic:
+  - active node must be graph-native (`root / workline / child / proposal`), not legacy
+    `historical`;
+  - any detected `hot_historical_sql_nodes_count > 0` blocks promotion;
+  - truncated preview (`sql_nodes_total > records_preview_count`) blocks promotion;
+  - projected control surface must be invariant-equal to current ExecCtl control on
+    `active_source_event_id / required_return_task / pending_return_count /
+    execctl_resume_state / startup_next_action_kind`, otherwise startup falls back to ExecCtl.
+- cached restore snapshots no longer skip this logic:
+  - `load_recent_restore_bundle_without_live_guard` now reapplies active lease, graph projection,
+    restore execution card and workspace restore pack even when reusing a fresh snapshot;
+  - this closes the restart/reconnect defect where a recent cached snapshot could silently bypass
+    the new projection/fallback overlay.
+- fresh local/live proof on current `amai/continuity` data at that 2026-06-03 point showed the
+  expected hostile result:
+  - runtime artifact surfaces
+    `continuity_startup_summary.task_graph_projection_validation.status = fallback_to_execctl_ledger`;
+  - `projection_source = execctl_ledger_fallback`;
+  - `truth_claim = false`;
+  - current live fallback reason = `active_task_node_is_legacy_mirror_not_graph_native`;
+  - live SQL counts inside the artifact currently show heavy legacy contamination
+    (`hot_historical_sql_nodes_count = 2316`, `sql_nodes_total = 2328`, `sql_events_total = 2324`),
+    so graph projection is correctly prevented from becoming startup control truth.
+- new bounded proof contour materialized:
+  - `./scripts/proof_graph_first_startup_restore_projection.sh`
+  - it accepts either:
+    - fail-closed fallback with explicit reason and preserved ExecCtl storage lane; or
+    - clean validated projection with `control_invariant.status = passed`;
+  - in both paths it requires `truth_claim = false`.
+- targeted verification run for this slice:
+  - `cargo fmt --check`
+  - `cargo test --quiet task_graph_projection_`
+  - `cargo test --quiet compact_project_task_surfaces_preserve_already_compacted_counts`
+  - `cargo test --quiet continuity_startup_summary_surfaces_execctl_and_prompt_state`
+  - `./scripts/proof_graph_first_startup_restore_projection.sh`
+  - `./scripts/continuity_startup.sh --repo-root "$(pwd)" --namespace continuity --json`
+  - `jq '.continuity_startup_summary.task_graph_projection_validation' .amai/continuity/project-chat-startup-state.json`
+- truthful boundary after this update:
+  - this is not full graph-first startup/restore truth promotion;
+  - it is a bounded fail-closed projection lane with live hostile-data detection and explicit
+    fallback evidence;
+  - any future claim that startup already runs from graph truth must first remove legacy mirror
+    contamination and keep the new control invariants green.
+
+## Fresh refresh 2026-06-05 — current amai/continuity line now validates graph-first startup projection
+
+- the 2026-06-03 hostile fallback snapshot above is no longer the current live truth for
+  `amai/continuity`:
+  - `continuity_startup_summary.task_graph_projection_validation.status = valid`;
+  - `projection_source = graph_first_sql_validated`;
+  - `truth_claim = false`;
+  - `control_invariant.status = passed`.
+- current live SQL state now shows reconciled legacy debt excluded from the bounded startup
+  projection instead of still surfacing as hot historical contamination:
+  - `sql_nodes_total = 16`, `sql_events_total = 14`;
+  - `all_sql_nodes_total = 2412`, `all_sql_events_total = 4804`;
+  - `projection_excluded_sql_nodes_count = 2396`,
+    `deprecated_sql_nodes_count = 2396`,
+    `hot_historical_sql_nodes_count = 0`.
+- the startup artifact now surfaces those exclusion counters directly inside
+  `continuity_startup_summary.task_graph_projection_validation`, so operator truth no longer
+  requires a separate ad hoc SQL query just to see how much deprecated debt was filtered out.
+- startup-facing compact summaries now carry the same truth in a short operator form:
+  - `project_task_tree_summary` and `project_task_ledger_summary` append
+    `excluded_legacy(...)` on the validated graph-first path when deprecated/quarantined debt was
+    filtered out of projection truth.
+- compact preview pressure remains visible but does not block the validated path by itself:
+  - current runtime artifact still carries
+    `warnings.projection_preview_limited = true` and `open_preview_limited = true`;
+  - this is now a truthful compact-preview warning, not proof of truncated SQL projection, because
+    the full validated SQL set is already materialized and the control invariant still passes.
+- fresh verification for this state:
+  - `cargo test --quiet task_graph_projection_promotes_current_legacy_mirror_to_workline`;
+  - `cargo test --quiet task_graph_projection_ignores_excluded_legacy_historical_debt_after_reconcile`;
+  - `cargo test --quiet task_graph_projection_keeps_validated_state_when_only_compact_preview_is_limited`;
+  - `cargo test --quiet project_task_projection_summaries_surface_excluded_legacy_debt`;
+  - `./scripts/proof_graph_first_startup_restore_projection.sh`;
+  - `./scripts/continuity_startup.sh --repo-root "$(pwd)" --namespace continuity --json`;
+  - live SQL counts read directly from `ami.task_nodes` / `ami.task_events` for `amai/continuity`.
+- truthful boundary after this refresh:
+  - this is still not full graph-truth promotion, because startup keeps `truth_claim = false` and
+    remains a bounded validated projection over canonical SQL plus ExecCtl control invariants;
+  - however, the current repo-local continuity line is no longer blocked by legacy hot historical
+    debt and no longer truthfully belongs in the old fallback-only snapshot.
+
+## Fresh update 2026-06-03 — continuity ownership fail-closed hardening
+
+- tightened continuity ownership law beyond the initial live-lease write guard:
+  - `capture_handoff_payload` now acquires the same ExecCtl scope advisory lock before touching
+    `state/continuity-imports/*/live-handoff.md` or writing working-state side effects, so a stale
+    writer cannot win by landing the file write before the ownership check;
+  - direct `continuity handoff` now also fail-closes when the live lease is already gone but the
+    latest restore for the same handoff path still proves foreign or missing thread ownership;
+  - `refresh_same_thread_execctl_active_lease_for_startup` no longer rebinds threadless/ambiguous
+    leases, it now refuses source-event drift instead of silently swapping the active line, and it
+    now overlays the current live lease back into the returned restore bundle instead of leaving a
+    stale startup surface after a fail-closed decision;
+  - `maintain_same_thread_execctl_active_lease_for_guard` now follows the same source-event /
+    ownership rules, runs under the same advisory-lock contour, and no longer turns threadless
+    leases into foreign live ownership through the background guard path;
+  - `collect_live_current_session_budget_guard` no longer treats restore-carried `thread_id` as
+    live proof or safe shortcut for current-session reuse unless the restore already passes fresh
+    lease-bound validation.
+- hostile proof contour is now materialized as a real closure lane instead of a local ad hoc check:
+  - [scripts/proof_continuity_threadless_handoff_fail_closed.sh](../scripts/proof_continuity_threadless_handoff_fail_closed.sh)
+    now rebuilds the current release binary, uses `mktemp`-scoped evidence files, proves blocked
+    foreign overwrite of a threadless shared line, and proves that foreign `continuity startup`
+    still leaves the lease threadless instead of rebinding it;
+  - [scripts/proof_before_report.sh](../scripts/proof_before_report.sh) now includes targeted Rust
+    ownership/startup guards, [scripts/proof_startup_redirect_freshness.sh](../scripts/proof_startup_redirect_freshness.sh),
+    [scripts/proof_graph_first_startup_restore_projection.sh](../scripts/proof_graph_first_startup_restore_projection.sh),
+    and this shell hostile proof as a required non-regression part of the final report gate.
+- targeted verification for this corrective pass:
+  - `cargo test --quiet foreign_thread`
+  - `cargo test --quiet startup_refresh_`
+  - `cargo test --quiet guard_maintenance_`
+  - `cargo test --quiet startup_refresh_reloads_live_source_event_after_scope_lock_wait`
+  - `cargo test --quiet guard_maintenance_reloads_live_owner_after_scope_lock_wait`
+  - `cargo test --quiet restore_context_thread_id_hint_accepts_fresh_lease_bound_restore`
+  - `cargo test --quiet restore_context_thread_id_hint_rejects_unbound_restore_thread_id`
+  - `./scripts/proof_continuity_threadless_handoff_fail_closed.sh`
+- truthful boundary after this update:
+  - this slice closes foreign-thread / threadless ambiguity across write, startup and guard paths;
+  - same-thread same-scope competing handoff now fails closed unless the caller sets `promote_active_workline`;
+  - it still does not materialize a separate non-promoting same-scope side/private lane;
+  - side-agent/private work on the same thread still requires a distinct `AMAI_AGENT_SCOPE`.
 
 ## Что агент должен делать прямо сейчас
 

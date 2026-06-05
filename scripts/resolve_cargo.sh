@@ -1,23 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+rustup_timeout_seconds="${AMAI_RUSTUP_REPAIR_TIMEOUT_SECONDS:-30}"
+cargo_check_timeout_seconds="${AMAI_CARGO_CHECK_TIMEOUT_SECONDS:-20}"
+
+run_bounded() {
+  local timeout_seconds="$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --preserve-status --kill-after=5s "${timeout_seconds}s" "$@"
+    return $?
+  fi
+  "$@"
+}
+
 ensure_default_rustup_toolchain() {
   command -v rustup >/dev/null 2>&1 || return 1
-  rustup show active-toolchain >/dev/null 2>&1 || true
-  rustup default stable >/dev/null 2>&1 || true
-  rustup toolchain install stable >/dev/null 2>&1 || true
-  rustup default stable >/dev/null 2>&1
+  run_bounded "${rustup_timeout_seconds}" rustup show active-toolchain >/dev/null 2>&1 || true
+  run_bounded "${rustup_timeout_seconds}" rustup default stable >/dev/null 2>&1 || true
+  run_bounded "${rustup_timeout_seconds}" rustup toolchain install stable >/dev/null 2>&1 || true
+  run_bounded "${rustup_timeout_seconds}" rustup default stable >/dev/null 2>&1
 }
 
 candidate_works() {
   local candidate="$1"
   [[ -n "${candidate}" ]] || return 1
   [[ -x "${candidate}" ]] || return 1
-  if "${candidate}" --version >/dev/null 2>&1; then
+  if run_bounded "${cargo_check_timeout_seconds}" "${candidate}" --version >/dev/null 2>&1; then
     return 0
   fi
   ensure_default_rustup_toolchain || return 1
-  "${candidate}" --version >/dev/null 2>&1
+  run_bounded "${cargo_check_timeout_seconds}" "${candidate}" --version >/dev/null 2>&1
 }
 
 if [[ -n "${AMAI_CARGO_BIN:-}" ]] && candidate_works "${AMAI_CARGO_BIN}"; then

@@ -12,6 +12,8 @@ use tokio::process::Command as ProcessCommand;
 pub(super) const COMPACT_CHAT_AUTO_LAUNCH_ENV: &str = "AMAI_COMPACT_CHAT_AUTO_LAUNCH";
 const COMPACT_CHAT_BRIDGE_RESULT_RELATIVE_PATH: &str =
     ".amai/continuity/compact-chat-launch-result.json";
+const COMPACT_CHAT_BRIDGE_REQUEST_RELATIVE_PATH: &str =
+    ".amai/onboarding/vscode-public-bridge-request.json";
 const COMPACT_CHAT_BRIDGE_LIVE_STATE_RELATIVE_PATH: &str =
     ".amai/onboarding/vscode-public-bridge-live-state.json";
 const VSCODE_AMAI_BRIDGE_URI_AUTHORITY: &str = "amai.amai-vscode-bridge";
@@ -267,6 +269,28 @@ fn build_vscode_public_bridge_uri(
     )
 }
 
+fn compact_chat_bridge_request_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(COMPACT_CHAT_BRIDGE_REQUEST_RELATIVE_PATH)
+}
+
+fn build_vscode_public_bridge_request_json(
+    repo_root: &Path,
+    prompt_path: &Path,
+    result_path: &Path,
+    target: &str,
+) -> String {
+    json!({
+        "kind": "open-clean-chat",
+        "prompt_file": prompt_path.display().to_string(),
+        "result_file": result_path.display().to_string(),
+        "repo_root": repo_root.display().to_string(),
+        "target": target,
+        "auto_submit": true,
+        "source_uri_text": build_vscode_public_bridge_uri(repo_root, prompt_path, result_path, target),
+    })
+    .to_string()
+}
+
 fn build_vscode_public_bridge_launch_command(
     vscode_binary: Option<&str>,
     uri_open_command: Option<&str>,
@@ -275,16 +299,29 @@ fn build_vscode_public_bridge_launch_command(
     result_path: &Path,
     target: &str,
 ) -> String {
-    let uri = build_vscode_public_bridge_uri(repo_root, prompt_path, result_path, target);
+    let request_path = compact_chat_bridge_request_path(repo_root);
+    let request_json =
+        build_vscode_public_bridge_request_json(repo_root, prompt_path, result_path, target);
     if let Some(vscode_binary) = vscode_binary
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
         return format!(
-            "cd {} && {} --open-url {}",
+            "cd {} && mkdir -p {} && tmp_request=$(mktemp {}) && printf %s {} > \"$tmp_request\" && mv \"$tmp_request\" {} && {} --new-window {}",
             shell_quote(&repo_root.display().to_string()),
+            shell_quote(
+                request_path
+                    .parent()
+                    .expect("compact bridge request path parent")
+                    .display()
+                    .to_string()
+                    .as_str(),
+            ),
+            shell_quote("amai-vscode-bridge-request.XXXXXX"),
+            shell_quote(&request_json),
+            shell_quote(&request_path.display().to_string()),
             shell_quote(vscode_binary),
-            shell_quote(&uri),
+            shell_quote(&repo_root.display().to_string()),
         );
     }
     let uri_open_command = uri_open_command
@@ -292,10 +329,21 @@ fn build_vscode_public_bridge_launch_command(
         .filter(|value| !value.is_empty())
         .unwrap_or("xdg-open");
     format!(
-        "cd {} && {} {}",
+        "cd {} && mkdir -p {} && tmp_request=$(mktemp {}) && printf %s {} > \"$tmp_request\" && mv \"$tmp_request\" {} && {} {}",
         shell_quote(&repo_root.display().to_string()),
+        shell_quote(
+            request_path
+                .parent()
+                .expect("compact bridge request path parent")
+                .display()
+                .to_string()
+                .as_str(),
+        ),
+        shell_quote("amai-vscode-bridge-request.XXXXXX"),
+        shell_quote(&request_json),
+        shell_quote(&request_path.display().to_string()),
         shell_quote(uri_open_command),
-        shell_quote(&uri),
+        shell_quote(&repo_root.display().to_string()),
     )
 }
 

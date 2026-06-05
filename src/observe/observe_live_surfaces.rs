@@ -333,7 +333,8 @@ pub(super) async fn maybe_refresh_client_live_meter(state: &ObserveState) -> Res
     }
 
     let cached_meter = cached_client_live_meter_state(&snapshot);
-    let preferred_thread_id = codex_threads::current_thread_id()
+    let preferred_thread_id = codex_threads::current_thread_id_result()
+        .map_err(anyhow::Error::from)?
         .or_else(|| cached_meter.working_state_thread_id.clone())
         .or_else(|| cached_meter.thread_id.clone());
     let Some(thread_id) = preferred_thread_id else {

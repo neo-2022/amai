@@ -196,6 +196,7 @@ Exact statistical methods для `v1`:
 - выбирать другой статистический метод молча, если он не описан здесь.
 
 Обязательный proof bundle:
+- `./scripts/proof_benchmark_contamination_preflight.sh`
 - `./scripts/proof_memory_task_matrix.sh`
 - `./scripts/proof_mcp_task_matrix.sh`
 - `./scripts/proof_observability.sh`
@@ -204,7 +205,9 @@ Exact statistical methods для `v1`:
 Выход из Queue 1:
 - benchmark contours публикуют `statistics` block;
 - benchmark surfaces без статистического блока fail-closed не выдают promotable verdict;
-- dashboard и observe не расходятся с raw payload truth.
+- `score_distribution_drift` surfaced как measured для score-bearing payloads и как `not_applicable` для payload kinds без score;
+- dashboard и observe не расходятся с raw payload truth;
+- dashboard `Memory task matrix compare` и `MCP task matrix compare` fail-closed, если после matrix proof path карточка всё ещё показывает missing baseline pair вместо measured compare + pending human review.
 
 #### Queue 2. Lifecycle transition discipline
 

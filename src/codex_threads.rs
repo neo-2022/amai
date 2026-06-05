@@ -352,24 +352,50 @@ struct CachedThreadRecordById {
 }
 
 pub fn current_thread_id() -> Option<String> {
-    env::var("CODEX_THREAD_ID")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    crate::thread_binding::current_thread_id()
+}
+
+pub fn current_thread_id_result()
+-> Result<Option<String>, crate::thread_binding::ThreadBindingConflict> {
+    crate::thread_binding::current_thread_id_result()
+}
+
+fn current_thread_id_checked() -> Result<Option<String>> {
+    current_thread_id_result().map_err(anyhow::Error::from)
 }
 
 fn thread_record_matches_repo_root(record: &ThreadRecord, repo_root: &str) -> bool {
     record.cwd == repo_root || record.cwd.starts_with(&format!("{repo_root}/"))
 }
 
-pub fn preferred_thread_id_for_repo(repo_root: &str) -> Result<Option<String>> {
-    if let Some(current_thread_id) = current_thread_id().as_deref()
-        && let Some(record) = thread_record_by_id(current_thread_id)?
-        && thread_record_matches_repo_root(&record, repo_root)
+fn preferred_thread_id_for_repo_record(
+    repo_root: &str,
+    current_thread_id: Option<&str>,
+    current_record: Option<&ThreadRecord>,
+) -> Option<String> {
+    let current_thread_id = current_thread_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let record = current_record?;
+    if record.thread_id != current_thread_id || !thread_record_matches_repo_root(record, repo_root)
     {
-        return Ok(Some(record.thread_id));
+        return None;
     }
-    Ok(current_thread_record(repo_root, None)?.map(|record| record.thread_id))
+    Some(record.thread_id.clone())
+}
+
+pub fn preferred_thread_id_for_repo(repo_root: &str) -> Result<Option<String>> {
+    let current_thread_id = current_thread_id_checked()?;
+    let current_record = if let Some(thread_id) = current_thread_id.as_deref() {
+        thread_record_by_id(thread_id)?
+    } else {
+        None
+    };
+    Ok(preferred_thread_id_for_repo_record(
+        repo_root,
+        current_thread_id.as_deref(),
+        current_record.as_ref(),
+    ))
 }
 
 pub fn derive_thread_index_summary(
@@ -415,8 +441,8 @@ pub fn nth_previous_chat_tail(
     count: usize,
 ) -> Result<Option<ChatTail>> {
     let offset = offset.max(1);
-    if let Some(record) = previous_thread_record(repo_root, current_thread_id().as_deref(), offset)?
-    {
+    let current_thread_id = current_thread_id_checked()?;
+    if let Some(record) = previous_thread_record(repo_root, current_thread_id.as_deref(), offset)? {
         return build_previous_chat_tail(
             &record.thread_id,
             &record.title,
@@ -437,14 +463,13 @@ pub fn nth_previous_chat_tail(
     index
         .threads
         .sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
-    let current_thread = current_thread_id();
     let Some(entry) = index
         .threads
         .into_iter()
         .rev()
         .filter(|item| {
             item.cwd.starts_with(repo_root)
-                && Some(item.thread_id.as_str()) != current_thread.as_deref()
+                && Some(item.thread_id.as_str()) != current_thread_id.as_deref()
         })
         .nth(offset.saturating_sub(1))
     else {
@@ -505,7 +530,8 @@ pub fn nth_previous_chat_tail(
 }
 
 pub fn current_chat_tail(repo_root: &str, count: usize) -> Result<Option<ChatTail>> {
-    if let Some(record) = current_thread_record(repo_root, current_thread_id().as_deref())? {
+    let current_thread_id = current_thread_id_checked()?;
+    if let Some(record) = current_thread_record(repo_root, current_thread_id.as_deref())? {
         return build_previous_chat_tail(
             &record.thread_id,
             &record.title,
@@ -526,8 +552,7 @@ pub fn current_chat_tail(repo_root: &str, count: usize) -> Result<Option<ChatTai
     index
         .threads
         .sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
-    let current_thread = current_thread_id();
-    let entry = if let Some(current_thread) = current_thread.as_deref() {
+    let entry = if let Some(current_thread) = current_thread_id.as_deref() {
         index
             .threads
             .into_iter()
@@ -1254,7 +1279,7 @@ pub fn latest_rollout_client_meter_observation(
         let thread_id = rollout_thread_id_from_path(&path).unwrap_or_default();
         (thread_id, path)
     } else {
-        let current_thread_id = current_thread_id();
+        let current_thread_id = current_thread_id_checked()?;
         let record =
             current_thread_record(repo_root, current_thread_id.as_deref())?.or_else(|| {
                 if current_thread_id.is_some() {
@@ -1286,7 +1311,8 @@ pub fn rollout_assistant_generation_observations(
         let thread_id = rollout_thread_id_from_path(&path).unwrap_or_default();
         (thread_id, path)
     } else {
-        let Some(record) = current_thread_record(repo_root, current_thread_id().as_deref())? else {
+        let current_thread_id = current_thread_id_checked()?;
+        let Some(record) = current_thread_record(repo_root, current_thread_id.as_deref())? else {
             return Ok(Vec::new());
         };
         if record.rollout_path.is_empty() {
@@ -1333,7 +1359,8 @@ pub fn latest_rollout_context_compaction_observation_for_thread(
 }
 
 pub fn current_rollout_source_signature(repo_root: &str) -> Result<Option<String>> {
-    let Some(record) = current_thread_record(repo_root, current_thread_id().as_deref())? else {
+    let current_thread_id = current_thread_id_checked()?;
+    let Some(record) = current_thread_record(repo_root, current_thread_id.as_deref())? else {
         return Ok(None);
     };
     if record.rollout_path.is_empty() {
@@ -3828,11 +3855,50 @@ mod tests {
         select_tail_messages, time_slice_matches_exact_time,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
+    use crate::thread_binding::{LEGACY_CODEX_THREAD_ID_ENV, PLATFORM_THREAD_ID_ENV};
     use proptest::prelude::*;
     use serde_json::json;
     use std::fs;
     use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
     use uuid::Uuid;
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("codex-threads env lock")
+    }
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match self.previous.as_deref() {
+                Some(value) => unsafe {
+                    std::env::set_var(self.key, value);
+                },
+                None => unsafe {
+                    std::env::remove_var(self.key);
+                },
+            }
+        }
+    }
 
     #[test]
     fn parse_role_heading_accepts_only_user_and_assistant() {
@@ -5306,5 +5372,91 @@ mod tests {
         fs::write(&db_path, b"sqlite-updated").expect("mutate sqlite temp file");
         assert!(super::cached_thread_record_by_id(&db_path, "thread-current").is_none());
         let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn preferred_thread_id_for_repo_record_requires_live_thread_binding() {
+        let record = super::ThreadRecord {
+            thread_id: "thread-current".to_string(),
+            title: "Current".to_string(),
+            cwd: "/home/art/agent-memory-index".to_string(),
+            first_user_message: "hi".to_string(),
+            rollout_path: "/tmp/rollout.jsonl".to_string(),
+            created_at_epoch_s: 1,
+            updated_at_epoch_s: 2,
+        };
+        assert_eq!(
+            super::preferred_thread_id_for_repo_record(
+                "/home/art/agent-memory-index",
+                None,
+                Some(&record),
+            ),
+            None
+        );
+        assert_eq!(
+            super::preferred_thread_id_for_repo_record(
+                "/home/art/agent-memory-index",
+                Some("thread-other"),
+                Some(&record),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn preferred_thread_id_for_repo_record_accepts_same_thread_same_repo_binding() {
+        let record = super::ThreadRecord {
+            thread_id: "thread-current".to_string(),
+            title: "Current".to_string(),
+            cwd: "/home/art/agent-memory-index".to_string(),
+            first_user_message: "hi".to_string(),
+            rollout_path: "/tmp/rollout.jsonl".to_string(),
+            created_at_epoch_s: 1,
+            updated_at_epoch_s: 2,
+        };
+        assert_eq!(
+            super::preferred_thread_id_for_repo_record(
+                "/home/art/agent-memory-index",
+                Some("thread-current"),
+                Some(&record),
+            )
+            .as_deref(),
+            Some("thread-current")
+        );
+        assert_eq!(
+            super::preferred_thread_id_for_repo_record(
+                "/home/art/other-project",
+                Some("thread-current"),
+                Some(&record),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn preferred_thread_id_for_repo_rejects_conflicting_thread_aliases() {
+        let _guard = env_lock();
+        let _platform = ScopedEnvVar::set(PLATFORM_THREAD_ID_ENV, "thread-a");
+        let _legacy = ScopedEnvVar::set(LEGACY_CODEX_THREAD_ID_ENV, "thread-b");
+        assert!(super::preferred_thread_id_for_repo("/home/art/agent-memory-index").is_err());
+    }
+
+    #[test]
+    fn current_chat_tail_rejects_conflicting_thread_aliases() {
+        let _guard = env_lock();
+        let _platform = ScopedEnvVar::set(PLATFORM_THREAD_ID_ENV, "thread-a");
+        let _legacy = ScopedEnvVar::set(LEGACY_CODEX_THREAD_ID_ENV, "thread-b");
+        assert!(super::current_chat_tail("/home/art/agent-memory-index", 2).is_err());
+    }
+
+    #[test]
+    fn latest_rollout_client_meter_observation_rejects_conflicting_thread_aliases() {
+        let _guard = env_lock();
+        let _platform = ScopedEnvVar::set(PLATFORM_THREAD_ID_ENV, "thread-a");
+        let _legacy = ScopedEnvVar::set(LEGACY_CODEX_THREAD_ID_ENV, "thread-b");
+        assert!(
+            super::latest_rollout_client_meter_observation("/home/art/agent-memory-index", None)
+                .is_err()
+        );
     }
 }

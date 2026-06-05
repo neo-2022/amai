@@ -4536,6 +4536,14 @@ CREATE INDEX IF NOT EXISTS idx_ami_observability_working_state_context_pack_crea
     WHERE snapshot_kind = 'working_state_event'
       AND payload #>> '{working_state_event,event_kind}' = 'retrieval_context_pack'
       AND payload #>> '{working_state_event,context_pack_id}' IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_ami_observability_legacy_working_state_restore_project_created
+    ON ami.observability_snapshots(
+        (payload #>> '{working_state_restore,project,code}'),
+        created_at DESC
+    )
+    WHERE snapshot_kind = 'working_state_restore'
+      AND scope_project_code IS NULL
+      AND scope_namespace_code IS NULL;
 
 CREATE OR REPLACE VIEW ami.project_links AS
 SELECT

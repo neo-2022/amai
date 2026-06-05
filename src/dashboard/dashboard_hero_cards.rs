@@ -1075,6 +1075,7 @@ fn build_current_session_hero_card(snapshot: &Value) -> Value {
             same_thread_compaction_preferred,
             host_current_thread_control["thread_id"].as_str(),
             host_current_thread_control["command_id"].as_str(),
+            None,
         )
     });
     if let Some(sentence) =

@@ -534,6 +534,7 @@ pub(super) async fn bootstrap_schema_is_current(client: &Client) -> Result<bool>
                 )
                 AND to_regclass('ami.idx_ami_observability_snapshots_kind_event_key') IS NOT NULL
                 AND to_regclass('ami.idx_ami_observability_working_state_retrieval_thread_captured') IS NOT NULL
+                AND to_regclass('ami.idx_ami_observability_legacy_working_state_restore_project_created') IS NOT NULL
             "#,
             &[],
         )

@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Command as ProcessCommand;
 use uuid::Uuid;
 
@@ -151,6 +151,10 @@ async fn run_matrix_inner(
 ) -> Result<()> {
     let db = postgres::connect_admin(cfg).await?;
     let matrix_run_id = Uuid::new_v4();
+    let captured_at_epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_millis() as u64;
     let mut task_results = Vec::with_capacity(ordered_tasks.len());
 
     for (task_code, task) in ordered_tasks {
@@ -233,6 +237,7 @@ async fn run_matrix_inner(
             "source_kind": "mcp_task_matrix_run",
             "scope_project_code": "amai",
             "scope_namespace_code": args.matrix,
+            "captured_at_epoch_ms": captured_at_epoch_ms,
         },
         "mcp_task_matrix": {
             "matrix": args.matrix,

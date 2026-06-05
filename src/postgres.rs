@@ -23,6 +23,16 @@ static BOOTSTRAP_SCHEMA_CACHE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new(
 #[cfg(test)]
 static OBSERVABILITY_PROFILE_TEST_LOGS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
+pub(crate) fn execctl_task_lease_advisory_lock_key(namespace_id: Uuid, agent_scope: &str) -> i64 {
+    let mut hasher = Sha256::new();
+    hasher.update(namespace_id.as_bytes());
+    hasher.update(agent_scope.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    i64::from_be_bytes(bytes)
+}
+
 #[path = "postgres/postgres_bootstrap_runtime.rs"]
 mod postgres_bootstrap_runtime;
 #[path = "postgres/postgres_context_provenance.rs"]

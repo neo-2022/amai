@@ -881,6 +881,7 @@ pub(super) async fn continuity_handoff_api_handler(
             request.resolve_current_goal,
             &request.resolved_headlines,
             &request.resolved_task_ids,
+            request.promote_active_workline,
         )
         .await?;
         Ok(json!({

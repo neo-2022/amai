@@ -5,9 +5,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 cd "${REPO_ROOT}"
+source "${SCRIPT_DIR}/load_env.sh"
 
 cache_path="${REPO_ROOT}/state/observe/client_budget_gate_cache.json"
-thread_cache_path="${REPO_ROOT}/state/observe/client_budget_gate_cache.thread-${CODEX_THREAD_ID:-}.json"
+resolved_thread_id="$(resolve_amai_thread_id_or_empty_from_env)"
+thread_cache_path="${REPO_ROOT}/state/observe/client_budget_gate_cache.thread-${resolved_thread_id}.json"
 startup_contract_path="${REPO_ROOT}/.amai/onboarding/project-chat-startup-contract.json"
 tmpdir="$(mktemp -d)"
 
@@ -17,7 +19,7 @@ cleanup() {
   else
     rm -f "${cache_path}"
   fi
-  if [[ -n "${CODEX_THREAD_ID:-}" ]]; then
+  if [[ -n "${resolved_thread_id}" ]]; then
     if [[ -f "${tmpdir}/thread_cache" ]]; then
       mv "${tmpdir}/thread_cache" "${thread_cache_path}"
     else
@@ -35,7 +37,7 @@ cleanup() {
 trap cleanup EXIT
 
 [[ -f "${cache_path}" ]] && mv "${cache_path}" "${tmpdir}/cache"
-if [[ -n "${CODEX_THREAD_ID:-}" ]] && [[ -f "${thread_cache_path}" ]]; then
+if [[ -n "${resolved_thread_id}" ]] && [[ -f "${thread_cache_path}" ]]; then
   mv "${thread_cache_path}" "${tmpdir}/thread_cache"
 fi
 mv "${SCRIPT_DIR}/client_budget_gate.sh" "${tmpdir}/client_budget_gate.sh"
@@ -55,7 +57,7 @@ chmod +x "${SCRIPT_DIR}/client_budget_gate.sh"
 
 set +e
 output="$(
-  env -u CODEX_THREAD_ID \
+  env -u AMAI_PLATFORM_THREAD_ID -u CODEX_THREAD_ID \
     AMI_OBSERVE_BIND=127.0.0.1:1 \
     "${SCRIPT_DIR}/client_budget_reply_gate.sh" 2>&1
 )"

@@ -118,13 +118,8 @@ pub(super) async fn current_workspace_personal_kpi_selector(
     let Ok(project) = postgres::get_project_by_repo_root(db, &repo_root_display).await else {
         return Ok(None);
     };
-    let snapshot = postgres::latest_observability_snapshot_for_project(
-        db,
-        "working_state_restore",
-        "working_state_restore",
-        &project.code,
-    )
-    .await?;
+    let snapshot =
+        postgres::latest_working_state_restore_snapshot_for_project(db, &project.code).await?;
     let namespace_code = snapshot
         .as_ref()
         .and_then(|value| value["working_state_restore"]["namespace"]["code"].as_str())
@@ -132,7 +127,8 @@ pub(super) async fn current_workspace_personal_kpi_selector(
         .filter(|value| !value.is_empty())
         .unwrap_or("continuity")
         .to_string();
-    let agent_scope = working_state::current_agent_scope_for(&project.code, &namespace_code);
+    let agent_scope =
+        working_state::current_agent_scope_for_result(&project.code, &namespace_code)?;
     let thread_id = preferred_dashboard_thread_binding_hint_with_override(
         db,
         repo_root,

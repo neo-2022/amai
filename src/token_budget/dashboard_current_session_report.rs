@@ -570,6 +570,7 @@ pub(crate) async fn collect_live_current_session_budget_guard(
     let now_epoch_ms = current_epoch_ms().unwrap_or_default() as u64;
 
     if let Some(thread_id) = explicit_thread_id_hint
+        .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         && let Some(snapshot) = load_shared_thread_bound_budget_snapshot(
@@ -585,16 +586,12 @@ pub(crate) async fn collect_live_current_session_budget_guard(
         })));
     }
 
-    working_state::maintain_same_thread_execctl_active_lease_for_guard(
-        db,
-        restore_context,
-        explicit_thread_id_hint,
-    )
-    .await?;
+    working_state::maintain_same_thread_execctl_active_lease_for_guard(db, restore_context, None)
+        .await?;
     let report = collect_dashboard_current_session_budget_report_with_thread_hint_and_base(
         db,
         None,
-        explicit_thread_id_hint,
+        explicit_thread_id_hint.as_deref(),
     )
     .await?;
     let snapshot = json!({
@@ -606,15 +603,16 @@ pub(crate) async fn collect_live_current_session_budget_guard(
     Ok(dashboard::current_session_budget_guard(&snapshot))
 }
 
-pub(super) fn restore_context_thread_id_hint(restore_context: Option<&Value>) -> Option<&str> {
-    restore_context
-        .and_then(|value| {
-            value["working_state_restore"]["thread_id"]
-                .as_str()
-                .or_else(|| value["thread_id"].as_str())
-        })
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+pub(super) fn restore_context_thread_id_hint(restore_context: Option<&Value>) -> Option<String> {
+    let restore = restore_context.and_then(|value| {
+        value
+            .get("working_state_restore")
+            .filter(|node| node.is_object())
+            .or_else(|| value.as_object().map(|_| value))
+    })?;
+    super::token_budget_runtime_event_flow::dashboard_thread_binding_hint_from_working_state_restore(
+        restore,
+    )
 }
 
 #[cfg(test)]
@@ -1179,30 +1177,32 @@ mod tests {
     }
 
     #[test]
-    fn restore_context_thread_id_hint_prefers_working_state_restore_thread_id() {
+    fn restore_context_thread_id_hint_accepts_fresh_lease_bound_restore() {
         let restore = json!({
-            "thread_id": "thread-fallback",
             "working_state_restore": {
-                "thread_id": "thread-current"
+                "restore_freshness_state": "fresh",
+                "thread_id": "thread-current",
+                "session_id": "session-current",
+                "execctl_active_lease": {
+                    "lease_state": "active",
+                    "owner_thread_id": "thread-current",
+                    "owner_session_id": "session-current"
+                }
             }
         });
 
         assert_eq!(
             restore_context_thread_id_hint(Some(&restore)),
-            Some("thread-current")
+            Some("thread-current".to_string())
         );
     }
 
     #[test]
-    fn restore_context_thread_id_hint_falls_back_to_root_thread_id() {
+    fn restore_context_thread_id_hint_rejects_unbound_restore_thread_id() {
         let restore = json!({
-            "thread_id": "thread-fallback",
             "working_state_restore": {}
         });
 
-        assert_eq!(
-            restore_context_thread_id_hint(Some(&restore)),
-            Some("thread-fallback")
-        );
+        assert_eq!(restore_context_thread_id_hint(Some(&restore)), None);
     }
 }

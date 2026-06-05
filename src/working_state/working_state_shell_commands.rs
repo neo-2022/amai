@@ -127,6 +127,7 @@ pub(super) fn build_workspace_aware_handoff_command(
             headline,
             "--next-step",
             next_step,
+            "--promote-active-workline",
         ]));
     }
     let project_code = project_code.filter(|value| !value.is_empty())?;
@@ -143,5 +144,6 @@ pub(super) fn build_workspace_aware_handoff_command(
         headline,
         "--next-step",
         next_step,
+        "--promote-active-workline",
     ]))
 }

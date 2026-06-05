@@ -308,15 +308,8 @@ marker_payload="$(
         ($ss.gate_semantics_consistent == true
          and $ss.startup_execution_gate.must_read_prompt_text_before_reply == true
          and $ss.startup_execution_gate.no_silent_drop == true
-         and (
-           (($ss.startup_execution_gate.action_kind // "") == "continue_active_workline"
-            and ($ss.startup_execution_gate.blocking // false) == false
-            and ($ss.startup_execution_gate.must_follow_startup_next_action // false) == false
-           and ($ss.startup_execution_gate.unrelated_work_allowed // false) == true)
-           or
-           (($ss.startup_execution_gate.must_follow_startup_next_action // false) == true
-            and $ss.startup_execution_gate.unrelated_work_allowed == false)
-         )),
+         and (($ss.startup_execution_gate.must_follow_startup_next_action // false) == true)
+         and $ss.startup_execution_gate.unrelated_work_allowed == false),
       exact_prefix_drift_within_tolerance:
         ($prefix_drift_abs == null or $prefix_drift_abs <= $prefix_drift_tolerance_percent),
       reply_gate_present:

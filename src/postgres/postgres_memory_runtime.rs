@@ -2439,6 +2439,482 @@ pub async fn get_task_event(client: &Client, task_event_id: Uuid) -> Result<Task
     Ok(task_event_record_from_row(&row))
 }
 
+pub async fn list_task_graph_restore_projection_nodes(
+    client: &Client,
+    project_id: Uuid,
+    namespace_id: Uuid,
+    limit: i64,
+) -> Result<Vec<TaskGraphRestoreProjectionNodeRecord>> {
+    let rows = client
+        .query(
+            r#"
+            SELECT
+                tn.task_node_id,
+                w.code,
+                p.code,
+                n.code,
+                tn.parent_task_node_id,
+                tn.memory_item_id,
+                tn.task_key,
+                tn.task_role,
+                tn.headline,
+                tn.summary,
+                tn.next_step,
+                tn.execution_state,
+                tn.lifecycle_state,
+                tn.confidence,
+                tn.current_score,
+                tn.reopened_count,
+                tn.child_count,
+                tn.closed_child_count,
+                tn.pending_return_count,
+                tn.source_event_ids,
+                tn.artifact_refs,
+                tn.evidence_span,
+                tn.candidate_class,
+                tn.derivation_kind,
+                tn.source_kind,
+                tn.hot_path_write_eligible,
+                tn.background_consolidation_recommended,
+                tn.status_payload,
+                tn.metadata,
+                tn.opened_at_epoch_ms,
+                tn.closed_at_epoch_ms,
+                tn.archived_at_epoch_ms,
+                COALESCE(te_stats.event_count, 0)::bigint AS event_count,
+                te_latest.event_kind AS latest_event_kind,
+                te_latest.recorded_at_epoch_ms AS latest_event_recorded_at_epoch_ms
+            FROM ami.task_nodes tn
+            JOIN ami.workspaces w ON w.workspace_id = tn.workspace_id
+            JOIN ami.projects p ON p.project_id = tn.project_id
+            LEFT JOIN ami.namespaces n ON n.namespace_id = tn.namespace_id
+            LEFT JOIN LATERAL (
+                SELECT count(*)::bigint AS event_count
+                FROM ami.task_events te
+                WHERE te.task_node_id = tn.task_node_id
+                  AND te.project_id = tn.project_id
+                  AND te.namespace_id IS NOT DISTINCT FROM tn.namespace_id
+            ) te_stats ON true
+            LEFT JOIN LATERAL (
+                SELECT te.event_kind, te.recorded_at_epoch_ms
+                FROM ami.task_events te
+                WHERE te.task_node_id = tn.task_node_id
+                  AND te.project_id = tn.project_id
+                  AND te.namespace_id IS NOT DISTINCT FROM tn.namespace_id
+                ORDER BY te.recorded_at_epoch_ms DESC NULLS LAST, te.created_at DESC
+                LIMIT 1
+            ) te_latest ON true
+            WHERE tn.project_id = $1
+              AND tn.namespace_id = $2
+              AND tn.lifecycle_state NOT IN ('deprecated', 'quarantined')
+            ORDER BY
+                CASE
+                    WHEN tn.lifecycle_state = 'hot' AND tn.execution_state = 'active' THEN 0
+                    WHEN tn.lifecycle_state = 'hot' THEN 1
+                    WHEN tn.lifecycle_state = 'closed' THEN 2
+                    WHEN tn.lifecycle_state = 'archived' THEN 3
+                    ELSE 4
+                END,
+                COALESCE(tn.opened_at_epoch_ms, tn.closed_at_epoch_ms, tn.archived_at_epoch_ms, 0) DESC,
+                tn.updated_at DESC
+            LIMIT $3
+            "#,
+            &[&project_id, &namespace_id, &limit],
+        )
+        .await
+        .context("failed to list task graph restore projection nodes")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| TaskGraphRestoreProjectionNodeRecord {
+            task_node: task_node_record_from_row(&row),
+            event_count: row.get(32),
+            latest_event_kind: row.get(33),
+            latest_event_recorded_at_epoch_ms: row.get(34),
+        })
+        .collect())
+}
+
+pub async fn task_graph_restore_projection_counts(
+    client: &Client,
+    project_id: Uuid,
+    namespace_id: Uuid,
+) -> Result<Value> {
+    let row = client
+        .query_one(
+            r#"
+            SELECT jsonb_build_object(
+                'sql_nodes_total', count(*) FILTER (
+                    WHERE lifecycle_state NOT IN ('deprecated', 'quarantined')
+                )::bigint,
+                'all_sql_nodes_total', count(*)::bigint,
+                'projection_excluded_sql_nodes_count', count(*) FILTER (
+                    WHERE lifecycle_state IN ('deprecated', 'quarantined')
+                )::bigint,
+                'deprecated_sql_nodes_count', count(*) FILTER (
+                    WHERE lifecycle_state = 'deprecated'
+                )::bigint,
+                'quarantined_sql_nodes_count', count(*) FILTER (
+                    WHERE lifecycle_state = 'quarantined'
+                )::bigint,
+                'hot_active_sql_nodes_count', count(*) FILTER (
+                    WHERE lifecycle_state = 'hot'
+                      AND execution_state = 'active'
+                )::bigint,
+                'hot_historical_sql_nodes_count', count(*) FILTER (
+                    WHERE lifecycle_state = 'hot'
+                      AND task_role = 'historical'
+                )::bigint,
+                'hot_open_sql_nodes_count', count(*) FILTER (
+                    WHERE lifecycle_state = 'hot'
+                      AND task_role IN ('root', 'workline', 'child', 'proposal')
+                      AND execution_state NOT IN ('done', 'failed', 'canceled', 'superseded')
+                )::bigint,
+                'closed_sql_nodes_count', count(*) FILTER (
+                    WHERE lifecycle_state = 'closed'
+                )::bigint,
+                'archived_sql_nodes_count', count(*) FILTER (
+                    WHERE lifecycle_state = 'archived'
+                )::bigint,
+                'sql_events_total', (
+                    SELECT count(*)::bigint
+                    FROM ami.task_events te
+                    JOIN ami.task_nodes tn
+                      ON tn.task_node_id = te.task_node_id
+                     AND tn.project_id = te.project_id
+                     AND tn.namespace_id IS NOT DISTINCT FROM te.namespace_id
+                    WHERE te.project_id = $1
+                      AND te.namespace_id = $2
+                      AND tn.lifecycle_state NOT IN ('deprecated', 'quarantined')
+                ),
+                'all_sql_events_total', (
+                    SELECT count(*)::bigint
+                    FROM ami.task_events te
+                    WHERE te.project_id = $1
+                      AND te.namespace_id = $2
+                )
+            )
+            FROM ami.task_nodes
+            WHERE project_id = $1
+              AND namespace_id = $2
+            "#,
+            &[&project_id, &namespace_id],
+        )
+        .await
+        .context("failed to aggregate task graph restore projection counts")?;
+    Ok(row.get(0))
+}
+
+pub async fn reconcile_legacy_continuity_handoff_task_mirrors(
+    client: &Client,
+    project_id: Uuid,
+    namespace_id: Uuid,
+    source_snapshot_id: Uuid,
+    replacement_source_event_id: &str,
+    recorded_at_epoch_ms: i64,
+) -> Result<u64> {
+    let rows = client
+        .query(
+            r#"
+            WITH target_nodes AS (
+                SELECT
+                    tn.task_node_id,
+                    tn.workspace_id,
+                    tn.project_id,
+                    tn.namespace_id,
+                    tn.execution_state,
+                    tn.lifecycle_state,
+                    tn.artifact_refs,
+                    COALESCE(
+                        NULLIF(tn.status_payload ->> 'source_event_id', ''),
+                        NULLIF(tn.task_key, '')
+                    ) AS legacy_source_event_id
+                FROM ami.task_nodes tn
+                WHERE tn.project_id = $1
+                  AND tn.namespace_id = $2
+                  AND tn.lifecycle_state = 'hot'
+                  AND tn.task_role = 'historical'
+                  AND COALESCE(
+                        NULLIF(tn.source_kind, ''),
+                        NULLIF(tn.status_payload ->> 'source_kind', ''),
+                        NULLIF(tn.metadata ->> 'source_kind', '')
+                  ) = 'continuity_handoff'
+                  AND COALESCE(tn.metadata ->> 'materialized_from', '') = 'execctl_task_ledger_entry'
+                  AND COALESCE(
+                        NULLIF(tn.status_payload ->> 'source_event_id', ''),
+                        NULLIF(tn.task_key, ''),
+                        ''
+                  ) <> $4
+            ),
+            inserted_events AS (
+                INSERT INTO ami.task_events(
+                    workspace_id,
+                    project_id,
+                    namespace_id,
+                    task_node_id,
+                    source_snapshot_id,
+                    source_event_id,
+                    event_kind,
+                    prior_execution_state,
+                    next_execution_state,
+                    prior_lifecycle_state,
+                    next_lifecycle_state,
+                    source_kind,
+                    artifact_refs,
+                    message_refs,
+                    evidence_span,
+                    derivation_kind,
+                    schema_version,
+                    event_payload,
+                    recorded_at_epoch_ms
+                )
+                SELECT
+                    workspace_id,
+                    project_id,
+                    namespace_id,
+                    task_node_id,
+                    $3,
+                    $4,
+                    'superseded',
+                    execution_state,
+                    CASE
+                        WHEN execution_state IN ('done', 'failed', 'canceled', 'superseded')
+                            THEN execution_state
+                        ELSE 'superseded'
+                    END,
+                    lifecycle_state,
+                    'deprecated',
+                    'continuity_handoff_reconcile',
+                    artifact_refs,
+                    '[]'::jsonb,
+                    jsonb_build_object(
+                        'replacement_source_event_id', $4,
+                        'legacy_source_event_id', legacy_source_event_id,
+                        'reconciled_as', 'legacy_continuity_handoff_mirror'
+                    ),
+                    'operator_write',
+                    'task-event-envelope-v1',
+                    jsonb_build_object(
+                        'reason', 'legacy_continuity_handoff_mirror',
+                        'replacement_source_event_id', $4,
+                        'legacy_source_event_id', legacy_source_event_id
+                    ),
+                    $5
+                FROM target_nodes
+                RETURNING task_node_id
+            )
+            UPDATE ami.task_nodes tn
+            SET execution_state = CASE
+                    WHEN tn.execution_state IN ('done', 'failed', 'canceled', 'superseded')
+                        THEN tn.execution_state
+                    ELSE 'superseded'
+                END,
+                lifecycle_state = 'deprecated',
+                closed_at_epoch_ms = COALESCE(tn.closed_at_epoch_ms, $5),
+                status_payload = tn.status_payload || jsonb_build_object(
+                    'reconciled_legacy_mirror', true,
+                    'reconcile_source_kind', 'continuity_handoff_reconcile',
+                    'reconcile_source_event_id', $4,
+                    'reconciled_at_epoch_ms', $5
+                ),
+                metadata = tn.metadata || jsonb_build_object(
+                    'projection_excluded_reason', 'legacy_continuity_handoff_mirror',
+                    'projection_excluded_at_epoch_ms', $5
+                ),
+                updated_at = now()
+            WHERE tn.task_node_id IN (SELECT task_node_id FROM inserted_events)
+            RETURNING tn.task_node_id
+            "#,
+            &[
+                &project_id,
+                &namespace_id,
+                &source_snapshot_id,
+                &replacement_source_event_id,
+                &recorded_at_epoch_ms,
+            ],
+    )
+    .await
+    .context("failed to reconcile legacy continuity handoff task mirrors")?;
+    Ok(rows.len() as u64)
+}
+
+pub async fn promote_legacy_continuity_handoff_task_mirror(
+    client: &Client,
+    project_code: &str,
+    namespace_code: &str,
+    project_id: Uuid,
+    namespace_id: Uuid,
+    legacy_task: &TaskNodeRecord,
+    source_snapshot_id: Uuid,
+    source_event_id: &str,
+    headline: &str,
+    summary: &str,
+    next_step: &str,
+    agent_scope: &str,
+    session_id: &str,
+    thread_id: Option<&str>,
+    local_path: &str,
+    pending_return_queue: &Value,
+    recorded_at_epoch_ms: i64,
+) -> Result<()> {
+    let pending_return_count = pending_return_queue
+        .as_array()
+        .map(|items| items.len() as i32)
+        .unwrap_or(0);
+    let execution_state = if pending_return_count > 0 {
+        "blocked"
+    } else {
+        "active"
+    };
+    let promotion_source_event_id = format!("continuity_handoff_promotion:{source_event_id}");
+    let source_snapshot_id_text = source_snapshot_id.to_string();
+    let source_event_ids = json!([source_event_id]);
+    let artifact_refs = json!([format!("file://{local_path}")]);
+    let evidence_span = json!({
+        "event_id": source_event_id,
+        "snapshot_id": source_snapshot_id,
+        "task_node_id": legacy_task.task_node_id,
+        "promotion_source_event_id": promotion_source_event_id,
+        "promotion_kind": "legacy_current_mirror_to_workline",
+    });
+    let task_event_artifact_refs = json!([format!("file://{local_path}")]);
+    let task_event_message_refs = thread_id
+        .map(|thread| json!([format!("thread:{thread}")]))
+        .unwrap_or_else(|| json!([]));
+    let task_event_payload = json!({
+        "source_kind": "continuity_handoff_promotion",
+        "source_event_id": source_event_id,
+        "source_snapshot_id": source_snapshot_id,
+        "legacy_task_node_id": legacy_task.task_node_id,
+        "legacy_task_role": legacy_task.task_role,
+        "legacy_lifecycle_state": legacy_task.lifecycle_state,
+        "promoted_task_role": "workline",
+        "pending_return_queue": pending_return_queue,
+        "summary": summary,
+        "next_step": next_step,
+    });
+
+    client
+        .batch_execute("BEGIN")
+        .await
+        .context("failed to begin legacy continuity handoff mirror promotion transaction")?;
+
+    let result = async {
+        client
+            .execute(
+                r#"
+                UPDATE ami.task_nodes
+                SET task_role = 'workline',
+                    headline = $2,
+                    summary = $3,
+                    next_step = $4,
+                    execution_state = $5,
+                    lifecycle_state = 'hot',
+                    source_kind = 'continuity_handoff',
+                    source_event_ids = $6::jsonb,
+                    artifact_refs = $7::jsonb,
+                    evidence_span = $8::jsonb,
+                    pending_return_count = $9,
+                    closed_at_epoch_ms = NULL,
+                    archived_at_epoch_ms = NULL,
+                    status_payload = COALESCE(status_payload, '{}'::jsonb) || jsonb_build_object(
+                        'source_kind', 'continuity_handoff',
+                        'source_event_id', $10::text,
+                        'source_snapshot_id', $11::text,
+                        'pending_return_queue', $12::jsonb,
+                        'promoted_from_legacy_mirror', true,
+                        'promotion_source_kind', 'continuity_handoff',
+                        'promotion_source_event_id', $13::text,
+                        'promotion_recorded_at_epoch_ms', $14::bigint
+                    ),
+                    metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                        'agent_scope', $15::text,
+                        'session_id', $16::text,
+                        'thread_id', $17::text,
+                        'local_path', $18::text,
+                        'materialized_from', 'execctl_task_ledger_entry',
+                        'promoted_from_legacy_mirror', true,
+                        'promotion_source_kind', 'continuity_handoff',
+                        'promotion_source_event_id', $13::text,
+                        'promotion_recorded_at_epoch_ms', $14::bigint
+                    ),
+                    updated_at = now()
+                WHERE task_node_id = $1
+                  AND project_id = $19
+                  AND namespace_id = $20
+                "#,
+                &[
+                    &legacy_task.task_node_id,
+                    &headline,
+                    &summary,
+                    &next_step,
+                    &execution_state,
+                    &source_event_ids,
+                    &artifact_refs,
+                    &evidence_span,
+                    &pending_return_count,
+                    &source_event_id,
+                    &source_snapshot_id_text,
+                    pending_return_queue,
+                    &promotion_source_event_id,
+                    &recorded_at_epoch_ms,
+                    &agent_scope,
+                    &session_id,
+                    &thread_id,
+                    &local_path,
+                    &project_id,
+                    &namespace_id,
+                ],
+            )
+            .await
+            .context("failed to promote legacy continuity handoff task mirror")?;
+
+        create_task_event(
+            client,
+            project_code,
+            namespace_code,
+            &TaskEventInsert {
+                task_node_id: legacy_task.task_node_id,
+                source_snapshot_id: Some(source_snapshot_id),
+                source_event_id: Some(&promotion_source_event_id),
+                event_kind: "state_change",
+                prior_execution_state: Some(legacy_task.execution_state.as_str()),
+                next_execution_state: Some(execution_state),
+                prior_lifecycle_state: Some(legacy_task.lifecycle_state.as_str()),
+                next_lifecycle_state: Some("hot"),
+                source_kind: Some("continuity_handoff_promotion"),
+                artifact_refs: Some(&task_event_artifact_refs),
+                message_refs: Some(&task_event_message_refs),
+                evidence_span: Some(&evidence_span),
+                derivation_kind: Some("operator_write"),
+                schema_version: Some("task-event-envelope-v1"),
+                event_payload: &task_event_payload,
+                recorded_at_epoch_ms: Some(recorded_at_epoch_ms),
+            },
+        )
+        .await
+        .context("failed to append legacy continuity handoff promotion event")?;
+
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            client.batch_execute("COMMIT").await.context(
+                "failed to commit legacy continuity handoff mirror promotion transaction",
+            )?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = client.batch_execute("ROLLBACK").await.context(
+                "failed to roll back legacy continuity handoff mirror promotion transaction",
+            );
+            Err(error)
+        }
+    }
+}
+
 pub async fn create_memory_link_decision(
     client: &Client,
     project_code: &str,

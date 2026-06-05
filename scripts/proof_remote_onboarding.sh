@@ -90,6 +90,66 @@ restore_file_from_snapshot() {
   cp "${data_path}" "${path}"
 }
 
+resolve_openclaw_cli_from_home() {
+  local base_home="$1"
+  local candidate
+  candidate="$(find "${base_home}/.openclaw/tools" -maxdepth 3 -path '*/node-v*/bin/openclaw' -type f 2>/dev/null | sort -Vr | head -n 1)"
+  if [[ -n "${candidate}" ]]; then
+    printf '%s\n' "${candidate}"
+    return 0
+  fi
+  if [[ -x "${base_home}/.openclaw/tools/node/bin/openclaw" ]]; then
+    printf '%s\n' "${base_home}/.openclaw/tools/node/bin/openclaw"
+    return 0
+  fi
+  if command -v openclaw >/dev/null 2>&1; then
+    command -v openclaw
+    return 0
+  fi
+  return 1
+}
+
+sanitize_path_without_openclaw_cli() {
+  local openclaw_cli="$1"
+  local filtered=""
+  local path_entry
+  IFS=':' read -r -a path_parts <<<"${PATH}"
+  for path_entry in "${path_parts[@]}"; do
+    if [[ "${path_entry}" == "$(dirname "${openclaw_cli}")" ]]; then
+      continue
+    fi
+    if [[ -n "${orig_home}" ]] && [[ "${path_entry}" == "${orig_home}/.openclaw/tools/"*/bin ]]; then
+      continue
+    fi
+    if [[ -z "${filtered}" ]]; then
+      filtered="${path_entry}"
+    else
+      filtered="${filtered}:${path_entry}"
+    fi
+  done
+  printf '%s\n' "${filtered}"
+}
+
+seed_temp_home_openclaw_cli() {
+  local host_cli
+  host_cli="$(resolve_openclaw_cli_from_home "${orig_home}" || true)"
+  if [[ -z "${host_cli}" ]]; then
+    return 0
+  fi
+  local relative_cli="${host_cli#"${orig_home}/"}"
+  if [[ "${relative_cli}" == "${host_cli}" ]]; then
+    relative_cli=".openclaw/tools/node/bin/openclaw"
+  fi
+  mkdir -p "${HOME}/$(dirname "${relative_cli}")"
+  ln -sf "${host_cli}" "${HOME}/${relative_cli}"
+  export OPENCLAW_PROOF_PATH
+  OPENCLAW_PROOF_PATH="$(sanitize_path_without_openclaw_cli "${host_cli}")"
+}
+
+resolve_temp_home_openclaw_cli() {
+  resolve_openclaw_cli_from_home "${HOME}"
+}
+
 assert_contains_all() {
   local path="$1"
   shift
@@ -103,7 +163,7 @@ assert_hermes_compact_startup() {
   local path="$1"
   local max_bytes="$2"
   assert_contains_all "${path}" \
-    'AMAI MANAGED STARTUP INSTRUCTIONS v1' \
+    'AMAI MANAGED STARTUP INSTRUCTIONS v2' \
     'compact contract-pointer' \
     'до любого другого Amai шага.' \
     './scripts/reconnect_local.sh --client hermes'
@@ -145,7 +205,7 @@ grep -q '"command": "ssh"' "${repo_root}/.vscode/mcp.json"
 grep -q "cd '/srv/amai' && ./scripts/run_mcp_stdio.sh" "${repo_root}/.vscode/mcp.json"
 test -f .github/instructions/amai-continuity-startup.instructions.md
 assert_contains_all .github/instructions/amai-continuity-startup.instructions.md \
-  'AMAI MANAGED STARTUP INSTRUCTIONS v1' \
+  'AMAI MANAGED STARTUP INSTRUCTIONS v2' \
   './scripts/reconnect_local.sh --client vscode'
 ./scripts/disconnect_local.sh --client vscode >/dev/null
 test ! -f "${repo_root}/.vscode/mcp.json"
@@ -159,7 +219,7 @@ grep -q '"command": "ssh"' "${HOME}/.cursor/mcp.json"
 grep -q "cd '/srv/amai' && ./scripts/run_mcp_stdio.sh" "${HOME}/.cursor/mcp.json"
 test -f .cursor/rules/amai-continuity-startup.mdc
 assert_contains_all .cursor/rules/amai-continuity-startup.mdc \
-  'AMAI MANAGED STARTUP INSTRUCTIONS v1' \
+  'AMAI MANAGED STARTUP INSTRUCTIONS v2' \
   './scripts/reconnect_local.sh --client cursor'
 ./scripts/disconnect_local.sh --client cursor >/dev/null
 test ! -f "${HOME}/.cursor/mcp.json"
@@ -173,11 +233,11 @@ grep -q 'command = "ssh"' "${HOME}/.codex/config.toml"
 grep -q "cd '/srv/amai' && ./scripts/run_mcp_stdio.sh" "${HOME}/.codex/config.toml"
 test -f AGENTS.md
 assert_contains_all AGENTS.md \
-  'AMAI MANAGED STARTUP INSTRUCTIONS v1' \
+  'AMAI MANAGED STARTUP INSTRUCTIONS v2' \
   './scripts/reconnect_local.sh --client codex'
 ./scripts/disconnect_local.sh --client codex >/dev/null
 test ! -f "${HOME}/.codex/config.toml"
-if grep -Fq 'AMAI MANAGED STARTUP INSTRUCTIONS v1' AGENTS.md; then
+if grep -Fq 'AMAI MANAGED STARTUP INSTRUCTIONS v2' AGENTS.md; then
   echo "proof_remote_onboarding: codex startup instructions still present after disconnect"
   exit 1
 fi
@@ -188,11 +248,11 @@ grep -q '"command": "ssh"' "${repo_root}/.mcp.json"
 grep -q "cd '/srv/amai' && ./scripts/run_mcp_stdio.sh" "${repo_root}/.mcp.json"
 test -f CLAUDE.md
 assert_contains_all CLAUDE.md \
-  'AMAI MANAGED STARTUP INSTRUCTIONS v1' \
+  'AMAI MANAGED STARTUP INSTRUCTIONS v2' \
   './scripts/reconnect_local.sh --client claude-code'
 ./scripts/disconnect_local.sh --client claude-code >/dev/null
 test ! -f "${repo_root}/.mcp.json"
-if [[ -f CLAUDE.md ]] && grep -Fq 'AMAI MANAGED STARTUP INSTRUCTIONS v1' CLAUDE.md; then
+if [[ -f CLAUDE.md ]] && grep -Fq 'AMAI MANAGED STARTUP INSTRUCTIONS v2' CLAUDE.md; then
   echo "proof_remote_onboarding: claude-code startup instructions still present after disconnect"
   exit 1
 fi
@@ -218,25 +278,32 @@ cat > "${HOME}/.openclaw/openclaw.json" <<'EOF'
   },
 }
 EOF
-run_remote_onboarding "openclaw" "${HOME}/.openclaw/openclaw.json"
+seed_temp_home_openclaw_cli
+PATH="${OPENCLAW_PROOF_PATH:-${PATH}}" run_remote_onboarding "openclaw" "${HOME}/.openclaw/openclaw.json"
 grep -q '"command": "ssh"' "${HOME}/.openclaw/openclaw.json"
 grep -q "cd '/srv/amai' && ./scripts/run_mcp_stdio.sh" "${HOME}/.openclaw/openclaw.json"
 grep -q '"gateway"' "${HOME}/.openclaw/openclaw.json"
-HOME="${HOME}" openclaw mcp show amai --json | grep -q 'ops@example-host'
 test -f .openclaw/AGENTS.md
 assert_contains_all .openclaw/AGENTS.md \
-  'AMAI MANAGED STARTUP INSTRUCTIONS v1' \
+  'AMAI MANAGED STARTUP INSTRUCTIONS v2' \
   './scripts/reconnect_local.sh --client openclaw'
-HOME="${HOME}" openclaw agents list --json | jq -e --arg workspace "${repo_root}/.openclaw" '.[] | select(.workspace == $workspace)' >/dev/null
-./scripts/disconnect_local.sh --client openclaw >/dev/null
-if HOME="${HOME}" openclaw mcp show amai --json >/dev/null 2>&1; then
-  echo "proof_remote_onboarding: openclaw config still contains amai after disconnect"
-  exit 1
+if openclaw_cli="$(resolve_temp_home_openclaw_cli)"; then
+  HOME="${HOME}" "${openclaw_cli}" mcp show amai --json | grep -q 'ops@example-host'
+  HOME="${HOME}" "${openclaw_cli}" agents list --json | jq -e --arg workspace "${repo_root}/.openclaw" '.[] | select(.workspace == $workspace)' >/dev/null
+else
+  echo "proof_remote_onboarding: OpenClaw CLI missing; skipping CLI-backed registration checks"
 fi
+PATH="${OPENCLAW_PROOF_PATH:-${PATH}}" ./scripts/disconnect_local.sh --client openclaw >/dev/null
 grep -q '"gateway"' "${HOME}/.openclaw/openclaw.json"
-if HOME="${HOME}" openclaw agents list --json | jq -e --arg workspace "${repo_root}/.openclaw" '.[] | select(.workspace == $workspace)' >/dev/null; then
-  echo "proof_remote_onboarding: openclaw project agent still present after disconnect"
-  exit 1
+if openclaw_cli="$(resolve_temp_home_openclaw_cli)"; then
+  if HOME="${HOME}" "${openclaw_cli}" mcp show amai --json >/dev/null 2>&1; then
+    echo "proof_remote_onboarding: openclaw config still contains amai after disconnect"
+    exit 1
+  fi
+  if HOME="${HOME}" "${openclaw_cli}" agents list --json | jq -e --arg workspace "${repo_root}/.openclaw" '.[] | select(.workspace == $workspace)' >/dev/null; then
+    echo "proof_remote_onboarding: openclaw project agent still present after disconnect"
+    exit 1
+  fi
 fi
 if [[ -f .openclaw/AGENTS.md ]]; then
   echo "proof_remote_onboarding: openclaw startup instructions still present after disconnect"

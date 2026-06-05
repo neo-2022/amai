@@ -3,6 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 source ./scripts/load_env.sh
+export AMAI_OPERATOR_REDIRECT_PROVENANCE="proof_harness:$(basename "$0")"
 
 step() {
   echo "[proof_restore_execution_card] $*"
@@ -128,6 +129,7 @@ cargo run --quiet -- skill record-eval \
 step "materialize restore pack via continuity handoff"
 handoff_details_file="$(mktemp)"
 cat >"${handoff_details_file}" <<EOF
+promotion_contract: operator_redirect
 Restore continuity safely via compact execution card.
 Need a compact executable card for the current step, not a long procedural note.
 Current focus: inspect startup gate, then confirm startup next action.
@@ -137,7 +139,8 @@ cargo run --quiet -- continuity handoff \
   --namespace "${namespace_code}" \
   --headline "Restore continuity for current step" \
   --next-step "Inspect startup gate and confirm startup next action with a compact execution card." \
-  --details-file "${handoff_details_file}" >/dev/null
+  --details-file "${handoff_details_file}" \
+  --promote-active-workline >/dev/null
 rm -f "${handoff_details_file}"
 
 step "run continuity restore with explicit runtime/model/tool binding"

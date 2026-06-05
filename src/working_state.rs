@@ -61,6 +61,11 @@ const MAX_REQUIRED_TASK_SET: usize = 12;
 const MAX_RECENT_DECISION_TRACES: usize = 3;
 const MAX_PENDING_RETURN_QUEUE: usize = 6;
 const MAX_EXECCTL_LEDGER_ENTRIES: i64 = 256;
+const MAX_TASK_GRAPH_RESTORE_PROJECTION_NODES: i64 = 256;
+const MAX_TASK_GRAPH_RESTORE_OPEN_PREVIEW: usize = 6;
+const MAX_TASK_GRAPH_RESTORE_PAUSED_PREVIEW: usize = 6;
+const MAX_TASK_GRAPH_RESTORE_RECENTLY_CLOSED_PREVIEW: usize = 6;
+const MAX_TASK_GRAPH_RESTORE_ARCHIVE_PREVIEW: usize = 6;
 const MAX_PERSISTED_PROJECT_TASK_LEDGER_HISTORICAL_ENTRIES: usize = 5;
 const RESTORE_EXECUTION_CARD_THREAD_WINDOW_SECONDS: i64 = 30 * 60;
 const WORKING_STATE_RESTORE_REFRESH_MIN_INTERVAL_MS: u64 = 30_000;
@@ -68,6 +73,7 @@ const EXECCTL_LEASE_TTL_MS: u64 = SESSION_GAP_MS;
 const EXECCTL_LEASE_HEARTBEAT_MIN_INTERVAL_MS: u64 = 5 * 60 * 1000;
 const PROJECT_TASK_TREE_VERSION: &str = "project-task-tree-v1";
 const PROJECT_TASK_LEDGER_VERSION: &str = "project-task-ledger-v2";
+const TASK_GRAPH_STARTUP_PROJECTION_VERSION: &str = "task-graph-startup-projection-v1";
 const WORKSPACE_RESTORE_PACK_VERSION: &str = "workspace-restore-pack-v1";
 const WORKSPACE_RESTORE_PACK_ENVELOPE_VERSION: &str = "restore-pack-envelope-v2";
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION: &str =
@@ -78,6 +84,8 @@ pub(crate) const CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND: &str = "wait_f
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND: &str =
     CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND;
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES: u64 = 1;
+pub(crate) const OPERATOR_REDIRECT_PROVENANCE_ENV: &str = "AMAI_OPERATOR_REDIRECT_PROVENANCE";
+pub(crate) const USER_REDIRECT_PROVENANCE_ENV: &str = "AMAI_USER_REDIRECT_PROVENANCE";
 pub(crate) const CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE: &str = "Этот чат жжёт внешний лимит клиента: сначала сожми текущий чат; continuity startup используй только если fallback действительно нужен.";
 pub(crate) const CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE: &str = "Внешний лимит клиента почти исчерпан во всём клиенте. Не продолжай содержательный ответ, дождись восстановления окна лимита.";
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE: &str =
@@ -164,6 +172,214 @@ async fn refresh_restore_snapshot_after_primary_write(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextPackPreviousHandoffBinding {
+    authoritative_event_id: String,
+    source_snapshot_id: Option<Uuid>,
+    local_path: String,
+}
+
+fn context_pack_previous_handoff_binding(
+    previous_restore: Option<&Value>,
+    active_lease: Option<&ExecCtlTaskLeaseRecord>,
+) -> Option<ContextPackPreviousHandoffBinding> {
+    let restore = previous_restore?.get("working_state_restore")?;
+    if !restore_lineage_is_continuity_handoff(restore) {
+        return None;
+    }
+    let authoritative_event_id = restore["state_lineage"]["authoritative_event_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if let Some(active_lease) = active_lease {
+        let lease_source_kind = active_lease.source_kind.trim();
+        let lease_source_event_id = active_lease.source_event_id.trim();
+        if (!lease_source_kind.is_empty() || !lease_source_event_id.is_empty())
+            && (lease_source_kind != "continuity_handoff"
+                || lease_source_event_id != authoritative_event_id)
+        {
+            return None;
+        }
+    }
+    let source_snapshot_id = restore["state_lineage"]["source_snapshot_id"]
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let local_path = restore["state_lineage"]["authoritative_local_path"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            active_lease
+                .and_then(|lease| lease.local_path.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_default()
+        .to_string();
+    Some(ContextPackPreviousHandoffBinding {
+        authoritative_event_id: authoritative_event_id.to_string(),
+        source_snapshot_id,
+        local_path,
+    })
+}
+
+fn first_meaningful_json_value(candidates: &[&Value]) -> Value {
+    for candidate in candidates {
+        match candidate {
+            Value::String(value) if !value.trim().is_empty() => {
+                return Value::String(value.clone());
+            }
+            Value::Null => {}
+            other => return (*other).clone(),
+        }
+    }
+    Value::Null
+}
+
+fn is_continuity_handoff_kind(value: Option<&str>) -> bool {
+    value
+        .map(str::trim)
+        .is_some_and(|value| value == "continuity_handoff")
+}
+
+fn is_context_pack_kind(value: Option<&str>) -> bool {
+    value
+        .map(str::trim)
+        .is_some_and(|value| matches!(value, "context_pack" | "retrieval_context_pack"))
+}
+
+fn restore_lineage_is_continuity_handoff(restore: &Value) -> bool {
+    is_continuity_handoff_kind(restore["state_lineage"]["authoritative_event_kind"].as_str())
+        || is_continuity_handoff_kind(
+            restore["state_lineage"]["authoritative_source_kind"].as_str(),
+        )
+}
+
+fn restore_should_preserve_lineage_handoff_over_context_pack(
+    restore: &Value,
+    live_source_kind: Option<&str>,
+) -> bool {
+    if !is_context_pack_kind(live_source_kind) {
+        return false;
+    }
+    if restore_lineage_is_continuity_handoff(restore) {
+        return true;
+    }
+    let authoritative_event_id = restore["state_lineage"]["authoritative_event_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let active_task = restore["project_task_tree"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|node| node["task_role"].as_str() == Some("active"));
+    let active_task_event_id = active_task
+        .and_then(|node| node["authoritative_event_id"].as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let current_goal = restore["current_goal"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let current_next_step = restore["next_step"].as_str().map(normalize_next_step_hint);
+    let active_headline = active_task
+        .and_then(|node| node["headline"].as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let active_next_step = active_task
+        .and_then(|node| node["next_step"].as_str())
+        .map(normalize_next_step_hint);
+    authoritative_event_id.is_some()
+        && authoritative_event_id != active_task_event_id
+        && (current_goal != active_headline || current_next_step != active_next_step)
+}
+
+fn preserve_authoritative_identity_for_context_pack(
+    authoritative_event: &Value,
+    supporting_event: Option<&Value>,
+) -> bool {
+    let authoritative_is_handoff =
+        is_continuity_handoff_kind(authoritative_event["event_kind"].as_str())
+            || is_continuity_handoff_kind(authoritative_event["source_kind"].as_str());
+    let supporting_is_context_pack = supporting_event.is_some_and(|event| {
+        is_context_pack_kind(event["event_kind"].as_str())
+            || is_context_pack_kind(event["source_kind"].as_str())
+    });
+    authoritative_is_handoff && supporting_is_context_pack
+}
+
+fn refresh_restore_identity_value(
+    authoritative_event: &Value,
+    latest_event: &Value,
+    restore: &Value,
+    field: &str,
+) -> Value {
+    if preserve_authoritative_identity_for_context_pack(authoritative_event, Some(latest_event)) {
+        first_meaningful_json_value(&[&authoritative_event[field], &restore[field]])
+    } else {
+        first_meaningful_json_value(&[
+            &latest_event[field],
+            &authoritative_event[field],
+            &restore[field],
+        ])
+    }
+}
+
+async fn refresh_restore_snapshot_after_context_pack_write(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    previous_restore: Option<&Value>,
+    active_lease: Option<&ExecCtlTaskLeaseRecord>,
+    supporting_event: &Value,
+) -> WorkingStateWriteStatus {
+    let operation = "context_pack.refresh_restore_snapshot";
+    let preserve_previous_handoff =
+        context_pack_previous_handoff_binding(previous_restore, active_lease);
+    let refresh_result = if let (Some(previous_restore), Some(binding)) =
+        (previous_restore, preserve_previous_handoff)
+    {
+        let restore = previous_restore
+            .get("working_state_restore")
+            .unwrap_or(&Value::Null);
+        let recorded_at_epoch_ms = supporting_event["recorded_at_epoch_ms"]
+            .as_u64()
+            .unwrap_or_else(|| now_epoch_ms().unwrap_or_default());
+        let authoritative_event = semantic_handoff_replay_authoritative_event(
+            restore,
+            &binding.authoritative_event_id,
+            &binding.local_path,
+            recorded_at_epoch_ms,
+        );
+        force_refresh_restore_snapshot_from_previous_handoff(
+            db,
+            project,
+            namespace,
+            previous_restore,
+            &authoritative_event,
+            binding.source_snapshot_id,
+            Some(supporting_event),
+        )
+        .await
+    } else {
+        force_refresh_restore_snapshot(db, project, namespace).await
+    };
+    match refresh_result {
+        Ok(_) => WorkingStateWriteStatus::refreshed(),
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                project = %project.code,
+                namespace = %namespace.code,
+                operation,
+                "working_state primary write persisted but restore snapshot refresh degraded"
+            );
+            WorkingStateWriteStatus::degraded_after_primary_write(operation, &error)
+        }
+    }
+}
+
 async fn insert_restore_snapshot_and_materialize_pack(
     db: &Client,
     project: &ProjectRecord,
@@ -226,15 +442,53 @@ async fn mirror_handoff_into_commitment_graph(
     pending_return_queue: &Value,
     recorded_at_epoch_ms: i64,
 ) -> Result<()> {
-    if postgres::find_task_node_by_task_key(
+    let existing_task = postgres::find_task_node_by_task_key(
         db,
         project.project_id,
         namespace.namespace_id,
         event_id,
     )
-    .await?
-    .is_some()
-    {
+    .await?;
+
+    if let Some(existing_task) = existing_task {
+        if matches!(
+            existing_task.task_role.as_str(),
+            "root" | "workline" | "child" | "proposal"
+        ) {
+            return Ok(());
+        }
+        if task_node_is_current_legacy_continuity_mirror(&existing_task, event_id) {
+            postgres::promote_legacy_continuity_handoff_task_mirror(
+                db,
+                &project.code,
+                &namespace.code,
+                project.project_id,
+                namespace.namespace_id,
+                &existing_task,
+                snapshot_id,
+                event_id,
+                headline,
+                summary,
+                next_step,
+                agent_scope,
+                session_id,
+                thread_id,
+                local_path,
+                pending_return_queue,
+                recorded_at_epoch_ms,
+            )
+            .await?;
+            let _ = postgres::reconcile_legacy_continuity_handoff_task_mirrors(
+                db,
+                project.project_id,
+                namespace.namespace_id,
+                snapshot_id,
+                event_id,
+                recorded_at_epoch_ms,
+            )
+            .await?;
+            return Ok(());
+        }
         return Ok(());
     }
 
@@ -338,7 +592,7 @@ async fn mirror_handoff_into_commitment_graph(
             parent_task_node_id: None,
             memory_item_id: Some(memory_item.memory_item_id),
             task_key: Some(event_id),
-            task_role: Some("historical"),
+            task_role: Some("workline"),
             headline,
             summary: Some(summary),
             next_step: Some(next_step),
@@ -400,6 +654,15 @@ async fn mirror_handoff_into_commitment_graph(
             event_payload: &task_event_payload,
             recorded_at_epoch_ms: Some(recorded_at_epoch_ms),
         },
+    )
+    .await?;
+    let _ = postgres::reconcile_legacy_continuity_handoff_task_mirrors(
+        db,
+        project.project_id,
+        namespace.namespace_id,
+        snapshot_id,
+        event_id,
+        recorded_at_epoch_ms,
     )
     .await?;
     Ok(())
@@ -783,7 +1046,7 @@ pub async fn record_handoff_event(
     resolved_task_ids: &[String],
     local_path: &str,
 ) -> Result<()> {
-    record_handoff_event_with_refresh(
+    record_handoff_event_with_refresh_contract(
         db,
         project,
         namespace,
@@ -796,11 +1059,12 @@ pub async fn record_handoff_event(
         local_path,
         None,
         true,
+        true,
     )
     .await
 }
 
-pub async fn record_handoff_event_with_previous_restore(
+pub async fn record_handoff_event_with_previous_restore_contract(
     db: &Client,
     project: &ProjectRecord,
     namespace: &NamespaceRecord,
@@ -812,8 +1076,9 @@ pub async fn record_handoff_event_with_previous_restore(
     resolved_task_ids: &[String],
     local_path: &str,
     previous_restore: Option<&Value>,
+    promote_active_workline: bool,
 ) -> Result<()> {
-    record_handoff_event_with_refresh(
+    record_handoff_event_with_refresh_contract(
         db,
         project,
         namespace,
@@ -826,6 +1091,7 @@ pub async fn record_handoff_event_with_previous_restore(
         local_path,
         previous_restore,
         true,
+        promote_active_workline,
     )
     .await
 }
@@ -844,10 +1110,52 @@ async fn record_handoff_event_with_refresh(
     previous_restore: Option<&Value>,
     refresh_restore_snapshot_after_write: bool,
 ) -> Result<()> {
+    record_handoff_event_with_refresh_contract(
+        db,
+        project,
+        namespace,
+        headline,
+        next_step,
+        details,
+        resolve_current_goal,
+        resolved_headlines,
+        resolved_task_ids,
+        local_path,
+        previous_restore,
+        refresh_restore_snapshot_after_write,
+        true,
+    )
+    .await
+}
+
+async fn record_handoff_event_with_refresh_contract(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    headline: &str,
+    next_step: &str,
+    details: &str,
+    resolve_current_goal: bool,
+    resolved_headlines: &[String],
+    resolved_task_ids: &[String],
+    local_path: &str,
+    previous_restore: Option<&Value>,
+    refresh_restore_snapshot_after_write: bool,
+    promote_active_workline: bool,
+) -> Result<()> {
     let total_started = Instant::now();
     let recorded_at_epoch_ms = now_epoch_ms()?;
-    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
+    let agent_scope = current_agent_scope_for_result(&project.code, &namespace.code)?;
     let next_step = normalize_next_step_hint(next_step);
+    let thread_id = resolve_execctl_live_thread_id_checked(None)?;
+    let live_active_lease = postgres::get_execctl_task_lease(
+        db,
+        project.project_id,
+        namespace.namespace_id,
+        &agent_scope,
+        recorded_at_epoch_ms as i64,
+    )
+    .await?;
     let previous_restore_started = Instant::now();
     let previous_restore = match previous_restore {
         Some(restore) => Some(restore.clone()),
@@ -858,6 +1166,111 @@ async fn record_handoff_event_with_refresh(
         previous_restore_started.elapsed().as_millis(),
         &format!("project={} namespace={}", project.code, namespace.code),
     );
+    let live_active_lease_is_active = live_active_lease
+        .as_ref()
+        .is_some_and(|lease| lease.lease_state.trim() == "active");
+    if let Some(conflict) = execctl_foreign_thread_handoff_conflict(
+        live_active_lease.as_ref(),
+        thread_id.as_deref(),
+        previous_restore.as_ref(),
+    ) {
+        if let Some(owner_thread_id) = conflict.owner_thread_id.as_deref() {
+            let owner_phrase = if conflict.owner_binding_source == "working_state_restore" {
+                format!("restore lineage still binds this workline to thread {owner_thread_id}")
+            } else {
+                format!(
+                    "active ExecCtl lease for scope {agent_scope} is owned by thread {owner_thread_id}"
+                )
+            };
+            if let Some(current_thread_id) = conflict.current_thread_id.as_deref() {
+                return Err(anyhow::anyhow!(
+                    "continuity handoff blocked: {owner_phrase} and currently tracks '{}' (source_event_id={}); current thread {} must run continuity startup first to rebind that workline or use a distinct AMAI_AGENT_SCOPE for side-agent/private work",
+                    conflict.headline,
+                    conflict.source_event_id,
+                    current_thread_id,
+                ));
+            }
+            return Err(anyhow::anyhow!(
+                "continuity handoff blocked: {owner_phrase} and currently tracks '{}' (source_event_id={}); current thread binding is missing, so this write cannot prove same-thread ownership. Run from a thread-bound client after continuity startup or use a distinct AMAI_AGENT_SCOPE for side-agent/private work",
+                conflict.headline,
+                conflict.source_event_id,
+            ));
+        }
+        if let Some(current_thread_id) = conflict.current_thread_id.as_deref() {
+            return Err(anyhow::anyhow!(
+                "continuity handoff blocked: active ExecCtl lease for scope {agent_scope} currently tracks '{}' (source_event_id={}) but has no durable or restorable thread binding; current thread {} cannot prove same-thread ownership. Run continuity startup from the correct thread-bound client or use a distinct AMAI_AGENT_SCOPE for side-agent/private work",
+                conflict.headline,
+                conflict.source_event_id,
+                current_thread_id,
+            ));
+        }
+        return Err(anyhow::anyhow!(
+            "continuity handoff blocked: active ExecCtl lease for scope {agent_scope} currently tracks '{}' (source_event_id={}) but has no durable or restorable thread binding, and the current thread binding is missing. Run continuity startup from a thread-bound client or use a distinct AMAI_AGENT_SCOPE for side-agent/private work",
+            conflict.headline,
+            conflict.source_event_id,
+        ));
+    }
+    if !live_active_lease_is_active
+        && let Some(conflict) = previous_restore_foreign_thread_handoff_conflict(
+            previous_restore.as_ref(),
+            thread_id.as_deref(),
+            local_path,
+        )
+    {
+        if let Some(owner_thread_id) = conflict.owner_thread_id.as_deref() {
+            if let Some(current_thread_id) = conflict.current_thread_id.as_deref() {
+                return Err(anyhow::anyhow!(
+                    "continuity handoff blocked: latest restore for '{}' still binds this workline to thread {} (source_event_id={}); current thread {} must run continuity startup first to rebind that workline or use a distinct AMAI_AGENT_SCOPE for side-agent/private work",
+                    conflict.headline,
+                    owner_thread_id,
+                    conflict.source_event_id,
+                    current_thread_id,
+                ));
+            }
+            return Err(anyhow::anyhow!(
+                "continuity handoff blocked: latest restore for '{}' still binds this workline to thread {} (source_event_id={}); current thread binding is missing, so this write cannot prove same-thread ownership. Run from a thread-bound client after continuity startup or use a distinct AMAI_AGENT_SCOPE for side-agent/private work",
+                conflict.headline,
+                owner_thread_id,
+                conflict.source_event_id,
+            ));
+        }
+        if let Some(current_thread_id) = conflict.current_thread_id.as_deref() {
+            return Err(anyhow::anyhow!(
+                "continuity handoff blocked: latest restore for '{}' (source_event_id={}) has no durable or restorable thread binding; current thread {} cannot prove same-thread ownership. Run continuity startup from the correct thread-bound client or use a distinct AMAI_AGENT_SCOPE for side-agent/private work",
+                conflict.headline,
+                conflict.source_event_id,
+                current_thread_id,
+            ));
+        }
+        return Err(anyhow::anyhow!(
+            "continuity handoff blocked: latest restore for '{}' (source_event_id={}) has no durable or restorable thread binding, and the current thread binding is missing. Run continuity startup from a thread-bound client or use a distinct AMAI_AGENT_SCOPE for side-agent/private work",
+            conflict.headline,
+            conflict.source_event_id,
+        ));
+    }
+    let competing_active_headline = same_scope_competing_handoff_active_headline(
+        previous_restore.as_ref(),
+        headline,
+        &next_step,
+    );
+    if let Some(active_headline) = competing_active_headline.as_deref() {
+        if !promote_active_workline {
+            return Err(anyhow::anyhow!(
+                "continuity handoff blocked: same-thread same-scope write would replace active line '{}' with competing line '{}' without explicit promotion contract. Re-run with --promote-active-workline for a real main workline redirect or use a distinct AMAI_AGENT_SCOPE for critic/private work",
+                active_headline,
+                headline.trim(),
+            ));
+        }
+        if !handoff_promotion_contract_allows_active_line_switch(details) {
+            return Err(anyhow::anyhow!(
+                "continuity handoff blocked: same-thread same-scope promotion from '{}' to '{}' is missing a valid promotion_contract. Add 'promotion_contract: user_redirect' only for an explicit user redirect with AMAI_USER_REDIRECT_PROVENANCE set, 'promotion_contract: operator_redirect' only for an explicit operator/synthetic mainline redirect with AMAI_OPERATOR_REDIRECT_PROVENANCE set, 'promotion_contract: resume_required_return_task' only when resuming the required return task, or use a distinct AMAI_AGENT_SCOPE for critic/private work",
+                active_headline,
+                headline.trim(),
+            ));
+        }
+    }
+    let effective_promote_active_workline =
+        promote_active_workline && competing_active_headline.is_some();
     let client_budget_target_percent = previous_restore.as_ref().and_then(|value| {
         value["working_state_restore"]["client_budget_target_percent"]
             .as_u64()
@@ -874,7 +1287,6 @@ async fn record_handoff_event_with_refresh(
         resolved_headlines,
         resolved_task_ids,
     );
-    let thread_id = resolve_thread_id_for_project_repo_root(&project.repo_root, None);
     let session_id_started = Instant::now();
     let session_id = resolve_session_id(
         db,
@@ -957,7 +1369,8 @@ async fn record_handoff_event_with_refresh(
                         namespace,
                         previous_restore_value,
                         &authoritative_event,
-                        source_snapshot_id,
+                        Some(source_snapshot_id),
+                        None,
                     )
                     .await?;
                 } else {
@@ -1014,6 +1427,10 @@ async fn record_handoff_event_with_refresh(
             "pending_return_queue": pending_return_queue,
             "client_budget_target_percent": client_budget_target_percent,
             "resolve_current_goal": resolve_current_goal,
+            "promote_active_workline": effective_promote_active_workline,
+            "promotion_contract": handoff_promotion_contract(details),
+            "user_redirect_provenance": user_redirect_provenance_from_env(),
+            "operator_redirect_provenance": operator_redirect_provenance_from_env(),
             "resolved_pending_return_headlines": resolved_headlines,
             "resolved_pending_return_task_ids": resolved_task_ids,
             "last_command": "continuity handoff".to_string(),
@@ -1123,7 +1540,8 @@ async fn record_handoff_event_with_refresh(
                 namespace,
                 previous_restore,
                 &payload["working_state_event"],
-                snapshot_id,
+                Some(snapshot_id),
+                None,
             )
             .await?
         } else {
@@ -1190,8 +1608,9 @@ pub async fn record_client_budget_target_event_with_thread_hint(
         .map(normalize_next_step_hint)
         .unwrap_or_else(|| "Продолжить работу с новым target для клиентской экономии.".to_string());
     let recorded_at_epoch_ms = now_epoch_ms()?;
-    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
-    let thread_id = resolve_thread_id_for_project_repo_root(&project.repo_root, thread_id_hint);
+    let agent_scope = current_agent_scope_for_result(&project.code, &namespace.code)?;
+    let thread_id =
+        resolve_thread_id_for_project_repo_root_checked(&project.repo_root, thread_id_hint)?;
     let session_id_started = Instant::now();
     let session_id = resolve_session_id(
         db,
@@ -1321,8 +1740,9 @@ pub async fn record_host_current_thread_control_feedback_with_thread_hint(
         .map(|value| normalize_host_current_thread_control_command_id(Some(value)))
         .unwrap_or(HOST_CURRENT_THREAD_CONTROL_COMMAND_ID);
     let recorded_at_epoch_ms = now_epoch_ms()?;
-    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
-    let thread_id = resolve_thread_id_for_project_repo_root(&project.repo_root, thread_id_hint);
+    let agent_scope = current_agent_scope_for_result(&project.code, &namespace.code)?;
+    let thread_id =
+        resolve_thread_id_for_project_repo_root_checked(&project.repo_root, thread_id_hint)?;
     let session_id = resolve_session_id(
         db,
         &project.code,
@@ -1449,8 +1869,9 @@ pub async fn record_context_pack_event(
         "unknown"
     };
     let recorded_at_epoch_ms = now_epoch_ms()?;
-    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
-    let thread_id = if let Some(thread_id) = current_thread_id() {
+    let agent_scope = current_agent_scope_for_result(&project.code, &namespace.code)?;
+    let env_thread_id = crate::thread_binding::current_thread_id_result()?;
+    let thread_id = if let Some(thread_id) = env_thread_id {
         Some(thread_id)
     } else if project.repo_root.trim().is_empty() {
         None
@@ -1525,21 +1946,12 @@ pub async fn record_context_pack_event(
             "workspace_graph": node.get("workspace_graph").cloned().unwrap_or(Value::Null),
         }
     });
-    postgres::insert_observability_snapshot(db, WORKING_STATE_EVENT_KIND, &payload).await?;
-    if traffic_class == "live" && !project.repo_root.is_empty() {
-        if let Ok(recorded_at_epoch_ms) = i64::try_from(recorded_at_epoch_ms) {
-            let _ = token_budget::bump_dashboard_live_turn_retrieval_invalidation(
-                Path::new(&project.repo_root),
-                recorded_at_epoch_ms,
-            );
-        }
-    }
     let persisted_project = postgres::get_project_by_code(db, &project.code).await?;
     let project_record = ProjectRecord {
         project_id: persisted_project.project_id,
         code: project.code,
         display_name: project.display_name,
-        repo_root: project.repo_root,
+        repo_root: project.repo_root.clone(),
         visibility_scope: persisted_project.visibility_scope,
         updated_at: String::new(),
     };
@@ -1551,11 +1963,33 @@ pub async fn record_context_pack_event(
         display_name: namespace.display_name,
         retrieval_mode: persisted_namespace.retrieval_mode,
     };
-    Ok(refresh_restore_snapshot_after_primary_write(
+    let previous_restore =
+        load_recent_restore_bundle_without_live_guard(db, &project_record, &namespace_record)
+            .await?;
+    let active_lease = postgres::get_execctl_task_lease(
+        db,
+        project_record.project_id,
+        namespace_record.namespace_id,
+        &agent_scope,
+        recorded_at_epoch_ms as i64,
+    )
+    .await?;
+    postgres::insert_observability_snapshot(db, WORKING_STATE_EVENT_KIND, &payload).await?;
+    if traffic_class == "live" && !project.repo_root.is_empty() {
+        if let Ok(recorded_at_epoch_ms) = i64::try_from(recorded_at_epoch_ms) {
+            let _ = token_budget::bump_dashboard_live_turn_retrieval_invalidation(
+                Path::new(&project.repo_root),
+                recorded_at_epoch_ms,
+            );
+        }
+    }
+    Ok(refresh_restore_snapshot_after_context_pack_write(
         db,
         &project_record,
         &namespace_record,
-        "context_pack.refresh_restore_snapshot",
+        previous_restore.as_ref(),
+        active_lease.as_ref(),
+        &payload["working_state_event"],
     )
     .await)
 }
@@ -1566,7 +2000,7 @@ async fn build_restore_bundle_without_live_guard(
     namespace: &NamespaceRecord,
 ) -> Result<Option<Value>> {
     let total_started = Instant::now();
-    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
+    let agent_scope = current_agent_scope_for_result(&project.code, &namespace.code)?;
     let step_started = Instant::now();
     let events = load_selected_working_state_events(db, project, namespace).await?;
     continuity_profile_log(
@@ -1652,6 +2086,13 @@ async fn build_restore_bundle_without_live_guard(
     overlay_execctl_active_lease(&mut bundle, active_lease.as_ref());
     continuity_profile_log(
         "build_restore_bundle_without_live_guard.overlay_execctl_active_lease",
+        step_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let step_started = Instant::now();
+    overlay_task_graph_restore_projection(db, &mut bundle, project, namespace).await?;
+    continuity_profile_log(
+        "build_restore_bundle_without_live_guard.overlay_task_graph_restore_projection",
         step_started.elapsed().as_millis(),
         &format!("project={} namespace={}", project.code, namespace.code),
     );
@@ -1864,14 +2305,23 @@ fn resolve_restore_execution_card_binding(
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let thread_id = node["thread_id"]
+    let explicit_thread_id = node["thread_id"]
         .as_str()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| resolve_thread_id_for_project_repo_root(&project.repo_root, None));
+        .map(str::to_string);
+    let (thread_id, thread_binding_conflict) = if explicit_thread_id.is_some() {
+        (explicit_thread_id, false)
+    } else {
+        match resolve_thread_id_for_project_repo_root_checked(&project.repo_root, None) {
+            Ok(thread_id) => (thread_id, false),
+            Err(_) => (None, true),
+        }
+    };
 
-    let recent_thread =
+    let recent_thread = if thread_binding_conflict {
+        None
+    } else {
         codex_threads::recent_client_thread_records(RESTORE_EXECUTION_CARD_THREAD_WINDOW_SECONDS)
             .ok()
             .and_then(|items| {
@@ -1879,7 +2329,8 @@ fn resolve_restore_execution_card_binding(
                     thread_id.as_deref() == Some(item.thread_id.as_str())
                         || (!project.repo_root.trim().is_empty() && item.cwd == project.repo_root)
                 })
-            });
+            })
+    };
 
     let model =
         explicit_model.or_else(|| recent_thread.as_ref().and_then(|item| item.model.clone()));
@@ -2074,6 +2525,19 @@ pub async fn load_recent_restore_bundle_without_live_guard(
             {
                 let mut bundle = snapshot.payload.clone();
                 ensure_runtime_workspace_restore_pack(&mut bundle);
+                let agent_scope = current_agent_scope_for_result(&project.code, &namespace.code)?;
+                let active_lease = postgres::get_execctl_task_lease(
+                    db,
+                    project.project_id,
+                    namespace.namespace_id,
+                    &agent_scope,
+                    now_epoch_ms()? as i64,
+                )
+                .await?;
+                overlay_execctl_active_lease(&mut bundle, active_lease.as_ref());
+                overlay_task_graph_restore_projection(db, &mut bundle, project, namespace).await?;
+                overlay_restore_execution_card(db, project, namespace, &mut bundle).await?;
+                overlay_workspace_restore_pack(&mut bundle);
                 return Ok(Some(bundle));
             }
         }
@@ -2180,47 +2644,99 @@ fn execctl_startup_same_thread_lease_refresh_candidate(
         .into_iter()
         .flatten()
         .find(|node| node["task_role"].as_str() == Some("active"));
-    let source_event_id = active_task
-        .and_then(|node| node["authoritative_event_id"].as_str())
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            restore["state_lineage"]["authoritative_event_id"]
-                .as_str()
-                .filter(|value| !value.trim().is_empty())
-        })?
-        .trim()
-        .to_string();
-    let source_kind = active_task
-        .and_then(|node| node["source_kind"].as_str())
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            restore["state_lineage"]["authoritative_source_kind"]
-                .as_str()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .unwrap_or("working_state_restore")
-        .trim()
-        .to_string();
-    let headline = active_task
-        .and_then(|node| node["headline"].as_str())
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            restore["current_goal"]
-                .as_str()
-                .filter(|value| !value.trim().is_empty())
-        })?
-        .trim()
-        .to_string();
-    let next_step = active_task
-        .and_then(|node| node["next_step"].as_str())
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            restore["next_step"]
-                .as_str()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .map(normalize_next_step_hint)
-        .unwrap_or_else(|| "ещё нет данных".to_string());
+    let preserve_lineage_handoff = restore_should_preserve_lineage_handoff_over_context_pack(
+        restore,
+        restore["execctl_active_lease"]["source_kind"].as_str(),
+    );
+    let source_event_id = if preserve_lineage_handoff {
+        restore["state_lineage"]["authoritative_event_id"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                active_task
+                    .and_then(|node| node["authoritative_event_id"].as_str())
+                    .filter(|value| !value.trim().is_empty())
+            })?
+            .trim()
+            .to_string()
+    } else {
+        active_task
+            .and_then(|node| node["authoritative_event_id"].as_str())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                restore["state_lineage"]["authoritative_event_id"]
+                    .as_str()
+                    .filter(|value| !value.trim().is_empty())
+            })?
+            .trim()
+            .to_string()
+    };
+    let source_kind = if preserve_lineage_handoff {
+        restore["state_lineage"]["authoritative_source_kind"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("continuity_handoff")
+            .trim()
+            .to_string()
+    } else {
+        active_task
+            .and_then(|node| node["source_kind"].as_str())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                restore["state_lineage"]["authoritative_source_kind"]
+                    .as_str()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or("working_state_restore")
+            .trim()
+            .to_string()
+    };
+    let headline = if preserve_lineage_handoff {
+        restore["current_goal"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                active_task
+                    .and_then(|node| node["headline"].as_str())
+                    .filter(|value| !value.trim().is_empty())
+            })?
+            .trim()
+            .to_string()
+    } else {
+        active_task
+            .and_then(|node| node["headline"].as_str())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                restore["current_goal"]
+                    .as_str()
+                    .filter(|value| !value.trim().is_empty())
+            })?
+            .trim()
+            .to_string()
+    };
+    let next_step = if preserve_lineage_handoff {
+        restore["next_step"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                active_task
+                    .and_then(|node| node["next_step"].as_str())
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .map(normalize_next_step_hint)
+            .unwrap_or_else(|| "ещё нет данных".to_string())
+    } else {
+        active_task
+            .and_then(|node| node["next_step"].as_str())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                restore["next_step"]
+                    .as_str()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .map(normalize_next_step_hint)
+            .unwrap_or_else(|| "ещё нет данных".to_string())
+    };
     let local_path = restore["state_lineage"]["authoritative_local_path"]
         .as_str()
         .filter(|value| !value.trim().is_empty())
@@ -2243,6 +2759,275 @@ fn execctl_startup_same_thread_lease_refresh_candidate(
         next_step,
         local_path,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExecCtlForeignThreadHandoffConflict {
+    owner_thread_id: Option<String>,
+    current_thread_id: Option<String>,
+    source_event_id: String,
+    headline: String,
+    owner_binding_source: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecCtlLeaseRefreshIntent {
+    Startup,
+    Guard,
+}
+
+fn restore_thread_id_hint_for_active_lease(
+    active_lease: &ExecCtlTaskLeaseRecord,
+    previous_restore: Option<&Value>,
+) -> Option<String> {
+    let restore = previous_restore?.get("working_state_restore")?;
+    let lease_source_event_id = active_lease.source_event_id.trim();
+    if !lease_source_event_id.is_empty() {
+        let restore_lease_source_event_id = restore["execctl_active_lease"]["source_event_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let restore_lineage_event_id = restore["state_lineage"]["authoritative_event_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if restore_lease_source_event_id != Some(lease_source_event_id)
+            && restore_lineage_event_id != Some(lease_source_event_id)
+        {
+            return None;
+        }
+    }
+    restore["thread_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn execctl_foreign_thread_handoff_conflict(
+    active_lease: Option<&ExecCtlTaskLeaseRecord>,
+    current_thread_id: Option<&str>,
+    previous_restore: Option<&Value>,
+) -> Option<ExecCtlForeignThreadHandoffConflict> {
+    let active_lease = active_lease?;
+    if active_lease.lease_state.trim() != "active" {
+        return None;
+    }
+    let owner_thread_id = active_lease
+        .owner_thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| restore_thread_id_hint_for_active_lease(active_lease, previous_restore));
+    let owner_binding_source = if active_lease
+        .owner_thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        "execctl_active_lease"
+    } else if owner_thread_id.is_some() {
+        "working_state_restore"
+    } else {
+        "missing"
+    };
+    let current_thread_id = current_thread_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if owner_thread_id
+        .as_deref()
+        .is_some_and(|owner| current_thread_id.as_deref() == Some(owner))
+    {
+        return None;
+    }
+    let source_event_id = active_lease.source_event_id.trim();
+    let headline = active_lease.headline.trim();
+    Some(ExecCtlForeignThreadHandoffConflict {
+        owner_thread_id,
+        current_thread_id,
+        source_event_id: if source_event_id.is_empty() {
+            "unknown".to_string()
+        } else {
+            source_event_id.to_string()
+        },
+        headline: if headline.is_empty() {
+            "активная рабочая линия".to_string()
+        } else {
+            headline.to_string()
+        },
+        owner_binding_source,
+    })
+}
+
+fn previous_restore_thread_id_hint_for_handoff(
+    previous_restore: Option<&Value>,
+    local_path: &str,
+) -> Option<String> {
+    let restore = previous_restore?.get("working_state_restore")?;
+    if restore["state_lineage"]["authoritative_event_kind"].as_str() != Some("continuity_handoff") {
+        return None;
+    }
+    if restore["state_lineage"]["authoritative_local_path"].as_str() != Some(local_path) {
+        return None;
+    }
+    restore["thread_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn previous_restore_foreign_thread_handoff_conflict(
+    previous_restore: Option<&Value>,
+    current_thread_id: Option<&str>,
+    local_path: &str,
+) -> Option<ExecCtlForeignThreadHandoffConflict> {
+    let restore = previous_restore?.get("working_state_restore")?;
+    if restore["state_lineage"]["authoritative_event_kind"].as_str() != Some("continuity_handoff") {
+        return None;
+    }
+    if restore["state_lineage"]["authoritative_local_path"].as_str() != Some(local_path) {
+        return None;
+    }
+    let owner_thread_id = previous_restore_thread_id_hint_for_handoff(previous_restore, local_path);
+    let current_thread_id = current_thread_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if owner_thread_id
+        .as_deref()
+        .is_some_and(|owner| current_thread_id.as_deref() == Some(owner))
+    {
+        return None;
+    }
+    let source_event_id = restore["state_lineage"]["authoritative_event_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+    let headline = restore["current_goal"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("активная рабочая линия");
+    Some(ExecCtlForeignThreadHandoffConflict {
+        owner_thread_id,
+        current_thread_id,
+        source_event_id: source_event_id.to_string(),
+        headline: headline.to_string(),
+        owner_binding_source: "working_state_restore",
+    })
+}
+
+fn same_scope_competing_handoff_active_headline(
+    previous_restore: Option<&Value>,
+    new_headline: &str,
+    _new_next_step: &str,
+) -> Option<String> {
+    let restore = previous_restore?.get("working_state_restore")?;
+    let previous_headline = restore["current_goal"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| is_meaningful_pending_return_headline(value))?;
+    let new_headline = new_headline.trim();
+    if new_headline.is_empty() || previous_headline == new_headline {
+        return None;
+    }
+    Some(previous_headline.to_string())
+}
+
+pub(crate) fn handoff_promote_active_workline_effective(
+    previous_restore: Option<&Value>,
+    new_headline: &str,
+    new_next_step: &str,
+    requested_promote_active_workline: bool,
+) -> bool {
+    requested_promote_active_workline
+        && same_scope_competing_handoff_active_headline(
+            previous_restore,
+            new_headline,
+            new_next_step,
+        )
+        .is_some()
+}
+
+fn handoff_promotion_contract(details: &str) -> Option<String> {
+    details.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let value = trimmed
+            .strip_prefix("promotion_contract:")
+            .or_else(|| trimmed.strip_prefix("promotion_contract ="))?
+            .trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+pub(crate) fn operator_redirect_provenance_from_env() -> Option<String> {
+    std::env::var(OPERATOR_REDIRECT_PROVENANCE_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn user_redirect_provenance_from_env() -> Option<String> {
+    std::env::var(USER_REDIRECT_PROVENANCE_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn handoff_promotion_contract_allows_active_line_switch(details: &str) -> bool {
+    match handoff_promotion_contract(details).as_deref() {
+        Some("user_redirect") => user_redirect_provenance_from_env().is_some(),
+        Some("resume_required_return_task") => true,
+        Some("operator_redirect") => operator_redirect_provenance_from_env().is_some(),
+        _ => false,
+    }
+}
+
+fn execctl_live_thread_lease_refresh_allowed(
+    active_lease: Option<&ExecCtlTaskLeaseRecord>,
+    current_thread_id: Option<&str>,
+    previous_restore: Option<&Value>,
+    candidate_source_event_id: &str,
+    intent: ExecCtlLeaseRefreshIntent,
+) -> bool {
+    let Some(current_thread_id) = current_thread_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let Some(active_lease) = active_lease else {
+        return true;
+    };
+    if active_lease.lease_state.trim() != "active" {
+        return true;
+    }
+    let live_source_event_id = active_lease.source_event_id.trim();
+    let candidate_source_event_id = candidate_source_event_id.trim();
+    if live_source_event_id.is_empty()
+        || candidate_source_event_id.is_empty()
+        || live_source_event_id != candidate_source_event_id
+    {
+        return false;
+    }
+    let owner_thread_id = active_lease
+        .owner_thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match owner_thread_id {
+        Some(owner_thread_id) if owner_thread_id == current_thread_id => true,
+        Some(_) => intent == ExecCtlLeaseRefreshIntent::Startup,
+        None => {
+            restore_thread_id_hint_for_active_lease(active_lease, previous_restore).as_deref()
+                == Some(current_thread_id)
+        }
+    }
 }
 
 fn execctl_same_thread_lease_refresh_required(
@@ -2272,6 +3057,55 @@ fn execctl_same_thread_lease_refresh_required(
     let expires_at_epoch_ms = active_lease.expires_at_epoch_ms.max(0) as u64;
     now_epoch_ms.saturating_sub(heartbeat_at_epoch_ms) >= min_refresh_interval_ms
         || expires_at_epoch_ms.saturating_sub(now_epoch_ms) <= min_refresh_interval_ms
+}
+
+fn execctl_same_thread_lineage_handoff_rebind_required(
+    active_lease: Option<&ExecCtlTaskLeaseRecord>,
+    current_thread_id: Option<&str>,
+    previous_restore: Option<&Value>,
+    candidate_source_event_id: &str,
+    candidate_source_kind: &str,
+) -> bool {
+    let Some(current_thread_id) = current_thread_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let Some(active_lease) = active_lease else {
+        return false;
+    };
+    if active_lease.lease_state.trim() != "active"
+        || !is_continuity_handoff_kind(Some(candidate_source_kind))
+    {
+        return false;
+    }
+    let Some(restore) = previous_restore.and_then(|value| value.get("working_state_restore"))
+    else {
+        return false;
+    };
+    if !restore_should_preserve_lineage_handoff_over_context_pack(
+        restore,
+        Some(active_lease.source_kind.as_str()),
+    ) {
+        return false;
+    }
+    let live_source_event_id = active_lease.source_event_id.trim();
+    let candidate_source_event_id = candidate_source_event_id.trim();
+    if live_source_event_id.is_empty()
+        || candidate_source_event_id.is_empty()
+        || live_source_event_id == candidate_source_event_id
+    {
+        return false;
+    }
+    let owner_thread_id = active_lease
+        .owner_thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| restore_thread_id_hint_for_active_lease(active_lease, previous_restore));
+    owner_thread_id.as_deref() == Some(current_thread_id)
 }
 
 pub fn print_restore_bundle_human(restore: &Value) {
@@ -2475,17 +3309,26 @@ async fn force_refresh_restore_snapshot(
     Ok(Some(bundle))
 }
 
+pub(crate) async fn force_refresh_restore_snapshot_for_startup_reconcile(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+) -> Result<Option<Value>> {
+    force_refresh_restore_snapshot(db, project, namespace).await
+}
+
 async fn force_refresh_restore_snapshot_from_previous_handoff(
     db: &Client,
     project: &ProjectRecord,
     namespace: &NamespaceRecord,
     previous_restore: &Value,
     authoritative_event: &Value,
-    source_snapshot_id: Uuid,
+    source_snapshot_id: Option<Uuid>,
+    supporting_event: Option<&Value>,
 ) -> Result<Option<Value>> {
     let project_value = project_json(project);
     let namespace_value = namespace_json(namespace);
-    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
+    let agent_scope = current_agent_scope_for_result(&project.code, &namespace.code)?;
     let durable_entries_started = Instant::now();
     let durable_entries = postgres::list_execctl_task_ledger_entries(
         db,
@@ -2522,7 +3365,8 @@ async fn force_refresh_restore_snapshot_from_previous_handoff(
         return force_refresh_restore_snapshot(db, project, namespace).await;
     };
     let now_epoch_ms = now_epoch_ms().unwrap_or_default();
-    let recorded_at_epoch_ms = authoritative_event["recorded_at_epoch_ms"]
+    let latest_event = supporting_event.unwrap_or(authoritative_event);
+    let recorded_at_epoch_ms = latest_event["recorded_at_epoch_ms"]
         .as_u64()
         .unwrap_or(now_epoch_ms);
     let current_goal = authoritative_event["headline"]
@@ -2541,15 +3385,27 @@ async fn force_refresh_restore_snapshot_from_previous_handoff(
     let required_task_set_summary = summarize_required_task_set(&required_task_set);
 
     let mut active_files = Vec::new();
+    if let Some(supporting_event) = supporting_event {
+        collect_active_files(&mut active_files, &supporting_event["active_files"]);
+    }
     collect_active_files(&mut active_files, &authoritative_event["active_files"]);
     collect_active_files(&mut active_files, &restore["active_files"]);
     let mut visible_projects = Vec::new();
+    if let Some(supporting_event) = supporting_event {
+        collect_unique_strings(&mut visible_projects, &supporting_event["visible_projects"]);
+    }
     collect_unique_strings(
         &mut visible_projects,
         &authoritative_event["visible_projects"],
     );
     collect_unique_strings(&mut visible_projects, &restore["visible_projects"]);
     let mut recent_queries = Vec::new();
+    if let Some(query) = supporting_event
+        .and_then(|event| event["query"].as_str())
+        .filter(|value| !value.is_empty())
+    {
+        push_unique(&mut recent_queries, query.to_string());
+    }
     if let Some(query) = authoritative_event["query"]
         .as_str()
         .filter(|value| !value.is_empty())
@@ -2561,50 +3417,81 @@ async fn force_refresh_restore_snapshot_from_previous_handoff(
     collect_open_questions(&mut open_questions, &authoritative_event["open_questions"]);
     collect_open_questions(&mut open_questions, &restore["open_questions"]);
     let mut rejected_hypotheses = Vec::new();
+    if let Some(supporting_event) = supporting_event {
+        collect_unique_strings(
+            &mut rejected_hypotheses,
+            &supporting_event["rejected_hypotheses"],
+        );
+    }
     collect_unique_strings(
         &mut rejected_hypotheses,
         &authoritative_event["rejected_hypotheses"],
     );
     collect_unique_strings(&mut rejected_hypotheses, &restore["rejected_hypotheses"]);
     let mut materialized_notes = Vec::new();
+    if let Some(supporting_event) = supporting_event {
+        collect_materialized_notes(
+            &mut materialized_notes,
+            &supporting_event["materialized_notes"],
+        );
+    }
     collect_materialized_notes(
         &mut materialized_notes,
         &authoritative_event["materialized_notes"],
     );
     collect_materialized_notes(&mut materialized_notes, &restore["materialized_notes"]);
-    let current_hypothesis = authoritative_event["current_hypothesis"]
-        .as_str()
+    let current_hypothesis = supporting_event
+        .and_then(|event| event["current_hypothesis"].as_str())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+        .or_else(|| {
+            authoritative_event["current_hypothesis"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
         .or_else(|| {
             restore["current_hypothesis"]
                 .as_str()
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned)
         });
-    let last_command = authoritative_event["last_command"]
-        .as_str()
+    let last_command = supporting_event
+        .and_then(|event| event["last_command"].as_str())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+        .or_else(|| {
+            authoritative_event["last_command"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
         .or_else(|| {
             restore["last_command"]
                 .as_str()
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned)
         });
-    let last_results_summary = authoritative_event["last_results_summary"]
-        .as_str()
+    let last_results_summary = supporting_event
+        .and_then(|event| event["last_results_summary"].as_str())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+        .or_else(|| {
+            authoritative_event["last_results_summary"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
         .or_else(|| {
             restore["last_results_summary"]
                 .as_str()
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned)
         });
-    let included_reasons_summary = decision_trace_summary(Some(authoritative_event), "included");
+    let decision_trace_event = supporting_event.unwrap_or(authoritative_event);
+    let included_reasons_summary = decision_trace_summary(Some(decision_trace_event), "included");
     let excluded_reasons_summary =
-        decision_trace_summary(Some(authoritative_event), "not_included");
+        decision_trace_summary(Some(decision_trace_event), "not_included");
     let current_focus = derive_restore_current_focus(
         &active_files,
         &recent_queries,
@@ -2615,8 +3502,39 @@ async fn force_refresh_restore_snapshot_from_previous_handoff(
         &active_files,
         included_reasons_summary.as_deref(),
     );
+    let authoritative_event_id = authoritative_event["event_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
 
-    let mut recent_actions = vec![json!({
+    let mut recent_actions = Vec::new();
+    if let Some(supporting_event) = supporting_event {
+        let supporting_recorded_at_epoch_ms = supporting_event["recorded_at_epoch_ms"]
+            .as_u64()
+            .unwrap_or(recorded_at_epoch_ms);
+        recent_actions.push(json!({
+            "event_id": supporting_event["event_id"],
+            "event_kind": supporting_event["event_kind"],
+            "source_kind": supporting_event["source_kind"],
+            "headline": supporting_event["headline"],
+            "summary": supporting_event["summary"],
+            "recorded_at_epoch_ms": supporting_event["recorded_at_epoch_ms"],
+            "local_path": supporting_event["local_path"],
+            "host_current_thread_control_feedback": if supporting_event["host_current_thread_control_feedback"].is_object() {
+                supporting_event["host_current_thread_control_feedback"].clone()
+            } else {
+                Value::Null
+            },
+            "execution_state": classify_action_state(
+                supporting_event,
+                &authoritative_event_id,
+                supporting_recorded_at_epoch_ms,
+                now_epoch_ms,
+            ),
+            "authoritative": false,
+        }));
+    }
+    recent_actions.push(json!({
         "event_id": authoritative_event["event_id"],
         "event_kind": authoritative_event["event_kind"],
         "source_kind": authoritative_event["source_kind"],
@@ -2631,13 +3549,16 @@ async fn force_refresh_restore_snapshot_from_previous_handoff(
         },
         "execution_state": "succeeded",
         "authoritative": true,
-    })];
+    }));
     if let Some(items) = restore["recent_actions"].as_array() {
         for item in items {
             if recent_actions.len() >= MAX_RECENT_ACTIONS {
                 break;
             }
             if item["event_id"] == authoritative_event["event_id"] {
+                continue;
+            }
+            if supporting_event.is_some_and(|event| item["event_id"] == event["event_id"]) {
                 continue;
             }
             let mut updated = item.clone();
@@ -2653,10 +3574,6 @@ async fn force_refresh_restore_snapshot_from_previous_handoff(
         .iter()
         .filter_map(|item| item["event_id"].as_str().map(ToOwned::to_owned))
         .collect::<Vec<_>>();
-    let authoritative_event_id = authoritative_event["event_id"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
     let lineage_nodes = recent_actions
         .iter()
         .filter_map(|item| {
@@ -2722,22 +3639,32 @@ async fn force_refresh_restore_snapshot_from_previous_handoff(
         Some(project.repo_root.as_str()),
     );
     let startup_next_action_summary = summarize_startup_next_action(&startup_next_action);
+    let restore_identity_source = Value::Object(restore.clone());
+    let refresh_agent_scope = refresh_restore_identity_value(
+        authoritative_event,
+        latest_event,
+        &restore_identity_source,
+        "agent_scope",
+    );
+    let refresh_thread_id = refresh_restore_identity_value(
+        authoritative_event,
+        latest_event,
+        &restore_identity_source,
+        "thread_id",
+    );
+    let refresh_session_id = refresh_restore_identity_value(
+        authoritative_event,
+        latest_event,
+        &restore_identity_source,
+        "session_id",
+    );
 
     restore.insert("project".to_string(), project_value.clone());
     restore.insert("namespace".to_string(), namespace_value.clone());
     restore.insert("captured_at_epoch_ms".to_string(), json!(now_epoch_ms));
-    restore.insert(
-        "agent_scope".to_string(),
-        authoritative_event["agent_scope"].clone(),
-    );
-    restore.insert(
-        "thread_id".to_string(),
-        authoritative_event["thread_id"].clone(),
-    );
-    restore.insert(
-        "session_id".to_string(),
-        authoritative_event["session_id"].clone(),
-    );
+    restore.insert("agent_scope".to_string(), refresh_agent_scope.clone());
+    restore.insert("thread_id".to_string(), refresh_thread_id.clone());
+    restore.insert("session_id".to_string(), refresh_session_id.clone());
     restore.insert(
         "session_age_ms".to_string(),
         json!(now_epoch_ms.saturating_sub(recorded_at_epoch_ms)),
@@ -2791,14 +3718,9 @@ async fn force_refresh_restore_snapshot_from_previous_handoff(
     );
     restore.insert(
         "execctl_resume_state".to_string(),
-        if pending_return_queue
-            .as_array()
-            .is_some_and(|items| !items.is_empty())
-        {
-            json!("pending_return_queue_present")
-        } else {
-            json!("clear")
-        },
+        json!(task_graph_resume_state_from_contract(
+            &execctl_resume_contract
+        )),
     );
     restore.insert(
         "execctl_resume_contract".to_string(),
@@ -2853,7 +3775,12 @@ async fn force_refresh_restore_snapshot_from_previous_handoff(
         "source_summary".to_string(),
         source_summary.map(Value::String).unwrap_or(Value::Null),
     );
-    restore.insert("latest_decision_trace".to_string(), Value::Null);
+    restore.insert(
+        "latest_decision_trace".to_string(),
+        supporting_event
+            .and_then(summarize_decision_trace)
+            .unwrap_or(Value::Null),
+    );
     restore.insert(
         "included_reasons_summary".to_string(),
         included_reasons_summary
@@ -2883,7 +3810,10 @@ async fn force_refresh_restore_snapshot_from_previous_handoff(
             "authoritative_event_kind": authoritative_event["event_kind"],
             "authoritative_source_kind": authoritative_event["source_kind"],
             "authoritative_local_path": authoritative_event["local_path"],
-            "source_snapshot_id": source_snapshot_id.to_string(),
+            "agent_scope": refresh_agent_scope,
+            "thread_id": refresh_thread_id,
+            "session_id": refresh_session_id,
+            "source_snapshot_id": source_snapshot_id.map(|value| value.to_string()),
             "supporting_event_ids": lineage_supporting_event_ids,
             "truth_ranking": restore["execution_catalog"]["truth_ranking"].clone(),
             "nodes": lineage_nodes,
@@ -2897,6 +3827,13 @@ async fn force_refresh_restore_snapshot_from_previous_handoff(
     continuity_profile_log(
         "force_refresh_restore_snapshot_from_previous_handoff.overlay_active_lease",
         overlay_lease_started.elapsed().as_millis(),
+        &format!("project={} namespace={}", project.code, namespace.code),
+    );
+    let overlay_task_graph_started = Instant::now();
+    overlay_task_graph_restore_projection(db, &mut bundle, project, namespace).await?;
+    continuity_profile_log(
+        "force_refresh_restore_snapshot_from_previous_handoff.overlay_task_graph_restore_projection",
+        overlay_task_graph_started.elapsed().as_millis(),
         &format!("project={} namespace={}", project.code, namespace.code),
     );
     let overlay_execution_card_started = Instant::now();
@@ -2939,16 +3876,62 @@ pub(crate) async fn refresh_same_thread_execctl_active_lease_for_startup(
     namespace: &NamespaceRecord,
     restore: Option<&Value>,
 ) -> Result<Option<Value>> {
+    let agent_scope = current_agent_scope_for_result(&project.code, &namespace.code)?;
+    let advisory_lock_key =
+        postgres::execctl_task_lease_advisory_lock_key(namespace.namespace_id, &agent_scope);
+    postgres::with_postgres_advisory_lock(
+        db,
+        advisory_lock_key,
+        format!(
+            "failed to acquire continuity execctl advisory lock for {}:{}:{}",
+            project.code, namespace.code, agent_scope
+        ),
+        format!(
+            "failed to release continuity execctl advisory lock for {}:{}:{}",
+            project.code, namespace.code, agent_scope
+        ),
+        || async {
+            refresh_same_thread_execctl_active_lease_for_startup_unlocked(
+                db, project, namespace, restore,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+async fn refresh_same_thread_execctl_active_lease_for_startup_unlocked(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    restore: Option<&Value>,
+) -> Result<Option<Value>> {
     let Some(restore) = restore else {
         return Ok(None);
     };
-    let current_thread_id = resolve_thread_id_for_project_repo_root(&project.repo_root, None);
+    let agent_scope = current_agent_scope_for_result(&project.code, &namespace.code)?;
+    let current_thread_id = resolve_execctl_live_thread_id_checked(None)?;
     let Some(candidate) =
         execctl_startup_same_thread_lease_refresh_candidate(restore, current_thread_id.as_deref())
     else {
-        return Ok(Some(restore.clone()));
+        let live_active_lease = postgres::get_execctl_task_lease(
+            db,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            now_epoch_ms()? as i64,
+        )
+        .await?;
+        return refresh_startup_restore_bundle_with_live_lease(
+            db,
+            project,
+            namespace,
+            restore,
+            live_active_lease.as_ref(),
+        )
+        .await
+        .map(Some);
     };
-    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
     let live_active_lease = postgres::get_execctl_task_lease(
         db,
         project.project_id,
@@ -2958,13 +3941,49 @@ pub(crate) async fn refresh_same_thread_execctl_active_lease_for_startup(
     )
     .await?;
     let now_epoch_ms = now_epoch_ms()?;
-    if !execctl_same_thread_lease_refresh_required(
+    let preserve_lineage_handoff_rebind = execctl_same_thread_lineage_handoff_rebind_required(
         live_active_lease.as_ref(),
         current_thread_id.as_deref(),
-        now_epoch_ms,
-        0,
-    ) {
-        return Ok(Some(restore.clone()));
+        Some(restore),
+        candidate.source_event_id.as_str(),
+        candidate.source_kind.as_str(),
+    );
+    if !preserve_lineage_handoff_rebind
+        && !execctl_same_thread_lease_refresh_required(
+            live_active_lease.as_ref(),
+            current_thread_id.as_deref(),
+            now_epoch_ms,
+            0,
+        )
+    {
+        return refresh_startup_restore_bundle_with_live_lease(
+            db,
+            project,
+            namespace,
+            restore,
+            live_active_lease.as_ref(),
+        )
+        .await
+        .map(Some);
+    }
+    if !preserve_lineage_handoff_rebind
+        && !execctl_live_thread_lease_refresh_allowed(
+            live_active_lease.as_ref(),
+            current_thread_id.as_deref(),
+            Some(restore),
+            candidate.source_event_id.as_str(),
+            ExecCtlLeaseRefreshIntent::Startup,
+        )
+    {
+        return refresh_startup_restore_bundle_with_live_lease(
+            db,
+            project,
+            namespace,
+            restore,
+            live_active_lease.as_ref(),
+        )
+        .await
+        .map(Some);
     }
     let recorded_at_epoch_ms = now_epoch_ms;
     let session_id = resolve_session_id(
@@ -3006,8 +4025,27 @@ pub(crate) async fn refresh_same_thread_execctl_active_lease_for_startup(
         now_epoch_ms as i64,
     )
     .await?;
+    refresh_startup_restore_bundle_with_live_lease(
+        db,
+        project,
+        namespace,
+        restore,
+        refreshed_lease.as_ref(),
+    )
+    .await
+    .map(Some)
+}
+
+async fn refresh_startup_restore_bundle_with_live_lease(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    restore: &Value,
+    live_active_lease: Option<&ExecCtlTaskLeaseRecord>,
+) -> Result<Value> {
     let mut refreshed_bundle = restore.clone();
-    overlay_execctl_active_lease(&mut refreshed_bundle, refreshed_lease.as_ref());
+    overlay_execctl_active_lease(&mut refreshed_bundle, live_active_lease);
+    overlay_task_graph_restore_projection(db, &mut refreshed_bundle, project, namespace).await?;
     overlay_workspace_restore_pack(&mut refreshed_bundle);
     let client_budget_guard =
         token_budget::collect_live_current_session_budget_guard(db, Some(&refreshed_bundle))
@@ -3015,7 +4053,7 @@ pub(crate) async fn refresh_same_thread_execctl_active_lease_for_startup(
             .unwrap_or_else(|error| fallback_client_budget_guard_from_error(&error.to_string()));
     overlay_client_budget_guard(&mut refreshed_bundle, &client_budget_guard);
     overlay_workspace_restore_pack(&mut refreshed_bundle);
-    Ok(Some(refreshed_bundle))
+    Ok(refreshed_bundle)
 }
 
 pub(crate) async fn maintain_same_thread_execctl_active_lease_for_guard(
@@ -3046,14 +4084,49 @@ pub(crate) async fn maintain_same_thread_execctl_active_lease_for_guard(
     else {
         return Ok(());
     };
-    let current_thread_id =
-        resolve_thread_id_for_project_repo_root(&project.repo_root, explicit_thread_id_hint);
+    let agent_scope = current_agent_scope_for_result(&project.code, &namespace.code)?;
+    let advisory_lock_key =
+        postgres::execctl_task_lease_advisory_lock_key(namespace.namespace_id, &agent_scope);
+    postgres::with_postgres_advisory_lock(
+        db,
+        advisory_lock_key,
+        format!(
+            "failed to acquire continuity execctl advisory lock for {}:{}:{}",
+            project.code, namespace.code, agent_scope
+        ),
+        format!(
+            "failed to release continuity execctl advisory lock for {}:{}:{}",
+            project.code, namespace.code, agent_scope
+        ),
+        || async {
+            maintain_same_thread_execctl_active_lease_for_guard_unlocked(
+                db,
+                &project,
+                &namespace,
+                restore,
+                explicit_thread_id_hint,
+                agent_scope.as_str(),
+            )
+            .await
+        },
+    )
+    .await
+}
+
+async fn maintain_same_thread_execctl_active_lease_for_guard_unlocked(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    restore: &Value,
+    explicit_thread_id_hint: Option<&str>,
+    agent_scope: &str,
+) -> Result<()> {
+    let current_thread_id = resolve_execctl_live_thread_id_checked(explicit_thread_id_hint)?;
     let Some(candidate) =
         execctl_startup_same_thread_lease_refresh_candidate(restore, current_thread_id.as_deref())
     else {
         return Ok(());
     };
-    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
     let now_epoch_ms = now_epoch_ms()?;
     let live_active_lease = postgres::get_execctl_task_lease(
         db,
@@ -3063,12 +4136,32 @@ pub(crate) async fn maintain_same_thread_execctl_active_lease_for_guard(
         now_epoch_ms as i64,
     )
     .await?;
-    if !execctl_same_thread_lease_refresh_required(
+    let preserve_lineage_handoff_rebind = execctl_same_thread_lineage_handoff_rebind_required(
         live_active_lease.as_ref(),
         current_thread_id.as_deref(),
-        now_epoch_ms,
-        EXECCTL_LEASE_HEARTBEAT_MIN_INTERVAL_MS,
-    ) {
+        Some(restore),
+        candidate.source_event_id.as_str(),
+        candidate.source_kind.as_str(),
+    );
+    if !preserve_lineage_handoff_rebind
+        && !execctl_same_thread_lease_refresh_required(
+            live_active_lease.as_ref(),
+            current_thread_id.as_deref(),
+            now_epoch_ms,
+            EXECCTL_LEASE_HEARTBEAT_MIN_INTERVAL_MS,
+        )
+    {
+        return Ok(());
+    }
+    if !preserve_lineage_handoff_rebind
+        && !execctl_live_thread_lease_refresh_allowed(
+            live_active_lease.as_ref(),
+            current_thread_id.as_deref(),
+            Some(restore),
+            candidate.source_event_id.as_str(),
+            ExecCtlLeaseRefreshIntent::Guard,
+        )
+    {
         return Ok(());
     }
     let session_id = resolve_session_id(
@@ -3110,7 +4203,7 @@ async fn load_selected_working_state_events(
     project: &ProjectRecord,
     namespace: &NamespaceRecord,
 ) -> Result<Vec<ObservabilitySnapshotRecord>> {
-    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
+    let agent_scope = current_agent_scope_for_result(&project.code, &namespace.code)?;
     let snapshots = postgres::list_observability_snapshots_by_kind_for_scope_index_only(
         db,
         WORKING_STATE_EVENT_KIND,
@@ -3443,14 +4536,6 @@ fn compose_restore_bundle(
         })
         .unwrap_or(DEFAULT_CLIENT_BUDGET_TARGET_PERCENT);
     let pending_return_summary = summarize_pending_return_queue(&pending_return_queue);
-    let has_pending_return_queue = pending_return_queue
-        .as_array()
-        .is_some_and(|items| !items.is_empty());
-    let execctl_resume_state = if has_pending_return_queue {
-        "pending_return_queue_present"
-    } else {
-        "clear"
-    };
     let restore_freshness_state =
         if now_epoch_ms.saturating_sub(latest_recorded_at) > 15 * 60 * 1000 {
             "stale"
@@ -3497,6 +4582,7 @@ fn compose_restore_bundle(
         &pending_return_queue,
         &required_task_set,
     );
+    let execctl_resume_state = task_graph_resume_state_from_contract(&execctl_resume_contract);
     let execctl_resume_contract_summary =
         summarize_execctl_resume_contract(&execctl_resume_contract);
     let client_budget_guard = default_client_budget_guard();
@@ -4035,13 +5121,31 @@ fn select_relevant_events(
     if latest_session_id.is_empty() {
         return scoped.into_iter().take(1).collect();
     }
-    scoped
-        .into_iter()
+    let mut selected = scoped
+        .iter()
         .filter(|snapshot| {
             snapshot.payload["working_state_event"]["session_id"].as_str()
                 == Some(latest_session_id.as_str())
         })
-        .collect()
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected_has_handoff = selected.iter().any(|snapshot| {
+        let event = &snapshot.payload["working_state_event"];
+        event["event_kind"].as_str() == Some("continuity_handoff")
+            && !is_meta_continuity_event(event)
+    });
+    if !selected_has_handoff
+        && let Some(previous_handoff) = scoped.iter().find(|snapshot| {
+            let event = &snapshot.payload["working_state_event"];
+            snapshot.payload["working_state_event"]["session_id"].as_str()
+                != Some(latest_session_id.as_str())
+                && event["event_kind"].as_str() == Some("continuity_handoff")
+                && !is_meta_continuity_event(event)
+        })
+    {
+        selected.push(previous_handoff.clone());
+    }
+    selected
 }
 
 fn classify_action_state(
@@ -4207,21 +5311,41 @@ async fn resolve_session_id(
 }
 
 pub(crate) fn current_agent_scope_for(project_code: &str, namespace_code: &str) -> String {
-    for key in [
-        "AMAI_AGENT_SCOPE",
-        "CODEX_AGENT_SCOPE",
-        "AMAI_CLIENT_SCOPE",
-        "AMAI_CLIENT_KEY",
-    ] {
+    current_agent_scope_for_result(project_code, namespace_code)
+        .unwrap_or_else(|_| format!("{project_code}::{namespace_code}::default"))
+}
+
+pub(crate) fn current_agent_scope_for_result(
+    project_code: &str,
+    namespace_code: &str,
+) -> Result<String> {
+    let mut selected: Option<(&'static str, String)> = None;
+    for key in AGENT_SCOPE_ALIAS_ENV_KEYS {
         if let Ok(value) = env::var(key) {
             let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Some((selected_key, selected_value)) = selected.as_ref() {
+                if selected_value != trimmed {
+                    anyhow::bail!(
+                        "conflicting agent scope aliases: {selected_key}='{}' and {key}='{}' differ",
+                        selected_value,
+                        trimmed
+                    );
+                }
+            } else {
+                selected = Some((key, trimmed.to_string()));
             }
         }
     }
-    format!("{project_code}::{namespace_code}::default")
+    Ok(selected
+        .map(|(_, value)| value)
+        .unwrap_or_else(|| format!("{project_code}::{namespace_code}::default")))
 }
+
+const AGENT_SCOPE_ALIAS_ENV_KEYS: &[&str] =
+    &["AMAI_AGENT_SCOPE", "CODEX_AGENT_SCOPE", "AMAI_CLIENT_SCOPE"];
 
 struct SyntheticSnapshotSpec<'a> {
     project_code: &'a str,
@@ -4259,13 +5383,6 @@ fn synthetic_snapshot_with_kind(spec: SyntheticSnapshotSpec<'_>) -> Observabilit
     }
 }
 
-pub(super) fn current_thread_id() -> Option<String> {
-    env::var("CODEX_THREAD_ID")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 fn resolved_thread_id_with_candidates(
     explicit_thread_id_hint: Option<&str>,
     env_thread_id: Option<&str>,
@@ -4289,11 +5406,37 @@ fn resolved_thread_id_with_candidates(
         })
 }
 
-fn resolve_thread_id_for_project_repo_root(
+fn resolved_live_thread_id_with_candidates(
+    explicit_thread_id_hint: Option<&str>,
+    env_thread_id: Option<&str>,
+) -> Option<String> {
+    explicit_thread_id_hint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            env_thread_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+}
+
+fn resolve_execctl_live_thread_id_checked(
+    explicit_thread_id_hint: Option<&str>,
+) -> Result<Option<String>> {
+    let env_thread_id = crate::thread_binding::current_thread_id_result()?;
+    Ok(resolved_live_thread_id_with_candidates(
+        explicit_thread_id_hint,
+        env_thread_id.as_deref(),
+    ))
+}
+
+fn resolve_thread_id_for_project_repo_root_checked(
     repo_root: &str,
     explicit_thread_id_hint: Option<&str>,
-) -> Option<String> {
-    let env_thread_id = current_thread_id();
+) -> Result<Option<String>> {
+    let env_thread_id = crate::thread_binding::current_thread_id_result()?;
     let repo_preferred_thread_id = if repo_root.trim().is_empty() {
         None
     } else {
@@ -4301,11 +5444,11 @@ fn resolve_thread_id_for_project_repo_root(
             .ok()
             .flatten()
     };
-    resolved_thread_id_with_candidates(
+    Ok(resolved_thread_id_with_candidates(
         explicit_thread_id_hint,
         env_thread_id.as_deref(),
         repo_preferred_thread_id.as_deref(),
-    )
+    ))
 }
 
 fn project_json(project: &ProjectRecord) -> Value {
@@ -4439,6 +5582,11 @@ fn derive_pending_return_queue(
         .and_then(|node| node["pending_return_queue"].as_array())
         .cloned()
         .unwrap_or_default();
+    let resumed_pending_return_task_id = restore_node
+        .and_then(|node| infer_resumed_pending_return_task_id(node, new_headline, new_next_step));
+    if let Some(task_id) = resumed_pending_return_task_id {
+        prune_resolved_pending_return_items(&mut queue, &[], &[task_id]);
+    }
     prune_resolved_pending_return_items(&mut queue, resolved_headlines, resolved_task_ids);
     let Some(node) = restore_node else {
         return queue;
@@ -4455,7 +5603,6 @@ fn derive_pending_return_queue(
         .as_str()
         .unwrap_or_default();
     let previous_task_id = task_id_for_authoritative_event(previous_authoritative_event_id);
-    let normalized_new_next_step = normalize_next_step_hint(new_next_step);
     if !is_meaningful_pending_return_headline(previous_goal)
         || previous_goal == new_headline
         || resolve_current_goal
@@ -4465,7 +5612,6 @@ fn derive_pending_return_queue(
             previous_authoritative_event_id,
             resolved_task_ids,
         )
-        || (!previous_next_step.is_empty() && previous_next_step == normalized_new_next_step)
     {
         return queue;
     }
@@ -4483,6 +5629,49 @@ fn derive_pending_return_queue(
     prepend_pending_return_item(&mut queue, candidate);
     queue.truncate(MAX_PENDING_RETURN_QUEUE);
     queue
+}
+
+fn infer_resumed_pending_return_task_id(
+    restore_node: &Value,
+    new_headline: &str,
+    new_next_step: &str,
+) -> Option<String> {
+    let headline = new_headline.trim();
+    if headline.is_empty() {
+        return None;
+    }
+    let normalized_new_next_step = normalize_next_step_hint(new_next_step);
+    let pending_items = restore_node["pending_return_queue"].as_array()?;
+    let exact_matches = pending_items
+        .iter()
+        .filter(|item| {
+            item["headline"].as_str().map(str::trim) == Some(headline)
+                && normalize_next_step_hint(item["next_step"].as_str().unwrap_or_default())
+                    == normalized_new_next_step
+        })
+        .collect::<Vec<_>>();
+    if exact_matches.len() == 1 {
+        return pending_return_item_task_id(exact_matches[0]);
+    }
+    let headline_matches = pending_items
+        .iter()
+        .filter(|item| item["headline"].as_str().map(str::trim) == Some(headline))
+        .collect::<Vec<_>>();
+    if headline_matches.len() == 1 {
+        return pending_return_item_task_id(headline_matches[0]);
+    }
+    None
+}
+
+fn pending_return_item_task_id(item: &Value) -> Option<String> {
+    item["task_id"]
+        .as_str()
+        .and_then(normalize_resolved_task_id)
+        .or_else(|| {
+            task_id_for_authoritative_event(
+                item["authoritative_event_id"].as_str().unwrap_or_default(),
+            )
+        })
 }
 
 fn resolved_pending_return_headline_matches(value: &str, resolved_headlines: &[String]) -> bool {
@@ -4663,6 +5852,10 @@ fn semantic_handoff_replay_authoritative_event(
         "recorded_at_epoch_ms": recorded_at_epoch_ms,
         "headline": restore["current_goal"].clone(),
         "next_step_hint": restore["next_step"].clone(),
+        "agent_scope": restore["agent_scope"].clone(),
+        "thread_id": restore["thread_id"].clone(),
+        "session_id": restore["session_id"].clone(),
+        "turn_id": restore["turn_id"].clone(),
         "summary": summary,
         "active_files": restore["active_files"].clone(),
         "visible_projects": restore["visible_projects"].clone(),
@@ -4916,11 +6109,14 @@ fn summarize_project_task_tree(value: &Value) -> Option<String> {
         .iter()
         .filter(|item| item["task_role"].as_str() == Some("pending_return"))
         .collect::<Vec<_>>();
+    let excluded_legacy_suffix = summarize_project_task_projection_excluded_legacy(value);
     if pending.is_empty() {
-        return Some(format!(
-            "active: {}",
-            collapse_human_text(active_headline, 72)
-        ));
+        let mut summary = format!("active: {}", collapse_human_text(active_headline, 72));
+        if let Some(excluded_legacy_suffix) = excluded_legacy_suffix {
+            summary.push_str("; ");
+            summary.push_str(&excluded_legacy_suffix);
+        }
+        return Some(summary);
     }
     let pending_headline = pending
         .iter()
@@ -4933,10 +6129,15 @@ fn summarize_project_task_tree(value: &Value) -> Option<String> {
     if more > 0 {
         pending_summary.push_str(&format!("; +{more} more"));
     }
-    Some(format!(
+    let mut summary = format!(
         "active: {}; {pending_summary}",
         collapse_human_text(active_headline, 72)
-    ))
+    );
+    if let Some(excluded_legacy_suffix) = excluded_legacy_suffix {
+        summary.push_str("; ");
+        summary.push_str(&excluded_legacy_suffix);
+    }
+    Some(summary)
 }
 
 fn build_project_task_ledger(
@@ -5093,10 +6294,54 @@ fn summarize_project_task_ledger(value: &Value) -> Option<String> {
         .iter()
         .filter(|item| item["task_role"].as_str() == Some("historical_handoff"))
         .count();
-    Some(format!(
+    let mut summary = format!(
         "active: {}; pending_return({pending}); historical_handoffs({historical})",
         collapse_human_text(active_headline, 72)
-    ))
+    );
+    if let Some(excluded_legacy_suffix) = summarize_project_task_projection_excluded_legacy(value) {
+        summary.push_str("; ");
+        summary.push_str(&excluded_legacy_suffix);
+    }
+    Some(summary)
+}
+
+fn summarize_project_task_projection_excluded_legacy(value: &Value) -> Option<String> {
+    let validation = &value["validation"];
+    let projection_source = validation["projection_source"]
+        .as_str()
+        .or_else(|| value["projection_source"].as_str());
+    if projection_source != Some("graph_first_sql_validated") {
+        return None;
+    }
+    if validation["status"].as_str() != Some("valid") {
+        return None;
+    }
+    let excluded_total = validation["projection_excluded_sql_nodes_count"]
+        .as_u64()
+        .or_else(|| value["projection_excluded_sql_nodes_count"].as_u64())
+        .unwrap_or(0);
+    if excluded_total == 0 {
+        return None;
+    }
+    let deprecated_total = validation["deprecated_sql_nodes_count"]
+        .as_u64()
+        .or_else(|| value["deprecated_sql_nodes_count"].as_u64())
+        .unwrap_or(0);
+    let quarantined_total = validation["quarantined_sql_nodes_count"]
+        .as_u64()
+        .or_else(|| value["quarantined_sql_nodes_count"].as_u64())
+        .unwrap_or(0);
+    let detail = match (deprecated_total, quarantined_total) {
+        (deprecated, 0) if deprecated == excluded_total => format!("{excluded_total} deprecated"),
+        (0, quarantined) if quarantined == excluded_total => {
+            format!("{excluded_total} quarantined")
+        }
+        (deprecated, quarantined) if deprecated > 0 && quarantined > 0 => {
+            format!("{excluded_total}: {deprecated} deprecated, {quarantined} quarantined")
+        }
+        _ => excluded_total.to_string(),
+    };
+    Some(format!("excluded_legacy({detail})"))
 }
 
 fn summarize_execctl_active_lease(value: &Value) -> Option<String> {
@@ -5158,6 +6403,885 @@ fn overlay_durable_project_task_ledger(
     if let Some(summary) = summary {
         restore.insert("project_task_ledger_summary".to_string(), json!(summary));
     }
+}
+
+fn task_graph_projection_bounds_json() -> Value {
+    json!({
+        "max_nodes_read": MAX_TASK_GRAPH_RESTORE_PROJECTION_NODES,
+        "max_open_preview": MAX_TASK_GRAPH_RESTORE_OPEN_PREVIEW,
+        "max_paused_preview": MAX_TASK_GRAPH_RESTORE_PAUSED_PREVIEW,
+        "max_recently_closed_preview": MAX_TASK_GRAPH_RESTORE_RECENTLY_CLOSED_PREVIEW,
+        "max_archive_preview": MAX_TASK_GRAPH_RESTORE_ARCHIVE_PREVIEW,
+    })
+}
+
+fn task_graph_record_source_event_id(
+    record: &postgres::TaskGraphRestoreProjectionNodeRecord,
+) -> Option<&str> {
+    record
+        .task_node
+        .task_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            record
+                .task_node
+                .source_event_ids
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .find(|value| !value.is_empty())
+        })
+}
+
+fn task_graph_record_matches_event_id(
+    record: &postgres::TaskGraphRestoreProjectionNodeRecord,
+    event_id: &str,
+) -> bool {
+    let event_id = event_id.trim();
+    if event_id.is_empty() {
+        return false;
+    }
+    task_graph_record_source_event_id(record) == Some(event_id)
+        || record
+            .task_node
+            .source_event_ids
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(|value| value.trim() == event_id)
+}
+
+fn task_graph_restore_active_source_event_id(restore: &Value) -> Option<String> {
+    if restore_should_preserve_lineage_handoff_over_context_pack(
+        restore,
+        restore["execctl_active_lease"]["source_kind"].as_str(),
+    ) {
+        return restore["state_lineage"]["authoritative_event_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                restore["execctl_active_lease"]["source_event_id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+            .map(ToOwned::to_owned);
+    }
+    restore["execctl_active_lease"]["source_event_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            restore["state_lineage"]["authoritative_event_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .map(ToOwned::to_owned)
+}
+
+fn task_graph_projection_authoritative_event_id_for_record(
+    record: &postgres::TaskGraphRestoreProjectionNodeRecord,
+    preferred_event_id: Option<&str>,
+) -> Option<String> {
+    let preferred_event_id = preferred_event_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(preferred_event_id) = preferred_event_id
+        && task_graph_record_matches_event_id(record, preferred_event_id)
+    {
+        return Some(preferred_event_id.to_string());
+    }
+    task_graph_record_source_event_id(record).map(ToOwned::to_owned)
+}
+
+fn task_graph_projection_node_json(
+    record: &postgres::TaskGraphRestoreProjectionNodeRecord,
+    task_role: &str,
+    task_state: &str,
+    resume_state: &str,
+    authoritative_event_id_override: Option<&str>,
+) -> Value {
+    let source_event_id = task_graph_projection_authoritative_event_id_for_record(
+        record,
+        authoritative_event_id_override,
+    );
+    json!({
+        "task_id": record.task_node.task_node_id.to_string(),
+        "sql_task_node_id": record.task_node.task_node_id.to_string(),
+        "parent_task_id": record.task_node.parent_task_node_id.map(|value| value.to_string()),
+        "memory_item_id": record.task_node.memory_item_id.map(|value| value.to_string()),
+        "task_key": record.task_node.task_key,
+        "task_role": task_role,
+        "sql_task_role": record.task_node.task_role,
+        "task_state": task_state,
+        "execution_state": record.task_node.execution_state,
+        "lifecycle_state": record.task_node.lifecycle_state,
+        "resume_state": resume_state,
+        "headline": record.task_node.headline,
+        "summary": record.task_node.summary,
+        "next_step": record.task_node.next_step,
+        "authoritative_event_id": source_event_id,
+        "source_event_ids": record.task_node.source_event_ids,
+        "source_kind": record.task_node.source_kind,
+        "opened_at_epoch_ms": record.task_node.opened_at_epoch_ms,
+        "closed_at_epoch_ms": record.task_node.closed_at_epoch_ms,
+        "archived_at_epoch_ms": record.task_node.archived_at_epoch_ms,
+        "pending_return_count": record.task_node.pending_return_count,
+        "sql_event_count": record.event_count,
+        "latest_event_kind": record.latest_event_kind,
+        "latest_event_recorded_at_epoch_ms": record.latest_event_recorded_at_epoch_ms,
+        "projection_source": "ami.task_nodes",
+    })
+}
+
+fn task_graph_projection_active_node_event_id(projected_tree: &Value) -> Option<String> {
+    projected_tree["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|node| node["task_role"].as_str() == Some("active"))
+        .and_then(|node| {
+            node["authoritative_event_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn task_graph_projection_pending_queue_node_json(
+    item: &Value,
+    index: usize,
+    parent_task_id: &str,
+) -> Value {
+    let event_id = item["authoritative_event_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    json!({
+        "task_id": event_id
+            .map(|value| format!("task::{value}"))
+            .unwrap_or_else(|| format!("{parent_task_id}::pending-return-{}", index + 1)),
+        "parent_task_id": parent_task_id,
+        "task_role": "pending_return",
+        "sql_task_role": Value::Null,
+        "task_state": "suspended",
+        "execution_state": "waiting_external",
+        "lifecycle_state": "hot",
+        "resume_state": item["resume_state"].as_str().unwrap_or("pending_return"),
+        "headline": item["headline"].as_str().unwrap_or_default(),
+        "next_step": item["next_step"].as_str().unwrap_or_default(),
+        "authoritative_event_id": event_id,
+        "queued_at_epoch_ms": item["queued_at_epoch_ms"].as_u64(),
+        "queued_reason": item["queued_reason"].as_str().unwrap_or("interrupted_by_new_handoff"),
+        "projection_source": "ami.task_nodes.status_payload.pending_return_queue",
+    })
+}
+
+fn push_preview_node(
+    target: &mut Vec<Value>,
+    node: Value,
+    limit: usize,
+    seen: &mut BTreeSet<String>,
+) {
+    if target.len() >= limit {
+        return;
+    }
+    let key = node["task_id"]
+        .as_str()
+        .or_else(|| node["authoritative_event_id"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    if key.is_empty() || seen.insert(key) {
+        target.push(node);
+    }
+}
+
+fn task_graph_projection_summary(tree: &Value) -> Option<String> {
+    let active_headline = tree["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|node| node["task_role"].as_str() == Some("active"))
+        .and_then(|node| node["headline"].as_str())
+        .filter(|value| !value.is_empty())
+        .map(|value| collapse_human_text(value, 72))
+        .unwrap_or_else(|| "ещё нет данных".to_string());
+    let open = tree["open_siblings_count"].as_u64().unwrap_or(0);
+    let paused = tree["paused_branches_count"].as_u64().unwrap_or(0);
+    let recently_closed = tree["recently_closed_count"].as_u64().unwrap_or(0);
+    let archive = tree["archive_candidates_count"].as_u64().unwrap_or(0);
+    let mut parts = vec![format!("active: {active_headline}")];
+    if open > 0 {
+        parts.push(format!("open({open})"));
+    }
+    if paused > 0 {
+        parts.push(format!("pending_return({paused})"));
+    }
+    if recently_closed > 0 {
+        parts.push(format!("recently_closed({recently_closed})"));
+    }
+    if archive > 0 {
+        parts.push(format!("archive_candidates({archive})"));
+    }
+    if let Some(excluded_legacy_suffix) = summarize_project_task_projection_excluded_legacy(tree) {
+        parts.push(excluded_legacy_suffix);
+    }
+    Some(parts.join("; "))
+}
+
+fn task_graph_projection_ledger_summary(ledger: &Value) -> Option<String> {
+    let entries = ledger["entries"].as_array()?;
+    let active = entries
+        .iter()
+        .find(|entry| entry["task_role"].as_str() == Some("active"));
+    let active_headline = active
+        .and_then(|entry| entry["headline"].as_str())
+        .filter(|value| !value.is_empty())
+        .map(|value| collapse_human_text(value, 72))
+        .unwrap_or_else(|| "ещё нет данных".to_string());
+    let mut summary = format!(
+        "active: {}; open({}); pending_return({}); recently_closed({}); archive_candidates({})",
+        active_headline,
+        ledger["open_entries_count"].as_u64().unwrap_or(0),
+        ledger["pending_return_entries_count"].as_u64().unwrap_or(0),
+        ledger["recently_closed_entries_count"]
+            .as_u64()
+            .unwrap_or(0),
+        ledger["archive_candidate_entries_count"]
+            .as_u64()
+            .unwrap_or(0),
+    );
+    if let Some(excluded_legacy_suffix) = summarize_project_task_projection_excluded_legacy(ledger)
+    {
+        summary.push_str("; ");
+        summary.push_str(&excluded_legacy_suffix);
+    }
+    Some(summary)
+}
+
+fn task_graph_record_is_graph_native(
+    record: &postgres::TaskGraphRestoreProjectionNodeRecord,
+) -> bool {
+    matches!(
+        record.task_node.task_role.as_str(),
+        "root" | "workline" | "child" | "proposal"
+    )
+}
+
+fn task_graph_projection_sql_nodes_total(
+    records: &[postgres::TaskGraphRestoreProjectionNodeRecord],
+    counts: &Value,
+) -> u64 {
+    counts["sql_nodes_total"]
+        .as_u64()
+        .unwrap_or(records.len() as u64)
+}
+
+fn task_node_is_current_legacy_continuity_mirror(
+    task_node: &postgres::TaskNodeRecord,
+    event_id: &str,
+) -> bool {
+    let source_event_id_matches = task_node.status_payload["source_event_id"].as_str()
+        == Some(event_id)
+        || task_node.task_key.as_deref() == Some(event_id);
+    let source_kind_matches =
+        matches!(task_node.source_kind.as_deref(), Some("continuity_handoff"))
+            || task_node.status_payload["source_kind"].as_str() == Some("continuity_handoff")
+            || task_node.metadata["materialized_from"].as_str()
+                == Some("execctl_task_ledger_entry");
+    task_node.task_role == "historical"
+        && task_node.lifecycle_state == "hot"
+        && source_event_id_matches
+        && source_kind_matches
+}
+
+fn task_graph_projection_blocking_reason(
+    restore: &Value,
+    records: &[postgres::TaskGraphRestoreProjectionNodeRecord],
+    counts: &Value,
+) -> Option<String> {
+    if records.is_empty() {
+        return Some("no_sql_task_nodes".to_string());
+    }
+    let Some(active_source_event_id) = task_graph_restore_active_source_event_id(restore) else {
+        return Some("missing_active_source_event_id".to_string());
+    };
+    let active_matches = records
+        .iter()
+        .filter(|record| task_graph_record_matches_event_id(record, &active_source_event_id))
+        .collect::<Vec<_>>();
+    if active_matches.is_empty() {
+        return Some("no_active_task_node_for_current_lease".to_string());
+    }
+    if active_matches.len() > 1 {
+        return Some("ambiguous_active_task_nodes_for_current_lease".to_string());
+    }
+    let active_record = active_matches[0];
+    if active_record.event_count <= 0 {
+        return Some("active_task_node_has_no_task_events".to_string());
+    }
+    if !task_graph_record_is_graph_native(active_record) {
+        return Some("active_task_node_is_legacy_mirror_not_graph_native".to_string());
+    }
+    if counts["hot_historical_sql_nodes_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        return Some("legacy_hot_historical_nodes_present".to_string());
+    }
+    if task_graph_projection_sql_nodes_total(records, counts) > records.len() as u64 {
+        return Some("projection_preview_limited".to_string());
+    }
+    None
+}
+
+fn task_graph_required_return_signature(task: &Value) -> Value {
+    if !task.is_object() {
+        return Value::Null;
+    }
+    json!({
+        "task_id": task["task_id"].clone(),
+        "authoritative_event_id": task["authoritative_event_id"].clone(),
+        "headline": task["headline"].clone(),
+        "next_step": task["next_step"].clone(),
+    })
+}
+
+fn task_graph_resume_state_from_contract(contract: &Value) -> &'static str {
+    match contract["resume_state"].as_str() {
+        Some("return_required") | Some("pending_return_queue_present") => "return_required",
+        Some("clear") => "clear",
+        _ if contract["required_return_task"].is_object() => "return_required",
+        _ => "clear",
+    }
+}
+
+fn task_graph_projection_control_invariant_report(
+    restore: &Value,
+    projected_tree: &Value,
+) -> Value {
+    let current_goal = restore["current_goal"]
+        .as_str()
+        .unwrap_or("ещё нет данных")
+        .to_string();
+    let next_step = restore["next_step"]
+        .as_str()
+        .unwrap_or("ещё нет данных")
+        .to_string();
+    let pending_return_queue = restore["pending_return_queue"].clone();
+    let required_task_set = restore["required_task_set"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let client_budget_guard = restore
+        .get("client_budget_guard")
+        .cloned()
+        .unwrap_or_else(default_client_budget_guard);
+    let current_contract = if restore["execctl_resume_contract"].is_object() {
+        restore["execctl_resume_contract"].clone()
+    } else {
+        build_execctl_resume_contract(
+            &restore["project_task_tree"],
+            &pending_return_queue,
+            &required_task_set,
+        )
+    };
+    let projected_contract =
+        build_execctl_resume_contract(projected_tree, &pending_return_queue, &required_task_set);
+    let current_action = build_startup_next_action(
+        &current_goal,
+        &next_step,
+        &current_contract,
+        &client_budget_guard,
+        restore["project"]["code"].as_str(),
+        restore["namespace"]["code"].as_str(),
+        restore["project"]["repo_root"].as_str(),
+    );
+    let projected_action = build_startup_next_action(
+        &current_goal,
+        &next_step,
+        &projected_contract,
+        &client_budget_guard,
+        restore["project"]["code"].as_str(),
+        restore["namespace"]["code"].as_str(),
+        restore["project"]["repo_root"].as_str(),
+    );
+    let current_signature = json!({
+        "active_source_event_id": task_graph_restore_active_source_event_id(restore),
+        "required_return_task": task_graph_required_return_signature(&current_contract["required_return_task"]),
+        "pending_return_count": current_contract["pending_return_count"],
+        "execctl_resume_state": task_graph_resume_state_from_contract(&current_contract),
+        "startup_next_action_kind": current_action["action_kind"],
+    });
+    let projected_signature = json!({
+        "active_source_event_id": task_graph_projection_active_node_event_id(projected_tree),
+        "required_return_task": task_graph_required_return_signature(&projected_contract["required_return_task"]),
+        "pending_return_count": projected_contract["pending_return_count"],
+        "execctl_resume_state": task_graph_resume_state_from_contract(&projected_contract),
+        "startup_next_action_kind": projected_action["action_kind"],
+    });
+    json!({
+        "status": if current_signature == projected_signature { "passed" } else { "failed" },
+        "checked_fields": [
+            "active_source_event_id",
+            "required_return_task",
+            "pending_return_count",
+            "execctl_resume_state",
+            "startup_next_action_kind"
+        ],
+        "current_execctl_signature": current_signature,
+        "projected_graph_signature": projected_signature,
+    })
+}
+
+fn build_task_graph_restore_projection(
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    restore: &Value,
+    records: &[postgres::TaskGraphRestoreProjectionNodeRecord],
+    counts: &Value,
+    generated_at_epoch_ms: u64,
+) -> Option<(Value, Value, Value)> {
+    if task_graph_projection_blocking_reason(restore, records, counts).is_some() {
+        return None;
+    }
+    let active_source_event_id = task_graph_restore_active_source_event_id(restore)?;
+    let active_matches = records
+        .iter()
+        .filter(|record| task_graph_record_matches_event_id(record, &active_source_event_id))
+        .collect::<Vec<_>>();
+    if active_matches.len() != 1 || active_matches[0].event_count <= 0 {
+        return None;
+    }
+    let active_record = active_matches[0];
+    let active_node = task_graph_projection_node_json(
+        active_record,
+        "active",
+        "active",
+        "active",
+        Some(active_source_event_id.as_str()),
+    );
+    let root_task_id = format!("{}::{}::task-graph-root", project.code, namespace.code);
+    let active_task_id = active_node["task_id"]
+        .as_str()
+        .unwrap_or(root_task_id.as_str())
+        .to_string();
+    let mut seen = BTreeSet::new();
+    let mut nodes = vec![active_node.clone()];
+    let mut open_nodes = Vec::new();
+    let mut paused_nodes = Vec::new();
+    let mut recently_closed_nodes = Vec::new();
+    let mut archive_nodes = Vec::new();
+
+    if let Some(items) = active_record
+        .task_node
+        .status_payload
+        .get("pending_return_queue")
+        .and_then(Value::as_array)
+    {
+        for (index, item) in items.iter().enumerate() {
+            push_preview_node(
+                &mut paused_nodes,
+                task_graph_projection_pending_queue_node_json(item, index, &active_task_id),
+                MAX_TASK_GRAPH_RESTORE_PAUSED_PREVIEW,
+                &mut seen,
+            );
+        }
+    }
+
+    for record in records {
+        if record.task_node.task_node_id == active_record.task_node.task_node_id {
+            continue;
+        }
+        let lifecycle = record.task_node.lifecycle_state.as_str();
+        let execution = record.task_node.execution_state.as_str();
+        let role = record.task_node.task_role.as_str();
+        match (lifecycle, role, execution) {
+            ("hot", "pending_return", _) => push_preview_node(
+                &mut paused_nodes,
+                task_graph_projection_node_json(
+                    record,
+                    "pending_return",
+                    "suspended",
+                    "pending_return",
+                    None,
+                ),
+                MAX_TASK_GRAPH_RESTORE_PAUSED_PREVIEW,
+                &mut seen,
+            ),
+            ("hot", "root" | "workline" | "child" | "proposal", state)
+                if !matches!(state, "done" | "failed" | "canceled" | "superseded") =>
+            {
+                push_preview_node(
+                    &mut open_nodes,
+                    task_graph_projection_node_json(record, "open", state, "open", None),
+                    MAX_TASK_GRAPH_RESTORE_OPEN_PREVIEW,
+                    &mut seen,
+                )
+            }
+            ("closed", _, _) => push_preview_node(
+                &mut recently_closed_nodes,
+                task_graph_projection_node_json(
+                    record,
+                    "recently_closed",
+                    "done",
+                    "historical_only",
+                    None,
+                ),
+                MAX_TASK_GRAPH_RESTORE_RECENTLY_CLOSED_PREVIEW,
+                &mut seen,
+            ),
+            ("archived", _, _) => push_preview_node(
+                &mut archive_nodes,
+                task_graph_projection_node_json(
+                    record,
+                    "archive_candidate",
+                    "archived",
+                    "archive_only",
+                    None,
+                ),
+                MAX_TASK_GRAPH_RESTORE_ARCHIVE_PREVIEW,
+                &mut seen,
+            ),
+            ("hot", "historical", _) => push_preview_node(
+                &mut archive_nodes,
+                task_graph_projection_node_json(
+                    record,
+                    "archive_candidate",
+                    "superseded",
+                    "archive_candidate",
+                    None,
+                ),
+                MAX_TASK_GRAPH_RESTORE_ARCHIVE_PREVIEW,
+                &mut seen,
+            ),
+            _ => {}
+        }
+    }
+
+    nodes.extend(open_nodes.iter().cloned());
+    nodes.extend(paused_nodes.iter().cloned());
+    nodes.extend(recently_closed_nodes.iter().cloned());
+    nodes.extend(archive_nodes.iter().cloned());
+    let edges = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            json!({
+                "from_task_id": root_task_id,
+                "to_task_id": node["task_id"],
+                "relation": if node["task_role"].as_str() == Some("archive_candidate") {
+                    "tracks_archive_candidate"
+                } else {
+                    "tracks_restore_projection"
+                },
+                "priority_rank": index,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let open_siblings_count = counts["hot_open_sql_nodes_count"]
+        .as_i64()
+        .unwrap_or_default()
+        .saturating_sub(1)
+        .max(open_nodes.len() as i64) as u64;
+    let paused_branches_count = paused_nodes.len() as u64;
+    let recently_closed_count = counts["closed_sql_nodes_count"]
+        .as_u64()
+        .unwrap_or(recently_closed_nodes.len() as u64);
+    let archive_candidates_count = counts["hot_historical_sql_nodes_count"]
+        .as_u64()
+        .unwrap_or_default()
+        .saturating_sub(1)
+        .saturating_add(
+            counts["archived_sql_nodes_count"]
+                .as_u64()
+                .unwrap_or_default(),
+        );
+    let open_tasks_count = 1_u64
+        .saturating_add(open_siblings_count)
+        .saturating_add(paused_branches_count);
+    let sql_nodes_total = task_graph_projection_sql_nodes_total(records, counts);
+    let sql_events_total = counts["sql_events_total"].as_u64().unwrap_or_default();
+    let open_preview_limited = open_siblings_count > open_nodes.len() as u64;
+    let paused_preview_limited = active_record
+        .task_node
+        .status_payload
+        .get("pending_return_queue")
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.len() > paused_nodes.len());
+    let recently_closed_preview_limited =
+        recently_closed_count > recently_closed_nodes.len() as u64;
+    let archive_preview_limited = archive_candidates_count > archive_nodes.len() as u64;
+    let projection_preview_limited = (sql_nodes_total as usize) > records.len()
+        || open_preview_limited
+        || paused_preview_limited
+        || recently_closed_preview_limited
+        || archive_preview_limited;
+    let validation = json!({
+        "projection_kind": TASK_GRAPH_STARTUP_PROJECTION_VERSION,
+        "status": "valid",
+        "validation_state": "valid",
+        "projection_source": "graph_first_sql_validated",
+        "source_truth_tables": ["ami.task_nodes", "ami.task_events"],
+        "truth_claim": false,
+        "generated_at_epoch_ms": generated_at_epoch_ms,
+        "bounds": task_graph_projection_bounds_json(),
+        "active_source_event_id": active_source_event_id,
+        "active_sql_task_node_id": active_record.task_node.task_node_id.to_string(),
+        "sql_nodes_total": sql_nodes_total,
+        "sql_events_total": sql_events_total,
+        "all_sql_nodes_total": counts["all_sql_nodes_total"].clone(),
+        "all_sql_events_total": counts["all_sql_events_total"].clone(),
+        "projection_excluded_sql_nodes_count": counts["projection_excluded_sql_nodes_count"].clone(),
+        "deprecated_sql_nodes_count": counts["deprecated_sql_nodes_count"].clone(),
+        "quarantined_sql_nodes_count": counts["quarantined_sql_nodes_count"].clone(),
+        "project_code": project.code,
+        "namespace_code": namespace.code,
+        "counts": {
+            "active_tasks_count": 1,
+            "open_siblings_count": open_siblings_count,
+            "paused_branches_count": paused_branches_count,
+            "recently_closed_count": recently_closed_count,
+            "archive_candidates_count": archive_candidates_count,
+        },
+        "warnings": {
+            "legacy_hot_historical_sql_nodes_count": counts["hot_historical_sql_nodes_count"].clone(),
+            "projection_preview_limited": projection_preview_limited,
+            "open_preview_limited": open_preview_limited,
+            "paused_preview_limited": paused_preview_limited,
+            "recently_closed_preview_limited": recently_closed_preview_limited,
+            "archive_preview_limited": archive_preview_limited,
+        }
+    });
+    let tree = json!({
+        "tree_version": PROJECT_TASK_TREE_VERSION,
+        "projection_kind": TASK_GRAPH_STARTUP_PROJECTION_VERSION,
+        "projection_source": "graph_first_sql_validated",
+        "source_truth_tables": ["ami.task_nodes", "ami.task_events"],
+        "truth_claim": false,
+        "validation_state": "valid",
+        "storage_lane": "ami.task_nodes",
+        "project_code": project.code,
+        "namespace_code": namespace.code,
+        "root_task_id": root_task_id,
+        "open_tasks_count": open_tasks_count,
+        "active_tasks_count": 1,
+        "open_siblings_count": open_siblings_count,
+        "pending_return_count": paused_branches_count,
+        "paused_branches_count": paused_branches_count,
+        "recently_closed_count": recently_closed_count,
+        "archive_candidates_count": archive_candidates_count,
+        "sql_nodes_total": sql_nodes_total,
+        "sql_events_total": sql_events_total,
+        "nodes_total": sql_nodes_total,
+        "nodes_total_source": "sql_total",
+        "edges_total": edges.len(),
+        "nodes_preview_count": nodes.len(),
+        "edges_preview_count": edges.len(),
+        "preview_limited": projection_preview_limited,
+        "nodes": nodes,
+        "edges": edges,
+        "validation": validation,
+    });
+    let ledger_entries = tree["nodes"].as_array().cloned().unwrap_or_default();
+    let ledger = json!({
+        "ledger_version": PROJECT_TASK_LEDGER_VERSION,
+        "projection_kind": TASK_GRAPH_STARTUP_PROJECTION_VERSION,
+        "projection_source": "graph_first_sql_validated",
+        "source_truth_tables": ["ami.task_nodes", "ami.task_events"],
+        "truth_claim": false,
+        "validation_state": "valid",
+        "project_code": project.code,
+        "namespace_code": namespace.code,
+        "entries_count": sql_nodes_total,
+        "entries_count_source": "sql_total",
+        "entries_preview_count": ledger_entries.len(),
+        "preview_limited": projection_preview_limited,
+        "open_tasks_count": open_tasks_count,
+        "active_entries_count": 1,
+        "open_entries_count": open_siblings_count,
+        "pending_return_entries_count": paused_branches_count,
+        "recently_closed_entries_count": recently_closed_count,
+        "archive_candidate_entries_count": archive_candidates_count,
+        "historical_handoffs_count": archive_candidates_count.saturating_add(recently_closed_count),
+        "sql_nodes_total": sql_nodes_total,
+        "sql_events_total": sql_events_total,
+        "persistence_state": "graph_first_sql_validated",
+        "storage_lane": "ami.task_nodes+ami.task_events",
+        "entries": ledger_entries,
+        "validation": validation,
+    });
+    Some((tree, ledger, validation))
+}
+
+async fn overlay_task_graph_restore_projection(
+    db: &Client,
+    bundle: &mut Value,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+) -> Result<()> {
+    let Some(restore) = bundle
+        .get_mut("working_state_restore")
+        .and_then(Value::as_object_mut)
+    else {
+        return Ok(());
+    };
+    let generated_at_epoch_ms = now_epoch_ms()?;
+    let records = match postgres::list_task_graph_restore_projection_nodes(
+        db,
+        project.project_id,
+        namespace.namespace_id,
+        MAX_TASK_GRAPH_RESTORE_PROJECTION_NODES,
+    )
+    .await
+    {
+        Ok(records) => records,
+        Err(error) => {
+            restore.insert(
+                "task_graph_projection_validation".to_string(),
+                json!({
+                    "projection_kind": TASK_GRAPH_STARTUP_PROJECTION_VERSION,
+                    "status": "fallback_to_execctl_ledger",
+                    "validation_state": "fallback_to_execctl_ledger",
+                    "projection_source": "execctl_ledger_fallback",
+                    "source_truth_tables": ["ami.task_nodes", "ami.task_events"],
+                    "truth_claim": false,
+                    "generated_at_epoch_ms": generated_at_epoch_ms,
+                    "bounds": task_graph_projection_bounds_json(),
+                    "reason": "task graph projection SQL node read failed",
+                    "error": error.to_string(),
+                }),
+            );
+            return Ok(());
+        }
+    };
+    let counts = match postgres::task_graph_restore_projection_counts(
+        db,
+        project.project_id,
+        namespace.namespace_id,
+    )
+    .await
+    {
+        Ok(counts) => counts,
+        Err(error) => {
+            restore.insert(
+                "task_graph_projection_validation".to_string(),
+                json!({
+                    "projection_kind": TASK_GRAPH_STARTUP_PROJECTION_VERSION,
+                    "status": "fallback_to_execctl_ledger",
+                    "validation_state": "fallback_to_execctl_ledger",
+                    "projection_source": "execctl_ledger_fallback",
+                    "source_truth_tables": ["ami.task_nodes", "ami.task_events"],
+                    "truth_claim": false,
+                    "generated_at_epoch_ms": generated_at_epoch_ms,
+                    "bounds": task_graph_projection_bounds_json(),
+                    "records_preview_count": records.len(),
+                    "reason": "task graph projection SQL count read failed",
+                    "error": error.to_string(),
+                }),
+            );
+            return Ok(());
+        }
+    };
+    let restore_value = Value::Object(restore.clone());
+    if let Some(reason) = task_graph_projection_blocking_reason(&restore_value, &records, &counts) {
+        restore.insert(
+            "task_graph_projection_validation".to_string(),
+            json!({
+                "projection_kind": TASK_GRAPH_STARTUP_PROJECTION_VERSION,
+                "status": "fallback_to_execctl_ledger",
+                "validation_state": "fallback_to_execctl_ledger",
+                "projection_source": "execctl_ledger_fallback",
+                "source_truth_tables": ["ami.task_nodes", "ami.task_events"],
+                "truth_claim": false,
+                "generated_at_epoch_ms": generated_at_epoch_ms,
+                "bounds": task_graph_projection_bounds_json(),
+                "sql_counts": counts,
+                "reason": reason,
+                "records_preview_count": records.len(),
+            }),
+        );
+        return Ok(());
+    }
+    let Some((tree, ledger, validation)) = build_task_graph_restore_projection(
+        project,
+        namespace,
+        &restore_value,
+        &records,
+        &counts,
+        generated_at_epoch_ms,
+    ) else {
+        restore.insert(
+            "task_graph_projection_validation".to_string(),
+            json!({
+                "projection_kind": TASK_GRAPH_STARTUP_PROJECTION_VERSION,
+                "status": "fallback_to_execctl_ledger",
+                "validation_state": "fallback_to_execctl_ledger",
+                "projection_source": "execctl_ledger_fallback",
+                "source_truth_tables": ["ami.task_nodes", "ami.task_events"],
+                "truth_claim": false,
+                "generated_at_epoch_ms": generated_at_epoch_ms,
+                "bounds": task_graph_projection_bounds_json(),
+                "sql_counts": counts,
+                "reason": "task graph projection could not identify exactly one event-backed active task for the current lease/lineage",
+            }),
+        );
+        return Ok(());
+    };
+    let control_invariant = task_graph_projection_control_invariant_report(&restore_value, &tree);
+    if control_invariant["status"].as_str() != Some("passed") {
+        restore.insert(
+            "task_graph_projection_validation".to_string(),
+            json!({
+                "projection_kind": TASK_GRAPH_STARTUP_PROJECTION_VERSION,
+                "status": "fallback_to_execctl_ledger",
+                "validation_state": "fallback_to_execctl_ledger",
+                "projection_source": "execctl_ledger_fallback",
+                "source_truth_tables": ["ami.task_nodes", "ami.task_events"],
+                "truth_claim": false,
+                "generated_at_epoch_ms": generated_at_epoch_ms,
+                "bounds": task_graph_projection_bounds_json(),
+                "sql_counts": counts,
+                "reason": "control_invariant_mismatch",
+                "control_invariant": control_invariant,
+            }),
+        );
+        return Ok(());
+    }
+    let tree_summary = task_graph_projection_summary(&tree);
+    let ledger_summary = task_graph_projection_ledger_summary(&ledger);
+    restore.insert("project_task_tree".to_string(), tree);
+    restore.insert(
+        "project_task_tree_summary".to_string(),
+        tree_summary.map(Value::String).unwrap_or(Value::Null),
+    );
+    restore.insert("project_task_ledger".to_string(), ledger);
+    restore.insert(
+        "project_task_ledger_summary".to_string(),
+        ledger_summary.map(Value::String).unwrap_or(Value::Null),
+    );
+    let mut validation = validation;
+    if let Some(validation_object) = validation.as_object_mut() {
+        validation_object.insert("control_invariant".to_string(), control_invariant);
+    }
+    restore.insert("task_graph_projection_validation".to_string(), validation);
+    Ok(())
 }
 
 fn overlay_execctl_active_lease(bundle: &mut Value, active_lease: Option<&ExecCtlTaskLeaseRecord>) {
@@ -5508,6 +7632,11 @@ pub(crate) fn build_rotate_chat_action_bundle_for_stage_with_preference(
     host_context_compaction_stage: HostContextCompactionStage,
     prefer_same_thread_host_control_primary: bool,
 ) -> Value {
+    let (thread_id, thread_binding_conflict) =
+        match crate::thread_binding::current_thread_id_result() {
+            Ok(thread_id) => (thread_id, None),
+            Err(error) => (None, Some(error.to_string())),
+        };
     build_rotate_chat_action_bundle_for_stage_with_preference_and_primary_command(
         project_code,
         namespace_code,
@@ -5517,8 +7646,9 @@ pub(crate) fn build_rotate_chat_action_bundle_for_stage_with_preference(
         recommended_next_step,
         host_context_compaction_stage,
         prefer_same_thread_host_control_primary,
-        current_thread_id().as_deref(),
+        thread_id.as_deref(),
         None,
+        thread_binding_conflict.as_deref(),
     )
 }
 
@@ -5533,6 +7663,7 @@ pub(crate) fn build_rotate_chat_action_bundle_for_stage_with_preference_and_prim
     prefer_same_thread_host_control_primary: bool,
     thread_id: Option<&str>,
     primary_command_id: Option<&str>,
+    thread_binding_conflict: Option<&str>,
 ) -> Value {
     let project_code = project_code.filter(|value| !value.is_empty());
     let namespace_code = namespace_code.filter(|value| !value.is_empty());
@@ -5552,6 +7683,9 @@ pub(crate) fn build_rotate_chat_action_bundle_for_stage_with_preference_and_prim
     }
     if repo_root.is_none() {
         missing_inputs.push("repo_root");
+    }
+    if thread_binding_conflict.is_some() {
+        missing_inputs.push("thread_id_conflict");
     }
     let project_arg = project_code.unwrap_or("<project_code_required>");
     let namespace_arg = namespace_code.unwrap_or("<namespace_code_required>");
@@ -5582,6 +7716,29 @@ pub(crate) fn build_rotate_chat_action_bundle_for_stage_with_preference_and_prim
             },
             primary_command_id,
         );
+    let mut host_current_thread_control = host_current_thread_control;
+    if let Some(conflict) = thread_binding_conflict {
+        if let Some(root) = host_current_thread_control.as_object_mut() {
+            root.insert(
+                "thread_binding_state".to_string(),
+                json!("conflicting_thread_identity_aliases"),
+            );
+            root.insert("thread_binding_error".to_string(), json!(conflict));
+            root.insert("automation_ready".to_string(), json!(false));
+            if let Some(external_uri_launch) = root
+                .get_mut("external_uri_launch")
+                .and_then(Value::as_object_mut)
+            {
+                external_uri_launch.insert(
+                    "verification_state".to_string(),
+                    json!("thread_binding_conflict"),
+                );
+                external_uri_launch.insert("platform_launch_command".to_string(), Value::Null);
+                external_uri_launch.insert("uri".to_string(), Value::Null);
+                external_uri_launch.insert("route_path".to_string(), Value::Null);
+            }
+        }
+    }
     let host_current_thread_control_launch_command = if prefer_same_thread_host_control_primary {
         build_host_current_thread_control_observe_launch_command(
             project_code,
@@ -5643,6 +7800,14 @@ pub(crate) fn build_rotate_chat_action_bundle_for_stage_with_preference_and_prim
         "missing_inputs": missing_inputs,
         "preserves_return_obligation": preserves_return_obligation,
         "host_current_thread_control": host_current_thread_control,
+        "thread_binding_state": if thread_binding_conflict.is_some() {
+            "conflicting_thread_identity_aliases"
+        } else if thread_id.is_some() {
+            "current_thread_bound"
+        } else {
+            "current_thread_unbound"
+        },
+        "thread_binding_error": thread_binding_conflict,
         "recommended_handoff": {
             "available": recommended_headline.is_some() && recommended_next_step.is_some(),
             "headline": recommended_headline,
@@ -5739,7 +7904,8 @@ pub(crate) fn build_rotate_chat_action_bundle_for_stage_with_preference_and_prim
                 "--headline",
                 "<headline_required>",
                 "--next-step",
-                "<next_step_required>"
+                "<next_step_required>",
+                "--promote-active-workline"
             ],
             "project": project_code,
             "namespace": namespace_code,
@@ -5868,7 +8034,8 @@ pub(crate) fn build_wait_for_global_client_budget_action_bundle(
                 "--headline",
                 "<headline_required>",
                 "--next-step",
-                "<next_step_required>"
+                "<next_step_required>",
+                "--promote-active-workline"
             ],
             "project": project_code,
             "namespace": namespace_code,
@@ -6433,8 +8600,18 @@ mod tests {
     use crate::postgres;
     use proptest::prelude::*;
     use serde_json::json;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use uuid::Uuid;
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("working-state env lock")
+    }
 
     struct FakeSnapshotSpec<'a> {
         project_code: &'a str,
@@ -6446,6 +8623,707 @@ mod tests {
         next_step_hint: &'a str,
         summary: &'a str,
         offset: i64,
+    }
+
+    fn graph_projection_test_project() -> ProjectRecord {
+        ProjectRecord {
+            project_id: Uuid::new_v4(),
+            code: "amai".to_string(),
+            display_name: "Amai".to_string(),
+            repo_root: "/home/art/agent-memory-index".to_string(),
+            visibility_scope: "project_shared".to_string(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn graph_projection_test_namespace() -> NamespaceRecord {
+        NamespaceRecord {
+            namespace_id: Uuid::new_v4(),
+            code: "continuity".to_string(),
+            display_name: "Continuity".to_string(),
+            retrieval_mode: "local_strict".to_string(),
+        }
+    }
+
+    fn graph_projection_restore(active_event_id: &str, current_tree: Value) -> Value {
+        json!({
+            "project": {
+                "code": "amai",
+                "display_name": "Amai",
+                "repo_root": "/home/art/agent-memory-index"
+            },
+            "namespace": {
+                "code": "continuity",
+                "display_name": "Continuity"
+            },
+            "current_goal": "Graph startup projection",
+            "next_step": "Continue active graph work.",
+            "execctl_active_lease": {
+                "source_event_id": active_event_id,
+                "lease_owner_state": "same_session_owner"
+            },
+            "project_task_tree": current_tree,
+            "pending_return_queue": [],
+            "required_task_set": [],
+            "client_budget_guard": {
+                "status": "ok",
+                "should_rotate_chat_now": false,
+                "should_rotate_chat_soon": false
+            }
+        })
+    }
+
+    fn graph_projection_record(
+        event_id: &str,
+        task_role: &str,
+        lifecycle_state: &str,
+        execution_state: &str,
+        event_count: i64,
+        status_payload: Value,
+    ) -> postgres::TaskGraphRestoreProjectionNodeRecord {
+        postgres::TaskGraphRestoreProjectionNodeRecord {
+            task_node: postgres::TaskNodeRecord {
+                task_node_id: Uuid::new_v4(),
+                workspace_code: "default".to_string(),
+                project_code: "amai".to_string(),
+                namespace_code: Some("continuity".to_string()),
+                parent_task_node_id: None,
+                memory_item_id: None,
+                task_key: Some(event_id.to_string()),
+                task_role: task_role.to_string(),
+                headline: format!("{task_role} {event_id}"),
+                summary: Some(format!("{task_role} summary")),
+                next_step: Some(format!("{task_role} next step")),
+                execution_state: execution_state.to_string(),
+                lifecycle_state: lifecycle_state.to_string(),
+                confidence: Some(1.0),
+                current_score: None,
+                reopened_count: 0,
+                child_count: 0,
+                closed_child_count: 0,
+                pending_return_count: status_payload["pending_return_queue"]
+                    .as_array()
+                    .map(|items| items.len() as i32)
+                    .unwrap_or(0),
+                source_event_ids: json!([event_id]),
+                artifact_refs: json!([]),
+                evidence_span: json!({"event_id": event_id}),
+                candidate_class: "memory".to_string(),
+                derivation_kind: "extract".to_string(),
+                source_kind: Some("continuity_handoff".to_string()),
+                hot_path_write_eligible: true,
+                background_consolidation_recommended: false,
+                status_payload,
+                metadata: json!({}),
+                opened_at_epoch_ms: Some(1),
+                closed_at_epoch_ms: None,
+                archived_at_epoch_ms: None,
+            },
+            event_count,
+            latest_event_kind: Some("created".to_string()),
+            latest_event_recorded_at_epoch_ms: Some(1),
+        }
+    }
+
+    #[test]
+    fn task_graph_projection_blocks_legacy_active_mirror_node() {
+        let project = graph_projection_test_project();
+        let namespace = graph_projection_test_namespace();
+        let restore = graph_projection_restore(
+            "event-active",
+            json!({
+                "nodes": [
+                    {
+                        "task_id": "task::event-active",
+                        "task_role": "active",
+                        "headline": "ExecCtl active"
+                    }
+                ],
+                "edges": []
+            }),
+        );
+        let records = vec![graph_projection_record(
+            "event-active",
+            "historical",
+            "hot",
+            "active",
+            1,
+            json!({"pending_return_queue": []}),
+        )];
+        let counts = json!({
+            "sql_nodes_total": 1,
+            "sql_events_total": 1,
+            "hot_historical_sql_nodes_count": 1,
+            "hot_open_sql_nodes_count": 0,
+            "closed_sql_nodes_count": 0,
+            "archived_sql_nodes_count": 0
+        });
+
+        assert_eq!(
+            task_graph_projection_blocking_reason(&restore, &records, &counts).as_deref(),
+            Some("active_task_node_is_legacy_mirror_not_graph_native")
+        );
+        assert!(
+            build_task_graph_restore_projection(
+                &project, &namespace, &restore, &records, &counts, 42,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn task_graph_projection_blocks_legacy_hot_historical_population() {
+        let restore = graph_projection_restore(
+            "event-active",
+            json!({
+                "nodes": [
+                    {
+                        "task_id": "task::event-active",
+                        "task_role": "active",
+                        "headline": "ExecCtl active"
+                    }
+                ],
+                "edges": []
+            }),
+        );
+        let records = vec![
+            graph_projection_record(
+                "event-active",
+                "workline",
+                "hot",
+                "active",
+                1,
+                json!({"pending_return_queue": []}),
+            ),
+            graph_projection_record(
+                "event-legacy",
+                "historical",
+                "hot",
+                "blocked",
+                1,
+                json!({"pending_return_queue": []}),
+            ),
+        ];
+        let counts = json!({
+            "sql_nodes_total": 2,
+            "sql_events_total": 2,
+            "hot_historical_sql_nodes_count": 1,
+            "hot_open_sql_nodes_count": 1,
+            "closed_sql_nodes_count": 0,
+            "archived_sql_nodes_count": 0
+        });
+
+        assert_eq!(
+            task_graph_projection_blocking_reason(&restore, &records, &counts).as_deref(),
+            Some("legacy_hot_historical_nodes_present")
+        );
+    }
+
+    #[test]
+    fn task_graph_projection_blocks_missing_active_source_event_id() {
+        let mut restore = graph_projection_restore(
+            "event-active",
+            json!({
+                "nodes": [
+                    {
+                        "task_id": "task::event-active",
+                        "task_role": "active",
+                        "headline": "ExecCtl active"
+                    }
+                ],
+                "edges": []
+            }),
+        );
+        restore["execctl_active_lease"] = json!({
+            "lease_owner_state": "same_session_owner"
+        });
+        let records = vec![graph_projection_record(
+            "event-active",
+            "workline",
+            "hot",
+            "active",
+            1,
+            json!({"pending_return_queue": []}),
+        )];
+        let counts = json!({
+            "sql_nodes_total": 1,
+            "sql_events_total": 1,
+            "hot_historical_sql_nodes_count": 0,
+            "hot_open_sql_nodes_count": 1,
+            "closed_sql_nodes_count": 0,
+            "archived_sql_nodes_count": 0
+        });
+
+        assert_eq!(
+            task_graph_projection_blocking_reason(&restore, &records, &counts).as_deref(),
+            Some("missing_active_source_event_id")
+        );
+    }
+
+    #[test]
+    fn task_graph_restore_active_source_event_id_preserves_lineage_handoff_over_context_pack() {
+        let mut restore = graph_projection_restore(
+            "ctx-live-1",
+            json!({
+                "nodes": [],
+                "edges": []
+            }),
+        );
+        restore["state_lineage"] = json!({
+            "authoritative_event_id": "handoff-1",
+            "authoritative_source_kind": "continuity_handoff"
+        });
+        restore["execctl_active_lease"]["source_kind"] = json!("context_pack");
+
+        assert_eq!(
+            task_graph_restore_active_source_event_id(&restore),
+            Some("handoff-1".to_string())
+        );
+    }
+
+    #[test]
+    fn task_graph_projection_blocks_ambiguous_active_task_nodes() {
+        let restore = graph_projection_restore(
+            "event-active",
+            json!({
+                "nodes": [
+                    {
+                        "task_id": "task::event-active",
+                        "task_role": "active",
+                        "headline": "ExecCtl active"
+                    }
+                ],
+                "edges": []
+            }),
+        );
+        let records = vec![
+            graph_projection_record(
+                "event-active",
+                "workline",
+                "hot",
+                "active",
+                1,
+                json!({"pending_return_queue": []}),
+            ),
+            graph_projection_record(
+                "event-active",
+                "proposal",
+                "hot",
+                "proposed",
+                1,
+                json!({"pending_return_queue": []}),
+            ),
+        ];
+        let counts = json!({
+            "sql_nodes_total": 2,
+            "sql_events_total": 2,
+            "hot_historical_sql_nodes_count": 0,
+            "hot_open_sql_nodes_count": 2,
+            "closed_sql_nodes_count": 0,
+            "archived_sql_nodes_count": 0
+        });
+
+        assert_eq!(
+            task_graph_projection_blocking_reason(&restore, &records, &counts).as_deref(),
+            Some("ambiguous_active_task_nodes_for_current_lease")
+        );
+    }
+
+    #[test]
+    fn task_graph_projection_blocks_active_task_node_without_events() {
+        let restore = graph_projection_restore(
+            "event-active",
+            json!({
+                "nodes": [
+                    {
+                        "task_id": "task::event-active",
+                        "task_role": "active",
+                        "headline": "ExecCtl active"
+                    }
+                ],
+                "edges": []
+            }),
+        );
+        let records = vec![graph_projection_record(
+            "event-active",
+            "workline",
+            "hot",
+            "active",
+            0,
+            json!({"pending_return_queue": []}),
+        )];
+        let counts = json!({
+            "sql_nodes_total": 1,
+            "sql_events_total": 0,
+            "hot_historical_sql_nodes_count": 0,
+            "hot_open_sql_nodes_count": 1,
+            "closed_sql_nodes_count": 0,
+            "archived_sql_nodes_count": 0
+        });
+
+        assert_eq!(
+            task_graph_projection_blocking_reason(&restore, &records, &counts).as_deref(),
+            Some("active_task_node_has_no_task_events")
+        );
+    }
+
+    #[test]
+    fn task_graph_projection_builds_clean_graph_native_shadow_without_truth_claim() {
+        let project = graph_projection_test_project();
+        let namespace = graph_projection_test_namespace();
+        let restore = graph_projection_restore(
+            "event-active",
+            json!({
+                "nodes": [
+                    {
+                        "task_id": "task::event-active",
+                        "task_role": "active",
+                        "headline": "ExecCtl active"
+                    }
+                ],
+                "edges": []
+            }),
+        );
+        let records = vec![
+            graph_projection_record(
+                "event-active",
+                "workline",
+                "hot",
+                "active",
+                1,
+                json!({"pending_return_queue": []}),
+            ),
+            graph_projection_record(
+                "event-open",
+                "proposal",
+                "hot",
+                "proposed",
+                1,
+                json!({"pending_return_queue": []}),
+            ),
+            graph_projection_record(
+                "event-closed",
+                "workline",
+                "closed",
+                "done",
+                1,
+                json!({"pending_return_queue": []}),
+            ),
+        ];
+        let counts = json!({
+            "sql_nodes_total": 3,
+            "sql_events_total": 3,
+            "hot_historical_sql_nodes_count": 0,
+            "hot_open_sql_nodes_count": 2,
+            "closed_sql_nodes_count": 1,
+            "archived_sql_nodes_count": 0
+        });
+
+        let (tree, ledger, validation) = build_task_graph_restore_projection(
+            &project, &namespace, &restore, &records, &counts, 42,
+        )
+        .expect("clean graph projection");
+        assert_eq!(validation["truth_claim"], json!(false));
+        assert_eq!(tree["validation_state"], json!("valid"));
+        assert_eq!(tree["nodes_total"], json!(3));
+        assert_eq!(tree["nodes_total_source"], json!("sql_total"));
+        assert_eq!(tree["open_siblings_count"], json!(1));
+        assert_eq!(tree["recently_closed_count"], json!(1));
+        assert_eq!(ledger["entries_count_source"], json!("sql_total"));
+        assert_eq!(
+            task_graph_projection_control_invariant_report(&restore, &tree)["status"],
+            json!("passed")
+        );
+    }
+
+    #[test]
+    fn task_graph_projection_ignores_excluded_legacy_historical_debt_after_reconcile() {
+        let project = graph_projection_test_project();
+        let namespace = graph_projection_test_namespace();
+        let restore = graph_projection_restore(
+            "event-active",
+            json!({
+                "nodes": [
+                    {
+                        "task_id": "task::event-active",
+                        "task_role": "active",
+                        "headline": "ExecCtl active"
+                    }
+                ],
+                "edges": []
+            }),
+        );
+        let records = vec![graph_projection_record(
+            "event-active",
+            "workline",
+            "hot",
+            "active",
+            1,
+            json!({"pending_return_queue": []}),
+        )];
+        let counts = json!({
+            "sql_nodes_total": 1,
+            "all_sql_nodes_total": 3,
+            "projection_excluded_sql_nodes_count": 2,
+            "deprecated_sql_nodes_count": 2,
+            "quarantined_sql_nodes_count": 0,
+            "sql_events_total": 1,
+            "all_sql_events_total": 3,
+            "hot_historical_sql_nodes_count": 0,
+            "hot_open_sql_nodes_count": 1,
+            "closed_sql_nodes_count": 0,
+            "archived_sql_nodes_count": 0
+        });
+
+        assert_eq!(
+            task_graph_projection_blocking_reason(&restore, &records, &counts),
+            None
+        );
+        let (tree, ledger, validation) = build_task_graph_restore_projection(
+            &project, &namespace, &restore, &records, &counts, 42,
+        )
+        .expect("clean graph projection after legacy reconcile");
+        assert_eq!(validation["truth_claim"], json!(false));
+        assert_eq!(tree["nodes_total"], json!(1));
+        assert_eq!(validation["all_sql_nodes_total"], json!(3));
+        assert_eq!(validation["all_sql_events_total"], json!(3));
+        assert_eq!(validation["projection_excluded_sql_nodes_count"], json!(2));
+        assert_eq!(validation["deprecated_sql_nodes_count"], json!(2));
+        assert_eq!(validation["quarantined_sql_nodes_count"], json!(0));
+        assert_eq!(
+            validation["warnings"]["projection_preview_limited"],
+            json!(false)
+        );
+        assert_eq!(ledger["entries_count"], json!(1));
+    }
+
+    #[test]
+    fn task_graph_projection_keeps_validated_state_when_only_compact_preview_is_limited() {
+        let project = graph_projection_test_project();
+        let namespace = graph_projection_test_namespace();
+        let restore = graph_projection_restore(
+            "event-active",
+            json!({
+                "nodes": [
+                    {
+                        "task_id": "task::event-active",
+                        "task_role": "active",
+                        "headline": "ExecCtl active"
+                    }
+                ],
+                "edges": []
+            }),
+        );
+        let mut records = vec![graph_projection_record(
+            "event-active",
+            "workline",
+            "hot",
+            "active",
+            1,
+            json!({"pending_return_queue": []}),
+        )];
+        for index in 0..7 {
+            records.push(graph_projection_record(
+                &format!("event-open-{index}"),
+                "child",
+                "hot",
+                "active",
+                1,
+                json!({"pending_return_queue": []}),
+            ));
+        }
+        let counts = json!({
+            "sql_nodes_total": 8,
+            "all_sql_nodes_total": 8,
+            "projection_excluded_sql_nodes_count": 0,
+            "deprecated_sql_nodes_count": 0,
+            "quarantined_sql_nodes_count": 0,
+            "sql_events_total": 8,
+            "all_sql_events_total": 8,
+            "hot_historical_sql_nodes_count": 0,
+            "hot_open_sql_nodes_count": 8,
+            "closed_sql_nodes_count": 0,
+            "archived_sql_nodes_count": 0
+        });
+
+        assert_eq!(
+            task_graph_projection_blocking_reason(&restore, &records, &counts),
+            None
+        );
+        let (tree, ledger, validation) = build_task_graph_restore_projection(
+            &project, &namespace, &restore, &records, &counts, 42,
+        )
+        .expect("graph projection stays valid when only compact preview limits fire");
+        assert_eq!(validation["status"], json!("valid"));
+        assert_eq!(
+            validation["warnings"]["legacy_hot_historical_sql_nodes_count"],
+            json!(0)
+        );
+        assert_eq!(validation["all_sql_nodes_total"], json!(8));
+        assert_eq!(validation["all_sql_events_total"], json!(8));
+        assert_eq!(validation["projection_excluded_sql_nodes_count"], json!(0));
+        assert_eq!(validation["deprecated_sql_nodes_count"], json!(0));
+        assert_eq!(validation["quarantined_sql_nodes_count"], json!(0));
+        assert_eq!(
+            validation["warnings"]["projection_preview_limited"],
+            json!(true)
+        );
+        assert_eq!(validation["warnings"]["open_preview_limited"], json!(true));
+        assert_eq!(tree["preview_limited"], json!(true));
+        assert_eq!(ledger["preview_limited"], json!(true));
+        assert_eq!(tree["nodes_total"], json!(8));
+        assert_eq!(tree["nodes_preview_count"], json!(7));
+        assert_eq!(
+            task_graph_projection_control_invariant_report(&restore, &tree)["status"],
+            json!("passed")
+        );
+    }
+
+    #[test]
+    fn project_task_projection_summaries_surface_excluded_legacy_debt() {
+        let tree = json!({
+            "projection_source": "graph_first_sql_validated",
+            "open_siblings_count": 13,
+            "recently_closed_count": 2,
+            "archive_candidates_count": 1,
+            "nodes": [
+                {"task_role": "active", "headline": "Current active line"},
+                {"task_role": "pending_return", "headline": "Pending line"}
+            ],
+            "validation": {
+                "status": "valid",
+                "projection_source": "graph_first_sql_validated",
+                "projection_excluded_sql_nodes_count": 2396,
+                "deprecated_sql_nodes_count": 2396,
+                "quarantined_sql_nodes_count": 0
+            }
+        });
+        let ledger = json!({
+            "projection_source": "graph_first_sql_validated",
+            "open_entries_count": 13,
+            "pending_return_entries_count": 0,
+            "recently_closed_entries_count": 2,
+            "archive_candidate_entries_count": 1,
+            "entries": [
+                {"task_role": "active", "headline": "Current active line"},
+                {"task_role": "historical_handoff", "headline": "Older line"}
+            ],
+            "validation": {
+                "status": "valid",
+                "projection_source": "graph_first_sql_validated",
+                "projection_excluded_sql_nodes_count": 2396,
+                "deprecated_sql_nodes_count": 2396,
+                "quarantined_sql_nodes_count": 0
+            }
+        });
+
+        assert_eq!(
+            summarize_project_task_tree(&tree).as_deref(),
+            Some(
+                "active: Current active line; pending_return(1): Pending line; excluded_legacy(2396 deprecated)"
+            )
+        );
+        assert_eq!(
+            summarize_project_task_ledger(&ledger).as_deref(),
+            Some(
+                "active: Current active line; pending_return(0); historical_handoffs(1); excluded_legacy(2396 deprecated)"
+            )
+        );
+        assert_eq!(
+            task_graph_projection_summary(&tree).as_deref(),
+            Some(
+                "active: Current active line; open(13); recently_closed(2); archive_candidates(1); excluded_legacy(2396 deprecated)"
+            )
+        );
+        assert_eq!(
+            task_graph_projection_ledger_summary(&ledger).as_deref(),
+            Some(
+                "active: Current active line; open(13); pending_return(0); recently_closed(2); archive_candidates(1); excluded_legacy(2396 deprecated)"
+            )
+        );
+    }
+
+    #[test]
+    fn task_graph_projection_control_invariant_detects_required_return_mismatch() {
+        let restore = graph_projection_restore(
+            "event-active",
+            json!({
+                "nodes": [
+                    {
+                        "task_id": "task::event-active",
+                        "task_role": "active",
+                        "headline": "ExecCtl active"
+                    },
+                    {
+                        "task_id": "task::event-pending",
+                        "task_role": "pending_return",
+                        "headline": "Pending return",
+                        "next_step": "Resume pending branch."
+                    }
+                ],
+                "edges": []
+            }),
+        );
+        let projected_tree = json!({
+            "nodes": [
+                {
+                    "task_id": "task::event-active",
+                    "task_role": "active",
+                    "headline": "Graph active"
+                }
+            ],
+            "edges": []
+        });
+
+        let report = task_graph_projection_control_invariant_report(&restore, &projected_tree);
+        assert_eq!(report["status"], json!("failed"));
+        assert_eq!(
+            report["current_execctl_signature"]["pending_return_count"],
+            json!(1)
+        );
+        assert_eq!(
+            report["projected_graph_signature"]["pending_return_count"],
+            json!(0)
+        );
+    }
+
+    #[test]
+    fn task_graph_projection_control_invariant_detects_active_event_id_mismatch() {
+        let restore = graph_projection_restore(
+            "event-active",
+            json!({
+                "nodes": [
+                    {
+                        "task_id": "task::event-active",
+                        "task_role": "active",
+                        "headline": "ExecCtl active"
+                    }
+                ],
+                "edges": []
+            }),
+        );
+        let projected_tree = json!({
+            "nodes": [
+                {
+                    "task_id": "task::event-active",
+                    "task_role": "active",
+                    "headline": "Graph active",
+                    "authoritative_event_id": "event-stale"
+                }
+            ],
+            "edges": []
+        });
+
+        let report = task_graph_projection_control_invariant_report(&restore, &projected_tree);
+        assert_eq!(report["status"], json!("failed"));
+        assert_eq!(
+            report["current_execctl_signature"]["active_source_event_id"],
+            json!("event-active")
+        );
+        assert_eq!(
+            report["projected_graph_signature"]["active_source_event_id"],
+            json!("event-stale")
+        );
     }
 
     #[test]
@@ -6928,6 +9806,49 @@ mod tests {
         assert_eq!(
             selected[0].payload["working_state_event"]["headline"],
             json!("latest-without-session")
+        );
+    }
+
+    #[test]
+    fn select_relevant_events_keeps_previous_handoff_when_latest_session_has_only_context_pack() {
+        let latest_context_pack = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::primary",
+            session_id: "session-b",
+            event_kind: "retrieval_context_pack",
+            headline: "latest-context-pack",
+            next_step_hint: "Inspect retrieval evidence.",
+            summary: "Latest exact-scope session only has retrieval traffic.",
+            offset: 5,
+        });
+        let previous_handoff = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::primary",
+            session_id: "session-a",
+            event_kind: "continuity_handoff",
+            headline: "previous-handoff",
+            next_step_hint: "Keep the active workline authoritative.",
+            summary: "Previous session established the current workline.",
+            offset: 4,
+        });
+
+        let selected = select_relevant_events(
+            vec![latest_context_pack.clone(), previous_handoff.clone()],
+            "art",
+            "continuity",
+            "art::primary",
+        );
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(
+            selected[0].payload["working_state_event"]["headline"],
+            json!("latest-context-pack")
+        );
+        assert_eq!(
+            selected[1].payload["working_state_event"]["headline"],
+            json!("previous-handoff")
         );
     }
 
@@ -7569,6 +10490,117 @@ mod tests {
     }
 
     #[test]
+    fn derive_pending_return_queue_promotes_unique_pending_return_headline_without_duplication() {
+        let restore = json!({
+            "working_state_restore": {
+                "current_goal": "Final skeptic review",
+                "next_step": "Read blockers and decide whether close is allowed.",
+                "pending_return_queue": [
+                    {
+                        "task_id": "task::event-111",
+                        "headline": "Security/truth review",
+                        "next_step": "Run security/truth/provenance-only review.",
+                        "queued_at_epoch_ms": 7,
+                        "resume_state": "pending_return",
+                        "authoritative_event_id": "event-111"
+                    },
+                    {
+                        "task_id": "task::event-222",
+                        "headline": "Statistical honesty hardening",
+                        "next_step": "Finish benchmark honesty hardening.",
+                        "queued_at_epoch_ms": 6,
+                        "resume_state": "pending_return",
+                        "authoritative_event_id": "event-222"
+                    }
+                ],
+                "state_lineage": {
+                    "authoritative_event_id": "event-999",
+                    "authoritative_event_kind": "continuity_handoff",
+                    "authoritative_local_path": "/home/art/agent-memory-index"
+                }
+            }
+        });
+        let queue = derive_pending_return_queue(
+            Some(&restore["working_state_restore"]),
+            "Security/truth review",
+            "Record the observed security verdict and then hand control back.",
+            42,
+            false,
+            &[],
+            &[],
+        );
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0]["task_id"], json!("task::event-999"));
+        assert_eq!(queue[0]["headline"], json!("Final skeptic review"));
+        assert_eq!(queue[1]["task_id"], json!("task::event-222"));
+        assert_eq!(queue[1]["headline"], json!("Statistical honesty hardening"));
+        assert!(
+            queue
+                .iter()
+                .all(|item| item["headline"] != json!("Security/truth review"))
+        );
+    }
+
+    #[test]
+    fn derive_pending_return_queue_resumes_exact_duplicate_pending_return_branch_only_once() {
+        let restore = json!({
+            "working_state_restore": {
+                "current_goal": "Interrupt two",
+                "next_step": "Suspend the current branch.",
+                "pending_return_queue": [
+                    {
+                        "task_id": "task::event-111",
+                        "headline": "Shared headline",
+                        "next_step": "First incarnation.",
+                        "queued_at_epoch_ms": 7,
+                        "resume_state": "pending_return",
+                        "authoritative_event_id": "event-111"
+                    },
+                    {
+                        "task_id": "task::event-222",
+                        "headline": "Shared headline",
+                        "next_step": "Second incarnation.",
+                        "queued_at_epoch_ms": 6,
+                        "resume_state": "pending_return",
+                        "authoritative_event_id": "event-222"
+                    },
+                    {
+                        "task_id": "task::event-333",
+                        "headline": "Older pending line",
+                        "next_step": "Keep this pending.",
+                        "queued_at_epoch_ms": 5,
+                        "resume_state": "pending_return",
+                        "authoritative_event_id": "event-333"
+                    }
+                ],
+                "state_lineage": {
+                    "authoritative_event_id": "event-999",
+                    "authoritative_event_kind": "continuity_handoff",
+                    "authoritative_local_path": "/home/art/agent-memory-index"
+                }
+            }
+        });
+        let queue = derive_pending_return_queue(
+            Some(&restore["working_state_restore"]),
+            "Shared headline",
+            "Second incarnation.",
+            42,
+            false,
+            &[],
+            &[],
+        );
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue[0]["task_id"], json!("task::event-999"));
+        assert_eq!(queue[0]["headline"], json!("Interrupt two"));
+        let shared = queue
+            .iter()
+            .filter(|item| item["headline"] == json!("Shared headline"))
+            .collect::<Vec<_>>();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0]["task_id"], json!("task::event-111"));
+    }
+
+    #[test]
     fn compose_restore_bundle_surfaces_pending_return_queue() {
         let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
         let latest_handoff = ObservabilitySnapshotRecord {
@@ -7605,10 +10637,7 @@ mod tests {
             &[latest_handoff],
         );
         let restore = &bundle["working_state_restore"];
-        assert_eq!(
-            restore["execctl_resume_state"],
-            json!("pending_return_queue_present")
-        );
+        assert_eq!(restore["execctl_resume_state"], json!("return_required"));
         assert_eq!(
             restore["execctl_resume_contract"]["resume_state"],
             json!("return_required")
@@ -8147,6 +11176,54 @@ mod tests {
     }
 
     #[test]
+    fn startup_same_thread_lease_refresh_candidate_preserves_lineage_handoff_over_context_pack() {
+        let restore = json!({
+            "working_state_restore": {
+                "thread_id": "thread-a",
+                "current_goal": "Roadmap query line",
+                "next_step": "Stay on the roadmap workline.",
+                "state_lineage": {
+                    "authoritative_event_id": "handoff-2",
+                    "authoritative_source_kind": "continuity_handoff",
+                    "authoritative_local_path": "/tmp/FALLBACK.md"
+                },
+                "execctl_active_lease": {
+                    "source_event_id": "ctx-live-1",
+                    "source_kind": "context_pack"
+                },
+                "project_task_tree": {
+                    "nodes": [
+                        {
+                            "task_role": "active",
+                            "authoritative_event_id": "ctx-live-1",
+                            "source_kind": "context_pack",
+                            "headline": "Continuity contamination regression proof after preserve-path hardening",
+                            "next_step": "Retry the proof line."
+                        }
+                    ]
+                },
+                "project_task_ledger": {
+                    "entries": [
+                        {
+                            "task_role": "active",
+                            "local_path": "/tmp/LEDGER.md"
+                        }
+                    ]
+                }
+            }
+        });
+
+        let candidate =
+            execctl_startup_same_thread_lease_refresh_candidate(&restore, Some("thread-a"))
+                .expect("candidate");
+        assert_eq!(candidate.source_event_id, "handoff-2");
+        assert_eq!(candidate.source_kind, "continuity_handoff");
+        assert_eq!(candidate.headline, "Roadmap query line");
+        assert_eq!(candidate.next_step, "Stay on the roadmap workline.");
+        assert_eq!(candidate.local_path.as_deref(), Some("/tmp/FALLBACK.md"));
+    }
+
+    #[test]
     fn compose_restore_bundle_infers_recent_thread_id_when_latest_events_are_blank() {
         let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
         let latest_blank = ObservabilitySnapshotRecord {
@@ -8309,6 +11386,177 @@ mod tests {
             10_000,
             5_000
         ));
+    }
+
+    #[test]
+    fn execctl_foreign_thread_handoff_conflict_detects_foreign_owner() {
+        let lease = ExecCtlTaskLeaseRecord {
+            lease_id: Uuid::new_v4(),
+            source_snapshot_id: None,
+            source_event_id: "handoff-1".to_string(),
+            source_kind: "continuity_handoff".to_string(),
+            agent_scope: "art::continuity::default".to_string(),
+            owner_session_id: Some("session-a".to_string()),
+            owner_thread_id: Some("thread-b".to_string()),
+            lease_state: "active".to_string(),
+            headline: "Live line".to_string(),
+            next_step: "Keep going.".to_string(),
+            local_path: None,
+            acquired_at_epoch_ms: 1_000,
+            heartbeat_at_epoch_ms: 9_500,
+            expires_at_epoch_ms: 20_000,
+            created_at_epoch_ms: 1_000,
+            updated_at_epoch_ms: 9_500,
+        };
+
+        let conflict =
+            execctl_foreign_thread_handoff_conflict(Some(&lease), Some("thread-a"), None)
+                .expect("conflict");
+        assert_eq!(conflict.owner_thread_id.as_deref(), Some("thread-b"));
+        assert_eq!(conflict.current_thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(conflict.source_event_id, "handoff-1");
+        assert_eq!(conflict.headline, "Live line");
+        assert_eq!(conflict.owner_binding_source, "execctl_active_lease");
+    }
+
+    #[test]
+    fn execctl_foreign_thread_handoff_conflict_ignores_same_thread_only() {
+        let lease = ExecCtlTaskLeaseRecord {
+            lease_id: Uuid::new_v4(),
+            source_snapshot_id: None,
+            source_event_id: "handoff-1".to_string(),
+            source_kind: "continuity_handoff".to_string(),
+            agent_scope: "art::continuity::default".to_string(),
+            owner_session_id: Some("session-a".to_string()),
+            owner_thread_id: Some("thread-a".to_string()),
+            lease_state: "active".to_string(),
+            headline: "Live line".to_string(),
+            next_step: "Keep going.".to_string(),
+            local_path: None,
+            acquired_at_epoch_ms: 1_000,
+            heartbeat_at_epoch_ms: 9_500,
+            expires_at_epoch_ms: 20_000,
+            created_at_epoch_ms: 1_000,
+            updated_at_epoch_ms: 9_500,
+        };
+
+        assert!(
+            execctl_foreign_thread_handoff_conflict(Some(&lease), Some("thread-a"), None).is_none()
+        );
+    }
+
+    #[test]
+    fn execctl_foreign_thread_handoff_conflict_blocks_missing_binding_for_owned_lease() {
+        let lease = ExecCtlTaskLeaseRecord {
+            lease_id: Uuid::new_v4(),
+            source_snapshot_id: None,
+            source_event_id: "handoff-1".to_string(),
+            source_kind: "continuity_handoff".to_string(),
+            agent_scope: "art::continuity::default".to_string(),
+            owner_session_id: Some("session-a".to_string()),
+            owner_thread_id: Some("thread-a".to_string()),
+            lease_state: "active".to_string(),
+            headline: "Live line".to_string(),
+            next_step: "Keep going.".to_string(),
+            local_path: None,
+            acquired_at_epoch_ms: 1_000,
+            heartbeat_at_epoch_ms: 9_500,
+            expires_at_epoch_ms: 20_000,
+            created_at_epoch_ms: 1_000,
+            updated_at_epoch_ms: 9_500,
+        };
+
+        let conflict = execctl_foreign_thread_handoff_conflict(Some(&lease), None, None)
+            .expect("missing thread binding must block");
+        assert_eq!(conflict.owner_thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(conflict.current_thread_id, None);
+        assert_eq!(conflict.source_event_id, "handoff-1");
+        assert_eq!(conflict.headline, "Live line");
+        assert_eq!(conflict.owner_binding_source, "execctl_active_lease");
+    }
+
+    #[test]
+    fn execctl_foreign_thread_handoff_conflict_uses_restore_thread_hint_when_lease_owner_missing() {
+        let lease = ExecCtlTaskLeaseRecord {
+            lease_id: Uuid::new_v4(),
+            source_snapshot_id: None,
+            source_event_id: "handoff-1".to_string(),
+            source_kind: "continuity_handoff".to_string(),
+            agent_scope: "art::continuity::default".to_string(),
+            owner_session_id: Some("session-a".to_string()),
+            owner_thread_id: None,
+            lease_state: "active".to_string(),
+            headline: "Live line".to_string(),
+            next_step: "Keep going.".to_string(),
+            local_path: None,
+            acquired_at_epoch_ms: 1_000,
+            heartbeat_at_epoch_ms: 9_500,
+            expires_at_epoch_ms: 20_000,
+            created_at_epoch_ms: 1_000,
+            updated_at_epoch_ms: 9_500,
+        };
+        let restore = json!({
+            "working_state_restore": {
+                "thread_id": "thread-a",
+                "execctl_active_lease": {
+                    "source_event_id": "handoff-1"
+                }
+            }
+        });
+
+        assert!(
+            execctl_foreign_thread_handoff_conflict(
+                Some(&lease),
+                Some("thread-a"),
+                Some(&restore),
+            )
+            .is_none()
+        );
+
+        let conflict =
+            execctl_foreign_thread_handoff_conflict(Some(&lease), Some("thread-b"), Some(&restore))
+                .expect("restore-thread mismatch must block");
+        assert_eq!(conflict.owner_thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(conflict.current_thread_id.as_deref(), Some("thread-b"));
+        assert_eq!(conflict.owner_binding_source, "working_state_restore");
+    }
+
+    #[test]
+    fn execctl_foreign_thread_handoff_conflict_fail_closes_when_lease_owner_missing_and_restore_thread_unavailable()
+     {
+        let lease = ExecCtlTaskLeaseRecord {
+            lease_id: Uuid::new_v4(),
+            source_snapshot_id: None,
+            source_event_id: "handoff-1".to_string(),
+            source_kind: "continuity_handoff".to_string(),
+            agent_scope: "art::continuity::default".to_string(),
+            owner_session_id: Some("session-a".to_string()),
+            owner_thread_id: None,
+            lease_state: "active".to_string(),
+            headline: "Live line".to_string(),
+            next_step: "Keep going.".to_string(),
+            local_path: None,
+            acquired_at_epoch_ms: 1_000,
+            heartbeat_at_epoch_ms: 9_500,
+            expires_at_epoch_ms: 20_000,
+            created_at_epoch_ms: 1_000,
+            updated_at_epoch_ms: 9_500,
+        };
+        let restore = json!({
+            "working_state_restore": {
+                "thread_id": "",
+                "execctl_active_lease": {
+                    "source_event_id": "handoff-1"
+                }
+            }
+        });
+
+        let conflict =
+            execctl_foreign_thread_handoff_conflict(Some(&lease), Some("thread-b"), Some(&restore))
+                .expect("missing thread ownership proof must block");
+        assert_eq!(conflict.owner_thread_id, None);
+        assert_eq!(conflict.current_thread_id.as_deref(), Some("thread-b"));
+        assert_eq!(conflict.owner_binding_source, "missing");
     }
 
     #[test]
@@ -8761,6 +12009,36 @@ mod tests {
     }
 
     #[test]
+    fn host_current_thread_control_surface_surfaces_thread_alias_conflict() {
+        let _platform_thread = ScopedEnvVar::set(
+            crate::thread_binding::PLATFORM_THREAD_ID_ENV,
+            "platform-thread",
+        );
+        let _legacy_thread = ScopedEnvVar::set(
+            crate::thread_binding::LEGACY_CODEX_THREAD_ID_ENV,
+            "legacy-thread",
+        );
+        let surface = super::build_host_current_thread_control_surface_for_stage(
+            super::HostContextCompactionStage::Preserve,
+        );
+        assert_eq!(
+            surface["thread_binding_state"],
+            json!("conflicting_thread_identity_aliases")
+        );
+        assert_eq!(surface["automation_ready"], json!(false));
+        assert_eq!(
+            surface["external_uri_launch"]["verification_state"],
+            json!("thread_binding_conflict")
+        );
+        assert!(
+            surface["thread_binding_error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("conflicting thread identity aliases")
+        );
+    }
+
+    #[test]
     fn host_current_thread_control_surface_for_preserve_stage_prefers_compact_window() {
         let surface = super::build_host_current_thread_control_surface_for_thread_and_stage(
             Some("thread-current"),
@@ -8851,6 +12129,7 @@ mod tests {
                 true,
                 Some("thread-current"),
                 Some(super::HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID),
+                None,
             );
         assert_eq!(
             bundle["host_current_thread_control"]["thread_id"],
@@ -8888,6 +12167,7 @@ mod tests {
                 false,
                 Some("thread-current"),
                 Some(super::HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID),
+                None,
             );
         assert_eq!(
             bundle["operator_flow"]["primary_command_kind"],
@@ -8907,6 +12187,46 @@ mod tests {
                 "open_fresh_chat",
                 "run_continuity_startup"
             ])
+        );
+    }
+
+    #[test]
+    fn rotate_chat_action_bundle_surfaces_thread_binding_conflict_without_same_thread_automation() {
+        let bundle =
+            super::build_rotate_chat_action_bundle_for_stage_with_preference_and_primary_command(
+                Some("amai"),
+                Some("continuity"),
+                Some("/tmp/amai"),
+                true,
+                Some("Same-meter spend control"),
+                Some("Fallback to rotate helper."),
+                super::HostContextCompactionStage::Preserve,
+                true,
+                None,
+                Some(super::HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID),
+                Some("conflicting thread identity aliases"),
+            );
+        assert_eq!(
+            bundle["thread_binding_state"],
+            json!("conflicting_thread_identity_aliases")
+        );
+        assert_eq!(
+            bundle["host_current_thread_control"]["thread_binding_state"],
+            json!("conflicting_thread_identity_aliases")
+        );
+        assert_eq!(
+            bundle["host_current_thread_control"]["automation_ready"],
+            json!(false)
+        );
+        assert_eq!(
+            bundle["operator_flow"]["primary_command_kind"],
+            json!("rotate_helper_command")
+        );
+        assert!(
+            bundle["missing_inputs"]
+                .as_array()
+                .expect("missing inputs")
+                .contains(&json!("thread_id_conflict"))
         );
     }
 
@@ -9483,6 +12803,1741 @@ mod tests {
     }
 
     #[test]
+    fn resolved_live_thread_id_with_candidates_ignores_repo_only_hint() {
+        assert_eq!(
+            resolved_live_thread_id_with_candidates(None, Some("thread-env")).as_deref(),
+            Some("thread-env")
+        );
+        assert_eq!(resolved_live_thread_id_with_candidates(None, None), None);
+    }
+
+    #[tokio::test]
+    async fn record_handoff_event_rejects_same_thread_competing_line_without_explicit_promotion() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("same_thread_competing_handoff_contract").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "same-thread competing handoff contract")
+            .expect("handoff file");
+        let _thread = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-a");
+
+        super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Thread A line",
+            "Keep the original thread active.",
+            "Same-thread owner records the first handoff.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            true,
+        )
+        .await
+        .expect("first handoff");
+
+        let error = super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Thread A side review",
+            "Keep the original thread active.",
+            "Same-thread critic attempted to write a competing line without explicit promotion.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            false,
+        )
+        .await
+        .expect_err("competing same-thread handoff must fail without explicit promotion");
+        let error_text = format!("{error:#}");
+        assert!(error_text.contains("same-thread same-scope write would replace active line"));
+        assert!(error_text.contains("--promote-active-workline"));
+
+        let handoff_count: i64 = client
+            .query_one(
+                r#"
+                SELECT COUNT(*)
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = 'working_state_event'
+                  AND scope_project_code = $1
+                  AND scope_namespace_code = $2
+                  AND payload->'working_state_event'->>'event_kind' = 'continuity_handoff'
+                "#,
+                &[&project.code, &namespace.code],
+            )
+            .await
+            .expect("handoff count")
+            .get(0);
+        assert_eq!(handoff_count, 1);
+
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        let lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("lease lookup")
+        .expect("active lease");
+        assert_eq!(lease.owner_thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(lease.headline, "Thread A line");
+    }
+
+    #[tokio::test]
+    async fn record_handoff_event_allows_same_thread_progress_without_explicit_promotion() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("same_thread_progress_without_promotion").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "same-thread progress handoff guard").expect("handoff file");
+        let _thread = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-a");
+
+        super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Thread A line",
+            "Keep the original thread active.",
+            "Same-thread owner records the first handoff.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            true,
+        )
+        .await
+        .expect("first handoff");
+
+        super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Thread A line",
+            "Advance the active line without switching to another workline.",
+            "Same-thread owner updates the same workline.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            false,
+        )
+        .await
+        .expect("same-workline progress");
+    }
+
+    #[tokio::test]
+    async fn record_handoff_event_normalizes_non_competing_requested_promotion_to_false() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("same_thread_requested_promotion_normalized").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "same-thread normalized promotion guard")
+            .expect("handoff file");
+        let _thread = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-a");
+
+        super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Thread A line",
+            "Keep the original thread active.",
+            "Same-thread owner records the first handoff.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            true,
+        )
+        .await
+        .expect("first handoff");
+
+        super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Thread A line",
+            "Advance the same workline without a competing redirect.",
+            "Same-thread owner updates the same workline and should not persist a fake promotion.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            true,
+        )
+        .await
+        .expect("same-workline progress with requested promotion");
+
+        let latest_promote_active_workline: bool = client
+            .query_one(
+                r#"
+                SELECT COALESCE(
+                    (payload->'working_state_event'->>'promote_active_workline')::boolean,
+                    false
+                )
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = 'working_state_event'
+                  AND scope_project_code = $1
+                  AND scope_namespace_code = $2
+                  AND payload->'working_state_event'->>'event_kind' = 'continuity_handoff'
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+                &[&project.code, &namespace.code],
+            )
+            .await
+            .expect("latest working_state handoff snapshot")
+            .get(0);
+        assert!(!latest_promote_active_workline);
+    }
+
+    #[tokio::test]
+    async fn record_handoff_event_allows_same_thread_to_advance_active_line_with_explicit_promotion()
+     {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("same_thread_handoff_guard").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "same-thread handoff guard").expect("handoff file");
+        let _thread = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-a");
+        let _user_provenance = ScopedEnvVar::set(USER_REDIRECT_PROVENANCE_ENV, "unit:test");
+
+        super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Thread A line",
+            "Keep the original thread active.",
+            "Same-thread owner records the first handoff.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            true,
+        )
+        .await
+        .expect("first handoff");
+        super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Thread A line v2",
+            "Advance the same thread-owned line.",
+            "promotion_contract: user_redirect\nSame-thread owner records the second handoff.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            true,
+        )
+        .await
+        .expect("second handoff");
+
+        let handoff_count: i64 = client
+            .query_one(
+                r#"
+                SELECT COUNT(*)
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = 'working_state_event'
+                  AND scope_project_code = $1
+                  AND scope_namespace_code = $2
+                  AND payload->'working_state_event'->>'event_kind' = 'continuity_handoff'
+                "#,
+                &[&project.code, &namespace.code],
+            )
+            .await
+            .expect("handoff count")
+            .get(0);
+        assert_eq!(handoff_count, 2);
+
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        let lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("lease lookup")
+        .expect("active lease");
+        assert_eq!(lease.owner_thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(lease.headline, "Thread A line v2");
+    }
+
+    #[tokio::test]
+    async fn record_handoff_event_allows_same_thread_to_promote_competing_line_after_multi_stage_progress()
+     {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("same_thread_multi_stage_promotion").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "same-thread multi-stage promotion guard")
+            .expect("handoff file");
+        let _thread = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-a");
+
+        super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Thread A line",
+            "Keep the original thread active.",
+            "Same-thread owner records the first handoff.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            true,
+        )
+        .await
+        .expect("first handoff");
+
+        super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Thread A line",
+            "Advance the active line to stage two.",
+            "Same-thread owner records the second handoff.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            false,
+        )
+        .await
+        .expect("second handoff");
+
+        super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Thread A line",
+            "Advance the active line to stage three.",
+            "Same-thread owner records the third handoff.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            false,
+        )
+        .await
+        .expect("third handoff");
+
+        let error = super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Thread A side review",
+            "Advance the active line to stage three.",
+            "Same-thread critic attempted to write a competing line without explicit promotion.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            false,
+        )
+        .await
+        .expect_err("competing multi-stage handoff must fail without explicit promotion");
+        let error_text = format!("{error:#}");
+        assert!(error_text.contains("same-thread same-scope write would replace active line"));
+
+        super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Thread A promoted side review",
+            "Advance the active line to stage four.",
+            "promotion_contract: user_redirect\nSame-thread owner explicitly promotes the competing line.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            true,
+        )
+        .await
+        .expect("promoted competing handoff");
+
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        let lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("lease lookup")
+        .expect("active lease");
+        assert_eq!(lease.owner_thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(lease.headline, "Thread A promoted side review");
+
+        let handoff_count: i64 = client
+            .query_one(
+                r#"
+                SELECT COUNT(*)
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = 'working_state_event'
+                  AND scope_project_code = $1
+                  AND scope_namespace_code = $2
+                  AND payload->'working_state_event'->>'event_kind' = 'continuity_handoff'
+                "#,
+                &[&project.code, &namespace.code],
+            )
+            .await
+            .expect("handoff count")
+            .get(0);
+        assert_eq!(handoff_count, 4);
+    }
+
+    #[tokio::test]
+    async fn record_handoff_event_rejects_same_thread_competing_promotion_without_contract() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("same_thread_promotion_contract_guard").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "same-thread promotion contract guard")
+            .expect("handoff file");
+        let _thread = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-a");
+        let _operator_provenance = ScopedEnvVar::unset(OPERATOR_REDIRECT_PROVENANCE_ENV);
+        let _user_provenance = ScopedEnvVar::unset(USER_REDIRECT_PROVENANCE_ENV);
+
+        super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Main implementation line",
+            "Keep the implementation line active.",
+            "Primary workline handoff.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            true,
+        )
+        .await
+        .expect("first handoff");
+
+        let error = super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Hostile review: semantic identity guard hardening",
+            "Inspect code and report only material bypasses.",
+            "Side-agent critic attempted to promote a review task with only the boolean flag.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            true,
+        )
+        .await
+        .expect_err("competing same-thread promotion without contract must fail");
+        let error_text = format!("{error:#}");
+        assert!(error_text.contains("missing a valid promotion_contract"));
+        assert!(error_text.contains("distinct AMAI_AGENT_SCOPE"));
+
+        let invalid_error = super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Hostile review: typo contract",
+            "Inspect code and report only material bypasses.",
+            "promotion_contract: typo\nUnsupported promotion contract must not pass.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            true,
+        )
+        .await
+        .expect_err("competing same-thread promotion with invalid contract must fail");
+        let invalid_error_text = format!("{invalid_error:#}");
+        assert!(invalid_error_text.contains("missing a valid promotion_contract"));
+        assert!(invalid_error_text.contains("operator_redirect"));
+
+        let operator_without_provenance_error = super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Operator redirect without provenance",
+            "Attempt to promote without trusted operator provenance.",
+            "promotion_contract: operator_redirect\nSynthetic redirects must carry provenance.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            true,
+        )
+        .await
+        .expect_err("operator redirect without provenance must fail");
+        let operator_without_provenance_error_text =
+            format!("{operator_without_provenance_error:#}");
+        assert!(
+            operator_without_provenance_error_text.contains("missing a valid promotion_contract")
+        );
+        assert!(operator_without_provenance_error_text.contains(OPERATOR_REDIRECT_PROVENANCE_ENV));
+
+        let user_without_provenance_error = super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Forged user redirect without provenance",
+            "Attempt to promote without trusted user provenance.",
+            "promotion_contract: user_redirect\nSide-agent redirects must not forge user provenance.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            true,
+        )
+        .await
+        .expect_err("user redirect without provenance must fail");
+        let user_without_provenance_error_text = format!("{user_without_provenance_error:#}");
+        assert!(user_without_provenance_error_text.contains("missing a valid promotion_contract"));
+        assert!(user_without_provenance_error_text.contains(USER_REDIRECT_PROVENANCE_ENV));
+
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        let lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("lease lookup")
+        .expect("active lease");
+        assert_eq!(lease.owner_thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(lease.headline, "Main implementation line");
+    }
+
+    #[tokio::test]
+    async fn record_handoff_event_rejects_conflicting_thread_identity_aliases() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("conflicting_thread_identity_alias_guard").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "conflicting thread identity alias guard")
+            .expect("handoff file");
+        let _platform = ScopedEnvVar::set(
+            crate::thread_binding::PLATFORM_THREAD_ID_ENV,
+            "platform-thread",
+        );
+        let _legacy = ScopedEnvVar::set(
+            crate::thread_binding::LEGACY_CODEX_THREAD_ID_ENV,
+            "legacy-thread",
+        );
+
+        let error = super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Conflicting alias line",
+            "Do not record when live thread identity is ambiguous.",
+            "Primary workline handoff must fail closed before writing.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            true,
+        )
+        .await
+        .expect_err("conflicting thread identity aliases must block handoff writes");
+        let error_text = format!("{error:#}");
+        assert!(error_text.contains("conflicting thread identity aliases"));
+        assert!(error_text.contains(crate::thread_binding::PLATFORM_THREAD_ID_ENV));
+        assert!(error_text.contains(crate::thread_binding::LEGACY_CODEX_THREAD_ID_ENV));
+    }
+
+    #[tokio::test]
+    async fn record_handoff_event_rejects_conflicting_agent_scope_aliases() {
+        let _guard = env_lock();
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("conflicting_agent_scope_alias_guard").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "conflicting agent scope alias guard").expect("handoff file");
+        let _thread = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-a");
+        let _primary_scope = ScopedEnvVar::set("AMAI_AGENT_SCOPE", "scope-a");
+        let _legacy_scope = ScopedEnvVar::set("CODEX_AGENT_SCOPE", "scope-b");
+
+        let error = super::record_handoff_event_with_refresh_contract(
+            &client,
+            &project,
+            &namespace,
+            "Conflicting scope line",
+            "Do not record when agent scope aliases disagree.",
+            "Primary workline handoff must fail closed before scope lock.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+            true,
+        )
+        .await
+        .expect_err("conflicting agent scope aliases must block handoff writes");
+        let error_text = format!("{error:#}");
+        assert!(error_text.contains("conflicting agent scope aliases"));
+        assert!(error_text.contains("AMAI_AGENT_SCOPE"));
+        assert!(error_text.contains("CODEX_AGENT_SCOPE"));
+    }
+
+    #[test]
+    fn current_agent_scope_ignores_client_key_alias() {
+        let _guard = env_lock();
+        let _no_agent_scope = ScopedEnvVar::unset("AMAI_AGENT_SCOPE");
+        let _no_legacy_scope = ScopedEnvVar::unset("CODEX_AGENT_SCOPE");
+        let _no_client_scope = ScopedEnvVar::unset("AMAI_CLIENT_SCOPE");
+        let _client_key = ScopedEnvVar::set("AMAI_CLIENT_KEY", "codex");
+        let resolved = super::current_agent_scope_for_result("amai", "continuity")
+            .expect("client key must not poison default agent scope");
+        assert_eq!(resolved, "amai::continuity::default");
+    }
+
+    #[test]
+    fn current_agent_scope_prefers_explicit_scope_over_client_key() {
+        let _guard = env_lock();
+        let _no_legacy_scope = ScopedEnvVar::unset("CODEX_AGENT_SCOPE");
+        let _no_client_scope = ScopedEnvVar::unset("AMAI_CLIENT_SCOPE");
+        let _client_key = ScopedEnvVar::set("AMAI_CLIENT_KEY", "codex");
+        let _agent_scope = ScopedEnvVar::set("AMAI_AGENT_SCOPE", "explicit-scope");
+        let resolved = super::current_agent_scope_for_result("amai", "continuity")
+            .expect("explicit scope alias must remain authoritative");
+        assert_eq!(resolved, "explicit-scope");
+    }
+
+    #[tokio::test]
+    async fn record_handoff_event_rejects_foreign_thread_active_line_hijack() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("foreign_thread_handoff_guard").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "foreign-thread handoff guard").expect("handoff file");
+
+        let thread_a = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-a");
+        super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Thread A line",
+            "Keep the original thread active.",
+            "Primary owner recorded the active line.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect("first handoff");
+        drop(thread_a);
+
+        let _thread_b = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-b");
+        let error = super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Thread B hijack attempt",
+            "Try to overwrite the active line from a foreign thread.",
+            "Foreign thread attempted to record a new continuity handoff.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect_err("foreign thread handoff must fail");
+        let error_text = format!("{error:#}");
+        assert!(error_text.contains("continuity handoff blocked"));
+        assert!(error_text.contains("continuity startup"));
+        assert!(error_text.contains("AMAI_AGENT_SCOPE"));
+
+        let handoff_count: i64 = client
+            .query_one(
+                r#"
+                SELECT COUNT(*)
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = 'working_state_event'
+                  AND scope_project_code = $1
+                  AND scope_namespace_code = $2
+                  AND payload->'working_state_event'->>'event_kind' = 'continuity_handoff'
+                "#,
+                &[&project.code, &namespace.code],
+            )
+            .await
+            .expect("handoff count")
+            .get(0);
+        assert_eq!(handoff_count, 1);
+
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        let lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("lease lookup")
+        .expect("active lease");
+        assert_eq!(lease.owner_thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(lease.headline, "Thread A line");
+    }
+
+    #[tokio::test]
+    async fn record_handoff_event_rejects_missing_thread_binding_against_owned_active_line() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("missing_thread_handoff_guard").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "missing-thread handoff guard").expect("handoff file");
+
+        let thread_a = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-a");
+        super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Thread A line",
+            "Keep the original thread active.",
+            "Primary owner recorded the active line.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect("first handoff");
+        drop(thread_a);
+
+        let _no_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let error = super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Threadless overwrite attempt",
+            "Try to overwrite the active line without a live thread binding.",
+            "No-thread writer attempted to record a new continuity handoff.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect_err("missing-thread handoff must fail");
+        let error_text = format!("{error:#}");
+        assert!(error_text.contains("continuity handoff blocked"));
+        assert!(error_text.contains("current thread binding is missing"));
+
+        let handoff_count: i64 = client
+            .query_one(
+                r#"
+                SELECT COUNT(*)
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = 'working_state_event'
+                  AND scope_project_code = $1
+                  AND scope_namespace_code = $2
+                  AND payload->'working_state_event'->>'event_kind' = 'continuity_handoff'
+                "#,
+                &[&project.code, &namespace.code],
+            )
+            .await
+            .expect("handoff count")
+            .get(0);
+        assert_eq!(handoff_count, 1);
+
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        let lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("lease lookup")
+        .expect("active lease");
+        assert_eq!(lease.owner_thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(lease.headline, "Thread A line");
+    }
+
+    #[tokio::test]
+    async fn record_handoff_event_rejects_foreign_thread_when_active_lease_lacks_thread_binding() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("threadless_active_lease_guard").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "threadless active lease guard").expect("handoff file");
+
+        let _no_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Threadless line",
+            "Create an active lease without a durable thread binding.",
+            "Threadless writer recorded the initial shared line.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect("threadless initial handoff");
+
+        let _thread_b = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-b");
+        let error = super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Foreign overwrite attempt",
+            "Try to overwrite the threadless shared line from another thread.",
+            "Foreign thread attempted to claim an unbound active lease.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect_err("foreign thread must not claim threadless shared lease");
+        let error_text = format!("{error:#}");
+        assert!(error_text.contains("continuity handoff blocked"));
+        assert!(error_text.contains("no durable or restorable thread binding"));
+
+        let handoff_count: i64 = client
+            .query_one(
+                r#"
+                SELECT COUNT(*)
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = 'working_state_event'
+                  AND scope_project_code = $1
+                  AND scope_namespace_code = $2
+                  AND payload->'working_state_event'->>'event_kind' = 'continuity_handoff'
+                "#,
+                &[&project.code, &namespace.code],
+            )
+            .await
+            .expect("handoff count")
+            .get(0);
+        assert_eq!(handoff_count, 1);
+
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        let lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("lease lookup")
+        .expect("active lease");
+        assert_eq!(lease.owner_thread_id, None);
+        assert_eq!(lease.headline, "Threadless line");
+    }
+
+    #[tokio::test]
+    async fn record_handoff_semantic_replay_rejects_foreign_thread_rebind() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("foreign_thread_replay_guard").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "foreign-thread replay guard").expect("handoff file");
+
+        let thread_a = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-a");
+        super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Shared line",
+            "Keep the active line stable.",
+            "Primary owner recorded the shared continuity line.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect("first handoff");
+        drop(thread_a);
+
+        let _thread_b = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-b");
+        let error = super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Shared line",
+            "Keep the active line stable.",
+            "Primary owner recorded the shared continuity line.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect_err("foreign-thread semantic replay must fail");
+        assert!(format!("{error:#}").contains("continuity handoff blocked"));
+
+        let handoff_count: i64 = client
+            .query_one(
+                r#"
+                SELECT COUNT(*)
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = 'working_state_event'
+                  AND scope_project_code = $1
+                  AND scope_namespace_code = $2
+                  AND payload->'working_state_event'->>'event_kind' = 'continuity_handoff'
+                "#,
+                &[&project.code, &namespace.code],
+            )
+            .await
+            .expect("handoff count")
+            .get(0);
+        assert_eq!(handoff_count, 1);
+
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        let lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("lease lookup")
+        .expect("active lease");
+        assert_eq!(lease.owner_thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(lease.headline, "Shared line");
+    }
+
+    #[tokio::test]
+    async fn record_handoff_event_rejects_foreign_thread_when_previous_restore_is_last_owner_proof()
+    {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("foreign_thread_restore_guard").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "foreign-thread restore guard").expect("handoff file");
+
+        let thread_a = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-a");
+        super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Shared line",
+            "Keep the active line stable.",
+            "Primary owner recorded the shared continuity line.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect("first handoff");
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        client
+            .execute(
+                r#"
+                UPDATE ami.execctl_task_leases
+                   SET expires_at_epoch_ms = 0
+                 WHERE project_id = $1
+                   AND namespace_id = $2
+                   AND agent_scope = $3
+                "#,
+                &[&project.project_id, &namespace.namespace_id, &agent_scope],
+            )
+            .await
+            .expect("expire live lease");
+        drop(thread_a);
+
+        let _thread_b = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-b");
+        let error = super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Shared line",
+            "Keep the active line stable.",
+            "Primary owner recorded the shared continuity line.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect_err("foreign thread must not reuse restore ownership after live lease expiry");
+        let error_text = format!("{error:#}");
+        assert!(error_text.contains("continuity handoff blocked"));
+        assert!(error_text.contains("latest restore"));
+
+        let handoff_count: i64 = client
+            .query_one(
+                r#"
+                SELECT COUNT(*)
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = 'working_state_event'
+                  AND scope_project_code = $1
+                  AND scope_namespace_code = $2
+                  AND payload->'working_state_event'->>'event_kind' = 'continuity_handoff'
+                "#,
+                &[&project.code, &namespace.code],
+            )
+            .await
+            .expect("handoff count")
+            .get(0);
+        assert_eq!(handoff_count, 1);
+    }
+
+    #[tokio::test]
+    async fn startup_refresh_rebinds_active_lease_to_new_thread_after_guard() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("startup_rebind_after_guard").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "startup rebind after guard").expect("handoff file");
+
+        let thread_a = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-a");
+        super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Thread A line",
+            "Keep the original thread active.",
+            "Primary owner recorded the active line before startup rebind.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect("first handoff");
+        let restore =
+            super::load_recent_restore_bundle_without_live_guard(&client, &project, &namespace)
+                .await
+                .expect("restore bundle");
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        let original_lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("original lease lookup")
+        .expect("original active lease");
+        assert_eq!(original_lease.owner_thread_id.as_deref(), Some("thread-a"));
+        let source_event_id = original_lease.source_event_id.clone();
+        drop(thread_a);
+
+        let _thread_b = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-b");
+        let refreshed = super::refresh_same_thread_execctl_active_lease_for_startup(
+            &client,
+            &project,
+            &namespace,
+            restore.as_ref(),
+        )
+        .await
+        .expect("startup refresh")
+        .expect("refreshed restore");
+
+        let refreshed_lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("refreshed lease lookup")
+        .expect("refreshed active lease");
+        assert_eq!(refreshed_lease.owner_thread_id.as_deref(), Some("thread-b"));
+        assert_eq!(refreshed_lease.source_event_id, source_event_id);
+        assert_eq!(
+            refreshed["working_state_restore"]["execctl_active_lease"]["owner_thread_id"],
+            json!("thread-b")
+        );
+        assert_eq!(
+            refreshed["working_state_restore"]["execctl_active_lease"]["source_event_id"],
+            json!(source_event_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_refresh_does_not_rebind_without_live_thread_binding() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("startup_refresh_no_live_thread").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "startup refresh without live thread").expect("handoff file");
+
+        let thread_a = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-a");
+        super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Thread A line",
+            "Keep the original thread active.",
+            "Primary owner recorded the active line before startup refresh.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect("first handoff");
+        let restore =
+            super::load_recent_restore_bundle_without_live_guard(&client, &project, &namespace)
+                .await
+                .expect("restore bundle");
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        let original_lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("original lease lookup")
+        .expect("original active lease");
+        drop(thread_a);
+
+        let _no_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let refreshed = super::refresh_same_thread_execctl_active_lease_for_startup(
+            &client,
+            &project,
+            &namespace,
+            restore.as_ref(),
+        )
+        .await
+        .expect("startup refresh")
+        .expect("refreshed restore");
+
+        let refreshed_lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("refreshed lease lookup")
+        .expect("refreshed active lease");
+        assert_eq!(refreshed_lease.owner_thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(
+            refreshed_lease.source_event_id,
+            original_lease.source_event_id
+        );
+        assert_eq!(
+            refreshed["working_state_restore"]["execctl_active_lease"]["owner_thread_id"],
+            json!("thread-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_refresh_rebinds_same_thread_context_pack_lease_back_to_handoff() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("startup_rebind_context_pack_to_handoff").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "startup rebind context pack").expect("handoff file");
+
+        let _thread_a = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-a");
+        super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Roadmap query line",
+            "Stay on the roadmap workline.",
+            "Primary handoff must stay authoritative over context-pack proof traffic.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect("initial handoff");
+        let restore =
+            super::load_recent_restore_bundle_without_live_guard(&client, &project, &namespace)
+                .await
+                .expect("restore load")
+                .expect("restore bundle");
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        let original_lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("original lease lookup")
+        .expect("original active lease");
+        let handoff_event_id = original_lease.source_event_id.clone();
+
+        let mut contaminated_restore = restore.clone();
+        contaminated_restore["working_state_restore"]["execctl_active_lease"] = json!({
+            "source_event_id": "ctx-live-1",
+            "source_kind": "context_pack",
+            "lease_owner_state": "same_session_owner"
+        });
+        contaminated_restore["working_state_restore"]["project_task_tree"] = json!({
+            "nodes": [
+                {
+                    "task_role": "active",
+                    "authoritative_event_id": "ctx-live-1",
+                    "source_kind": "context_pack",
+                    "headline": "Continuity contamination regression proof after preserve-path hardening",
+                    "next_step": "Retry the proof line."
+                }
+            ],
+            "edges": []
+        });
+        postgres::upsert_execctl_task_lease(
+            &client,
+            &postgres::ExecCtlTaskLeaseInsert {
+                project_id: project.project_id,
+                namespace_id: namespace.namespace_id,
+                agent_scope: &agent_scope,
+                owner_session_id: original_lease.owner_session_id.as_deref(),
+                owner_thread_id: Some("thread-a"),
+                source_snapshot_id: None,
+                source_event_id: "ctx-live-1",
+                source_kind: "context_pack",
+                lease_state: "active",
+                headline: "Continuity contamination regression proof after preserve-path hardening",
+                next_step: "Retry the proof line.",
+                local_path: original_lease.local_path.as_deref(),
+                acquired_at_epoch_ms: original_lease.acquired_at_epoch_ms,
+                heartbeat_at_epoch_ms: original_lease.heartbeat_at_epoch_ms,
+                expires_at_epoch_ms: original_lease.expires_at_epoch_ms,
+            },
+        )
+        .await
+        .expect("contaminated lease write");
+
+        let refreshed = super::refresh_same_thread_execctl_active_lease_for_startup(
+            &client,
+            &project,
+            &namespace,
+            Some(&contaminated_restore),
+        )
+        .await
+        .expect("startup refresh")
+        .expect("refreshed restore");
+
+        let refreshed_lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("refreshed lease lookup")
+        .expect("refreshed active lease");
+        assert_eq!(refreshed_lease.owner_thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(refreshed_lease.source_event_id, handoff_event_id);
+        assert_eq!(refreshed_lease.source_kind, "continuity_handoff");
+        assert_eq!(
+            refreshed["working_state_restore"]["execctl_active_lease"]["source_event_id"],
+            json!(handoff_event_id)
+        );
+        assert_eq!(
+            refreshed["working_state_restore"]["current_goal"],
+            json!("Roadmap query line")
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_refresh_does_not_rebind_threadless_lease_to_foreign_thread() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("startup_threadless_foreign_guard").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "startup threadless foreign guard").expect("handoff file");
+
+        let _no_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Threadless line",
+            "Create an active lease without a durable thread binding.",
+            "Threadless writer recorded the initial shared line.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect("threadless initial handoff");
+        let restore =
+            super::load_recent_restore_bundle_without_live_guard(&client, &project, &namespace)
+                .await
+                .expect("restore bundle");
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        let original_lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("original lease lookup")
+        .expect("original active lease");
+        assert_eq!(original_lease.owner_thread_id, None);
+        let source_event_id = original_lease.source_event_id.clone();
+
+        let _thread_b = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-b");
+        let refreshed = super::refresh_same_thread_execctl_active_lease_for_startup(
+            &client,
+            &project,
+            &namespace,
+            restore.as_ref(),
+        )
+        .await
+        .expect("startup refresh")
+        .expect("refreshed restore");
+
+        let refreshed_lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("refreshed lease lookup")
+        .expect("refreshed active lease");
+        assert_eq!(refreshed_lease.owner_thread_id, None);
+        assert_eq!(refreshed_lease.source_event_id, source_event_id);
+        assert!(
+            refreshed["working_state_restore"]["execctl_active_lease"]["owner_thread_id"].is_null()
+        );
+    }
+
+    #[tokio::test]
+    async fn guard_maintenance_does_not_rebind_without_live_thread_binding() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("guard_maintenance_no_live_thread").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "guard maintenance without live thread")
+            .expect("handoff file");
+
+        let thread_a = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-a");
+        super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Thread A line",
+            "Keep the original thread active.",
+            "Primary owner recorded the active line before guard maintenance.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect("first handoff");
+        let restore =
+            super::load_recent_restore_bundle_without_live_guard(&client, &project, &namespace)
+                .await
+                .expect("restore bundle");
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        let original_lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("original lease lookup")
+        .expect("original active lease");
+        drop(thread_a);
+
+        let _no_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        super::maintain_same_thread_execctl_active_lease_for_guard(&client, restore.as_ref(), None)
+            .await
+            .expect("guard maintenance");
+
+        let maintained_lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("maintained lease lookup")
+        .expect("maintained active lease");
+        assert_eq!(
+            maintained_lease.owner_thread_id.as_deref(),
+            Some("thread-a")
+        );
+        assert_eq!(
+            maintained_lease.source_event_id,
+            original_lease.source_event_id
+        );
+    }
+
+    #[tokio::test]
+    async fn guard_maintenance_does_not_rebind_threadless_lease_to_foreign_thread() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("guard_threadless_foreign_guard").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "guard threadless foreign guard").expect("handoff file");
+
+        let _no_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Threadless line",
+            "Create an active lease without a durable thread binding.",
+            "Threadless writer recorded the initial shared line.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect("threadless initial handoff");
+        let restore =
+            super::load_recent_restore_bundle_without_live_guard(&client, &project, &namespace)
+                .await
+                .expect("restore bundle");
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        let original_lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("original lease lookup")
+        .expect("original active lease");
+        assert_eq!(original_lease.owner_thread_id, None);
+        let source_event_id = original_lease.source_event_id.clone();
+
+        let _thread_b = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-b");
+        super::maintain_same_thread_execctl_active_lease_for_guard(&client, restore.as_ref(), None)
+            .await
+            .expect("guard maintenance");
+
+        let maintained_lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("maintained lease lookup")
+        .expect("maintained active lease");
+        assert_eq!(maintained_lease.owner_thread_id, None);
+        assert_eq!(maintained_lease.source_event_id, source_event_id);
+    }
+
+    #[tokio::test]
+    async fn guard_maintenance_reloads_live_owner_after_scope_lock_wait() {
+        let (cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("guard_lock_wait_owner_reload").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "guard lock wait owner reload").expect("handoff file");
+
+        let _no_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Threadless line",
+            "Create an active lease without a durable thread binding.",
+            "Threadless writer recorded the initial shared line.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect("threadless initial handoff");
+        let restore =
+            super::load_recent_restore_bundle_without_live_guard(&client, &project, &namespace)
+                .await
+                .expect("restore bundle")
+                .expect("restore");
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        let original_lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("original lease lookup")
+        .expect("original active lease");
+        let advisory_lock_key =
+            postgres::execctl_task_lease_advisory_lock_key(namespace.namespace_id, &agent_scope);
+        let lock_holder = postgres::connect_admin(&cfg)
+            .await
+            .expect("lock holder postgres");
+        let worker_client = postgres::connect_admin(&cfg)
+            .await
+            .expect("worker postgres");
+        lock_holder
+            .query_one("SELECT pg_advisory_lock($1)", &[&advisory_lock_key])
+            .await
+            .expect("acquire advisory lock");
+
+        let restore_clone = restore.clone();
+        let worker = tokio::spawn(async move {
+            super::maintain_same_thread_execctl_active_lease_for_guard(
+                &worker_client,
+                Some(&restore_clone),
+                Some("thread-b"),
+            )
+            .await
+            .expect("guard maintenance")
+        });
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        postgres::upsert_execctl_task_lease(
+            &lock_holder,
+            &postgres::ExecCtlTaskLeaseInsert {
+                project_id: project.project_id,
+                namespace_id: namespace.namespace_id,
+                agent_scope: &agent_scope,
+                owner_session_id: Some("session-a"),
+                owner_thread_id: Some("thread-a"),
+                source_snapshot_id: original_lease.source_snapshot_id,
+                source_event_id: original_lease.source_event_id.as_str(),
+                source_kind: original_lease.source_kind.as_str(),
+                lease_state: "active",
+                headline: original_lease.headline.as_str(),
+                next_step: original_lease.next_step.as_str(),
+                local_path: original_lease.local_path.as_deref(),
+                acquired_at_epoch_ms: original_lease.acquired_at_epoch_ms,
+                heartbeat_at_epoch_ms: original_lease.heartbeat_at_epoch_ms.saturating_add(1),
+                expires_at_epoch_ms: original_lease.expires_at_epoch_ms.saturating_add(1_000),
+            },
+        )
+        .await
+        .expect("advance live lease owner");
+        assert!(
+            lock_holder
+                .query_one("SELECT pg_advisory_unlock($1)", &[&advisory_lock_key])
+                .await
+                .expect("release advisory lock")
+                .get::<_, bool>(0)
+        );
+
+        worker.await.expect("worker join");
+        let maintained_lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("maintained lease lookup")
+        .expect("maintained active lease");
+        assert_eq!(
+            maintained_lease.owner_thread_id.as_deref(),
+            Some("thread-a")
+        );
+        assert_eq!(
+            maintained_lease.source_event_id,
+            original_lease.source_event_id
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_refresh_reloads_live_source_event_after_scope_lock_wait() {
+        let (cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("startup_lock_wait_source_reload").await;
+        let handoff_path = format!("{repo_root}/HANDOFF.md");
+        std::fs::write(&handoff_path, "startup lock wait source reload").expect("handoff file");
+
+        let _no_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        super::record_handoff_event_with_refresh(
+            &client,
+            &project,
+            &namespace,
+            "Threadless line",
+            "Create an active lease without a durable thread binding.",
+            "Threadless writer recorded the initial shared line.",
+            false,
+            &[],
+            &[],
+            &handoff_path,
+            None,
+            false,
+        )
+        .await
+        .expect("threadless initial handoff");
+        let restore =
+            super::load_recent_restore_bundle_without_live_guard(&client, &project, &namespace)
+                .await
+                .expect("restore bundle")
+                .expect("restore");
+        let agent_scope = super::current_agent_scope_for(&project.code, &namespace.code);
+        let original_lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("original lease lookup")
+        .expect("original active lease");
+        let advisory_lock_key =
+            postgres::execctl_task_lease_advisory_lock_key(namespace.namespace_id, &agent_scope);
+        let lock_holder = postgres::connect_admin(&cfg)
+            .await
+            .expect("lock holder postgres");
+        let worker_client = postgres::connect_admin(&cfg)
+            .await
+            .expect("worker postgres");
+        lock_holder
+            .query_one("SELECT pg_advisory_lock($1)", &[&advisory_lock_key])
+            .await
+            .expect("acquire advisory lock");
+
+        let _thread_b = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-b");
+        let project_clone = project.clone();
+        let namespace_clone = namespace.clone();
+        let restore_clone = restore.clone();
+        let worker = tokio::spawn(async move {
+            super::refresh_same_thread_execctl_active_lease_for_startup(
+                &worker_client,
+                &project_clone,
+                &namespace_clone,
+                Some(&restore_clone),
+            )
+            .await
+            .expect("startup refresh")
+        });
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        postgres::upsert_execctl_task_lease(
+            &lock_holder,
+            &postgres::ExecCtlTaskLeaseInsert {
+                project_id: project.project_id,
+                namespace_id: namespace.namespace_id,
+                agent_scope: &agent_scope,
+                owner_session_id: Some("session-a"),
+                owner_thread_id: Some("thread-a"),
+                source_snapshot_id: original_lease.source_snapshot_id,
+                source_event_id: "event-new-after-lock",
+                source_kind: original_lease.source_kind.as_str(),
+                lease_state: "active",
+                headline: "Newer live line",
+                next_step: original_lease.next_step.as_str(),
+                local_path: original_lease.local_path.as_deref(),
+                acquired_at_epoch_ms: original_lease.acquired_at_epoch_ms.saturating_add(1),
+                heartbeat_at_epoch_ms: original_lease.heartbeat_at_epoch_ms.saturating_add(1),
+                expires_at_epoch_ms: original_lease.expires_at_epoch_ms.saturating_add(1_000),
+            },
+        )
+        .await
+        .expect("advance live lease source");
+        assert!(
+            lock_holder
+                .query_one("SELECT pg_advisory_unlock($1)", &[&advisory_lock_key])
+                .await
+                .expect("release advisory lock")
+                .get::<_, bool>(0)
+        );
+
+        let refreshed = worker
+            .await
+            .expect("worker join")
+            .expect("refreshed bundle");
+        let refreshed_lease = postgres::get_execctl_task_lease(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &agent_scope,
+            0,
+        )
+        .await
+        .expect("refreshed lease lookup")
+        .expect("refreshed active lease");
+        assert_eq!(refreshed_lease.owner_thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(refreshed_lease.source_event_id, "event-new-after-lock");
+        assert_eq!(
+            refreshed["working_state_restore"]["execctl_active_lease"]["source_event_id"],
+            json!("event-new-after-lock")
+        );
+    }
+
+    #[test]
     fn handoff_semantic_replay_matches_previous_restore_for_identical_state() {
         let previous_restore = json!({
             "working_state_restore": {
@@ -9521,6 +14576,285 @@ mod tests {
             &[],
             &[],
         ));
+    }
+
+    #[test]
+    fn context_pack_previous_handoff_binding_preserves_matching_continuity_handoff() {
+        let previous_restore = json!({
+            "working_state_restore": {
+                "state_lineage": {
+                    "authoritative_event_id": "event-1",
+                    "authoritative_event_kind": "continuity_handoff",
+                    "source_snapshot_id": "11111111-1111-1111-1111-111111111111"
+                }
+            }
+        });
+        let active_lease = test_execctl_task_lease_record(
+            "event-1",
+            "continuity_handoff",
+            "active",
+            Some("/tmp/lease-handoff.md"),
+        );
+
+        let binding = super::context_pack_previous_handoff_binding(
+            Some(&previous_restore),
+            Some(&active_lease),
+        )
+        .expect("binding");
+
+        assert_eq!(binding.authoritative_event_id, "event-1");
+        assert_eq!(
+            binding.source_snapshot_id,
+            Some(Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap())
+        );
+        assert_eq!(binding.local_path, "/tmp/lease-handoff.md");
+    }
+
+    #[test]
+    fn context_pack_previous_handoff_binding_preserves_source_kind_only_handoff_lineage() {
+        let previous_restore = json!({
+            "working_state_restore": {
+                "state_lineage": {
+                    "authoritative_event_id": "event-1",
+                    "authoritative_source_kind": "continuity_handoff",
+                    "authoritative_local_path": "/tmp/restore-handoff.md"
+                }
+            }
+        });
+        let active_lease = test_execctl_task_lease_record(
+            "event-1",
+            "continuity_handoff",
+            "active",
+            Some("/tmp/lease-handoff.md"),
+        );
+
+        let binding = super::context_pack_previous_handoff_binding(
+            Some(&previous_restore),
+            Some(&active_lease),
+        )
+        .expect("source-kind-only lineage binding");
+
+        assert_eq!(binding.authoritative_event_id, "event-1");
+        assert_eq!(binding.local_path, "/tmp/restore-handoff.md");
+    }
+
+    #[test]
+    fn context_pack_previous_handoff_binding_rejects_non_handoff_restore() {
+        let previous_restore = json!({
+            "working_state_restore": {
+                "state_lineage": {
+                    "authoritative_event_id": "event-1",
+                    "authoritative_event_kind": "retrieval_context_pack",
+                    "authoritative_local_path": "/tmp/restore.md"
+                }
+            }
+        });
+        let active_lease = test_execctl_task_lease_record(
+            "event-1",
+            "continuity_handoff",
+            "active",
+            Some("/tmp/lease-handoff.md"),
+        );
+
+        assert_eq!(
+            super::context_pack_previous_handoff_binding(
+                Some(&previous_restore),
+                Some(&active_lease),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn context_pack_previous_handoff_binding_preserves_matching_handoff_without_live_lease() {
+        let previous_restore = json!({
+            "working_state_restore": {
+                "state_lineage": {
+                    "authoritative_event_id": "event-1",
+                    "authoritative_event_kind": "continuity_handoff",
+                    "authoritative_local_path": "/tmp/restore.md"
+                }
+            }
+        });
+        let stale_lease = test_execctl_task_lease_record(
+            "event-1",
+            "continuity_handoff",
+            "expired",
+            Some("/tmp/lease-handoff.md"),
+        );
+        let binding_from_missing_lease =
+            super::context_pack_previous_handoff_binding(Some(&previous_restore), None)
+                .expect("binding without live lease");
+        let binding_from_expired_matching_lease = super::context_pack_previous_handoff_binding(
+            Some(&previous_restore),
+            Some(&stale_lease),
+        )
+        .expect("binding from matching expired lease");
+
+        assert_eq!(binding_from_missing_lease.authoritative_event_id, "event-1");
+        assert_eq!(
+            binding_from_expired_matching_lease.authoritative_event_id,
+            "event-1"
+        );
+        assert_eq!(
+            binding_from_expired_matching_lease.local_path,
+            "/tmp/restore.md"
+        );
+    }
+
+    #[test]
+    fn context_pack_previous_handoff_binding_rejects_mismatched_foreign_lease() {
+        let previous_restore = json!({
+            "working_state_restore": {
+                "state_lineage": {
+                    "authoritative_event_id": "event-1",
+                    "authoritative_event_kind": "continuity_handoff",
+                    "authoritative_local_path": "/tmp/restore.md"
+                }
+            }
+        });
+        let mismatched_lease = test_execctl_task_lease_record(
+            "event-2",
+            "continuity_handoff",
+            "active",
+            Some("/tmp/lease-handoff.md"),
+        );
+        let foreign_kind_lease =
+            test_execctl_task_lease_record("event-1", "context_pack", "active", None);
+
+        assert_eq!(
+            super::context_pack_previous_handoff_binding(
+                Some(&previous_restore),
+                Some(&mismatched_lease),
+            ),
+            None
+        );
+        assert_eq!(
+            super::context_pack_previous_handoff_binding(
+                Some(&previous_restore),
+                Some(&foreign_kind_lease),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn semantic_handoff_replay_authoritative_event_keeps_identity_fields() {
+        let restore = json!({
+            "current_goal": "Same line",
+            "next_step": "Replay same line twice.",
+            "agent_scope": "amai::continuity::default",
+            "thread_id": "thread-a",
+            "session_id": "session-a",
+            "turn_id": "turn-a",
+            "active_files": [],
+            "visible_projects": [],
+            "query": "Q",
+            "query_type": "question",
+            "current_hypothesis": null,
+            "rejected_hypotheses": [],
+            "open_questions": [],
+            "materialized_notes": [],
+            "pending_return_queue": [],
+            "client_budget_target_percent": 90,
+            "last_command": "continuity handoff",
+            "last_results_summary": "Same line replay.",
+            "recent_actions": [
+                {
+                    "summary": "Same line replay."
+                }
+            ]
+        });
+
+        let authoritative_event = super::semantic_handoff_replay_authoritative_event(
+            &restore,
+            "event-1",
+            "/tmp/live-handoff.md",
+            1_000,
+        );
+
+        assert_eq!(
+            authoritative_event["agent_scope"],
+            json!("amai::continuity::default")
+        );
+        assert_eq!(authoritative_event["thread_id"], json!("thread-a"));
+        assert_eq!(authoritative_event["session_id"], json!("session-a"));
+        assert_eq!(authoritative_event["turn_id"], json!("turn-a"));
+    }
+
+    #[test]
+    fn refresh_restore_identity_value_preserves_handoff_owner_over_context_pack() {
+        let authoritative_event = json!({
+            "event_kind": "continuity_handoff",
+            "source_kind": "continuity_handoff",
+            "thread_id": "thread-a",
+            "session_id": "session-a",
+            "agent_scope": "amai::continuity::default"
+        });
+        let latest_event = json!({
+            "event_kind": "retrieval_context_pack",
+            "source_kind": "context_pack",
+            "thread_id": "thread-b",
+            "session_id": "session-b",
+            "agent_scope": "amai::continuity::default"
+        });
+        let restore = json!({
+            "thread_id": "thread-a",
+            "session_id": "session-a",
+            "agent_scope": "amai::continuity::default"
+        });
+
+        assert_eq!(
+            super::refresh_restore_identity_value(
+                &authoritative_event,
+                &latest_event,
+                &restore,
+                "thread_id",
+            ),
+            json!("thread-a")
+        );
+        assert_eq!(
+            super::refresh_restore_identity_value(
+                &authoritative_event,
+                &latest_event,
+                &restore,
+                "session_id",
+            ),
+            json!("session-a")
+        );
+    }
+
+    #[test]
+    fn refresh_restore_identity_value_uses_latest_event_outside_preserve_path() {
+        let authoritative_event = json!({
+            "event_kind": "retrieval_context_pack",
+            "source_kind": "context_pack",
+            "thread_id": "thread-old",
+            "session_id": "session-old",
+            "agent_scope": "amai::continuity::default"
+        });
+        let latest_event = json!({
+            "event_kind": "retrieval_context_pack",
+            "source_kind": "context_pack",
+            "thread_id": "thread-new",
+            "session_id": "session-new",
+            "agent_scope": "amai::continuity::default"
+        });
+        let restore = json!({
+            "thread_id": "thread-restore",
+            "session_id": "session-restore",
+            "agent_scope": "amai::continuity::default"
+        });
+
+        assert_eq!(
+            super::refresh_restore_identity_value(
+                &authoritative_event,
+                &latest_event,
+                &restore,
+                "thread_id",
+            ),
+            json!("thread-new")
+        );
     }
 
     #[test]
@@ -9584,6 +14918,69 @@ mod tests {
         }
     }
 
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(previous) = self.previous.as_deref() {
+                    std::env::set_var(self.key, previous);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    fn test_execctl_task_lease_record(
+        source_event_id: &str,
+        source_kind: &str,
+        lease_state: &str,
+        local_path: Option<&str>,
+    ) -> ExecCtlTaskLeaseRecord {
+        ExecCtlTaskLeaseRecord {
+            lease_id: Uuid::nil(),
+            source_snapshot_id: Some(
+                Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+            ),
+            source_event_id: source_event_id.to_string(),
+            source_kind: source_kind.to_string(),
+            agent_scope: "amai::continuity::default".to_string(),
+            owner_session_id: Some("session-1".to_string()),
+            owner_thread_id: Some("thread-1".to_string()),
+            lease_state: lease_state.to_string(),
+            headline: "Active line".to_string(),
+            next_step: "Continue active line.".to_string(),
+            local_path: local_path.map(ToOwned::to_owned),
+            acquired_at_epoch_ms: 1,
+            heartbeat_at_epoch_ms: 2,
+            expires_at_epoch_ms: 3,
+            created_at_epoch_ms: 1,
+            updated_at_epoch_ms: 2,
+        }
+    }
+
     async fn setup_working_state_test_scope(
         label: &str,
     ) -> (AppConfig, Client, ProjectRecord, NamespaceRecord, String) {
@@ -9624,6 +15021,428 @@ mod tests {
             .await
             .expect("default namespace");
         (cfg, client, project, namespace, repo_root)
+    }
+
+    #[tokio::test]
+    async fn mirror_handoff_into_commitment_graph_creates_workline_and_reconciles_legacy_mirrors() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("graph_first_handoff_reconcile").await;
+        let legacy_event_id = format!("event:legacy-mirror:{}", Uuid::new_v4());
+        let legacy_path = format!("{repo_root}/legacy-handoff.md");
+        std::fs::write(&legacy_path, "legacy handoff").expect("legacy handoff file");
+        let legacy_task = postgres::create_task_node(
+            &client,
+            &project.code,
+            &namespace.code,
+            &postgres::TaskNodeInsert {
+                parent_task_node_id: None,
+                memory_item_id: None,
+                task_key: Some(&legacy_event_id),
+                task_role: Some("historical"),
+                headline: "Legacy continuity mirror",
+                summary: Some("legacy summary"),
+                next_step: Some("legacy next step"),
+                execution_state: Some("active"),
+                lifecycle_state: Some("hot"),
+                confidence: Some(1.0),
+                current_score: None,
+                reopened_count: Some(0),
+                child_count: Some(0),
+                closed_child_count: Some(0),
+                pending_return_count: Some(0),
+                source_event_ids: Some(&json!([legacy_event_id.clone()])),
+                artifact_refs: Some(&json!([format!("file://{legacy_path}")])),
+                evidence_span: Some(&json!({"event_id": legacy_event_id})),
+                derivation_kind: Some("extract"),
+                status_payload: &json!({
+                    "source_kind": "continuity_handoff",
+                    "source_event_id": legacy_event_id,
+                    "pending_return_queue": []
+                }),
+                metadata: &json!({
+                    "materialized_from": "execctl_task_ledger_entry",
+                    "local_path": legacy_path
+                }),
+                opened_at_epoch_ms: Some(1_000),
+                closed_at_epoch_ms: None,
+                archived_at_epoch_ms: None,
+            },
+        )
+        .await
+        .expect("legacy task node");
+        postgres::create_task_event(
+            &client,
+            &project.code,
+            &namespace.code,
+            &postgres::TaskEventInsert {
+                task_node_id: legacy_task.task_node_id,
+                source_snapshot_id: None,
+                source_event_id: Some(&legacy_event_id),
+                event_kind: "created",
+                prior_execution_state: None,
+                next_execution_state: Some("active"),
+                prior_lifecycle_state: None,
+                next_lifecycle_state: Some("hot"),
+                source_kind: Some("continuity_handoff"),
+                artifact_refs: Some(&json!([format!("file://{legacy_path}")])),
+                message_refs: Some(&json!([])),
+                evidence_span: Some(
+                    &json!({"event_id": legacy_event_id, "kind": "continuity_handoff"}),
+                ),
+                derivation_kind: Some("raw_capture"),
+                schema_version: Some("task-event-envelope-v1"),
+                event_payload: &json!({"source_kind": "continuity_handoff"}),
+                recorded_at_epoch_ms: Some(1_001),
+            },
+        )
+        .await
+        .expect("legacy created event");
+        client
+            .execute(
+                "UPDATE ami.task_nodes SET source_kind = NULL WHERE task_node_id = $1",
+                &[&legacy_task.task_node_id],
+            )
+            .await
+            .expect("legacy source_kind nullified to simulate old mirror rows");
+
+        let current_event_id = format!("event:graph-native:{}", Uuid::new_v4());
+        let current_path = format!("{repo_root}/current-handoff.md");
+        std::fs::write(&current_path, "current handoff").expect("current handoff file");
+        let snapshot_payload = json!({
+            "working_state_event": {
+                "project": { "code": project.code.clone() },
+                "namespace": { "code": namespace.code.clone() },
+                "agent_scope": "amai::continuity::default",
+                "session_id": "session-graph-native",
+                "event_kind": "continuity_handoff",
+                "source_kind": "continuity_handoff",
+                "headline": "Graph-native current line",
+                "summary": "current summary",
+                "recorded_at_epoch_ms": 2_000
+            }
+        });
+        let snapshot_id = postgres::insert_observability_snapshot(
+            &client,
+            WORKING_STATE_EVENT_KIND,
+            &snapshot_payload,
+        )
+        .await
+        .expect("snapshot");
+
+        super::mirror_handoff_into_commitment_graph(
+            &client,
+            &project,
+            &namespace,
+            &current_event_id,
+            snapshot_id,
+            "amai::continuity::default",
+            "session-graph-native",
+            Some("thread-graph-native"),
+            "Graph-native current line",
+            "Continue truthful startup promotion.",
+            "current summary",
+            &current_path,
+            &json!([]),
+            2_000,
+        )
+        .await
+        .expect("mirror handoff");
+
+        let current_task = postgres::find_task_node_by_task_key(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &current_event_id,
+        )
+        .await
+        .expect("current task lookup")
+        .expect("current task node");
+        assert_eq!(current_task.task_role, "workline");
+        assert_eq!(current_task.lifecycle_state, "hot");
+        assert_eq!(current_task.execution_state, "active");
+        assert_eq!(
+            current_task.source_kind.as_deref(),
+            Some("continuity_handoff")
+        );
+
+        let reconciled_legacy = postgres::get_task_node(&client, legacy_task.task_node_id)
+            .await
+            .expect("refreshed legacy task");
+        assert_eq!(reconciled_legacy.lifecycle_state, "deprecated");
+        assert_eq!(reconciled_legacy.execution_state, "superseded");
+        assert_eq!(
+            reconciled_legacy.status_payload["reconciled_legacy_mirror"],
+            json!(true)
+        );
+
+        let legacy_reconcile_event = client
+            .query_one(
+                r#"
+                SELECT event_kind, source_kind, next_lifecycle_state
+                FROM ami.task_events
+                WHERE task_node_id = $1
+                ORDER BY recorded_at_epoch_ms DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                "#,
+                &[&legacy_task.task_node_id],
+            )
+            .await
+            .expect("legacy reconcile event");
+        assert_eq!(legacy_reconcile_event.get::<_, String>(0), "superseded");
+        assert_eq!(
+            legacy_reconcile_event
+                .get::<_, Option<String>>(1)
+                .as_deref(),
+            Some("continuity_handoff_reconcile")
+        );
+        assert_eq!(
+            legacy_reconcile_event
+                .get::<_, Option<String>>(2)
+                .as_deref(),
+            Some("deprecated")
+        );
+
+        let projection_nodes = postgres::list_task_graph_restore_projection_nodes(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            16,
+        )
+        .await
+        .expect("projection nodes");
+        assert_eq!(projection_nodes.len(), 1);
+        assert_eq!(
+            projection_nodes[0].task_node.task_key.as_deref(),
+            Some(current_event_id.as_str())
+        );
+
+        let counts = postgres::task_graph_restore_projection_counts(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+        )
+        .await
+        .expect("projection counts");
+        assert_eq!(counts["sql_nodes_total"], json!(1));
+        assert_eq!(counts["all_sql_nodes_total"], json!(2));
+        assert_eq!(counts["projection_excluded_sql_nodes_count"], json!(1));
+        assert_eq!(counts["deprecated_sql_nodes_count"], json!(1));
+        assert_eq!(counts["hot_historical_sql_nodes_count"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn task_graph_projection_promotes_current_legacy_mirror_to_workline() {
+        let (_cfg, client, project, namespace, repo_root) =
+            setup_working_state_test_scope("graph_first_current_mirror_promote").await;
+        let current_event_id = format!("event:current-mirror:{}", Uuid::new_v4());
+        let promotion_source_event_id = format!("continuity_handoff_promotion:{current_event_id}");
+        let current_path = format!("{repo_root}/current-handoff.md");
+        std::fs::write(&current_path, "current handoff").expect("current handoff file");
+        let legacy_task = postgres::create_task_node(
+            &client,
+            &project.code,
+            &namespace.code,
+            &postgres::TaskNodeInsert {
+                parent_task_node_id: None,
+                memory_item_id: None,
+                task_key: Some(&current_event_id),
+                task_role: Some("historical"),
+                headline: "Legacy current mirror",
+                summary: Some("legacy summary"),
+                next_step: Some("legacy next step"),
+                execution_state: Some("active"),
+                lifecycle_state: Some("hot"),
+                confidence: Some(1.0),
+                current_score: None,
+                reopened_count: Some(0),
+                child_count: Some(0),
+                closed_child_count: Some(0),
+                pending_return_count: Some(0),
+                source_event_ids: Some(&json!([current_event_id.clone()])),
+                artifact_refs: Some(&json!([format!("file://{current_path}")])),
+                evidence_span: Some(&json!({"event_id": current_event_id.clone()})),
+                derivation_kind: Some("extract"),
+                status_payload: &json!({
+                    "source_kind": "continuity_handoff",
+                    "source_event_id": current_event_id.clone(),
+                    "pending_return_queue": []
+                }),
+                metadata: &json!({
+                    "materialized_from": "execctl_task_ledger_entry",
+                    "local_path": current_path.clone()
+                }),
+                opened_at_epoch_ms: Some(1_000),
+                closed_at_epoch_ms: None,
+                archived_at_epoch_ms: None,
+            },
+        )
+        .await
+        .expect("legacy task node");
+        postgres::create_task_event(
+            &client,
+            &project.code,
+            &namespace.code,
+            &postgres::TaskEventInsert {
+                task_node_id: legacy_task.task_node_id,
+                source_snapshot_id: None,
+                source_event_id: Some(&current_event_id),
+                event_kind: "created",
+                prior_execution_state: None,
+                next_execution_state: Some("active"),
+                prior_lifecycle_state: None,
+                next_lifecycle_state: Some("hot"),
+                source_kind: Some("continuity_handoff"),
+                artifact_refs: Some(&json!([format!("file://{current_path}")])),
+                message_refs: Some(&json!([])),
+                evidence_span: Some(
+                    &json!({"event_id": current_event_id.clone(), "kind": "continuity_handoff"}),
+                ),
+                derivation_kind: Some("raw_capture"),
+                schema_version: Some("task-event-envelope-v1"),
+                event_payload: &json!({"source_kind": "continuity_handoff"}),
+                recorded_at_epoch_ms: Some(1_001),
+            },
+        )
+        .await
+        .expect("legacy created event");
+
+        let snapshot_payload = json!({
+            "working_state_event": {
+                "project": { "code": project.code.clone() },
+                "namespace": { "code": namespace.code.clone() },
+                "agent_scope": "amai::continuity::default",
+                "session_id": "session-current-mirror-promote",
+                "event_kind": "continuity_handoff",
+                "source_kind": "continuity_handoff",
+                "headline": "Legacy current mirror",
+                "summary": "legacy summary",
+                "recorded_at_epoch_ms": 2_000
+            }
+        });
+        let snapshot_id = postgres::insert_observability_snapshot(
+            &client,
+            WORKING_STATE_EVENT_KIND,
+            &snapshot_payload,
+        )
+        .await
+        .expect("snapshot");
+
+        super::mirror_handoff_into_commitment_graph(
+            &client,
+            &project,
+            &namespace,
+            &current_event_id,
+            snapshot_id,
+            "amai::continuity::default",
+            "session-current-mirror-promote",
+            Some("thread-current-mirror-promote"),
+            "Legacy current mirror",
+            "Continue truthful startup promotion.",
+            "legacy summary",
+            &current_path,
+            &json!([]),
+            2_000,
+        )
+        .await
+        .expect("promote legacy current mirror");
+
+        let promoted_task = postgres::find_task_node_by_task_key(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            &current_event_id,
+        )
+        .await
+        .expect("promoted task lookup")
+        .expect("promoted task node");
+        assert_eq!(promoted_task.task_role, "workline");
+        assert_eq!(promoted_task.lifecycle_state, "hot");
+        assert_eq!(promoted_task.execution_state, "active");
+        assert_eq!(
+            promoted_task.source_kind.as_deref(),
+            Some("continuity_handoff")
+        );
+        assert_eq!(
+            promoted_task.status_payload["promoted_from_legacy_mirror"],
+            json!(true)
+        );
+
+        let task_node_count: i64 = client
+            .query_one(
+                r#"
+                SELECT count(*)::bigint
+                FROM ami.task_nodes
+                WHERE project_id = $1
+                  AND namespace_id = $2
+                  AND task_key = $3
+                "#,
+                &[
+                    &project.project_id,
+                    &namespace.namespace_id,
+                    &current_event_id,
+                ],
+            )
+            .await
+            .expect("task node count")
+            .get(0);
+        assert_eq!(task_node_count, 1);
+
+        let latest_event = client
+            .query_one(
+                r#"
+                SELECT event_kind, source_kind, source_event_id
+                FROM ami.task_events
+                WHERE task_node_id = $1
+                ORDER BY recorded_at_epoch_ms DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                "#,
+                &[&promoted_task.task_node_id],
+            )
+            .await
+            .expect("latest task event");
+        assert_eq!(latest_event.get::<_, String>(0), "state_change");
+        assert_eq!(
+            latest_event.get::<_, Option<String>>(1).as_deref(),
+            Some("continuity_handoff_promotion")
+        );
+        assert_eq!(
+            latest_event.get::<_, Option<String>>(2).as_deref(),
+            Some(promotion_source_event_id.as_str())
+        );
+
+        let projection_nodes = postgres::list_task_graph_restore_projection_nodes(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+            16,
+        )
+        .await
+        .expect("projection nodes");
+        assert_eq!(projection_nodes.len(), 1);
+        assert_eq!(
+            projection_nodes[0].task_node.task_key.as_deref(),
+            Some(current_event_id.as_str())
+        );
+        assert_eq!(projection_nodes[0].event_count, 2);
+        assert_eq!(
+            projection_nodes[0].latest_event_kind.as_deref(),
+            Some("state_change")
+        );
+
+        let counts = postgres::task_graph_restore_projection_counts(
+            &client,
+            project.project_id,
+            namespace.namespace_id,
+        )
+        .await
+        .expect("projection counts");
+        assert_eq!(counts["sql_nodes_total"], json!(1));
+        assert_eq!(counts["all_sql_nodes_total"], json!(1));
+        assert_eq!(counts["sql_events_total"], json!(2));
+        assert_eq!(counts["all_sql_events_total"], json!(2));
+        assert_eq!(counts["projection_excluded_sql_nodes_count"], json!(0));
+        assert_eq!(counts["deprecated_sql_nodes_count"], json!(0));
+        assert_eq!(counts["hot_historical_sql_nodes_count"], json!(0));
     }
 
     fn mutable_restore_pack_test_bundle(

@@ -1574,7 +1574,7 @@ fn working_state_reason_summary(
     summary_key: &str,
     trace_key: &str,
 ) -> Option<String> {
-    let restore = &snapshot["latest_working_state_restore"]["working_state_restore"];
+    let restore = preferred_working_state_reason_restore(snapshot)?;
     if let Some(value) = restore[summary_key]
         .as_str()
         .filter(|value| !value.is_empty())
@@ -1609,6 +1609,15 @@ fn working_state_reason_summary(
     } else {
         Some(parts.join(" • "))
     }
+}
+
+fn preferred_working_state_reason_restore(snapshot: &Value) -> Option<&Value> {
+    let repo_restore = &snapshot["latest_repo_working_state_restore"]["working_state_restore"];
+    if repo_restore.is_object() {
+        return Some(repo_restore);
+    }
+    let global_restore = &snapshot["latest_working_state_restore"]["working_state_restore"];
+    global_restore.is_object().then_some(global_restore)
 }
 
 fn detect_memory_type() -> Option<String> {
@@ -2735,8 +2744,18 @@ fn expand_target_template(template: &str, repo_root: &Path, home: &Path) -> Path
     )
 }
 
-const STARTUP_INSTRUCTIONS_MARKER: &str = "<!-- AMAI MANAGED STARTUP INSTRUCTIONS v1 -->";
-const STARTUP_INSTRUCTIONS_END_MARKER: &str = "<!-- /AMAI MANAGED STARTUP INSTRUCTIONS v1 -->";
+const STARTUP_INSTRUCTIONS_MARKER: &str = "<!-- AMAI MANAGED STARTUP INSTRUCTIONS v2 -->";
+const STARTUP_INSTRUCTIONS_END_MARKER: &str = "<!-- /AMAI MANAGED STARTUP INSTRUCTIONS v2 -->";
+const LEGACY_STARTUP_INSTRUCTIONS_MARKER: &str = "<!-- AMAI MANAGED STARTUP INSTRUCTIONS v1 -->";
+const LEGACY_STARTUP_INSTRUCTIONS_END_MARKER: &str =
+    "<!-- /AMAI MANAGED STARTUP INSTRUCTIONS v1 -->";
+const STARTUP_INSTRUCTIONS_MARKER_GENERATIONS: [(&str, &str); 2] = [
+    (STARTUP_INSTRUCTIONS_MARKER, STARTUP_INSTRUCTIONS_END_MARKER),
+    (
+        LEGACY_STARTUP_INSTRUCTIONS_MARKER,
+        LEGACY_STARTUP_INSTRUCTIONS_END_MARKER,
+    ),
+];
 
 fn startup_contract_artifact_path(repo_root: &Path) -> PathBuf {
     repo_root.join(".amai/onboarding/project-chat-startup-contract.json")
@@ -2758,26 +2777,38 @@ fn agent_preflight_state_artifact_path(repo_root: &Path) -> PathBuf {
     repo_root.join(".amai/onboarding/project-agent-preflight-state.json")
 }
 
+fn contains_managed_startup_marker(content: &str) -> Result<bool> {
+    Ok(managed_startup_block_bounds(content)?.is_some())
+}
+
 fn managed_startup_block_bounds(content: &str) -> Result<Option<(usize, usize)>> {
-    let start = content.find(STARTUP_INSTRUCTIONS_MARKER);
-    let end = content.find(STARTUP_INSTRUCTIONS_END_MARKER);
-    match (start, end) {
-        (None, None) => Ok(None),
-        (Some(_), None) | (None, Some(_)) => Err(anyhow!(
-            "managed startup block is malformed: expected both start and end markers"
-        )),
-        (Some(start_index), Some(end_index)) => {
-            if end_index < start_index {
+    let mut found_bounds = None;
+    for (start_marker, end_marker) in STARTUP_INSTRUCTIONS_MARKER_GENERATIONS {
+        let start = content.find(start_marker);
+        let end = content.find(end_marker);
+        match (start, end) {
+            (None, None) => {}
+            (Some(_), None) | (None, Some(_)) => {
                 return Err(anyhow!(
-                    "managed startup block is malformed: end marker precedes start marker"
+                    "managed startup block is malformed: expected both start and end markers"
                 ));
             }
-            Ok(Some((
-                start_index,
-                end_index + STARTUP_INSTRUCTIONS_END_MARKER.len(),
-            )))
+            (Some(start_index), Some(end_index)) => {
+                if end_index < start_index {
+                    return Err(anyhow!(
+                        "managed startup block is malformed: end marker precedes start marker"
+                    ));
+                }
+                if found_bounds.is_some() {
+                    return Err(anyhow!(
+                        "managed startup block is malformed: multiple marker generations found"
+                    ));
+                }
+                found_bounds = Some((start_index, end_index + end_marker.len()));
+            }
         }
     }
+    Ok(found_bounds)
 }
 
 fn merge_managed_startup_block(existing: &str, block: &str) -> Result<String> {
@@ -2844,8 +2875,7 @@ fn install_startup_instructions(
             if output_path.is_file() {
                 let existing = fs::read_to_string(&output_path)
                     .with_context(|| format!("failed to read {}", output_path.display()))?;
-                if !existing.contains(STARTUP_INSTRUCTIONS_MARKER)
-                    && existing.trim() != content.trim()
+                if !contains_managed_startup_marker(&existing)? && existing.trim() != content.trim()
                 {
                     let fallback = workspace_root.join("tmp/onboarding").join(format!(
                         "{}-amai-startup-manual.md",
@@ -2968,17 +2998,17 @@ fn install_client_runtime_artifacts(
     if startup_summary.status != "managed_workspace_instruction_installed" {
         return Ok(None);
     }
-    if !command_exists_sync("openclaw") {
+    if openclaw_cli_binary().is_none() {
         startup_summary.status =
             "managed_openclaw_agent_workspace_skipped_openclaw_cli_missing".to_string();
         startup_summary.auto_start_ready = false;
-        startup_summary.reason = "OpenClaw CLI is not available in PATH; Amai generated the managed workspace, but cannot register the project agent automatically. Install OpenClaw, then rerun onboarding."
+        startup_summary.reason = "OpenClaw CLI is not available in PATH or standard ~/.openclaw/tools install locations; Amai generated the managed workspace, but cannot register the project agent automatically. Install OpenClaw, then rerun onboarding."
             .to_string();
         return Ok(Some(ClientRuntimeInstallSummary {
             status: "managed_openclaw_agent_registration_skipped".to_string(),
             output_path: repo_root.join(".openclaw"),
             install_scope: "workspace_local".to_string(),
-            reason: "OpenClaw CLI missing; skipped automatic agent registration".to_string(),
+            reason: "OpenClaw CLI missing from PATH and standard ~/.openclaw/tools install locations; skipped automatic agent registration".to_string(),
         }));
     }
     let workspace_root = startup_summary
@@ -3566,7 +3596,7 @@ fn remove_startup_instructions(
     match startup.mode.as_str() {
         "managed_workspace_file" | "manual_snippet_only" => {
             let removable = startup.mode == "manual_snippet_only"
-                || existing.contains(STARTUP_INSTRUCTIONS_MARKER);
+                || contains_managed_startup_marker(&existing)?;
             if !removable {
                 return Ok(None);
             }
@@ -3614,7 +3644,7 @@ fn remove_client_runtime_artifacts(
     if client_key == "hermes" {
         return remove_hermes_project_profile(repo_root);
     }
-    if client_key == "openclaw" && !command_exists_sync("openclaw") {
+    if client_key == "openclaw" && openclaw_cli_binary().is_none() {
         return Ok(None);
     }
     if client_key != "openclaw" {
@@ -3712,6 +3742,30 @@ fn render_hermes_compact_startup_body(
         tool_runtime_reconcile["transport_error_detail_contains"]
             .as_str()
             .unwrap_or("Transport closed");
+    let reconcile_local_cli_success_classification =
+        tool_runtime_reconcile["local_cli_success_classification"]
+            .as_str()
+            .unwrap_or("stale_embedded_mcp_session");
+    let reconcile_must_request_mcp_reconnect =
+        tool_runtime_reconcile["must_request_mcp_reconnect_after_local_success"]
+            .as_bool()
+            .unwrap_or(false);
+    let reconcile_same_session_continuation_allowed =
+        tool_runtime_reconcile["same_session_continuation_allowed_after_local_success"]
+            .as_bool()
+            .unwrap_or(false);
+    let reconcile_operator_action_required =
+        tool_runtime_reconcile["operator_action_required_after_local_success"]
+            .as_bool()
+            .unwrap_or(false);
+    let reconnect_helper_diagnostic_only =
+        tool_runtime_reconcile["reconnect_helper_diagnostic_only_after_local_success"]
+            .as_bool()
+            .unwrap_or(false);
+    let reconcile_must_continue_from_local_payload =
+        tool_runtime_reconcile["must_continue_from_local_startup_payload"]
+            .as_bool()
+            .unwrap_or(false);
     let stale_success = &tool_runtime_reconcile["success_payload_stale_runtime_artifact"];
     let stale_success_detect_after_any_success = stale_success["detect_after_any_success"]
         .as_bool()
@@ -3738,7 +3792,7 @@ fn render_hermes_compact_startup_body(
         })
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| {
-            "startup_contract_sha_mismatch, missing_agent_workflow_guard, missing_workflow_promotion_state, workflow_promotion_source_event_mismatch, gate_semantics_inconsistent".to_string()
+            "startup_contract_sha_mismatch, missing_agent_workflow_guard, missing_workflow_promotion_state, missing_working_state_lineage_event_id, missing_active_lease_source_event_id, workflow_promotion_source_event_mismatch, gate_semantics_inconsistent".to_string()
         });
     let reconnect_helper = &tool_runtime_reconcile["reconnect_helper"];
     let reconnect_helper_shell_relative_path = reconnect_helper["shell_helper_relative_path"]
@@ -3880,8 +3934,8 @@ fn render_hermes_compact_startup_body(
         "Перед первым содержательным ответом в новом или resumed чате и дальше перед каждым следующим содержательным ответом:\n\
 1. Workspace = `{repo_root_display}`. Прочитай compact agent contract `{agent_contract_path_display}` и machine-readable startup contract `{contract_path_display}`. Startup contract остаётся pinned source-of-truth; до MCP tool call проверь `{startup_contract_sha256_field} = \"{startup_contract_sha256}\"`, `workspace_contract_required_before_tool_call = {startup_contract_required_before_tool_call}`, `missing_or_unreadable_fail_closed = {startup_contract_missing_or_unreadable_fail_closed}`, `sha256_mismatch_fail_closed = {startup_contract_sha256_mismatch_fail_closed}`.\n\
 2. Затем вызови MCP tool `{tool}` с `repo_root = \"{repo_root_display}\"` и `namespace = \"{namespace}\"` до любого другого Amai шага.\n\
-3. Если tool вернул `{reconcile_error_class}` с detail `{reconcile_error_detail_contains}` или transport error с detail `{reconcile_transport_error_detail_contains}`, немедленно делай local reconcile: `{reconcile_local_cli_shell_command} --repo-root \"{repo_root_display}\" --namespace \"{namespace}\" --json`. Если он успешен, продолжай от локального startup payload и требуй reconnect exact front-door-ом: `{reconnect_shell_command}` или `{reconnect_bootstrap_command}`.\n\
-4. После любого успешного MCP startup прочитай runtime artifact `{runtime_state_relative_path}`. Если stale-success проверка включена (`detect_after_any_success = {stale_success_detect_after_any_success}`) и найдено `{stale_success_conditions}`, делай local reconcile (`local_cli_reconcile_required = {stale_success_local_cli_reconcile_required}`, `local_cli_unavailable_blocks_report = {stale_success_local_cli_unavailable_blocks_report}`, `local_cli_success_replaces_stale_mcp_success = {stale_success_replaces_mcp_success}`), продолжай только от локального payload и требуй reconnect exact front-door-ом.\n\
+3. Если tool вернул `{reconcile_error_class}` с detail `{reconcile_error_detail_contains}` или transport error с detail `{reconcile_transport_error_detail_contains}`, немедленно делай local reconcile: `{reconcile_local_cli_shell_command} --repo-root \"{repo_root_display}\" --namespace \"{namespace}\" --json`. Если он успешен, классифицируй случай как `{reconcile_local_cli_success_classification}` (`same_session_continuation_allowed_after_local_success = {reconcile_same_session_continuation_allowed}`, `operator_action_required_after_local_success = {reconcile_operator_action_required}`, `must_request_mcp_reconnect_after_local_success = {reconcile_must_request_mcp_reconnect}`, `reconnect_helper_diagnostic_only_after_local_success = {reconnect_helper_diagnostic_only}`, `must_continue_from_local_startup_payload = {reconcile_must_continue_from_local_payload}`) и продолжай от локального startup payload без прерывания пользователя. Reconnect helper держи только как диагностический fallback: `{reconnect_shell_command}` или `{reconnect_bootstrap_command}`.\n\
+4. После любого успешного MCP startup прочитай runtime artifact `{runtime_state_relative_path}`. Если stale-success проверка включена (`detect_after_any_success = {stale_success_detect_after_any_success}`) и найдено `{stale_success_conditions}`, делай local reconcile (`local_cli_reconcile_required = {stale_success_local_cli_reconcile_required}`, `local_cli_unavailable_blocks_report = {stale_success_local_cli_unavailable_blocks_report}`, `local_cli_success_replaces_stale_mcp_success = {stale_success_replaces_mcp_success}`), продолжай только от локального payload в том же сеансе и не требуй reconnect как нормальный шаг. Reconnect helper допустим только если transport продолжает падать или следующий MCP startup снова не доходит до self-healed состояния.\n\
 5. Obey fail-closed только по полям `{startup_execution_gate_field}`, `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}`, `{active_lease_field}`. `{gate_semantics_consistent_field}` должен быть `true`; если resume требует `{required_action_kind}`, follow startup_next_action first. No silent drop.\n\
 6. Перед каждым содержательным ответом обновляй `{client_budget_guard_shell_command} --enforce-reply-gate` и работай только по `client_budget_reply_gate.{client_budget_reply_execution_gate_field}`. Начинать user-visible reply можно только с exact non-empty `client_budget_reply_gate.{client_budget_reply_prefix_field}` из `{client_budget_required_reply_prefix_source}`.\n\
 7. Fallback для runtime-state inspection: `{startup_state_fallback_shell_command} --repo-root \"{repo_root_display}\" --json`.\n\
@@ -3986,6 +4040,18 @@ fn render_startup_instruction_body(
             .unwrap_or(false);
     let reconcile_must_request_mcp_reconnect =
         tool_runtime_reconcile["must_request_mcp_reconnect_after_local_success"]
+            .as_bool()
+            .unwrap_or(false);
+    let reconcile_same_session_continuation_allowed =
+        tool_runtime_reconcile["same_session_continuation_allowed_after_local_success"]
+            .as_bool()
+            .unwrap_or(false);
+    let reconcile_operator_action_required =
+        tool_runtime_reconcile["operator_action_required_after_local_success"]
+            .as_bool()
+            .unwrap_or(false);
+    let reconnect_helper_diagnostic_only =
+        tool_runtime_reconcile["reconnect_helper_diagnostic_only_after_local_success"]
             .as_bool()
             .unwrap_or(false);
     let reconcile_must_continue_from_local_payload =
@@ -4674,10 +4740,10 @@ fn render_startup_instruction_body(
             "1. Workspace = `{repo_root_display}`. Прочитай compact agent contract `{agent_contract_path_display}` и machine-readable startup contract `{contract_path_display}`; startup contract остаётся pinned source-of-truth. До MCP tool call проверь `{startup_contract_sha256_field} = \"{startup_contract_sha256}\"`, `workspace_contract_required_before_tool_call = {startup_contract_required_before_tool_call_text}`, `missing_or_unreadable_fail_closed = {startup_contract_missing_or_unreadable_fail_closed_text}`, `sha256_mismatch_fail_closed = {startup_contract_sha256_mismatch_fail_closed_text}`."
         ),
         format!(
-            "2. Затем вызови MCP tool `{tool}` с `repo_root = \"{repo_root_display}\"` и `namespace = \"{namespace}\"`; `project` передавай только при exact binding по repo_root. До `continuity_startup_summary` не переходи к `amai_context_pack`. При `{reconcile_error_class}` с detail `{reconcile_error_detail_contains}` или transport `{reconcile_transport_error_detail_contains}` (`transport_error_detail_case_insensitive = {reconcile_transport_error_case_insensitive_text}`) запускай `{reconcile_local_cli_shell_command} --repo-root \"{repo_root_display}\" --namespace \"{namespace}\" --json` (`requires_repo_root_argument = {reconcile_local_cli_requires_repo_root}`, `requires_namespace_argument = {reconcile_local_cli_requires_namespace}`, `json_required = {reconcile_local_cli_json_required}`). Если local CLI startup succeeds, классифицируй как `{reconcile_local_cli_success_classification}` (`local_cli_success_replaces_mcp_failure = {reconcile_local_cli_success_replaces_mcp_failure}`, `local_cli_success_replaces_transport_failure = {reconcile_local_cli_success_replaces_transport_failure_text}`, `must_request_mcp_reconnect_after_local_success = {reconcile_must_request_mcp_reconnect}`, `must_continue_from_local_startup_payload = {reconcile_must_continue_from_local_payload}`), продолжай от локального payload и требуй reconnect: `{reconnect_shell_command}` или `{reconnect_bootstrap_command}`. Если оба пути провалились, continuity unavailable."
+            "2. Затем вызови MCP tool `{tool}` с `repo_root = \"{repo_root_display}\"` и `namespace = \"{namespace}\"`; `project` передавай только при exact binding по repo_root. До `continuity_startup_summary` не переходи к `amai_context_pack`. При `{reconcile_error_class}` с detail `{reconcile_error_detail_contains}` или transport `{reconcile_transport_error_detail_contains}` (`transport_error_detail_case_insensitive = {reconcile_transport_error_case_insensitive_text}`) запускай `{reconcile_local_cli_shell_command} --repo-root \"{repo_root_display}\" --namespace \"{namespace}\" --json` (`requires_repo_root_argument = {reconcile_local_cli_requires_repo_root}`, `requires_namespace_argument = {reconcile_local_cli_requires_namespace}`, `json_required = {reconcile_local_cli_json_required}`). Если local CLI startup succeeds, классифицируй как `{reconcile_local_cli_success_classification}` (`local_cli_success_replaces_mcp_failure = {reconcile_local_cli_success_replaces_mcp_failure}`, `local_cli_success_replaces_transport_failure = {reconcile_local_cli_success_replaces_transport_failure_text}`, `same_session_continuation_allowed_after_local_success = {reconcile_same_session_continuation_allowed}`, `operator_action_required_after_local_success = {reconcile_operator_action_required}`, `must_request_mcp_reconnect_after_local_success = {reconcile_must_request_mcp_reconnect}`, `reconnect_helper_diagnostic_only_after_local_success = {reconnect_helper_diagnostic_only}`, `must_continue_from_local_startup_payload = {reconcile_must_continue_from_local_payload}`), продолжай от локального payload без прерывания пользователя. Reconnect helper `{reconnect_shell_command}` или `{reconnect_bootstrap_command}` держи только как диагностический fallback, если transport остаётся сломанным или следующий MCP startup снова не self-heal-ится. Если оба пути провалились, continuity unavailable."
         ),
         format!(
-            "3. После startup проверь runtime artifact `{runtime_state_relative_path}`: `workspace_runtime_state_artifact_version` должен быть `{runtime_state_artifact_version}`, его пишет `{runtime_state_written_by_tool}`, он обязан нести `{runtime_state_source_summary_field}`. Fallback: `{startup_state_fallback_shell_command} --repo-root \"{repo_root_display}\" --json`. Stale-success guard (`detect_after_any_success = {stale_success_detect_after_any_success_text}`, `local_cli_unavailable_blocks_report = {stale_success_local_cli_unavailable_blocks_report_text}`, `local_cli_success_replaces_stale_mcp_success = {stale_success_replaces_mcp_success_text}`): при SHA/`agent_workflow_guard`/`workflow_promotion_state`/event-match/`gate_semantics_consistent` drift = `stale_embedded_mcp_session`; use local payload + reconnect."
+            "3. После startup проверь runtime artifact `{runtime_state_relative_path}`: `workspace_runtime_state_artifact_version` должен быть `{runtime_state_artifact_version}`, его пишет `{runtime_state_written_by_tool}`, он обязан нести `{runtime_state_source_summary_field}`. Fallback: `{startup_state_fallback_shell_command} --repo-root \"{repo_root_display}\" --json`. Stale-success guard (`detect_after_any_success = {stale_success_detect_after_any_success_text}`, `local_cli_unavailable_blocks_report = {stale_success_local_cli_unavailable_blocks_report_text}`, `local_cli_success_replaces_stale_mcp_success = {stale_success_replaces_mcp_success_text}`): при SHA/`agent_workflow_guard`/`workflow_promotion_state`/event-match/`gate_semantics_consistent` drift = `stale_embedded_mcp_session`; use local payload in the same session and не требуй reconnect как нормальный шаг. Reconnect helper остаётся только diagnostic fallback для повторного transport/runtime failure."
         ),
         format!(
             "4. В runtime artifact смотри только `{startup_execution_gate_field}`, `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}`, `{active_lease_field}`. Restore бери из `required_summary_fields`, obligations из `restored_obligations`. Fail-closed, если `{gate_semantics_consistent_field} != true` (`gate_semantics_consistent_true_required = {gate_semantics_consistent_true_required_text}`), `{startup_execution_gate_field}.{gate_must_follow_field} != true`, `{startup_execution_gate_field}.{gate_unrelated_work_allowed_field} != false`, `{startup_execution_gate_field}.{gate_prompt_read_field} != true` или `{startup_execution_gate_field}.{gate_no_silent_drop_field} != true`."
@@ -4687,7 +4753,7 @@ fn render_startup_instruction_body(
         ),
         "5a. Если пользователь явно переключил задачу, это новый active workline немедленно: сначала materialize `continuity_handoff` для новой линии, затем продолжай только от неё; старую незавершённую линию, если она ещё не закрыта, паркуй в `pending_return_queue`, не продолжай её по инерции и не проси пользователя повторять указание."
             .to_string(),
-        "5b. Agent workflow guard: `agent_workflow_guard.guard_version = \"agent-workflow-guard-v1\"`; `workflow_promotion_state.source_event_match = true` + fresh `workflow_promotion_event_id`; external refs official/primary + local corroboration; per-item specialist consensus + bughunter-review; signoff: `./scripts/provision_specialist_signoff_trust.sh`, `./scripts/materialize_specialist_signoff.sh`, `./scripts/proof_workflow_before_report.sh`, `./scripts/proof_before_report.sh`, `./scripts/proof_specialist_signoff.sh`; subagents/specialists: только явно; язык en."
+        "5b. Agent workflow guard: `agent_workflow_guard.guard_version = \"agent-workflow-guard-v2\"`; `workflow_promotion_state.source_event_match = true` + fresh `workflow_promotion_event_id`; external refs official/primary + local corroboration; mandatory cycle `analysis -> plan -> team_critique -> implementation -> team_verification -> fix -> reverify -> final_audit -> report`; analysis covers `user_goal`, `requirements`, `constraints`, `existing_code`, `dependencies`, `risks`, `done_criteria`, `verification_method`; every plan item needs `goal`, `expected_result`, `risks`, `verification_method`, `completion_criteria`; team roles: `architect`, `senior_developer`, `tester`, `security_engineer`, `devops_if_applicable`, `skeptic`; implementation waits for `согласовано, замечаний нет`; per-item verification waits for `недостатков не найдено`; unresolved issues force return to analysis/plan/implementation as appropriate; signoff: `./scripts/provision_specialist_signoff_trust.sh`, `./scripts/materialize_specialist_signoff.sh`, `./scripts/proof_workflow_before_report.sh`, `./scripts/proof_before_report.sh`, `./scripts/proof_specialist_signoff.sh`; subagents/specialists: only explicit local-or-allowed contour; language en."
             .to_string(),
         format!(
             "6. Перед каждым содержательным ответом обновляй guard `{client_budget_guard_shell_command}` и работай только по `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}`. `must_check_before_each_substantive_reply = {client_budget_must_check_before_each_reply_text}`; stale старше `{client_budget_max_guard_age_seconds_text}` секунд запрещён (`stale_guard_requires_refresh = {client_budget_stale_guard_requires_refresh_text}`). Enforce `{client_budget_guard_enforcement_flag}` (`guard_enforcement_exit_on_blocking = {client_budget_guard_enforcement_exit_on_blocking_text}`). {client_budget_prefix_preflight_instruction} Amai continuity writes ({client_budget_continuity_write_operations}) exempt: `continuity_write_exempt_from_reply_guard = {client_budget_continuity_write_exempt_from_reply_guard_text}`; before rotate: `continuity_write_required_before_rotate = {client_budget_continuity_write_required_before_rotate_text}`. Root-cause first: `{client_budget_compact_diagnostics_shell_command}`; `must_prefer_compact_diagnostics_over_full_snapshot = {client_budget_prefer_compact_diagnostics_text}`."
@@ -4836,8 +4902,80 @@ struct OpenClawAgentAddSummary {
     _workspace: String,
 }
 
+fn discover_openclaw_cli_in_home(home: &Path) -> Option<PathBuf> {
+    let tools_root = home.join(".openclaw/tools");
+    let mut versioned_tool_dirs = match fs::read_dir(&tools_root) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.starts_with("node-"))
+            })
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+    versioned_tool_dirs.sort_by(|left, right| {
+        openclaw_version_sort_key(right)
+            .cmp(&openclaw_version_sort_key(left))
+            .then_with(|| right.cmp(left))
+    });
+    for tool_dir in versioned_tool_dirs {
+        let candidate = tool_dir.join("bin/openclaw");
+        if openclaw_cli_is_executable(&candidate) {
+            return Some(candidate);
+        }
+    }
+    let symlink_candidate = home.join(".openclaw/tools/node/bin/openclaw");
+    if openclaw_cli_is_executable(&symlink_candidate) {
+        return Some(symlink_candidate);
+    }
+    None
+}
+
+fn openclaw_version_sort_key(path: &Path) -> Vec<u64> {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .and_then(|value| value.strip_prefix("node-v"))
+        .map(|value| {
+            value
+                .split(|ch: char| !ch.is_ascii_digit())
+                .filter(|segment| !segment.is_empty())
+                .filter_map(|segment| segment.parse::<u64>().ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn openclaw_cli_is_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path) {
+            return meta.permissions().mode() & 0o111 != 0;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        return true;
+    }
+    false
+}
+
+fn openclaw_cli_binary() -> Option<PathBuf> {
+    if command_exists_sync("openclaw") {
+        return Some(PathBuf::from("openclaw"));
+    }
+    home_dir().and_then(|home| discover_openclaw_cli_in_home(&home))
+}
+
 fn openclaw_base_command(config_path: &Path) -> std::process::Command {
-    let mut command = std::process::Command::new("openclaw");
+    let binary = openclaw_cli_binary().unwrap_or_else(|| PathBuf::from("openclaw"));
+    let mut command = std::process::Command::new(binary);
     command.env("OPENCLAW_CONFIG_PATH", config_path);
     command.env("OPENCLAW_HIDE_BANNER", "1");
     command
@@ -5468,10 +5606,12 @@ fn maybe_backup_user_global(path: &Path, install_scope: &str) -> Result<Option<P
 #[cfg(test)]
 mod tests {
     use super::{
-        InstallState, describe_client_surface, detection_score, ensure_hermes_project_profile,
-        env_keys, expand_target_template, hermes_profile_id, inspect_startup_artifacts,
-        install_memory_bridge, install_scope_status, merge_managed_startup_block,
-        remove_hermes_project_profile, render_agent_preflight_contract_artifact,
+        InstallState, LEGACY_STARTUP_INSTRUCTIONS_END_MARKER, LEGACY_STARTUP_INSTRUCTIONS_MARKER,
+        STARTUP_INSTRUCTIONS_END_MARKER, STARTUP_INSTRUCTIONS_MARKER, describe_client_surface,
+        detection_score, ensure_hermes_project_profile, env_keys, expand_target_template,
+        hermes_profile_id, inspect_startup_artifacts, install_memory_bridge, install_scope_status,
+        install_startup_instructions, merge_managed_startup_block, remove_hermes_project_profile,
+        remove_startup_instructions, render_agent_preflight_contract_artifact,
         render_agent_preflight_state_artifact, render_startup_agent_contract_artifact,
         render_startup_contract_artifact, render_startup_instructions, resolve_client_target,
         resolve_output_path, save_install_state, startup_agent_contract_artifact_path,
@@ -5498,6 +5638,66 @@ mod tests {
             .expect("clock before epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("amai-{label}-{nanos}"))
+    }
+
+    fn legacy_startup_block(text: &str) -> String {
+        text.replace(
+            STARTUP_INSTRUCTIONS_MARKER,
+            LEGACY_STARTUP_INSTRUCTIONS_MARKER,
+        )
+        .replace(
+            STARTUP_INSTRUCTIONS_END_MARKER,
+            LEGACY_STARTUP_INSTRUCTIONS_END_MARKER,
+        )
+    }
+
+    #[cfg(unix)]
+    fn write_executable_file(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, "#!/bin/sh\nexit 0\n").expect("write executable file");
+        let mut perms = fs::metadata(path).expect("file metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("set executable permissions");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_openclaw_cli_in_home_prefers_highest_executable_versioned_binary() {
+        let home = unique_test_dir("openclaw-discovery-versioned");
+        let stale = home.join(".openclaw/tools/node-v9.9.9/bin/openclaw");
+        let newest = home.join(".openclaw/tools/node-v22.22.0/bin/openclaw");
+        let broken = home.join(".openclaw/tools/node-v99.0.0/bin/openclaw");
+        fs::create_dir_all(stale.parent().expect("stale parent")).expect("create stale parent");
+        fs::create_dir_all(newest.parent().expect("newest parent")).expect("create newest parent");
+        fs::create_dir_all(broken.parent().expect("broken parent")).expect("create broken parent");
+        write_executable_file(&stale);
+        write_executable_file(&newest);
+        fs::write(&broken, "#!/bin/sh\nexit 0\n").expect("write broken file");
+
+        assert_eq!(
+            super::discover_openclaw_cli_in_home(&home),
+            Some(newest.clone())
+        );
+
+        fs::remove_dir_all(&home).expect("cleanup temp home");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_openclaw_cli_in_home_falls_back_to_node_layout() {
+        let home = unique_test_dir("openclaw-discovery-node-layout");
+        let candidate = home.join(".openclaw/tools/node/bin/openclaw");
+        fs::create_dir_all(candidate.parent().expect("candidate parent"))
+            .expect("create candidate parent");
+        write_executable_file(&candidate);
+
+        assert_eq!(
+            super::discover_openclaw_cli_in_home(&home),
+            Some(candidate.clone())
+        );
+
+        fs::remove_dir_all(&home).expect("cleanup temp home");
     }
 
     #[test]
@@ -5747,7 +5947,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
                 .parent()
                 .expect("startup parent")
                 .join(".hermes.md"),
-            "<!-- AMAI MANAGED STARTUP INSTRUCTIONS v1 -->\namai_continuity_startup\n",
+            "<!-- AMAI MANAGED STARTUP INSTRUCTIONS v2 -->\namai_continuity_startup\n",
         )
         .expect("failed to write startup instructions");
         fs::write(home.join(".hermes").join("SOUL.md"), "Base Hermes soul\n")
@@ -5875,11 +6075,11 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         let text =
             render_startup_instructions(repo, repo, "VS Code", "vscode", "vscode_instructions_md")
                 .expect("startup instructions must render");
-        assert!(text.contains("AMAI MANAGED STARTUP INSTRUCTIONS v1"));
+        assert!(text.contains("AMAI MANAGED STARTUP INSTRUCTIONS v2"));
         assert!(text.contains(
             "Перед первым содержательным ответом в новом или resumed чате и дальше перед каждым следующим содержательным ответом:"
         ));
-        assert!(text.contains("/AMAI MANAGED STARTUP INSTRUCTIONS v1"));
+        assert!(text.contains("/AMAI MANAGED STARTUP INSTRUCTIONS v2"));
         assert!(text.contains("amai_continuity_startup"));
         assert!(text.contains("/tmp/amai"));
         assert!(text.contains("pinned source-of-truth"));
@@ -5932,15 +6132,23 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("materialize `continuity_handoff`"));
         assert!(text.contains("pending_return_queue"));
         assert!(text.contains("не продолжай её по инерции"));
-        assert!(text.contains("agent_workflow_guard.guard_version = \"agent-workflow-guard-v1\""));
+        assert!(text.contains("agent_workflow_guard.guard_version = \"agent-workflow-guard-v2\""));
         assert!(text.contains("workflow_promotion_state.source_event_match = true"));
-        assert!(text.contains("specialist consensus"));
-        assert!(text.contains("bughunter-review"));
+        assert!(text.contains("analysis -> plan -> team_critique -> implementation"));
+        assert!(text.contains("team_verification -> fix -> reverify -> final_audit -> report"));
+        assert!(text.contains("user_goal"));
+        assert!(text.contains("completion_criteria"));
+        assert!(text.contains("architect"));
+        assert!(text.contains("devops_if_applicable"));
+        assert!(text.contains("согласовано, замечаний нет"));
+        assert!(text.contains("недостатков не найдено"));
         assert!(text.contains("./scripts/proof_workflow_before_report.sh"));
         assert!(text.contains("./scripts/proof_specialist_signoff.sh"));
         assert!(text.contains("official/primary"));
         assert!(text.contains("local corroboration"));
-        assert!(text.contains("subagents/specialists: только явно; язык en"));
+        assert!(text.contains(
+            "subagents/specialists: only explicit local-or-allowed contour; language en"
+        ));
         assert!(text.contains("gate_semantics_consistent != true"));
         assert!(text.contains("gate_semantics_consistent_true_required = true"));
         assert!(text.contains("./scripts/continuity_startup_state.sh --repo-root"));
@@ -5960,7 +6168,10 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("local_cli_success_replaces_stale_mcp_success = true"));
         assert!(text.contains("stale_embedded_mcp_session"));
         assert!(text.contains("local_cli_success_replaces_transport_failure = true"));
-        assert!(text.contains("must_request_mcp_reconnect_after_local_success = true"));
+        assert!(text.contains("same_session_continuation_allowed_after_local_success = true"));
+        assert!(text.contains("operator_action_required_after_local_success = false"));
+        assert!(text.contains("must_request_mcp_reconnect_after_local_success = false"));
+        assert!(text.contains("reconnect_helper_diagnostic_only_after_local_success = true"));
         assert!(text.contains("must_continue_from_local_startup_payload = true"));
         assert!(text.contains("./scripts/reconnect_local.sh --client vscode"));
         assert!(text.contains("./scripts/amai_exec.sh bootstrap reconnect --client vscode --yes"));
@@ -6027,7 +6238,11 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("advisory/compact pressure signal"));
         assert!(text.contains("full_scale_client_truth_required = true"));
         assert!(text.contains("внутренним Amai-slice"));
-        assert!(text.len() < 9500);
+        assert!(
+            text.len() < 11000,
+            "startup instruction length = {}",
+            text.len()
+        );
     }
 
     #[test]
@@ -6048,11 +6263,29 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             payload["startup_contract"]["agent_workflow_guard"]["guard_version"],
-            json!("agent-workflow-guard-v1")
+            json!("agent-workflow-guard-v2")
         );
         assert_eq!(
             payload["startup_contract"]["agent_workflow_guard"]["planning"]["specialist_consensus_required_before_implementation"],
             json!(true)
+        );
+        assert_eq!(
+            payload["startup_contract"]["agent_workflow_guard"]["workflow_cycle"]["ordered_stage_codes"],
+            json!([
+                "analysis",
+                "plan",
+                "team_critique",
+                "implementation",
+                "team_verification",
+                "fix",
+                "reverify",
+                "final_audit",
+                "report"
+            ])
+        );
+        assert_eq!(
+            payload["startup_contract"]["agent_workflow_guard"]["team_critique"]["approval_status_label_before_implementation"],
+            json!("согласовано, замечаний нет")
         );
         assert_eq!(
             payload["startup_contract"]["agent_workflow_guard"]["promotion_identity"]["runtime_state_field"],
@@ -6251,6 +6484,18 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             payload["startup_contract"]["tool_runtime_reconcile"]["must_request_mcp_reconnect_after_local_success"],
+            json!(false)
+        );
+        assert_eq!(
+            payload["startup_contract"]["tool_runtime_reconcile"]["same_session_continuation_allowed_after_local_success"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["startup_contract"]["tool_runtime_reconcile"]["operator_action_required_after_local_success"],
+            json!(false)
+        );
+        assert_eq!(
+            payload["startup_contract"]["tool_runtime_reconcile"]["reconnect_helper_diagnostic_only_after_local_success"],
             json!(true)
         );
         assert_eq!(
@@ -6425,11 +6670,15 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             payload["agent_workflow_guard"]["guard_version"],
-            json!("agent-workflow-guard-v1")
+            json!("agent-workflow-guard-v2")
         );
         assert_eq!(
             payload["agent_workflow_guard"]["report_gate"]["workflow_before_report_guard_command"],
             json!("./scripts/proof_workflow_before_report.sh")
+        );
+        assert_eq!(
+            payload["agent_workflow_guard"]["team_verification"]["approval_status_label_after_verification"],
+            json!("недостатков не найдено")
         );
         assert_eq!(
             payload["agent_workflow_guard"]["promotion_identity"]["runtime_state_field"],
@@ -7251,9 +7500,24 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         let existing = "# Existing project rules\n\n- keep this content\n";
         let merged = merge_managed_startup_block(existing, &block).expect("managed merge");
         assert!(merged.contains("# Existing project rules"));
-        assert!(merged.contains("AMAI MANAGED STARTUP INSTRUCTIONS v1"));
-        assert!(merged.contains("/AMAI MANAGED STARTUP INSTRUCTIONS v1"));
+        assert!(merged.contains("AMAI MANAGED STARTUP INSTRUCTIONS v2"));
+        assert!(merged.contains("/AMAI MANAGED STARTUP INSTRUCTIONS v2"));
         assert!(merged.contains("project `AGENTS.md`"));
+    }
+
+    #[test]
+    fn managed_startup_block_replaces_legacy_v1_block_with_v2() {
+        let repo = Path::new("/tmp/amai");
+        let block =
+            render_startup_instructions(repo, repo, "Codex", "codex", "codex_agents_snippet")
+                .expect("codex startup instructions must render");
+        let legacy_block = legacy_startup_block(&block);
+        let existing = format!("# Existing project rules\n\n{legacy_block}\n## Keep me too\n");
+        let merged = merge_managed_startup_block(&existing, &block).expect("managed merge");
+        assert!(merged.contains("# Existing project rules"));
+        assert!(merged.contains("## Keep me too"));
+        assert!(merged.contains("AMAI MANAGED STARTUP INSTRUCTIONS v2"));
+        assert!(!merged.contains("AMAI MANAGED STARTUP INSTRUCTIONS v1"));
     }
 
     #[test]
@@ -7268,8 +7532,144 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             .expect("managed block should be found");
         assert!(stripped.contains("# Existing project rules"));
         assert!(stripped.contains("## Keep me too"));
-        assert!(!stripped.contains("AMAI MANAGED STARTUP INSTRUCTIONS v1"));
+        assert!(!stripped.contains("AMAI MANAGED STARTUP INSTRUCTIONS v2"));
         assert!(!stripped.contains("amai_continuity_startup"));
+    }
+
+    #[test]
+    fn strip_managed_startup_block_removes_legacy_v1_block() {
+        let repo = Path::new("/tmp/amai");
+        let block =
+            render_startup_instructions(repo, repo, "Codex", "codex", "codex_agents_snippet")
+                .expect("codex startup instructions must render");
+        let legacy_block = legacy_startup_block(&block);
+        let existing = format!("# Existing project rules\n\n{legacy_block}\n## Keep me too\n");
+        let stripped = strip_managed_startup_block(&existing)
+            .expect("managed strip should succeed")
+            .expect("managed block should be found");
+        assert!(stripped.contains("# Existing project rules"));
+        assert!(stripped.contains("## Keep me too"));
+        assert!(!stripped.contains("AMAI MANAGED STARTUP INSTRUCTIONS v1"));
+        assert!(!stripped.contains("AMAI MANAGED STARTUP INSTRUCTIONS v2"));
+    }
+
+    #[test]
+    fn install_startup_instructions_overwrites_legacy_managed_workspace_file() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = unique_test_dir("legacy-managed-startup-install");
+        fs::create_dir_all(workspace.join(".github/instructions")).expect("workspace startup dir");
+        let client_resolution =
+            resolve_client_target(repo, "vscode", false).expect("vscode target must exist");
+        let legacy_rendered = legacy_startup_block(
+            &render_startup_instructions(
+                &workspace,
+                repo,
+                "VS Code",
+                "vscode",
+                "vscode_instructions_md",
+            )
+            .expect("legacy startup instructions"),
+        );
+        let startup_path =
+            workspace.join(".github/instructions/amai-continuity-startup.instructions.md");
+        fs::write(&startup_path, legacy_rendered).expect("write legacy startup instructions");
+
+        let summary = install_startup_instructions(&workspace, repo, &client_resolution)
+            .expect("install startup instructions")
+            .expect("startup summary");
+        assert_eq!(summary.status, "managed_workspace_instruction_installed");
+        let installed = fs::read_to_string(&startup_path).expect("read installed startup file");
+        assert!(installed.contains("AMAI MANAGED STARTUP INSTRUCTIONS v2"));
+        assert!(!installed.contains("AMAI MANAGED STARTUP INSTRUCTIONS v1"));
+        assert!(
+            !workspace
+                .join("tmp/onboarding/vscode-amai-startup-manual.md")
+                .exists()
+        );
+
+        fs::remove_dir_all(&workspace).expect("cleanup workspace");
+    }
+
+    #[test]
+    fn install_startup_instructions_rejects_malformed_managed_workspace_file() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = unique_test_dir("malformed-managed-startup-install");
+        fs::create_dir_all(workspace.join(".github/instructions")).expect("workspace startup dir");
+        let client_resolution =
+            resolve_client_target(repo, "vscode", false).expect("vscode target must exist");
+        let startup_path =
+            workspace.join(".github/instructions/amai-continuity-startup.instructions.md");
+        fs::write(
+            &startup_path,
+            format!("{STARTUP_INSTRUCTIONS_MARKER}\namai_continuity_startup\n"),
+        )
+        .expect("write malformed startup instructions");
+
+        let err = install_startup_instructions(&workspace, repo, &client_resolution)
+            .expect_err("malformed managed startup file must fail closed");
+        assert!(
+            err.to_string().contains(
+                "managed startup block is malformed: expected both start and end markers"
+            )
+        );
+
+        fs::remove_dir_all(&workspace).expect("cleanup workspace");
+    }
+
+    #[test]
+    fn remove_startup_instructions_removes_legacy_managed_workspace_file() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = unique_test_dir("legacy-managed-startup-remove");
+        fs::create_dir_all(workspace.join(".openclaw")).expect("workspace startup dir");
+        let target = resolve_client_target(repo, "openclaw", false)
+            .expect("openclaw target must exist")
+            .target;
+        let legacy_rendered = legacy_startup_block(
+            &render_startup_instructions(
+                &workspace,
+                repo,
+                "OpenClaw",
+                "openclaw",
+                "generic_markdown",
+            )
+            .expect("legacy startup instructions"),
+        );
+        let startup_path = workspace.join(".openclaw/AGENTS.md");
+        fs::write(&startup_path, legacy_rendered).expect("write legacy startup instructions");
+
+        let summary = remove_startup_instructions(&workspace, &target)
+            .expect("remove startup instructions")
+            .expect("remove summary");
+        assert_eq!(summary.status, "startup_instructions_removed");
+        assert!(!startup_path.exists());
+
+        fs::remove_dir_all(&workspace).expect("cleanup workspace");
+    }
+
+    #[test]
+    fn remove_startup_instructions_rejects_malformed_managed_workspace_file() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = unique_test_dir("malformed-managed-startup-remove");
+        fs::create_dir_all(workspace.join(".openclaw")).expect("workspace startup dir");
+        let target = resolve_client_target(repo, "openclaw", false)
+            .expect("openclaw target must exist")
+            .target;
+        let startup_path = workspace.join(".openclaw/AGENTS.md");
+        fs::write(
+            &startup_path,
+            format!("{LEGACY_STARTUP_INSTRUCTIONS_MARKER}\namai_continuity_startup\n"),
+        )
+        .expect("write malformed startup instructions");
+
+        let err = remove_startup_instructions(&workspace, &target)
+            .expect_err("malformed managed startup file must fail closed");
+        assert!(
+            err.to_string().contains(
+                "managed startup block is malformed: expected both start and end markers"
+            )
+        );
+
+        fs::remove_dir_all(&workspace).expect("cleanup workspace");
     }
 
     #[test]
@@ -7301,6 +7701,77 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             working_state_reason_summary(&snapshot, "excluded_reasons_summary", "not_included")
                 .as_deref(),
             Some("смысловые фрагменты — Semantic layer abstained.")
+        );
+    }
+
+    #[test]
+    fn working_state_reason_summary_prefers_repo_restore_over_stale_global_restore() {
+        let snapshot = json!({
+            "latest_working_state_restore": {
+                "working_state_restore": {
+                    "included_reasons_summary": "stale_global_exact (9) — stale global summary must stay hidden.",
+                    "latest_decision_trace": {
+                        "included": [{
+                            "strategy": "stale_global_exact",
+                            "count": 9,
+                            "reason": "stale global trace must stay hidden"
+                        }],
+                        "not_included": [{
+                            "strategy": "stale_global_semantic",
+                            "reason": "stale global exclusion must stay hidden"
+                        }]
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "included_reasons_summary": "repo_exact (1) — repo-scoped summary must win.",
+                    "latest_decision_trace": {
+                        "not_included": [{
+                            "strategy": "repo_semantic",
+                            "count": 2,
+                            "reason": "repo-scoped exclusion trace must win"
+                        }]
+                    }
+                }
+            }
+        });
+
+        assert_eq!(
+            working_state_reason_summary(&snapshot, "included_reasons_summary", "included")
+                .as_deref(),
+            Some("repo_exact (1) — repo-scoped summary must win.")
+        );
+        assert_eq!(
+            working_state_reason_summary(&snapshot, "excluded_reasons_summary", "not_included")
+                .as_deref(),
+            Some("repo_semantic (2) — repo-scoped exclusion trace must win")
+        );
+    }
+
+    #[test]
+    fn working_state_reason_summary_does_not_fall_back_to_global_when_repo_restore_exists() {
+        let snapshot = json!({
+            "latest_working_state_restore": {
+                "working_state_restore": {
+                    "included_reasons_summary": "stale_global_exact (9) — global reason must stay hidden.",
+                    "excluded_reasons_summary": "stale_global_semantic — global exclusion must stay hidden."
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "current_goal": "repo restore exists, but reason data is absent"
+                }
+            }
+        });
+
+        assert!(
+            working_state_reason_summary(&snapshot, "included_reasons_summary", "included")
+                .is_none()
+        );
+        assert!(
+            working_state_reason_summary(&snapshot, "excluded_reasons_summary", "not_included")
+                .is_none()
         );
     }
 }

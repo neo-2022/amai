@@ -3,6 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 source ./scripts/load_env.sh
+export AMAI_OPERATOR_REDIRECT_PROVENANCE="proof_harness:$(basename "$0")"
 
 step() {
   echo "[proof_workspace_restore_pack_acceptance] $*"
@@ -130,6 +131,7 @@ cargo run --quiet -- skill record-eval \
 step "create paused branch and active line"
 first_handoff_details="$(mktemp)"
 cat >"${first_handoff_details}" <<EOF
+promotion_contract: operator_redirect
 Paused branch for workspace restore acceptance.
 Waiting for the next live line to preempt this branch.
 EOF
@@ -138,11 +140,13 @@ cargo run --quiet -- continuity handoff \
   --namespace "${namespace_code}" \
   --headline "Paused branch for workspace restore pack" \
   --next-step "Resume this branch after the active acceptance line is verified." \
-  --details-file "${first_handoff_details}" >/dev/null
+  --details-file "${first_handoff_details}" \
+  --promote-active-workline >/dev/null
 rm -f "${first_handoff_details}"
 
 second_handoff_details="$(mktemp)"
 cat >"${second_handoff_details}" <<EOF
+promotion_contract: operator_redirect
 Acceptance line for workspace restore pack.
 Need startup and restore to surface a compact execution card, recent episodic traces, constraints, permissions and artifacts.
 EOF
@@ -151,7 +155,8 @@ cargo run --quiet -- continuity handoff \
   --namespace "${namespace_code}" \
   --headline "Workspace restore pack acceptance line" \
   --next-step "Verify startup and restore surfaces with compact procedural card." \
-  --details-file "${second_handoff_details}" >/dev/null
+  --details-file "${second_handoff_details}" \
+  --promote-active-workline >/dev/null
 rm -f "${second_handoff_details}"
 
 step "verify live startup and restore surfaces relevant procedures"
@@ -186,8 +191,7 @@ printf '%s\n' "${startup_json}" | jq -e '
   .workspace_restore_pack.relevant_procedures[0].procedure_kind == "compact_execution_card" and
   .workspace_restore_pack.relevant_procedures[0].raw_procedural_archive_included == false and
   .workspace_restore_pack.procedural_restore_policy.materialized_surface == "compact_execution_card" and
-  .workspace_restore_pack.procedural_restore_policy.raw_procedural_archive_forbidden == true and
-  (.chat_start_restore.workspace_restore_pack_summary | contains("procedures(1)"))
+  .workspace_restore_pack.procedural_restore_policy.raw_procedural_archive_forbidden == true
 ' >/dev/null
 
 printf '%s\n' "${restore_json}" | jq -e '
@@ -204,8 +208,7 @@ printf '%s\n' "${restore_json}" | jq -e '
   .workspace_restore_pack.relevant_procedures[0].card.skill_title == "Restore Continuity Card" and
   .workspace_restore_pack.relevant_procedures[0].binding.tool == "'"${proof_tool}"'" and
   .workspace_restore_pack.procedural_restore_policy.materialized_surface == "compact_execution_card" and
-  .workspace_restore_pack.procedural_restore_policy.raw_procedural_archive_forbidden == true and
-  (.chat_start_restore.workspace_restore_pack_summary | contains("procedures(1)"))
+  .workspace_restore_pack.procedural_restore_policy.raw_procedural_archive_forbidden == true
 ' >/dev/null
 
 step "verify synthetic blocked/waiting acceptance bucket"

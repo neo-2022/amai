@@ -29,7 +29,7 @@ now_ms="$(./scripts/epoch_ms.sh)"
 
 cat >"${CACHE_PATH}" <<EOF
 {
-  "cache_version": "client-budget-gate-cache-v2",
+  "cache_version": "client-budget-gate-cache-v7",
   "fetched_at_epoch_ms": ${now_ms},
   "thread_id": "${THREAD_ID}",
   "gate": {
@@ -69,8 +69,9 @@ cat >"${CACHE_PATH}" <<EOF
 EOF
 
 output="$(
-  CODEX_THREAD_ID="${THREAD_ID}" \
-  AMI_OBSERVE_BIND=127.0.0.1:1 \
+  env -u CODEX_THREAD_ID \
+    AMAI_PLATFORM_THREAD_ID="${THREAD_ID}" \
+    AMI_OBSERVE_BIND=127.0.0.1:1 \
     "${SCRIPT_DIR}/client_budget_gate.sh"
 )"
 

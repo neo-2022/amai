@@ -102,8 +102,14 @@ try:
         fail(f"unexpected reconcile classification: {content}")
     if reconcile.get("continue_from_local_startup_payload") is not True:
         fail(f"tool did not continue from local startup payload: {content}")
-    if reconcile.get("mcp_reconnect_required") is not True:
-        fail(f"tool did not require MCP reconnect after reconcile: {content}")
+    if reconcile.get("same_session_continuation_allowed") is not True:
+        fail(f"tool did not allow same-session continuation after reconcile: {content}")
+    if reconcile.get("operator_action_required") is not False:
+        fail(f"tool still required operator action after reconcile: {content}")
+    if reconcile.get("mcp_reconnect_required") is not False:
+        fail(f"tool still marked reconnect as required after reconcile: {content}")
+    if reconcile.get("reconnect_helper_diagnostic_only") is not True:
+        fail(f"tool did not keep reconnect helper diagnostic-only: {content}")
     reconnect_helper = reconcile.get("reconnect_helper", {})
     if reconnect_helper.get("preferred_client_key") != "codex":
         fail(f"unexpected reconnect helper client: {content}")

@@ -772,10 +772,11 @@ fn plausible_codex_thread_id(value: &str) -> bool {
 }
 
 fn preferred_budget_guard_thread_id(report: &Value, restore_context: &Value) -> Option<String> {
+    let current_thread_id = codex_threads::current_thread_id_result().ok().flatten();
     [
         report["client_live_meter"]["thread_id"].as_str(),
         restore_context["thread_id"].as_str(),
-        codex_threads::current_thread_id().as_deref(),
+        current_thread_id.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -2258,12 +2259,12 @@ mod tests {
         );
         assert!(client_live_context_metric_row(&meter).is_none());
         let row = client_live_limit_metric_row(&meter).expect("limit row");
-        assert_eq!(row["label"], "Последний observed лимит клиента");
+        assert_eq!(row["label"], "Последний видимый лимит клиента");
         assert!(
             row["value"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("последнее observed:")
+                .contains("последнее видимое значение:")
         );
         assert!(
             row["value"]
