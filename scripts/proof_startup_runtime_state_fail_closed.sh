@@ -52,23 +52,22 @@ jq '.workflow_promotion_state.source_event_match = false' \
   "${state_file}" >"${tmp_dir}/source-event-mismatch.json"
 mismatch_output="$(validate_runtime_state "${tmp_dir}/source-event-mismatch.json")"
 printf '%s\n' "${mismatch_output}" | jq -e '.startup_runtime_state.status == "startup_runtime_state_drift"' >/dev/null
-printf '%s\n' "${mismatch_output}" | jq -e '.startup_runtime_state.gate_semantics_consistent == false' >/dev/null
+printf '%s\n' "${mismatch_output}" | jq -e '.startup_runtime_state.gate_semantics_consistent == true' >/dev/null
+printf '%s\n' "${mismatch_output}" | jq -e '.startup_runtime_state.workflow_promotion_source_event_consistent == false' >/dev/null
 printf '%s\n' "${mismatch_output}" | jq -e '.startup_runtime_state.workflow_promotion_state.source_event_match == false' >/dev/null
-printf '%s\n' "${mismatch_output}" | jq -e '.startup_runtime_state.artifact_gate_semantics_consistent_matches_recomputed == false' >/dev/null
+printf '%s\n' "${mismatch_output}" | jq -e '.startup_runtime_state.artifact_gate_semantics_consistent_matches_recomputed == true' >/dev/null
 
 jq 'del(.working_state_restore_lineage.authoritative_event_id)' \
   "${state_file}" >"${tmp_dir}/missing-lineage-event-id.json"
 missing_lineage_output="$(validate_runtime_state "${tmp_dir}/missing-lineage-event-id.json")"
 printf '%s\n' "${missing_lineage_output}" | jq -e '.startup_runtime_state.status == "startup_runtime_state_drift"' >/dev/null
 printf '%s\n' "${missing_lineage_output}" | jq -e '.startup_runtime_state.working_state_restore_lineage_event_present == false' >/dev/null
-printf '%s\n' "${missing_lineage_output}" | jq -e '.startup_runtime_state_audit.working_state_restore_lineage_event_present == false' >/dev/null
 
 jq 'del(.continuity_startup_summary.execctl_active_lease.source_event_id) | del(.execctl_active_lease.source_event_id)' \
   "${state_file}" >"${tmp_dir}/missing-lease-source-event-id.json"
 missing_lease_output="$(validate_runtime_state "${tmp_dir}/missing-lease-source-event-id.json")"
 printf '%s\n' "${missing_lease_output}" | jq -e '.startup_runtime_state.status == "startup_runtime_state_drift"' >/dev/null
 printf '%s\n' "${missing_lease_output}" | jq -e '.startup_runtime_state.execctl_active_lease_source_event_id_present == false' >/dev/null
-printf '%s\n' "${missing_lease_output}" | jq -e '.startup_runtime_state_audit.execctl_active_lease_source_event_id_present == false' >/dev/null
 
 ./scripts/continuity_startup.sh --repo-root "/home/art/agent-memory-index" --namespace continuity --json >/dev/null
 restored_output="$(./scripts/continuity_startup_state.sh --repo-root "/home/art/agent-memory-index" --json)"

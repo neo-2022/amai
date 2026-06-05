@@ -1062,6 +1062,7 @@ pub async fn record_handoff_event(
         true,
     )
     .await
+    .map(|_| ())
 }
 
 pub async fn record_handoff_event_with_previous_restore_contract(
@@ -1077,7 +1078,7 @@ pub async fn record_handoff_event_with_previous_restore_contract(
     local_path: &str,
     previous_restore: Option<&Value>,
     promote_active_workline: bool,
-) -> Result<()> {
+) -> Result<String> {
     record_handoff_event_with_refresh_contract(
         db,
         project,
@@ -1126,6 +1127,7 @@ async fn record_handoff_event_with_refresh(
         true,
     )
     .await
+    .map(|_| ())
 }
 
 async fn record_handoff_event_with_refresh_contract(
@@ -1142,7 +1144,7 @@ async fn record_handoff_event_with_refresh_contract(
     previous_restore: Option<&Value>,
     refresh_restore_snapshot_after_write: bool,
     promote_active_workline: bool,
-) -> Result<()> {
+) -> Result<String> {
     let total_started = Instant::now();
     let recorded_at_epoch_ms = now_epoch_ms()?;
     let agent_scope = current_agent_scope_for_result(&project.code, &namespace.code)?;
@@ -1390,7 +1392,7 @@ async fn record_handoff_event_with_refresh_contract(
                     project.code, namespace.code
                 ),
             );
-            return Ok(());
+            return Ok(source_event_id);
         }
     }
     let event_id = Uuid::new_v4().to_string();
@@ -1558,7 +1560,7 @@ async fn record_handoff_event_with_refresh_contract(
         total_started.elapsed().as_millis(),
         &format!("project={} namespace={}", project.code, namespace.code),
     );
-    Ok(())
+    Ok(event_id)
 }
 
 pub async fn record_client_budget_target_event(

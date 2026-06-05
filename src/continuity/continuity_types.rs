@@ -64,6 +64,7 @@ pub(super) struct ContinuityStartupContext {
     pub(super) namespace: NamespaceRecord,
     pub(super) continuity: Value,
     pub(super) handoff_summary: Value,
+    pub(super) startup_handoff_summary: Value,
     pub(super) restore: Option<Value>,
 }
 
@@ -84,6 +85,9 @@ pub(crate) struct StartupRuntimeStateAudit {
     pub workflow_promotion_state_present: Option<bool>,
     pub workflow_promotion_headline_consistent: Option<bool>,
     pub workflow_promotion_source_kind_consistent: Option<bool>,
+    pub workflow_promotion_source_event_consistent: Option<bool>,
+    pub workflow_promotion_event_id_present: Option<bool>,
+    pub workflow_promotion_missing_or_mismatch_blocks_report: Option<bool>,
     pub prompt_text_present: Option<bool>,
     pub startup_next_action_present: Option<bool>,
     pub startup_execution_gate_present: Option<bool>,
