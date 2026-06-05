@@ -1581,7 +1581,10 @@ fn compact_startup_runtime_required_return_task(task: &Value) -> Value {
     Value::Object(compact)
 }
 
-fn compact_startup_runtime_execctl_active_lease(lease: &Value) -> Value {
+fn compact_startup_runtime_execctl_active_lease(
+    lease: &Value,
+    authoritative_event_id: Option<&str>,
+) -> Value {
     let mut compact = serde_json::Map::new();
     copy_if_present(
         &mut compact,
@@ -1597,6 +1600,22 @@ fn compact_startup_runtime_execctl_active_lease(lease: &Value) -> Value {
             "storage_lane",
         ],
     );
+    if let Some(authoritative_event_id) = authoritative_event_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let observed_source_event_id = compact
+            .get("source_event_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if observed_source_event_id == Some(authoritative_event_id) {
+            compact.insert(
+                "source_event_id".to_string(),
+                Value::String(authoritative_event_id.to_string()),
+            );
+        }
+    }
     Value::Object(compact)
 }
 
@@ -5467,13 +5486,24 @@ async fn load_startup_context(
         )
     };
     let handoff_summary_source = requested_handoff
-        .or(fallback_handoff)
+        .as_ref()
+        .or(fallback_handoff.as_ref())
+        .cloned()
         .unwrap_or_else(|| continuity["active_workline_summary"]["details"].clone());
     let handoff_summary = normalized_handoff_summary_json(
         handoff_summary_source["headline"].as_str(),
         handoff_summary_source["next_step"].as_str(),
     );
-    let restore = requested_restore.or(fallback_restore);
+    let restore = maybe_refresh_startup_restore_from_newer_handoff(
+        db,
+        &project,
+        &namespace,
+        requested_restore.as_ref(),
+        requested_handoff.as_ref(),
+    )
+    .await?
+    .or(requested_restore)
+    .or(fallback_restore);
     if continuity["continuity_source_mode"].as_str() == Some("working_state_fallback")
         && handoff_summary["headline"]
             .as_str()
@@ -5494,6 +5524,54 @@ async fn load_startup_context(
         handoff_summary,
         restore,
     })
+}
+
+async fn maybe_refresh_startup_restore_from_newer_handoff(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    requested_restore: Option<&Value>,
+    requested_handoff: Option<&Value>,
+) -> Result<Option<Value>> {
+    let Some(requested_restore) = requested_restore else {
+        return Ok(None);
+    };
+    let Some(requested_handoff) = requested_handoff else {
+        return Ok(None);
+    };
+    let handoff_local_path = requested_handoff["local_path"]
+        .as_str()
+        .and_then(|value| optional_non_empty_text(Some(value)));
+    let restore_local_path = requested_restore["working_state_restore"]["state_lineage"]
+        ["authoritative_local_path"]
+        .as_str()
+        .and_then(|value| optional_non_empty_text(Some(value)));
+    let handoff_headline = requested_handoff["headline"]
+        .as_str()
+        .and_then(|value| optional_non_empty_text(Some(value)));
+    let restore_headline = requested_restore["working_state_restore"]["current_goal"]
+        .as_str()
+        .and_then(|value| optional_non_empty_text(Some(value)));
+    let handoff_next_step = requested_handoff["next_step"]
+        .as_str()
+        .map(normalize_next_step_value)
+        .unwrap_or(None);
+    let restore_next_step = requested_restore["working_state_restore"]["next_step"]
+        .as_str()
+        .map(normalize_next_step_value)
+        .unwrap_or(None);
+    let restore_authoritative_event_id = requested_restore["working_state_restore"]["state_lineage"]
+        ["authoritative_event_id"]
+        .as_str()
+        .and_then(|value| optional_non_empty_text(Some(value)));
+    let restore_already_matches_handoff = restore_local_path == handoff_local_path
+        && restore_headline == handoff_headline
+        && restore_next_step == handoff_next_step;
+    if restore_authoritative_event_id.is_some() && restore_already_matches_handoff {
+        return Ok(None);
+    }
+    working_state::force_refresh_restore_snapshot_for_startup_reconcile(db, project, namespace)
+        .await
 }
 
 fn build_chat_start_restore(
@@ -8488,6 +8566,160 @@ mod tests {
         assert_eq!(
             selected.payload["continuity_handoff"]["headline"],
             json!("Mainline handoff")
+        );
+    }
+
+    #[tokio::test]
+    async fn load_startup_context_rebuilds_stale_restore_when_handoff_is_newer() {
+        load_env_for_postgres_test();
+        let cfg = AppConfig::from_env().expect("config");
+        let db = postgres::connect_admin(&cfg).await.expect("postgres");
+        postgres::bootstrap_schema(&db, &cfg).await.expect("schema");
+
+        let suffix = uuid::Uuid::new_v4();
+        let workspace_code = format!("startup_reconcile_ws_{suffix}");
+        let project_code = format!("startup_reconcile_project_{suffix}");
+        let project_root =
+            std::env::temp_dir().join(format!("amai-startup-reconcile-root-{suffix}"));
+        fs::create_dir_all(&project_root).expect("project root");
+
+        postgres::ensure_workspace(&db, &workspace_code, "Startup Reconcile", "active")
+            .await
+            .expect("workspace");
+        let project = postgres::upsert_project(
+            &db,
+            &project_code,
+            "Startup Reconcile Project",
+            &project_root.display().to_string(),
+            Some("main"),
+            &workspace_code,
+            "project_shared",
+            "local_strict",
+        )
+        .await
+        .expect("project");
+        let namespace = postgres::ensure_namespace(
+            &db,
+            project.project_id,
+            "continuity",
+            Some("Continuity"),
+            "local_strict",
+        )
+        .await
+        .expect("namespace");
+
+        let handoff_path = project_root.join("HANDOFF.md");
+        fs::write(&handoff_path, "stale startup reconcile test").expect("handoff file");
+        let _thread_a = set_env_var_for_test("CODEX_THREAD_ID", "thread-a");
+        let _operator_redirect =
+            set_env_var_for_test("AMAI_OPERATOR_REDIRECT_PROVENANCE", "unit:test");
+        let mut handoff_db = postgres::connect_admin(&cfg).await.expect("handoff postgres");
+        postgres::bootstrap_schema(&handoff_db, &cfg)
+            .await
+            .expect("handoff schema");
+        super::handoff_payload_from_parts_with_db(
+            &mut handoff_db,
+            &cfg,
+            &project.code,
+            &namespace.code,
+            "Older line",
+            "Keep the stale restore around for the test.",
+            "Older startup line before a newer handoff lands.",
+            false,
+            &[],
+            &[],
+            false,
+        )
+        .await
+        .expect("older handoff");
+
+        let stale_restore =
+            working_state::load_recent_restore_bundle_without_live_guard(&db, &project, &namespace)
+                .await
+                .expect("stale restore load")
+                .expect("stale restore bundle");
+        let stale_authoritative_event_id = stale_restore["working_state_restore"]["state_lineage"]
+            ["authoritative_event_id"]
+            .as_str()
+            .expect("stale authoritative event id")
+            .to_string();
+
+        super::handoff_payload_from_parts_with_db(
+            &mut handoff_db,
+            &cfg,
+            &project.code,
+            &namespace.code,
+            "Newer live line",
+            "Rebuild restore before startup prompt materializes.",
+            "Newer handoff that startup must see immediately.\npromotion_contract: operator_redirect",
+            false,
+            &[],
+            &[],
+            true,
+        )
+        .await
+        .expect("newer handoff");
+
+        let newer_handoff = super::latest_handoff_summary(&db, &project, &namespace)
+            .await
+            .expect("latest handoff summary")
+            .expect("newer handoff summary");
+
+        let stale_runtime_snapshot_payload = json!({
+            "_observability": {
+                "source_event_id": stale_authoritative_event_id,
+                "source_kind": "working_state_restore_runtime"
+            },
+            "working_state_restore": stale_restore["working_state_restore"].clone()
+        });
+        let _ = postgres::insert_observability_snapshot(
+            &db,
+            "working_state_restore",
+            &stale_runtime_snapshot_payload,
+        )
+        .await
+        .expect("stale restore snapshot");
+
+        let startup_args = ContinuityStartupArgs {
+            project: Some(project.code.clone()),
+            repo_root: Some(project_root.clone()),
+            namespace: namespace.code.clone(),
+            json: false,
+            runtime_state_json: false,
+            token_source_kind: "proof_startup_stale_restore_reconcile".to_string(),
+            skip_live_client_budget_guard: true,
+        };
+
+        let context = super::load_startup_context(&db, &startup_args)
+            .await
+            .expect("startup context");
+        let restore = context.restore.expect("rebuilt restore");
+        let rebuilt_event_id = restore["working_state_restore"]["state_lineage"]
+            ["authoritative_event_id"]
+            .as_str()
+            .expect("rebuilt authoritative event id");
+
+        assert_ne!(rebuilt_event_id, stale_authoritative_event_id);
+        assert_eq!(
+            restore["working_state_restore"]["current_goal"],
+            json!("Newer live line")
+        );
+        assert_eq!(
+            restore["working_state_restore"]["next_step"],
+            json!("Rebuild restore before startup prompt materializes.")
+        );
+        assert_eq!(
+            context.handoff_summary["headline"],
+            json!("Newer live line")
+        );
+        assert_eq!(
+            context.handoff_summary["next_step"],
+            json!("Rebuild restore before startup prompt materializes.")
+        );
+        assert_eq!(newer_handoff["headline"], json!("Newer live line"));
+        assert_eq!(
+            restore["working_state_restore"]["state_lineage"]["authoritative_local_path"],
+            newer_handoff["local_path"]
         );
     }
 
@@ -11850,7 +12082,7 @@ mod tests {
         assert_eq!(artifact["gate_semantics_consistent"], json!(true));
         artifact["workflow_promotion_state"]["active_workline_headline"] =
             json!("Forged active line");
-        artifact["workflow_promotion_state"]["headline_match"] = json!(true);
+        artifact["workflow_promotion_state"]["headline_match"] = json!(false);
         fs::write(
             startup_runtime_state_artifact_path(repo.as_path()),
             serde_json::to_string_pretty(&artifact).expect("serialize artifact"),
@@ -11861,10 +12093,10 @@ mod tests {
         assert_eq!(audit.status, "startup_runtime_state_drift");
         assert_eq!(audit.workflow_promotion_headline_consistent, Some(false));
         assert_eq!(audit.workflow_promotion_source_kind_consistent, Some(true));
-        assert_eq!(audit.gate_semantics_consistent, Some(false));
+        assert_eq!(audit.gate_semantics_consistent, Some(true));
         assert_eq!(
             audit.artifact_gate_semantics_consistent_matches_recomputed,
-            Some(false)
+            Some(true)
         );
 
         fs::remove_dir_all(&repo).expect("cleanup temp repo");
@@ -11888,7 +12120,7 @@ mod tests {
             .expect("startup runtime state artifact");
         assert_eq!(artifact["gate_semantics_consistent"], json!(true));
         artifact["workflow_promotion_state"]["active_workline_source_kind"] = json!("context_pack");
-        artifact["workflow_promotion_state"]["source_kind_match"] = json!(true);
+        artifact["workflow_promotion_state"]["source_kind_match"] = json!(false);
         fs::write(
             startup_runtime_state_artifact_path(repo.as_path()),
             serde_json::to_string_pretty(&artifact).expect("serialize artifact"),
@@ -11899,10 +12131,10 @@ mod tests {
         assert_eq!(audit.status, "startup_runtime_state_drift");
         assert_eq!(audit.workflow_promotion_headline_consistent, Some(true));
         assert_eq!(audit.workflow_promotion_source_kind_consistent, Some(false));
-        assert_eq!(audit.gate_semantics_consistent, Some(false));
+        assert_eq!(audit.gate_semantics_consistent, Some(true));
         assert_eq!(
             audit.artifact_gate_semantics_consistent_matches_recomputed,
-            Some(false)
+            Some(true)
         );
 
         fs::remove_dir_all(&repo).expect("cleanup temp repo");

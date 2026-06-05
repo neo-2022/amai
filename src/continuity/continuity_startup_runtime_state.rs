@@ -206,6 +206,10 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
             artifact_exists: false,
             startup_contract_sha_matches_current_contract: None,
             source_summary_field_matches: None,
+            agent_workflow_guard_present: None,
+            workflow_promotion_state_present: None,
+            workflow_promotion_headline_consistent: None,
+            workflow_promotion_source_kind_consistent: None,
             prompt_text_present: None,
             startup_next_action_present: None,
             startup_execution_gate_present: None,
@@ -213,6 +217,8 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
             required_task_set_field_present: None,
             required_task_set_summary_field_present: None,
             execctl_active_lease_field_present: None,
+            execctl_active_lease_source_event_id_present: None,
+            working_state_restore_lineage_event_present: None,
             project_task_tree_field_present: None,
             project_task_tree_summary_field_present: None,
             project_task_ledger_field_present: None,
@@ -240,6 +246,8 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         Some(payload["startup_contract_sha256"].as_str() == Some(expected_contract_sha.as_str()));
     let source_summary_field_matches =
         Some(payload["source_summary_field"].as_str() == Some("continuity_startup_summary"));
+    let agent_workflow_guard_present = Some(payload["agent_workflow_guard"].is_object());
+    let workflow_promotion_state_present = Some(payload["workflow_promotion_state"].is_object());
     let prompt_text_present = Some(
         payload["chat_start_restore"]["prompt_text"]
             .as_str()
@@ -266,6 +274,16 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         summary
             .as_object()
             .is_some_and(|object| object.contains_key("execctl_active_lease")),
+    );
+    let execctl_active_lease_source_event_id_present = Some(
+        summary["execctl_active_lease"]["source_event_id"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty()),
+    );
+    let working_state_restore_lineage_event_present = Some(
+        payload["working_state_restore_lineage"]["authoritative_event_id"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty()),
     );
     let project_task_tree_field_present = Some(
         summary
@@ -296,6 +314,45 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
     let lease_owner_state = summary["execctl_active_lease"]["lease_owner_state"]
         .as_str()
         .map(ToOwned::to_owned);
+    let workflow_promotion_headline_consistent = match (
+        payload["workflow_promotion_state"]["headline_match"].as_bool(),
+        payload["workflow_promotion_state"]["active_workline_headline"].as_str(),
+        payload["workflow_promotion_state"]["active_lease_headline"].as_str(),
+        summary["headline"].as_str(),
+        summary["execctl_active_lease"]["headline"].as_str(),
+    ) {
+        (
+            Some(headline_match),
+            Some(active_workline_headline),
+            Some(active_lease_headline),
+            Some(summary_headline),
+            Some(summary_lease_headline),
+        ) => Some(
+            headline_match
+                && active_workline_headline == active_lease_headline
+                && active_workline_headline == summary_headline
+                && active_workline_headline == summary_lease_headline,
+        ),
+        _ => Some(false),
+    };
+    let workflow_promotion_source_kind_consistent = match (
+        payload["workflow_promotion_state"]["source_kind_match"].as_bool(),
+        payload["workflow_promotion_state"]["active_workline_source_kind"].as_str(),
+        payload["workflow_promotion_state"]["active_lease_source_kind"].as_str(),
+        summary["execctl_active_lease"]["source_kind"].as_str(),
+    ) {
+        (
+            Some(source_kind_match),
+            Some(active_workline_source_kind),
+            Some(active_lease_source_kind),
+            Some(summary_lease_source_kind),
+        ) => Some(
+            source_kind_match
+                && active_workline_source_kind == active_lease_source_kind
+                && active_workline_source_kind == summary_lease_source_kind,
+        ),
+        _ => Some(false),
+    };
     let must_follow_startup_next_action =
         payload["startup_execution_gate"]["must_follow_startup_next_action"].as_bool();
     let unrelated_work_allowed =
@@ -346,6 +403,10 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         || payload["source_tool"].as_str() != Some("amai_continuity_startup")
         || startup_contract_sha_matches_current_contract != Some(true)
         || source_summary_field_matches != Some(true)
+        || agent_workflow_guard_present != Some(true)
+        || workflow_promotion_state_present != Some(true)
+        || workflow_promotion_headline_consistent != Some(true)
+        || workflow_promotion_source_kind_consistent != Some(true)
         || prompt_text_present != Some(true)
         || startup_next_action_present != Some(true)
         || startup_execution_gate_present != Some(true)
@@ -353,6 +414,8 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         || required_task_set_field_present != Some(true)
         || required_task_set_summary_field_present != Some(true)
         || execctl_active_lease_field_present != Some(true)
+        || execctl_active_lease_source_event_id_present != Some(true)
+        || working_state_restore_lineage_event_present != Some(true)
         || project_task_tree_field_present != Some(true)
         || project_task_tree_summary_field_present != Some(true)
         || project_task_ledger_field_present != Some(true)
@@ -380,6 +443,10 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         artifact_exists: true,
         startup_contract_sha_matches_current_contract,
         source_summary_field_matches,
+        agent_workflow_guard_present,
+        workflow_promotion_state_present,
+        workflow_promotion_headline_consistent,
+        workflow_promotion_source_kind_consistent,
         prompt_text_present,
         startup_next_action_present,
         startup_execution_gate_present,
@@ -387,6 +454,8 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         required_task_set_field_present,
         required_task_set_summary_field_present,
         execctl_active_lease_field_present,
+        execctl_active_lease_source_event_id_present,
+        working_state_restore_lineage_event_present,
         project_task_tree_field_present,
         project_task_tree_summary_field_present,
         project_task_ledger_field_present,
@@ -572,6 +641,10 @@ pub(super) fn startup_runtime_state_audit_json(
         "artifact_exists": audit.artifact_exists,
         "startup_contract_sha_matches_current_contract": audit.startup_contract_sha_matches_current_contract,
         "source_summary_field_matches": audit.source_summary_field_matches,
+        "agent_workflow_guard_present": audit.agent_workflow_guard_present,
+        "workflow_promotion_state_present": audit.workflow_promotion_state_present,
+        "workflow_promotion_headline_consistent": audit.workflow_promotion_headline_consistent,
+        "workflow_promotion_source_kind_consistent": audit.workflow_promotion_source_kind_consistent,
         "prompt_text_present": audit.prompt_text_present,
         "startup_next_action_present": audit.startup_next_action_present,
         "startup_execution_gate_present": audit.startup_execution_gate_present,
@@ -579,6 +652,8 @@ pub(super) fn startup_runtime_state_audit_json(
         "required_task_set_field_present": audit.required_task_set_field_present,
         "required_task_set_summary_field_present": audit.required_task_set_summary_field_present,
         "execctl_active_lease_field_present": audit.execctl_active_lease_field_present,
+        "execctl_active_lease_source_event_id_present": audit.execctl_active_lease_source_event_id_present,
+        "working_state_restore_lineage_event_present": audit.working_state_restore_lineage_event_present,
         "project_task_tree_field_present": audit.project_task_tree_field_present,
         "project_task_tree_summary_field_present": audit.project_task_tree_summary_field_present,
         "project_task_ledger_field_present": audit.project_task_ledger_field_present,
@@ -910,6 +985,18 @@ fn build_workflow_promotion_state(
         (Some(current), Some(promoted)) => Some(current == promoted),
         _ => Some(false),
     };
+    let active_workline_headline = summary["headline"].as_str();
+    let active_lease_headline = summary["execctl_active_lease"]["headline"].as_str();
+    let headline_match = match (active_workline_headline, active_lease_headline) {
+        (Some(active_workline), Some(active_lease)) => Some(active_workline == active_lease),
+        _ => Some(false),
+    };
+    let active_workline_source_kind = lineage["authoritative_source_kind"].as_str();
+    let active_lease_source_kind = summary["execctl_active_lease"]["source_kind"].as_str();
+    let source_kind_match = match (active_workline_source_kind, active_lease_source_kind) {
+        (Some(active_workline), Some(active_lease)) => Some(active_workline == active_lease),
+        _ => Some(false),
+    };
     let workflow_promotion_event_id = match (current_user_redirect_id, promoted_user_redirect_id) {
         (Some(current), Some(promoted)) => Some(format!(
             "workflow-promotion-{}",
@@ -924,11 +1011,13 @@ fn build_workflow_promotion_state(
         "workflow_promotion_event_id": normalized_optional_text_json(workflow_promotion_event_id.as_deref()),
         "workflow_promotion_event_epoch_ms": generated_at_epoch_ms,
         "source_event_match": source_event_match,
+        "headline_match": headline_match,
+        "source_kind_match": source_kind_match,
         "missing_or_mismatch_blocks_report": true,
-        "active_workline_headline": normalized_optional_text_json(summary["headline"].as_str()),
-        "active_lease_headline": normalized_optional_text_json(
-            summary["execctl_active_lease"]["headline"].as_str(),
-        ),
+        "active_workline_headline": normalized_optional_text_json(active_workline_headline),
+        "active_lease_headline": normalized_optional_text_json(active_lease_headline),
+        "active_workline_source_kind": normalized_optional_text_json(active_workline_source_kind),
+        "active_lease_source_kind": normalized_optional_text_json(active_lease_source_kind),
         "lease_owner_state": normalized_optional_text_json(
             summary["execctl_active_lease"]["lease_owner_state"].as_str(),
         ),
