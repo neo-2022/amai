@@ -122,7 +122,11 @@ run_preview_phase() {
 
   REPO_ROOT="${repo_root}" jq -e '
     .continuity_startup.project.repo_root == env.REPO_ROOT and
-    (.chat_start_restore.prompt_text | type) == "string"
+    (.chat_start_restore.prompt_text | type) == "string" and
+    .chat_start_restore.headline == "startup_runtime_audit_probe" and
+    .chat_start_restore.next_step == "materialize_authoritative_startup_payload_after_runtime_reconcile" and
+    .working_state_restore.current_goal == null and
+    .working_state_restore.next_step == null
   ' "${output_file}" >/dev/null
 }
 
