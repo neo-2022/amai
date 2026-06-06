@@ -2855,6 +2855,59 @@ fn corrupt_startup_runtime_state_for_stale_success_proof(repo_root: &Path) -> Re
 
 fn corrupt_startup_payload_for_stale_success_proof(payload: &Value) -> Value {
     let mut corrupted = payload.clone();
+    if let Some(chat_start_restore) = corrupted
+        .get_mut("chat_start_restore")
+        .and_then(Value::as_object_mut)
+    {
+        chat_start_restore.insert(
+            "headline".to_string(),
+            json!("STALE PREVIEW HEADLINE MUST NOT LEAK"),
+        );
+        chat_start_restore.insert(
+            "next_step".to_string(),
+            json!("STALE PREVIEW NEXT STEP MUST NOT LEAK"),
+        );
+    }
+    if let Some(delivery_surface_restore) = corrupted
+        .get_mut("delivery_surface_restore")
+        .and_then(Value::as_object_mut)
+    {
+        delivery_surface_restore.insert(
+            "headline".to_string(),
+            json!("STALE PREVIEW HEADLINE MUST NOT LEAK"),
+        );
+        delivery_surface_restore.insert(
+            "next_step".to_string(),
+            json!("STALE PREVIEW NEXT STEP MUST NOT LEAK"),
+        );
+    }
+    if let Some(summary) = corrupted
+        .get_mut("continuity_startup_summary")
+        .and_then(Value::as_object_mut)
+    {
+        summary.insert(
+            "headline".to_string(),
+            json!("STALE PREVIEW HEADLINE MUST NOT LEAK"),
+        );
+        summary.insert(
+            "next_step".to_string(),
+            json!("STALE PREVIEW NEXT STEP MUST NOT LEAK"),
+        );
+    }
+    if let Some(handoff_summary) = corrupted
+        .get_mut("continuity_startup")
+        .and_then(|value| value.get_mut("handoff_summary"))
+        .and_then(Value::as_object_mut)
+    {
+        handoff_summary.insert(
+            "headline".to_string(),
+            json!("STALE PREVIEW HEADLINE MUST NOT LEAK"),
+        );
+        handoff_summary.insert(
+            "next_step".to_string(),
+            json!("STALE PREVIEW NEXT STEP MUST NOT LEAK"),
+        );
+    }
     if let Some(lineage) = corrupted
         .get_mut("working_state_restore")
         .and_then(|value| value.get_mut("state_lineage"))
@@ -11544,6 +11597,22 @@ mod tests {
         assert!(
             mutated["continuity_startup_summary"]["execctl_active_lease"]["source_event_id"]
                 .is_null()
+        );
+        assert_eq!(
+            mutated["chat_start_restore"]["headline"],
+            json!("STALE PREVIEW HEADLINE MUST NOT LEAK")
+        );
+        assert_eq!(
+            mutated["chat_start_restore"]["next_step"],
+            json!("STALE PREVIEW NEXT STEP MUST NOT LEAK")
+        );
+        assert_eq!(
+            mutated["continuity_startup_summary"]["headline"],
+            json!("STALE PREVIEW HEADLINE MUST NOT LEAK")
+        );
+        assert_eq!(
+            mutated["continuity_startup_summary"]["next_step"],
+            json!("STALE PREVIEW NEXT STEP MUST NOT LEAK")
         );
 
         unsafe {
