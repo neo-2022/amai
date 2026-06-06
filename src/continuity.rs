@@ -1358,7 +1358,7 @@ pub(crate) async fn startup_payload_preview(
 ) -> Result<Value> {
     let db = postgres::connect_admin(cfg).await?;
     let context = load_startup_context_preview(&db, args).await?;
-    startup_payload_with_context_preview(&db, &context, args).await
+    startup_runtime_audit_probe_payload_with_context(&db, &context, args).await
 }
 
 #[derive(Clone, Copy)]
@@ -1430,12 +1430,416 @@ async fn startup_payload_with_context_preview(
     .await
 }
 
+const STARTUP_RUNTIME_AUDIT_PROBE_HEADLINE: &str = "startup_runtime_audit_probe";
+const STARTUP_RUNTIME_AUDIT_PROBE_NEXT_STEP: &str =
+    "materialize_authoritative_startup_payload_after_runtime_reconcile";
+const STARTUP_RUNTIME_AUDIT_PROBE_REQUIRED_TASK_PREFIX: &str =
+    "startup_runtime_audit_required_task";
+const STARTUP_RUNTIME_AUDIT_PROBE_SOURCE_KIND: &str = "continuity_handoff";
+const STARTUP_RUNTIME_AUDIT_PROBE_PROMPT_TEXT: &str = "CHAT_START_RESTORE\nstartup runtime audit probe\npublic startup restore withheld until authoritative reconcile";
+
+async fn startup_runtime_audit_probe_payload_with_context(
+    db: &Client,
+    context: &ContinuityStartupContext,
+    args: &ContinuityStartupArgs,
+) -> Result<Value> {
+    let total_started = Instant::now();
+    let step_started = Instant::now();
+    let effective_restore = effective_startup_restore(db, context, false).await?;
+    continuity_profile_log(
+        "startup_runtime_audit_probe.effective_startup_restore",
+        step_started.elapsed().as_millis(),
+        &format!(
+            "project={} namespace={}",
+            context.project.code, context.namespace.code
+        ),
+    );
+    let step_started = Instant::now();
+    let payload = build_startup_runtime_audit_probe_payload(
+        context,
+        effective_restore.as_ref(),
+        &context.handoff_summary,
+    );
+    continuity_profile_log(
+        "startup_runtime_audit_probe.build_payload",
+        step_started.elapsed().as_millis(),
+        &format!(
+            "project={} namespace={}",
+            context.project.code, context.namespace.code
+        ),
+    );
+    let _ = args;
+    continuity_profile_log(
+        "startup_runtime_audit_probe.total",
+        total_started.elapsed().as_millis(),
+        &format!(
+            "project={} namespace={}",
+            context.project.code, context.namespace.code
+        ),
+    );
+    Ok(payload)
+}
+
+fn build_startup_runtime_audit_probe_payload(
+    context: &ContinuityStartupContext,
+    restore: Option<&Value>,
+    startup_handoff_summary: &Value,
+) -> Value {
+    let restore_bundle_node = restore;
+    let restore_node = restore.map(|value| &value["working_state_restore"]);
+    let required_task_set = startup_runtime_audit_required_task_set(
+        restore_node.and_then(|value| value.get("required_task_set")),
+    );
+    let required_task_set_summary =
+        startup_runtime_audit_required_task_set_summary(&required_task_set);
+    let required_return_task = startup_runtime_audit_required_return_task(
+        restore_node,
+        &required_task_set,
+        &required_task_set_summary,
+    );
+    let execctl_resume_obligation = startup_runtime_audit_execctl_resume_obligation(
+        restore_node,
+        &required_task_set,
+        &required_task_set_summary,
+        &required_return_task,
+    );
+    let execctl_active_lease = startup_runtime_audit_execctl_active_lease(
+        restore_bundle_node,
+        restore_node,
+        startup_handoff_summary,
+    );
+    let startup_next_action = startup_runtime_audit_startup_next_action(
+        &context.project,
+        &context.namespace,
+        restore_bundle_node,
+        restore_node,
+        &execctl_resume_obligation,
+        &required_task_set,
+        &required_task_set_summary,
+    );
+    let project_task_tree = restore_node
+        .filter(|value| value["project_task_tree"].is_object())
+        .map(|value| compact_project_task_tree_for_startup(&value["project_task_tree"]))
+        .unwrap_or(Value::Null);
+    let project_task_ledger = restore_node
+        .filter(|value| value["project_task_ledger"].is_object())
+        .map(|value| compact_project_task_ledger_for_startup(&value["project_task_ledger"]))
+        .unwrap_or(Value::Null);
+    let execctl_resume_state = restore_node
+        .and_then(authoritative_execctl_resume_state_value)
+        .or_else(|| restore_bundle_node.and_then(authoritative_execctl_resume_state_value))
+        .unwrap_or_else(|| execctl_resume_obligation["resume_state"].clone());
+    let thread_count = context.continuity["bootstrap_summary"]["details"]["thread_count"].clone();
+    let state_lineage = startup_runtime_audit_state_lineage(restore_node, startup_handoff_summary);
+    let client_budget_guard = restore_node
+        .filter(|value| value["client_budget_guard"].is_object())
+        .map(|value| value["client_budget_guard"].clone())
+        .unwrap_or(Value::Null);
+
+    json!({
+        "continuity_startup": {
+            "project": {
+                "code": context.project.code,
+                "display_name": context.project.display_name,
+                "repo_root": context.project.repo_root,
+            },
+            "namespace": {
+                "code": context.namespace.code,
+                "display_name": context.namespace.display_name,
+            },
+        },
+        "chat_start_restore": {
+            "project": {
+                "code": context.project.code,
+                "display_name": context.project.display_name,
+                "repo_root": context.project.repo_root,
+            },
+            "namespace": {
+                "code": context.namespace.code,
+                "display_name": context.namespace.display_name,
+            },
+            "headline": STARTUP_RUNTIME_AUDIT_PROBE_HEADLINE,
+            "next_step": STARTUP_RUNTIME_AUDIT_PROBE_NEXT_STEP,
+            "restore_confidence": normalized_restore_confidence_value(restore_node),
+            "thread_count": thread_count,
+            "pending_return_summary": Value::Null,
+            "execctl_resume_contract_summary": Value::Null,
+            "execctl_resume_obligation": execctl_resume_obligation,
+            "startup_next_action": startup_next_action,
+            "startup_next_action_summary": Value::Null,
+            "execctl_active_lease": execctl_active_lease,
+            "execctl_active_lease_summary": Value::Null,
+            "required_return_task": required_return_task,
+            "required_task_set": required_task_set,
+            "required_task_set_summary": required_task_set_summary,
+            "project_task_tree": project_task_tree,
+            "project_task_tree_summary": Value::Null,
+            "project_task_ledger": project_task_ledger,
+            "project_task_ledger_summary": Value::Null,
+            "task_graph_projection_validation": restore_node
+                .filter(|value| value["task_graph_projection_validation"].is_object())
+                .map(|value| value["task_graph_projection_validation"].clone())
+                .unwrap_or(Value::Null),
+            "execctl_resume_state": execctl_resume_state,
+            "included_reasons_summary": Value::Null,
+            "excluded_reasons_summary": Value::Null,
+            "prompt_text": STARTUP_RUNTIME_AUDIT_PROBE_PROMPT_TEXT,
+        },
+        "working_state_restore": {
+            "client_budget_guard": client_budget_guard,
+            "state_lineage": state_lineage,
+        },
+    })
+}
+
+fn startup_runtime_audit_required_task_set(required_task_set: Option<&Value>) -> Value {
+    let count = required_task_set
+        .and_then(Value::as_array)
+        .map(|items| items.len())
+        .unwrap_or(0);
+    Value::Array(
+        (0..count)
+            .map(|index| {
+                Value::String(format!(
+                    "{STARTUP_RUNTIME_AUDIT_PROBE_REQUIRED_TASK_PREFIX}_{}",
+                    index + 1
+                ))
+            })
+            .collect(),
+    )
+}
+
+fn startup_runtime_audit_required_task_set_summary(required_task_set: &Value) -> Value {
+    let count = required_task_set
+        .as_array()
+        .map(|items| items.len())
+        .unwrap_or(0);
+    if count == 0 {
+        Value::Null
+    } else {
+        json!(format!(
+            "{} task(s) withheld until authoritative startup payload",
+            count
+        ))
+    }
+}
+
+fn startup_runtime_audit_redact_task_like_fields(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "headline".to_string(),
+        json!(STARTUP_RUNTIME_AUDIT_PROBE_HEADLINE),
+    );
+    object.insert(
+        "next_step".to_string(),
+        json!(STARTUP_RUNTIME_AUDIT_PROBE_NEXT_STEP),
+    );
+}
+
+fn startup_runtime_audit_required_return_task(
+    restore_node: Option<&Value>,
+    required_task_set: &Value,
+    required_task_set_summary: &Value,
+) -> Value {
+    let mut required_return_task = restore_node
+        .filter(|value| value["execctl_resume_contract"]["required_return_task"].is_object())
+        .map(|value| value["execctl_resume_contract"]["required_return_task"].clone())
+        .unwrap_or_else(|| {
+            let default = default_execctl_resume_obligation(None, None);
+            let mut synthetic = json!({
+                "headline": STARTUP_RUNTIME_AUDIT_PROBE_HEADLINE,
+                "next_step": STARTUP_RUNTIME_AUDIT_PROBE_NEXT_STEP,
+            });
+            if default["pending_return_count"].as_u64().unwrap_or(0) == 0
+                && required_task_set
+                    .as_array()
+                    .is_some_and(|items| items.is_empty())
+            {
+                synthetic = Value::Null;
+            }
+            synthetic
+        });
+    if required_return_task.is_object() {
+        startup_runtime_audit_redact_task_like_fields(&mut required_return_task);
+        if let Some(object) = required_return_task.as_object_mut() {
+            object.insert("required_task_set".to_string(), required_task_set.clone());
+            object.insert(
+                "required_task_set_summary".to_string(),
+                required_task_set_summary.clone(),
+            );
+        }
+    }
+    required_return_task
+}
+
+fn startup_runtime_audit_execctl_resume_obligation(
+    restore_node: Option<&Value>,
+    required_task_set: &Value,
+    required_task_set_summary: &Value,
+    required_return_task: &Value,
+) -> Value {
+    let mut obligation = restore_node
+        .map(|value| summarize_execctl_resume_obligation(&value["execctl_resume_contract"]))
+        .unwrap_or_else(|| default_execctl_resume_obligation(None, None));
+    if let Some(object) = obligation.as_object_mut() {
+        object.insert(
+            "active_task_headline".to_string(),
+            json!(STARTUP_RUNTIME_AUDIT_PROBE_HEADLINE),
+        );
+        object.insert(
+            "required_return_headline".to_string(),
+            required_return_task["headline"].clone(),
+        );
+        object.insert(
+            "required_return_next_step".to_string(),
+            required_return_task["next_step"].clone(),
+        );
+        object.insert(
+            "required_task_set_count".to_string(),
+            json!(
+                required_task_set
+                    .as_array()
+                    .map(|items| items.len())
+                    .unwrap_or(0)
+            ),
+        );
+        object.insert("required_task_set".to_string(), required_task_set.clone());
+        object.insert(
+            "required_task_set_summary".to_string(),
+            required_task_set_summary.clone(),
+        );
+    }
+    obligation
+}
+
+fn startup_runtime_audit_startup_next_action(
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    restore_bundle_node: Option<&Value>,
+    restore_node: Option<&Value>,
+    execctl_resume_obligation: &Value,
+    required_task_set: &Value,
+    required_task_set_summary: &Value,
+) -> Value {
+    let mut startup_next_action = restore_node
+        .filter(|value| value["startup_next_action"].is_object())
+        .map(|value| value["startup_next_action"].clone())
+        .or_else(|| {
+            restore_bundle_node
+                .filter(|value| value["startup_next_action"].is_object())
+                .map(|value| value["startup_next_action"].clone())
+        })
+        .unwrap_or_else(|| {
+            default_startup_next_action(
+                STARTUP_RUNTIME_AUDIT_PROBE_HEADLINE,
+                STARTUP_RUNTIME_AUDIT_PROBE_NEXT_STEP,
+                project,
+                namespace,
+                execctl_resume_obligation,
+                restore_node.and_then(|value| value.get("client_budget_guard")),
+            )
+        });
+    startup_runtime_audit_redact_task_like_fields(&mut startup_next_action);
+    if let Some(object) = startup_next_action.as_object_mut() {
+        object.insert("required_task_set".to_string(), required_task_set.clone());
+        object.insert(
+            "required_task_set_summary".to_string(),
+            required_task_set_summary.clone(),
+        );
+    }
+    startup_next_action
+}
+
+fn startup_runtime_audit_execctl_active_lease(
+    restore_bundle_node: Option<&Value>,
+    restore_node: Option<&Value>,
+    startup_handoff_summary: &Value,
+) -> Value {
+    let state_lineage = startup_runtime_audit_state_lineage(restore_node, startup_handoff_summary);
+    let authoritative_event_id = state_lineage["authoritative_event_id"].clone();
+    let authoritative_source_kind = state_lineage["authoritative_source_kind"]
+        .as_str()
+        .unwrap_or(STARTUP_RUNTIME_AUDIT_PROBE_SOURCE_KIND)
+        .to_string();
+    let mut execctl_active_lease = restore_node
+        .filter(|value| value["execctl_active_lease"].is_object())
+        .map(|value| value["execctl_active_lease"].clone())
+        .or_else(|| {
+            restore_bundle_node
+                .filter(|value| value["execctl_active_lease"].is_object())
+                .map(|value| value["execctl_active_lease"].clone())
+        })
+        .unwrap_or_else(|| {
+            json!({
+                "lease_version": "execctl-active-lease-v1",
+                "lease_state": "active",
+                "lease_owner_state": "same_session_owner",
+            })
+        });
+    startup_runtime_audit_redact_task_like_fields(&mut execctl_active_lease);
+    if let Some(object) = execctl_active_lease.as_object_mut() {
+        if authoritative_event_id.is_string() {
+            object.insert("source_event_id".to_string(), authoritative_event_id);
+        }
+        object.insert("source_kind".to_string(), json!(authoritative_source_kind));
+    }
+    execctl_active_lease
+}
+
+fn startup_runtime_audit_state_lineage(
+    restore_node: Option<&Value>,
+    startup_handoff_summary: &Value,
+) -> Value {
+    let authoritative_event_id = restore_node
+        .and_then(|value| value["state_lineage"]["authoritative_event_id"].as_str())
+        .and_then(|value| optional_non_empty_text(Some(value)))
+        .or_else(|| {
+            startup_handoff_summary["source_event_id"]
+                .as_str()
+                .and_then(|value| optional_non_empty_text(Some(value)))
+        });
+    let authoritative_event_kind = restore_node
+        .and_then(|value| value["state_lineage"]["authoritative_event_kind"].as_str())
+        .and_then(|value| optional_non_empty_text(Some(value)))
+        .unwrap_or(STARTUP_RUNTIME_AUDIT_PROBE_SOURCE_KIND);
+    let authoritative_source_kind = restore_node
+        .and_then(|value| value["state_lineage"]["authoritative_source_kind"].as_str())
+        .and_then(|value| optional_non_empty_text(Some(value)))
+        .unwrap_or(STARTUP_RUNTIME_AUDIT_PROBE_SOURCE_KIND);
+    json!({
+        "authoritative_event_id": authoritative_event_id,
+        "authoritative_event_kind": authoritative_event_kind,
+        "authoritative_source_kind": authoritative_source_kind,
+        "session_id": restore_node
+            .and_then(|value| value["state_lineage"]["session_id"].as_str())
+            .and_then(|value| optional_non_empty_text(Some(value))),
+    })
+}
+
 async fn reconcile_startup_working_contour(
     db: &Client,
     context: &ContinuityStartupContext,
     refresh_same_thread_execctl_active_lease: bool,
 ) -> Result<(Option<Value>, Value)> {
-    let effective_restore = if refresh_same_thread_execctl_active_lease {
+    let effective_restore =
+        effective_startup_restore(db, context, refresh_same_thread_execctl_active_lease).await?;
+    let startup_handoff_summary = authoritative_startup_handoff_summary(
+        effective_restore
+            .as_ref()
+            .map(|value| &value["working_state_restore"]),
+        &context.handoff_summary,
+    );
+    Ok((effective_restore, startup_handoff_summary))
+}
+
+async fn effective_startup_restore(
+    db: &Client,
+    context: &ContinuityStartupContext,
+    refresh_same_thread_execctl_active_lease: bool,
+) -> Result<Option<Value>> {
+    if refresh_same_thread_execctl_active_lease {
         let refreshed_restore =
             working_state::refresh_same_thread_execctl_active_lease_for_startup(
                 db,
@@ -1444,17 +1848,10 @@ async fn reconcile_startup_working_contour(
                 context.restore.as_ref(),
             )
             .await?;
-        refreshed_restore.or_else(|| context.restore.clone())
+        Ok(refreshed_restore.or_else(|| context.restore.clone()))
     } else {
-        context.restore.clone()
-    };
-    let startup_handoff_summary = authoritative_startup_handoff_summary(
-        effective_restore
-            .as_ref()
-            .map(|value| &value["working_state_restore"]),
-        &context.handoff_summary,
-    );
-    Ok((effective_restore, startup_handoff_summary))
+        Ok(context.restore.clone())
+    }
 }
 
 async fn startup_payload_with_context_and_resources(
@@ -5477,20 +5874,21 @@ async fn load_startup_context(
     db: &Client,
     args: &ContinuityStartupArgs,
 ) -> Result<ContinuityStartupContext> {
-    load_startup_context_with_options(db, args, true).await
+    load_startup_context_with_options(db, args, true, true).await
 }
 
 async fn load_startup_context_preview(
     db: &Client,
     args: &ContinuityStartupArgs,
 ) -> Result<ContinuityStartupContext> {
-    load_startup_context_with_options(db, args, false).await
+    load_startup_context_with_options(db, args, false, false).await
 }
 
 async fn load_startup_context_with_options(
     db: &Client,
     args: &ContinuityStartupArgs,
     allow_continuity_namespace_materialization: bool,
+    materialize_startup_handoff_summary: bool,
 ) -> Result<ContinuityStartupContext> {
     let step_started = Instant::now();
     let project = resolve_project(db, args).await?;
@@ -5704,12 +6102,25 @@ async fn load_startup_context_with_options(
             namespace.code
         ));
     }
-    let startup_handoff_summary = authoritative_startup_handoff_summary(
-        restore
-            .as_ref()
-            .map(|value| &value["working_state_restore"]),
-        &handoff_summary,
-    );
+    let (handoff_summary, restore, startup_handoff_summary) = if materialize_startup_handoff_summary
+    {
+        let startup_handoff_summary = authoritative_startup_handoff_summary(
+            restore
+                .as_ref()
+                .map(|value| &value["working_state_restore"]),
+            &handoff_summary,
+        );
+        (handoff_summary, restore, startup_handoff_summary)
+    } else {
+        let sanitized_handoff_summary =
+            sanitize_handoff_summary_for_startup_audit_preview(&handoff_summary);
+        let sanitized_restore = sanitize_restore_for_startup_audit_preview(restore);
+        (
+            sanitized_handoff_summary.clone(),
+            sanitized_restore,
+            sanitized_handoff_summary,
+        )
+    };
     Ok(ContinuityStartupContext {
         project,
         namespace,
@@ -5718,6 +6129,71 @@ async fn load_startup_context_with_options(
         startup_handoff_summary,
         restore,
     })
+}
+
+fn sanitize_handoff_summary_for_startup_audit_preview(handoff_summary: &Value) -> Value {
+    let mut sanitized = serde_json::Map::new();
+    copy_if_present(
+        &mut sanitized,
+        handoff_summary,
+        &["source_event_id", "local_path"],
+    );
+    Value::Object(sanitized)
+}
+
+fn sanitize_restore_for_startup_audit_preview(restore: Option<Value>) -> Option<Value> {
+    let mut restore = restore?;
+    sanitize_value_for_startup_audit_preview(&mut restore);
+    Some(restore)
+}
+
+fn sanitize_value_for_startup_audit_preview(value: &mut Value) {
+    match value {
+        Value::Object(object) => sanitize_object_for_startup_audit_preview(object),
+        Value::Array(items) => {
+            for item in items {
+                sanitize_value_for_startup_audit_preview(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn sanitize_object_for_startup_audit_preview(object: &mut Map<String, Value>) {
+    for (key, value) in object.iter_mut() {
+        match key.as_str() {
+            "headline" => *value = json!(STARTUP_RUNTIME_AUDIT_PROBE_HEADLINE),
+            "next_step" => *value = json!(STARTUP_RUNTIME_AUDIT_PROBE_NEXT_STEP),
+            "current_goal" => *value = Value::Null,
+            "required_task_set" if value.is_array() => {
+                let count = value.as_array().map(|items| items.len()).unwrap_or(0);
+                *value = Value::Array(
+                    (0..count)
+                        .map(|index| {
+                            Value::String(format!(
+                                "{STARTUP_RUNTIME_AUDIT_PROBE_REQUIRED_TASK_PREFIX}_{}",
+                                index + 1
+                            ))
+                        })
+                        .collect(),
+                );
+            }
+            "required_task_set_summary" => *value = Value::Null,
+            "current_focus"
+            | "last_results_summary"
+            | "source_summary"
+            | "summary"
+            | "pending_return_summary"
+            | "project_task_tree_summary"
+            | "project_task_ledger_summary"
+            | "startup_next_action_summary"
+            | "execctl_active_lease_summary"
+            | "execctl_resume_contract_summary"
+            | "workspace_restore_pack_summary"
+            | "skill_execution_card_summary" => *value = Value::Null,
+            _ => sanitize_value_for_startup_audit_preview(value),
+        }
+    }
 }
 
 async fn maybe_refresh_startup_restore_from_newer_handoff(
@@ -15206,5 +15682,206 @@ mod tests {
         let _ = fs::remove_file(&input_path);
         let _ = fs::remove_file(&rollout_path);
         let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn startup_runtime_audit_probe_redacts_restore_workline_text_but_stays_audit_green() {
+        let unique = format!(
+            "amai-startup-runtime-audit-probe-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("epoch")
+                .as_nanos()
+        );
+        let repo = std::env::temp_dir().join(unique);
+        fs::create_dir_all(repo.join(".amai/continuity")).expect("runtime state dir");
+
+        let project = ProjectRecord {
+            project_id: uuid::Uuid::new_v4(),
+            code: "amai".to_string(),
+            display_name: "Amai".to_string(),
+            repo_root: repo.display().to_string(),
+            visibility_scope: "project_shared".to_string(),
+            updated_at: String::new(),
+        };
+        let namespace = NamespaceRecord {
+            namespace_id: uuid::Uuid::new_v4(),
+            code: "continuity".to_string(),
+            display_name: "Continuity".to_string(),
+            retrieval_mode: "local_strict".to_string(),
+        };
+        let continuity = json!({
+            "bootstrap_summary": {
+                "details": {
+                    "thread_count": 1,
+                    "latest_rendered_transcript": ""
+                }
+            }
+        });
+        let handoff = json!({
+            "headline": "Real current line must not leak",
+            "next_step": "Real next step must not leak",
+            "source_event_id": "evt_probe_restore"
+        });
+        let restore = json!({
+            "working_state_restore": {
+                "restore_confidence": "high",
+                "execctl_resume_state": "clear",
+                "required_task_set": ["Task A must not leak", "Task B must not leak"],
+                "required_task_set_summary": "2 задач(и): Task A must not leak",
+                "startup_next_action": {
+                    "action_kind": "continue_active_workline",
+                    "blocking": false,
+                    "headline": "Real current line must not leak",
+                    "next_step": "Real next step must not leak"
+                },
+                "execctl_active_lease": {
+                    "lease_version": "execctl-active-lease-v1",
+                    "lease_owner_state": "previous_session_owner",
+                    "lease_state": "active",
+                    "source_event_id": "evt_probe_restore",
+                    "source_kind": "continuity_handoff",
+                    "headline": "Real current line must not leak",
+                    "next_step": "Real next step must not leak",
+                    "storage_lane": "ami.execctl_task_leases"
+                },
+                "project_task_tree": {
+                    "open_tasks_count": 2,
+                    "pending_return_count": 0,
+                    "nodes_total": 2,
+                    "edges_total": 1
+                },
+                "project_task_ledger": {
+                    "open_tasks_count": 2,
+                    "historical_handoffs_count": 1,
+                    "entries_count": 2
+                },
+                "state_lineage": {
+                    "authoritative_event_id": "evt_probe_restore",
+                    "authoritative_event_kind": "continuity_handoff",
+                    "authoritative_source_kind": "continuity_handoff",
+                    "session_id": "sess_probe_restore"
+                }
+            }
+        });
+        let context = ContinuityStartupContext {
+            project,
+            namespace,
+            continuity,
+            handoff_summary: handoff.clone(),
+            startup_handoff_summary: authoritative_startup_handoff_summary(
+                Some(&restore["working_state_restore"]),
+                &handoff,
+            ),
+            restore: Some(restore),
+        };
+
+        let payload = super::build_startup_runtime_audit_probe_payload(
+            &context,
+            context.restore.as_ref(),
+            &context.startup_handoff_summary,
+        );
+        let serialized = serde_json::to_string(&payload).expect("serialize payload");
+        let audit =
+            inspect_startup_runtime_state_payload(repo.as_path(), &payload).expect("audit payload");
+
+        assert_eq!(
+            payload["chat_start_restore"]["headline"],
+            json!(super::STARTUP_RUNTIME_AUDIT_PROBE_HEADLINE)
+        );
+        assert_eq!(
+            payload["chat_start_restore"]["next_step"],
+            json!(super::STARTUP_RUNTIME_AUDIT_PROBE_NEXT_STEP)
+        );
+        assert_eq!(
+            payload["chat_start_restore"]["required_task_set"],
+            json!([
+                "startup_runtime_audit_required_task_1",
+                "startup_runtime_audit_required_task_2"
+            ])
+        );
+        assert_eq!(audit.status, "ok");
+        assert!(!serialized.contains("Real current line must not leak"));
+        assert!(!serialized.contains("Real next step must not leak"));
+        assert!(!serialized.contains("Task A must not leak"));
+        assert!(!serialized.contains("Task B must not leak"));
+
+        fs::remove_dir_all(&repo).expect("cleanup temp repo");
+    }
+
+    #[test]
+    fn startup_runtime_audit_probe_without_restore_stays_audit_green() {
+        let unique = format!(
+            "amai-startup-runtime-audit-probe-no-restore-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("epoch")
+                .as_nanos()
+        );
+        let repo = std::env::temp_dir().join(unique);
+        fs::create_dir_all(repo.join(".amai/continuity")).expect("runtime state dir");
+
+        let project = ProjectRecord {
+            project_id: uuid::Uuid::new_v4(),
+            code: "amai".to_string(),
+            display_name: "Amai".to_string(),
+            repo_root: repo.display().to_string(),
+            visibility_scope: "project_shared".to_string(),
+            updated_at: String::new(),
+        };
+        let namespace = NamespaceRecord {
+            namespace_id: uuid::Uuid::new_v4(),
+            code: "continuity".to_string(),
+            display_name: "Continuity".to_string(),
+            retrieval_mode: "local_strict".to_string(),
+        };
+        let continuity = json!({
+            "bootstrap_summary": {
+                "details": {
+                    "thread_count": 0,
+                    "latest_rendered_transcript": ""
+                }
+            }
+        });
+        let handoff = json!({
+            "headline": "No-restore line must not leak",
+            "next_step": "No-restore next step must not leak",
+            "source_event_id": "evt_probe_no_restore"
+        });
+        let context = ContinuityStartupContext {
+            project,
+            namespace,
+            continuity,
+            handoff_summary: handoff.clone(),
+            startup_handoff_summary: super::startup_handoff_summary_from_source(&handoff),
+            restore: None,
+        };
+
+        let payload = super::build_startup_runtime_audit_probe_payload(
+            &context,
+            context.restore.as_ref(),
+            &context.startup_handoff_summary,
+        );
+        let serialized = serde_json::to_string(&payload).expect("serialize payload");
+        let audit =
+            inspect_startup_runtime_state_payload(repo.as_path(), &payload).expect("audit payload");
+
+        assert_eq!(audit.status, "ok");
+        assert_eq!(
+            payload["working_state_restore"]["state_lineage"]["authoritative_event_id"],
+            json!("evt_probe_no_restore")
+        );
+        assert_eq!(
+            payload["chat_start_restore"]["execctl_active_lease"]["source_event_id"],
+            json!("evt_probe_no_restore")
+        );
+        assert_eq!(
+            payload["chat_start_restore"]["execctl_active_lease"]["source_kind"],
+            json!("continuity_handoff")
+        );
+        assert!(!serialized.contains("No-restore line must not leak"));
+        assert!(!serialized.contains("No-restore next step must not leak"));
+
+        fs::remove_dir_all(&repo).expect("cleanup temp repo");
     }
 }

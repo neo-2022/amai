@@ -2386,6 +2386,7 @@ async fn tool_continuity_handoff(
 }
 
 const CONTINUITY_STARTUP_TOOL_RUNTIME_RECONCILE_DETAIL: &str = "no continuity import found for";
+const CONTINUITY_STARTUP_PREVIEW_NAMESPACE_MISSING_DETAIL: &str = "continuity namespace not found:";
 const CONTINUITY_STARTUP_TOOL_RUNTIME_RECONCILE_FORCE_ENV: &str =
     "AMAI_FORCE_CONTINUITY_STARTUP_STALE_IMPORT_MISS";
 const CONTINUITY_STARTUP_STALE_RUNTIME_ARTIFACT_FORCE_ENV: &str =
@@ -2450,8 +2451,23 @@ async fn continuity_startup_payload_with_tool_runtime_reconcile(
                 payload, reconcile,
             ))
         }
+        Err(error) if continuity_startup_preview_requires_authoritative_retry(&error) => {
+            let payload = continuity::startup_payload(cfg, &args.to_cli_args()).await?;
+            continuity_startup_assert_authoritative_runtime_payload(
+                canonical_repo_root.as_deref(),
+                args,
+                &payload,
+            )?;
+            Ok(payload)
+        }
         Err(error) => Err(error),
     }
+}
+
+fn continuity_startup_preview_requires_authoritative_retry(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .contains(CONTINUITY_STARTUP_PREVIEW_NAMESPACE_MISSING_DETAIL)
 }
 
 #[derive(Debug, Clone)]
@@ -11657,6 +11673,21 @@ mod tests {
             surface["bootstrap_command"],
             json!("./scripts/amai_exec.sh bootstrap reconnect --client codex --yes")
         );
+    }
+
+    #[test]
+    fn continuity_startup_preview_namespace_error_uses_authoritative_retry() {
+        let error = anyhow::anyhow!("continuity namespace not found: continuity");
+        assert!(super::continuity_startup_preview_requires_authoritative_retry(&error));
+    }
+
+    #[test]
+    fn continuity_startup_preview_import_miss_does_not_use_authoritative_retry() {
+        let error = anyhow::anyhow!(
+            "{} stale import",
+            super::CONTINUITY_STARTUP_TOOL_RUNTIME_RECONCILE_DETAIL
+        );
+        assert!(!super::continuity_startup_preview_requires_authoritative_retry(&error));
     }
 
     #[test]
