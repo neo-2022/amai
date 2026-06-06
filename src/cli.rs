@@ -1152,6 +1152,10 @@ pub struct ContinuityStartupArgs {
         help = "Emit compact startup runtime-state JSON after materializing startup instead of the full startup payload."
     )]
     pub runtime_state_json: bool,
+    #[arg(long, default_value_t = false, hide = true)]
+    pub internal_preview_json: bool,
+    #[arg(long, default_value_t = false, hide = true)]
+    pub internal_raw_json: bool,
     #[arg(
         long,
         default_value = DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND,
@@ -3742,6 +3746,48 @@ mod tests {
             panic!("expected continuity startup command");
         };
         assert!(args.runtime_state_json);
+    }
+
+    #[test]
+    fn continuity_startup_cli_accepts_internal_raw_json_flag() {
+        let cli = Cli::parse_from([
+            "amai",
+            "continuity",
+            "startup",
+            "--project",
+            "art",
+            "--internal-raw-json",
+        ]);
+        let Command::Continuity { command } = cli.command else {
+            panic!("expected continuity command");
+        };
+        let ContinuityCommand::Startup(args) = command else {
+            panic!("expected continuity startup command");
+        };
+        assert!(args.internal_raw_json);
+        assert!(!args.json);
+        assert!(!args.runtime_state_json);
+    }
+
+    #[test]
+    fn continuity_startup_cli_accepts_internal_preview_json_flag() {
+        let cli = Cli::parse_from([
+            "amai",
+            "continuity",
+            "startup",
+            "--project",
+            "art",
+            "--internal-preview-json",
+        ]);
+        let Command::Continuity { command } = cli.command else {
+            panic!("expected continuity command");
+        };
+        let ContinuityCommand::Startup(args) = command else {
+            panic!("expected continuity startup command");
+        };
+        assert!(args.internal_preview_json);
+        assert!(!args.json);
+        assert!(!args.runtime_state_json);
     }
 
     #[test]

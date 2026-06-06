@@ -36,7 +36,8 @@ use self::continuity_compact_chat_helpers::*;
 use self::continuity_profile::*;
 use self::continuity_startup_runtime_state::*;
 pub(crate) use self::continuity_startup_runtime_state::{
-    inspect_startup_runtime_state, print_startup_runtime_state,
+    inspect_startup_runtime_state, inspect_startup_runtime_state_payload,
+    persist_startup_runtime_state_artifact, print_startup_runtime_state,
 };
 use self::continuity_types::*;
 
@@ -1170,6 +1171,11 @@ async fn import_thread_index_snapshots(
 pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Result<()> {
     let db = connect_bootstrapped_admin(cfg).await?;
     let context = load_startup_context(&db, args).await?;
+    if args.internal_preview_json {
+        let payload = startup_payload_with_context_preview(&db, &context, args).await?;
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
     if args.runtime_state_json {
         let _ = startup_payload_with_context(&db, &context, args).await?;
         let repo_root = canonical_path(Path::new(&context.project.repo_root))?;
@@ -1187,6 +1193,10 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
     if args.json {
         let payload = startup_payload_with_context(&db, &context, args).await?;
         persist_startup_runtime_state_artifact(Path::new(&context.project.repo_root), &payload)?;
+        if args.internal_raw_json {
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+            return Ok(());
+        }
         println!(
             "{}",
             serde_json::to_string_pretty(&compact_continuity_startup_public_payload(&payload))?
@@ -1194,7 +1204,7 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
         return Ok(());
     }
     let (effective_restore, startup_handoff_summary) =
-        reconcile_startup_working_contour(&db, &context).await?;
+        reconcile_startup_working_contour(&db, &context, true).await?;
     let chat_start_restore = build_chat_start_restore(
         &context.project,
         &context.namespace,
@@ -1342,6 +1352,22 @@ pub async fn startup_payload(cfg: &AppConfig, args: &ContinuityStartupArgs) -> R
     startup_payload_with_context(&db, &context, args).await
 }
 
+pub(crate) async fn startup_payload_preview(
+    cfg: &AppConfig,
+    args: &ContinuityStartupArgs,
+) -> Result<Value> {
+    let db = postgres::connect_admin(cfg).await?;
+    let context = load_startup_context_preview(&db, args).await?;
+    startup_payload_with_context_preview(&db, &context, args).await
+}
+
+#[derive(Clone, Copy)]
+struct StartupPayloadBuildOptions {
+    refresh_same_thread_execctl_active_lease: bool,
+    record_restore_observed_event: bool,
+    persist_runtime_artifact: bool,
+}
+
 fn prepare_continuity_restore_observed_resources(
     context: &ContinuityStartupContext,
 ) -> Result<ContinuityRestoreObservedResources> {
@@ -1371,21 +1397,57 @@ async fn startup_payload_with_context(
     context: &ContinuityStartupContext,
     args: &ContinuityStartupArgs,
 ) -> Result<Value> {
-    startup_payload_with_context_and_resources(db, context, args, None).await
+    startup_payload_with_context_and_resources(
+        db,
+        context,
+        args,
+        None,
+        StartupPayloadBuildOptions {
+            refresh_same_thread_execctl_active_lease: true,
+            record_restore_observed_event: true,
+            persist_runtime_artifact: true,
+        },
+    )
+    .await
+}
+
+async fn startup_payload_with_context_preview(
+    db: &Client,
+    context: &ContinuityStartupContext,
+    args: &ContinuityStartupArgs,
+) -> Result<Value> {
+    startup_payload_with_context_and_resources(
+        db,
+        context,
+        args,
+        None,
+        StartupPayloadBuildOptions {
+            refresh_same_thread_execctl_active_lease: false,
+            record_restore_observed_event: false,
+            persist_runtime_artifact: false,
+        },
+    )
+    .await
 }
 
 async fn reconcile_startup_working_contour(
     db: &Client,
     context: &ContinuityStartupContext,
+    refresh_same_thread_execctl_active_lease: bool,
 ) -> Result<(Option<Value>, Value)> {
-    let refreshed_restore = working_state::refresh_same_thread_execctl_active_lease_for_startup(
-        db,
-        &context.project,
-        &context.namespace,
-        context.restore.as_ref(),
-    )
-    .await?;
-    let effective_restore = refreshed_restore.or_else(|| context.restore.clone());
+    let effective_restore = if refresh_same_thread_execctl_active_lease {
+        let refreshed_restore =
+            working_state::refresh_same_thread_execctl_active_lease_for_startup(
+                db,
+                &context.project,
+                &context.namespace,
+                context.restore.as_ref(),
+            )
+            .await?;
+        refreshed_restore.or_else(|| context.restore.clone())
+    } else {
+        context.restore.clone()
+    };
     let startup_handoff_summary = authoritative_startup_handoff_summary(
         effective_restore
             .as_ref()
@@ -1400,19 +1462,16 @@ async fn startup_payload_with_context_and_resources(
     context: &ContinuityStartupContext,
     args: &ContinuityStartupArgs,
     resources: Option<ContinuityRestoreObservedResources>,
+    options: StartupPayloadBuildOptions,
 ) -> Result<Value> {
     let total_started = Instant::now();
-    let ContinuityRestoreObservedResources {
-        repo_root,
-        token_budget_config,
-        tokenizer_prewarm,
-    } = match resources {
-        Some(resources) => resources,
-        None => prepare_continuity_restore_observed_resources(context)?,
-    };
     let step_started = Instant::now();
-    let (effective_restore, startup_handoff_summary) =
-        reconcile_startup_working_contour(db, context).await?;
+    let (effective_restore, startup_handoff_summary) = reconcile_startup_working_contour(
+        db,
+        context,
+        options.refresh_same_thread_execctl_active_lease,
+    )
+    .await?;
     continuity_profile_log(
         "startup_payload_with_context.refresh_same_thread_execctl_active_lease_for_startup",
         step_started.elapsed().as_millis(),
@@ -1437,30 +1496,40 @@ async fn startup_payload_with_context_and_resources(
             context.project.code, context.namespace.code
         ),
     );
-    let step_started = Instant::now();
-    tokenizer_prewarm
-        .await
-        .context("failed to join continuity restore tokenizer prewarm task")??;
-    token_budget::record_continuity_restore_observed_event_with_config(
-        db,
-        &context.project.code,
-        &context.namespace.code,
-        chat_start_restore["chat_start_restore"]["prompt_text"]
-            .as_str()
-            .unwrap_or_default(),
-        &args.token_source_kind,
-        &repo_root,
-        &token_budget_config,
-    )
-    .await?;
-    continuity_profile_log(
-        "startup_payload_with_context.record_continuity_restore_observed_event",
-        step_started.elapsed().as_millis(),
-        &format!(
-            "project={} namespace={}",
-            context.project.code, context.namespace.code
-        ),
-    );
+    if options.record_restore_observed_event {
+        let ContinuityRestoreObservedResources {
+            repo_root,
+            token_budget_config,
+            tokenizer_prewarm,
+        } = match resources {
+            Some(resources) => resources,
+            None => prepare_continuity_restore_observed_resources(context)?,
+        };
+        let step_started = Instant::now();
+        tokenizer_prewarm
+            .await
+            .context("failed to join continuity restore tokenizer prewarm task")??;
+        token_budget::record_continuity_restore_observed_event_with_config(
+            db,
+            &context.project.code,
+            &context.namespace.code,
+            chat_start_restore["chat_start_restore"]["prompt_text"]
+                .as_str()
+                .unwrap_or_default(),
+            &args.token_source_kind,
+            &repo_root,
+            &token_budget_config,
+        )
+        .await?;
+        continuity_profile_log(
+            "startup_payload_with_context.record_continuity_restore_observed_event",
+            step_started.elapsed().as_millis(),
+            &format!(
+                "project={} namespace={}",
+                context.project.code, context.namespace.code
+            ),
+        );
+    }
     let step_started = Instant::now();
     let payload = build_continuity_startup_payload(
         &startup_handoff_summary,
@@ -1476,16 +1545,18 @@ async fn startup_payload_with_context_and_resources(
             context.project.code, context.namespace.code
         ),
     );
-    let step_started = Instant::now();
-    persist_startup_runtime_state_artifact(Path::new(&context.project.repo_root), &payload)?;
-    continuity_profile_log(
-        "startup_payload_with_context.persist_startup_runtime_state_artifact",
-        step_started.elapsed().as_millis(),
-        &format!(
-            "project={} namespace={}",
-            context.project.code, context.namespace.code
-        ),
-    );
+    if options.persist_runtime_artifact {
+        let step_started = Instant::now();
+        persist_startup_runtime_state_artifact(Path::new(&context.project.repo_root), &payload)?;
+        continuity_profile_log(
+            "startup_payload_with_context.persist_startup_runtime_state_artifact",
+            step_started.elapsed().as_millis(),
+            &format!(
+                "project={} namespace={}",
+                context.project.code, context.namespace.code
+            ),
+        );
+    }
     continuity_profile_log(
         "startup_payload_with_context.total",
         total_started.elapsed().as_millis(),
@@ -1979,7 +2050,7 @@ pub(crate) async fn restore_payload_with_db(
 ) -> Result<Value> {
     let context = load_startup_context(&db, args).await?;
     let (effective_restore, startup_handoff_summary) =
-        reconcile_startup_working_contour(db, &context).await?;
+        reconcile_startup_working_contour(db, &context, true).await?;
     let restore = effective_restore.ok_or_else(|| {
         anyhow!(
             "no working-state restore bundle found for {}::{}",
@@ -2211,12 +2282,14 @@ pub async fn verify_continuity(cfg: &AppConfig, args: &VerifyContinuityArgs) -> 
         namespace: args.namespace.clone(),
         json: false,
         runtime_state_json: false,
+        internal_preview_json: false,
+        internal_raw_json: false,
         token_source_kind: "verify_continuity_startup".to_string(),
         skip_live_client_budget_guard: false,
     };
     let context = load_startup_context(&db, &startup_args).await?;
     let (effective_restore, startup_handoff_summary) =
-        reconcile_startup_working_contour(&db, &context).await?;
+        reconcile_startup_working_contour(&db, &context, true).await?;
     let direct_handoff_summary =
         latest_handoff_summary(&db, &context.project, &context.namespace).await?;
     let chat_start_restore = build_chat_start_restore(
@@ -2620,6 +2693,8 @@ pub async fn client_budget_target_payload(
         namespace: args.namespace.clone(),
         json: false,
         runtime_state_json: false,
+        internal_preview_json: false,
+        internal_raw_json: false,
         token_source_kind: "operator_client_budget_target".to_string(),
         skip_live_client_budget_guard: false,
     };
@@ -2871,6 +2946,8 @@ pub async fn compact_chat_payload(
         namespace: args.namespace.clone(),
         json: false,
         runtime_state_json: false,
+        internal_preview_json: false,
+        internal_raw_json: false,
         token_source_kind: "operator_continuity_compact_chat".to_string(),
         skip_live_client_budget_guard: false,
     };
@@ -3020,6 +3097,11 @@ pub async fn compact_chat_payload(
         &startup_context,
         &startup_args,
         Some(restore_observed_resources),
+        StartupPayloadBuildOptions {
+            refresh_same_thread_execctl_active_lease: true,
+            record_restore_observed_event: true,
+            persist_runtime_artifact: true,
+        },
     )
     .await?;
     continuity_profile_log(
@@ -3451,6 +3533,8 @@ pub async fn rotate_chat(cfg: &AppConfig, args: &ContinuityRotateChatArgs) -> Re
         namespace: args.namespace.clone(),
         json: false,
         runtime_state_json: false,
+        internal_preview_json: false,
+        internal_raw_json: false,
         token_source_kind: "operator_continuity_rotate_chat".to_string(),
         skip_live_client_budget_guard: false,
     };
@@ -5393,6 +5477,21 @@ async fn load_startup_context(
     db: &Client,
     args: &ContinuityStartupArgs,
 ) -> Result<ContinuityStartupContext> {
+    load_startup_context_with_options(db, args, true).await
+}
+
+async fn load_startup_context_preview(
+    db: &Client,
+    args: &ContinuityStartupArgs,
+) -> Result<ContinuityStartupContext> {
+    load_startup_context_with_options(db, args, false).await
+}
+
+async fn load_startup_context_with_options(
+    db: &Client,
+    args: &ContinuityStartupArgs,
+    allow_continuity_namespace_materialization: bool,
+) -> Result<ContinuityStartupContext> {
     let step_started = Instant::now();
     let project = resolve_project(db, args).await?;
     continuity_profile_log(
@@ -5401,26 +5500,27 @@ async fn load_startup_context(
         &format!("project_code={}", project.code),
     );
     let step_started = Instant::now();
-    let namespace =
-        match postgres::find_namespace_by_code(db, project.project_id, &args.namespace).await? {
-            Some(namespace) => namespace,
-            None if args.namespace == "continuity" => {
-                postgres::ensure_namespace(
-                    db,
-                    project.project_id,
-                    "continuity",
-                    Some("Continuity"),
-                    "local_strict",
-                )
-                .await?
-            }
-            None => {
-                return Err(anyhow!(
-                    "continuity namespace not found: {}",
-                    args.namespace
-                ));
-            }
-        };
+    let namespace = match postgres::find_namespace_by_code(db, project.project_id, &args.namespace)
+        .await?
+    {
+        Some(namespace) => namespace,
+        None if allow_continuity_namespace_materialization && args.namespace == "continuity" => {
+            postgres::ensure_namespace(
+                db,
+                project.project_id,
+                "continuity",
+                Some("Continuity"),
+                "local_strict",
+            )
+            .await?
+        }
+        None => {
+            return Err(anyhow!(
+                "continuity namespace not found: {}",
+                args.namespace
+            ));
+        }
+    };
     continuity_profile_log(
         "load_startup_context.find_namespace",
         step_started.elapsed().as_millis(),
@@ -7314,13 +7414,13 @@ mod tests {
         continuity_replay_guard_probes, continuity_snapshot_semantic_epoch_ms,
         continuity_temporal_lookup_probes, degradation_proof_scenarios, enrich_thread_index_file,
         extract_next_step_from_text, fake_continuity_handoff_snapshot,
-        fake_continuity_import_snapshot, inspect_startup_runtime_state, is_meta_continuity_handoff,
-        latest_scoped_snapshot, maybe_launch_compact_chat_host,
-        maybe_launch_compact_chat_host_with_auto_launch_policy, normalized_handoff_summary_json,
-        parse_chat_reference_spec, render_direct_answer, resolve_answer_intent, shell_quote,
-        startup_runtime_state_artifact_path, summarize_execctl_resume_obligation,
-        summarize_required_task_set_for_human_surface, workspace_bound_vscode_chat_profile_name,
-        write_compact_chat_prompt_artifact,
+        fake_continuity_import_snapshot, inspect_startup_runtime_state,
+        inspect_startup_runtime_state_payload, is_meta_continuity_handoff, latest_scoped_snapshot,
+        maybe_launch_compact_chat_host, maybe_launch_compact_chat_host_with_auto_launch_policy,
+        normalized_handoff_summary_json, parse_chat_reference_spec, render_direct_answer,
+        resolve_answer_intent, shell_quote, startup_runtime_state_artifact_path,
+        summarize_execctl_resume_obligation, summarize_required_task_set_for_human_surface,
+        workspace_bound_vscode_chat_profile_name, write_compact_chat_prompt_artifact,
     };
     use crate::cli::{
         ContinuityCompactChatArgs, ContinuityStartupArgs, ContinuityThreadIndexEnrichArgs,
@@ -7423,6 +7523,8 @@ mod tests {
             namespace: "continuity".to_string(),
             json: true,
             runtime_state_json: false,
+            internal_preview_json: false,
+            internal_raw_json: false,
             token_source_kind: "proof_continuity_repo_root_hint".to_string(),
             skip_live_client_budget_guard: true,
         };
@@ -8790,6 +8892,8 @@ mod tests {
             namespace: namespace.code.clone(),
             json: false,
             runtime_state_json: false,
+            internal_preview_json: false,
+            internal_raw_json: false,
             token_source_kind: "proof_startup_stale_restore_reconcile".to_string(),
             skip_live_client_budget_guard: true,
         };
@@ -8955,6 +9059,8 @@ mod tests {
             namespace: namespace.code.clone(),
             json: false,
             runtime_state_json: false,
+            internal_preview_json: false,
+            internal_raw_json: false,
             token_source_kind: "proof_startup_same_text_handoff_reconcile".to_string(),
             skip_live_client_budget_guard: true,
         };
@@ -12434,6 +12540,53 @@ mod tests {
         assert_eq!(audit.must_preserve_required_task_set_consistent, Some(true));
         assert_eq!(audit.project_task_tree_summary_field_present, Some(true));
         assert_eq!(audit.project_task_ledger_summary_field_present, Some(true));
+
+        fs::remove_dir_all(&repo).expect("cleanup temp repo");
+    }
+
+    #[test]
+    fn build_startup_runtime_state_artifact_uses_workspace_contract_sha_when_present() {
+        let unique = format!(
+            "amai-startup-runtime-workspace-contract-sha-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("epoch")
+                .as_nanos()
+        );
+        let repo = std::env::temp_dir().join(unique);
+        fs::create_dir_all(repo.join(".amai/onboarding")).expect("create onboarding dir");
+
+        let mut workspace_contract = crate::mcp::project_chat_startup_contract();
+        workspace_contract["tool_runtime_reconcile"]["local_cli_success_classification"] =
+            json!("workspace-contract-authoritative");
+        let workspace_contract_sha = super::hex_sha256(
+            &serde_json::to_vec(&workspace_contract).expect("serialize workspace startup contract"),
+        );
+        fs::write(
+            repo.join(".amai/onboarding/project-chat-startup-contract.json"),
+            serde_json::to_string_pretty(&json!({
+                "startup_contract": workspace_contract,
+                "startup_contract_sha256": workspace_contract_sha
+            }))
+            .expect("encode workspace startup contract"),
+        )
+        .expect("write workspace startup contract");
+
+        let payload = startup_runtime_semantic_guard_payload(repo.as_path());
+        let artifact = build_startup_runtime_state_artifact(repo.as_path(), &payload, 42)
+            .expect("startup runtime state artifact");
+        assert_eq!(
+            artifact["startup_contract_sha256"],
+            json!(workspace_contract_sha)
+        );
+
+        let audit = inspect_startup_runtime_state_payload(repo.as_path(), &payload)
+            .expect("startup runtime payload audit");
+        assert_eq!(audit.status, "ok");
+        assert_eq!(
+            audit.startup_contract_sha_matches_current_contract,
+            Some(true)
+        );
 
         fs::remove_dir_all(&repo).expect("cleanup temp repo");
     }
