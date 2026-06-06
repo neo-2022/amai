@@ -2397,23 +2397,45 @@ async fn continuity_startup_payload_with_tool_runtime_reconcile(
     cfg: &AppConfig,
     args: &ContinuityStartupToolArgs,
 ) -> Result<Value> {
+    let canonical_repo_root = continuity_startup_canonical_project_repo_root(cfg, args).await?;
+    if continuity_startup_workspace_contract_requires_runtime_reconcile(
+        canonical_repo_root.as_deref(),
+    )? {
+        let (payload, reconcile) =
+            continuity_startup_reconcile_via_local_subprocess(cfg, args).await?;
+        return Ok(attach_continuity_startup_tool_runtime_reconcile(
+            payload, reconcile,
+        ));
+    }
     let first_attempt = if force_continuity_startup_tool_runtime_reconcile_for_test() {
         Err(anyhow!(
             "{CONTINUITY_STARTUP_TOOL_RUNTIME_RECONCILE_DETAIL} forced_test_reconcile"
         ))
     } else {
-        continuity::startup_payload(cfg, &args.to_cli_args()).await
+        continuity::startup_payload_preview(cfg, &args.to_cli_args()).await
     };
     match first_attempt {
         Ok(payload) => {
-            force_continuity_startup_stale_runtime_artifact_after_success_for_test(args, &payload)?;
-            if continuity_startup_success_payload_requires_runtime_reconcile(args, &payload)? {
+            let payload = force_continuity_startup_stale_runtime_artifact_after_success_for_test(
+                args, &payload,
+            )?;
+            if continuity_startup_success_payload_requires_runtime_reconcile(
+                canonical_repo_root.as_deref(),
+                args,
+                &payload,
+            )? {
                 let (payload, reconcile) =
                     continuity_startup_reconcile_via_local_subprocess(cfg, args).await?;
                 Ok(attach_continuity_startup_tool_runtime_reconcile(
                     payload, reconcile,
                 ))
             } else {
+                let payload = continuity::startup_payload(cfg, &args.to_cli_args()).await?;
+                continuity_startup_assert_authoritative_runtime_payload(
+                    canonical_repo_root.as_deref(),
+                    args,
+                    &payload,
+                )?;
                 Ok(payload)
             }
         }
@@ -2432,31 +2454,171 @@ async fn continuity_startup_payload_with_tool_runtime_reconcile(
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectChatStartupContractResolution {
+    pub(crate) contract: Value,
+    pub(crate) startup_contract_sha256: String,
+    from_workspace: bool,
+}
+
 fn continuity_startup_success_payload_requires_runtime_reconcile(
+    preferred_repo_root: Option<&Path>,
     args: &ContinuityStartupToolArgs,
     payload: &Value,
 ) -> Result<bool> {
-    let Some(repo_root) = continuity_startup_runtime_audit_repo_root(args, payload) else {
+    let Some(repo_root) =
+        continuity_startup_runtime_audit_repo_root(preferred_repo_root, args, payload)
+    else {
         return Ok(false);
     };
-    let audit = continuity::inspect_startup_runtime_state(Path::new(repo_root))?;
+    let audit = continuity::inspect_startup_runtime_state_payload(&repo_root, payload)?;
     Ok(audit.status == "startup_runtime_state_drift")
 }
 
-fn continuity_startup_runtime_audit_repo_root<'a>(
-    args: &'a ContinuityStartupToolArgs,
-    payload: &'a Value,
-) -> Option<&'a str> {
-    args.repo_root
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+fn continuity_startup_assert_authoritative_runtime_payload(
+    preferred_repo_root: Option<&Path>,
+    args: &ContinuityStartupToolArgs,
+    payload: &Value,
+) -> Result<()> {
+    let Some(repo_root) =
+        continuity_startup_runtime_audit_repo_root(preferred_repo_root, args, payload)
+    else {
+        return Ok(());
+    };
+    let audit = continuity::inspect_startup_runtime_state_payload(&repo_root, payload)?;
+    if audit.status != "ok" {
+        return Err(anyhow!(
+            "continuity startup payload failed authoritative runtime audit for {}: {}",
+            repo_root.display(),
+            audit.status
+        ));
+    }
+    Ok(())
+}
+
+fn continuity_startup_runtime_audit_repo_root(
+    preferred_repo_root: Option<&Path>,
+    args: &ContinuityStartupToolArgs,
+    payload: &Value,
+) -> Option<PathBuf> {
+    preferred_repo_root
+        .map(Path::to_path_buf)
         .or_else(|| {
             payload["continuity_startup"]["project"]["repo_root"]
                 .as_str()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
         })
+        .or_else(|| {
+            args.repo_root
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+}
+
+fn continuity_startup_workspace_contract_requires_runtime_reconcile(
+    repo_root: Option<&Path>,
+) -> Result<bool> {
+    let Some(repo_root) = repo_root else {
+        return Ok(false);
+    };
+    continuity_startup_workspace_contract_requires_runtime_reconcile_for_repo_root(repo_root)
+}
+
+fn continuity_startup_workspace_contract_requires_runtime_reconcile_for_repo_root(
+    repo_root: &Path,
+) -> Result<bool> {
+    let resolution = project_chat_startup_contract_resolution_for_repo_root(repo_root)?;
+    if !resolution.from_workspace {
+        return Ok(false);
+    }
+    let embedded_sha = embedded_project_chat_startup_contract_resolution()?.startup_contract_sha256;
+    Ok(resolution.startup_contract_sha256 != embedded_sha)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    hex
+}
+
+fn embedded_project_chat_startup_contract_resolution()
+-> Result<ProjectChatStartupContractResolution> {
+    let contract = project_chat_startup_contract();
+    let startup_contract_sha256 = sha256_hex(&serde_json::to_vec(&contract)?);
+    Ok(ProjectChatStartupContractResolution {
+        contract,
+        startup_contract_sha256,
+        from_workspace: false,
+    })
+}
+
+fn workspace_project_chat_startup_contract_artifact_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(".amai/onboarding/project-chat-startup-contract.json")
+}
+
+pub(crate) fn project_chat_startup_contract_resolution_for_repo_root(
+    repo_root: &Path,
+) -> Result<ProjectChatStartupContractResolution> {
+    let artifact_path = workspace_project_chat_startup_contract_artifact_path(repo_root);
+    if !artifact_path.is_file() {
+        return embedded_project_chat_startup_contract_resolution();
+    }
+    let raw = fs::read_to_string(&artifact_path).with_context(|| {
+        format!(
+            "failed to read workspace startup contract {}",
+            artifact_path.display()
+        )
+    })?;
+    let artifact: Value = serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "failed to parse workspace startup contract {}",
+            artifact_path.display()
+        )
+    })?;
+    let contract = artifact["startup_contract"]
+        .as_object()
+        .cloned()
+        .map(Value::Object)
+        .ok_or_else(|| {
+            anyhow!(
+                "workspace startup contract {} is missing startup_contract object",
+                artifact_path.display()
+            )
+        })?;
+    let declared_sha = artifact["startup_contract_sha256"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow!(
+                "workspace startup contract {} is missing startup_contract_sha256",
+                artifact_path.display()
+            )
+        })?;
+    let computed_sha = sha256_hex(&serde_json::to_vec(&contract)?);
+    if declared_sha != computed_sha {
+        return Err(anyhow!(
+            "workspace startup contract {} has mismatched startup_contract_sha256",
+            artifact_path.display()
+        ));
+    }
+    Ok(ProjectChatStartupContractResolution {
+        contract,
+        startup_contract_sha256: computed_sha,
+        from_workspace: true,
+    })
 }
 
 async fn continuity_startup_reconcile_via_local_subprocess(
@@ -2484,6 +2646,7 @@ async fn continuity_startup_reconcile_via_local_subprocess(
         .arg("--token-source-kind")
         .arg(&args.token_source_kind)
         .arg("--skip-live-client-budget-guard")
+        .arg("--internal-raw-json")
         .arg("--json")
         .env_remove(CONTINUITY_STARTUP_TOOL_RUNTIME_RECONCILE_FORCE_ENV)
         .env_remove(CONTINUITY_STARTUP_STALE_RUNTIME_ARTIFACT_FORCE_ENV)
@@ -2523,6 +2686,11 @@ async fn continuity_startup_reconcile_via_local_subprocess(
             project.code, args.namespace
         )
     })?;
+    continuity_startup_assert_authoritative_runtime_payload(
+        Some(Path::new(&project.repo_root)),
+        args,
+        &payload,
+    )?;
     let reconcile = json!({
         "applied": true,
         "classification": "stale_embedded_mcp_session",
@@ -2566,6 +2734,30 @@ async fn continuity_startup_reconcile_project_record(
     ))
 }
 
+async fn continuity_startup_canonical_project_repo_root(
+    cfg: &AppConfig,
+    args: &ContinuityStartupToolArgs,
+) -> Result<Option<PathBuf>> {
+    let has_repo_root = args
+        .repo_root
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    let has_project = args
+        .project
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    if !has_repo_root && !has_project {
+        return Ok(None);
+    }
+
+    let db = postgres::connect_admin(cfg).await?;
+    postgres::bootstrap_schema(&db, cfg).await?;
+    let project = continuity_startup_reconcile_project_record(&db, args).await?;
+    Ok(Some(PathBuf::from(project.repo_root)))
+}
+
 fn preferred_continuity_startup_reconcile_binary(repo_root: &Path, current_exe: &Path) -> PathBuf {
     let current_manifest_dir = current_exe.parent().and_then(|dir| dir.parent());
     let repo_target_release_dir = repo_root.join("target/release");
@@ -2602,13 +2794,13 @@ fn force_continuity_startup_tool_runtime_reconcile_for_test() -> bool {
 fn force_continuity_startup_stale_runtime_artifact_after_success_for_test(
     args: &ContinuityStartupToolArgs,
     payload: &Value,
-) -> Result<()> {
+) -> Result<Value> {
     let Some(mode) = std::env::var(CONTINUITY_STARTUP_STALE_RUNTIME_ARTIFACT_FORCE_ENV)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
     else {
-        return Ok(());
+        return Ok(payload.clone());
     };
     let should_force = match mode.as_str() {
         "1" | "true" | "TRUE" | "yes" | "YES" => true,
@@ -2619,11 +2811,13 @@ fn force_continuity_startup_stale_runtime_artifact_after_success_for_test(
         _ => false,
     };
     if !should_force {
-        return Ok(());
+        return Ok(payload.clone());
     }
-    let repo_root = continuity_startup_runtime_audit_repo_root(args, payload)
+    let repo_root = continuity_startup_runtime_audit_repo_root(None, args, payload)
         .ok_or_else(|| anyhow!("forced stale startup runtime artifact requires repo_root"))?;
-    corrupt_startup_runtime_state_for_stale_success_proof(Path::new(repo_root))
+    let mutated_payload = corrupt_startup_payload_for_stale_success_proof(payload);
+    persist_startup_payload_corruption_for_stale_success_proof(&repo_root, &mutated_payload)?;
+    Ok(mutated_payload)
 }
 
 fn corrupt_startup_runtime_state_for_stale_success_proof(repo_root: &Path) -> Result<()> {
@@ -2657,6 +2851,39 @@ fn corrupt_startup_runtime_state_for_stale_success_proof(repo_root: &Path) -> Re
     fs::write(&state_path, serde_json::to_vec_pretty(&state)?)
         .with_context(|| format!("failed to write {}", state_path.display()))?;
     Ok(())
+}
+
+fn corrupt_startup_payload_for_stale_success_proof(payload: &Value) -> Value {
+    let mut corrupted = payload.clone();
+    if let Some(lineage) = corrupted
+        .get_mut("working_state_restore")
+        .and_then(|value| value.get_mut("state_lineage"))
+        .and_then(Value::as_object_mut)
+    {
+        lineage.remove("authoritative_event_id");
+    }
+    if let Some(summary_lease) = corrupted
+        .get_mut("continuity_startup_summary")
+        .and_then(|value| value.get_mut("execctl_active_lease"))
+        .and_then(Value::as_object_mut)
+    {
+        summary_lease.remove("source_event_id");
+    }
+    if let Some(lease) = corrupted
+        .get_mut("chat_start_restore")
+        .and_then(|value| value.get_mut("execctl_active_lease"))
+        .and_then(Value::as_object_mut)
+    {
+        lease.remove("source_event_id");
+    }
+    corrupted
+}
+
+fn persist_startup_payload_corruption_for_stale_success_proof(
+    repo_root: &Path,
+    payload: &Value,
+) -> Result<()> {
+    continuity::persist_startup_runtime_state_artifact(repo_root, payload)
 }
 
 #[derive(Deserialize)]
@@ -6987,6 +7214,8 @@ impl ContinuityStartupToolArgs {
             namespace: self.namespace.clone(),
             json: true,
             runtime_state_json: false,
+            internal_preview_json: false,
+            internal_raw_json: false,
             token_source_kind: self.token_source_kind.clone(),
             skip_live_client_budget_guard: false,
         }
@@ -7244,7 +7473,9 @@ mod tests {
         verify_mcp_scope_requires_warm_cache, warm_cache_summary,
     };
     use crate::cli::VerifyMcpScope;
+    use crate::config::AppConfig;
     use crate::continuity;
+    use crate::postgres;
     use crate::retrieval::{ContextPackStats, ContextPackTimings};
     use crate::working_state;
     use serde_json::{Value, json};
@@ -7260,6 +7491,24 @@ mod tests {
         let mut perms = fs::metadata(path).expect("file metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).expect("set executable permissions");
+    }
+
+    fn load_env_for_postgres_test() {
+        if let Ok(env_text) =
+            fs::read_to_string(".env").or_else(|_| fs::read_to_string(".env.example"))
+        {
+            for line in env_text.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                if let Some((key, value)) = trimmed.split_once('=') {
+                    unsafe {
+                        std::env::set_var(key.trim(), value.trim_matches('"'));
+                    }
+                }
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -10584,8 +10833,35 @@ mod tests {
         });
 
         assert_eq!(
-            super::continuity_startup_runtime_audit_repo_root(&args, &payload),
-            Some("/repo/amai")
+            super::continuity_startup_runtime_audit_repo_root(None, &args, &payload),
+            Some(PathBuf::from("/repo/amai"))
+        );
+    }
+
+    #[test]
+    fn continuity_startup_runtime_audit_repo_root_prefers_canonical_repo_root() {
+        let args = ContinuityStartupToolArgs {
+            project: Some("amai".to_string()),
+            repo_root: Some("/repo/args".to_string()),
+            namespace: "continuity".to_string(),
+            token_source_kind: "proof".to_string(),
+        };
+        let payload = json!({
+            "continuity_startup": {
+                "project": {
+                    "code": "amai",
+                    "repo_root": "/repo/stale-payload"
+                }
+            }
+        });
+
+        assert_eq!(
+            super::continuity_startup_runtime_audit_repo_root(
+                Some(Path::new("/repo/canonical")),
+                &args,
+                &payload
+            ),
+            Some(PathBuf::from("/repo/canonical"))
         );
     }
 
@@ -11112,6 +11388,168 @@ mod tests {
             json!("stale_embedded_mcp_session")
         );
         assert_eq!(attached["tool_runtime_reconcile"]["applied"], json!(true));
+    }
+
+    #[test]
+    fn continuity_startup_workspace_contract_requires_runtime_reconcile_on_sha_mismatch() {
+        let temp_root = std::env::temp_dir().join(format!("amai-mcp-contract-{}", Uuid::new_v4()));
+        let onboarding_dir = temp_root.join(".amai/onboarding");
+        fs::create_dir_all(&onboarding_dir).expect("create onboarding dir");
+        let mut contract = super::project_chat_startup_contract();
+        contract["tool_runtime_reconcile"]["local_cli"]["command"] = json!("changed-local-cli");
+        let contract_sha = super::sha256_hex(
+            &serde_json::to_vec(&contract).expect("serialize mutated startup contract"),
+        );
+        fs::write(
+            onboarding_dir.join("project-chat-startup-contract.json"),
+            serde_json::to_vec_pretty(&json!({
+                "startup_contract": contract,
+                "startup_contract_sha256": contract_sha
+            }))
+            .expect("encode contract"),
+        )
+        .expect("write contract");
+
+        assert_eq!(
+            super::continuity_startup_workspace_contract_requires_runtime_reconcile_for_repo_root(
+                &temp_root
+            )
+            .expect("workspace contract precheck"),
+            true
+        );
+
+        fs::remove_dir_all(&temp_root).expect("cleanup temp root");
+    }
+
+    #[tokio::test]
+    async fn continuity_startup_workspace_contract_precheck_resolves_project_only_repo_root() {
+        load_env_for_postgres_test();
+        let cfg = AppConfig::from_env().expect("config");
+        let db = postgres::connect_admin(&cfg).await.expect("postgres");
+        postgres::bootstrap_schema(&db, &cfg).await.expect("schema");
+
+        let suffix = Uuid::new_v4();
+        let workspace_code = format!("mcp_startup_contract_ws_{suffix}");
+        let project_code = format!("mcp_startup_contract_project_{suffix}");
+        let project_root =
+            std::env::temp_dir().join(format!("amai-mcp-startup-contract-root-{suffix}"));
+        let onboarding_dir = project_root.join(".amai/onboarding");
+        fs::create_dir_all(&onboarding_dir).expect("create onboarding dir");
+
+        postgres::ensure_workspace(&db, &workspace_code, "MCP Startup Contract", "active")
+            .await
+            .expect("workspace");
+        postgres::upsert_project(
+            &db,
+            &project_code,
+            "MCP Startup Contract Project",
+            &project_root.display().to_string(),
+            Some("main"),
+            &workspace_code,
+            "project_shared",
+            "local_strict",
+        )
+        .await
+        .expect("project");
+
+        let mut contract = super::project_chat_startup_contract();
+        contract["tool_runtime_reconcile"]["local_cli_success_classification"] =
+            json!("workspace-contract-drift");
+        let contract_sha = super::sha256_hex(
+            &serde_json::to_vec(&contract).expect("serialize mutated startup contract"),
+        );
+        fs::write(
+            onboarding_dir.join("project-chat-startup-contract.json"),
+            serde_json::to_vec_pretty(&json!({
+                "startup_contract": contract,
+                "startup_contract_sha256": contract_sha
+            }))
+            .expect("encode contract"),
+        )
+        .expect("write contract");
+
+        let args = ContinuityStartupToolArgs {
+            project: Some(project_code),
+            repo_root: None,
+            namespace: "continuity".to_string(),
+            token_source_kind: "proof".to_string(),
+        };
+
+        let canonical_repo_root =
+            super::continuity_startup_canonical_project_repo_root(&cfg, &args)
+                .await
+                .expect("canonical project repo root");
+        assert_eq!(canonical_repo_root, Some(project_root.clone()));
+        assert_eq!(
+            super::continuity_startup_workspace_contract_requires_runtime_reconcile(
+                canonical_repo_root.as_deref()
+            )
+            .expect("workspace contract precheck"),
+            true
+        );
+
+        fs::remove_dir_all(&project_root).expect("cleanup project root");
+    }
+
+    #[test]
+    fn force_stale_startup_test_hook_corrupts_payload_lineage_for_in_memory_audit() {
+        let temp_root = std::env::temp_dir().join(format!("amai-mcp-payload-{}", Uuid::new_v4()));
+        fs::create_dir_all(temp_root.join(".amai/continuity")).expect("create startup dir");
+        unsafe {
+            std::env::set_var(
+                super::CONTINUITY_STARTUP_STALE_RUNTIME_ARTIFACT_FORCE_ENV,
+                "true",
+            );
+        }
+
+        let args = ContinuityStartupToolArgs {
+            project: Some("amai".to_string()),
+            repo_root: Some(temp_root.display().to_string()),
+            namespace: "continuity".to_string(),
+            token_source_kind: "proof".to_string(),
+        };
+        let payload = json!({
+            "continuity_startup": {
+                "project": {
+                    "repo_root": temp_root.display().to_string()
+                }
+            },
+            "chat_start_restore": {
+                "execctl_active_lease": {
+                    "source_event_id": "evt_1"
+                }
+            },
+            "continuity_startup_summary": {
+                "execctl_active_lease": {
+                    "source_event_id": "evt_1"
+                }
+            },
+            "working_state_restore": {
+                "state_lineage": {
+                    "authoritative_event_id": "evt_1"
+                }
+            }
+        });
+
+        let mutated =
+            super::force_continuity_startup_stale_runtime_artifact_after_success_for_test(
+                &args, &payload,
+            )
+            .expect("mutated payload");
+
+        assert!(
+            mutated["working_state_restore"]["state_lineage"]["authoritative_event_id"].is_null()
+        );
+        assert!(mutated["chat_start_restore"]["execctl_active_lease"]["source_event_id"].is_null());
+        assert!(
+            mutated["continuity_startup_summary"]["execctl_active_lease"]["source_event_id"]
+                .is_null()
+        );
+
+        unsafe {
+            std::env::remove_var(super::CONTINUITY_STARTUP_STALE_RUNTIME_ARTIFACT_FORCE_ENV);
+        }
+        fs::remove_dir_all(&temp_root).expect("cleanup temp root");
     }
 
     #[test]

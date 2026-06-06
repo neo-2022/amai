@@ -1041,6 +1041,8 @@ fn synthetic_memory_matrix_restore_args(project: &str, namespace: &str) -> Conti
         namespace: namespace.to_string(),
         json: false,
         runtime_state_json: false,
+        internal_preview_json: false,
+        internal_raw_json: false,
         token_source_kind: DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND.to_string(),
         skip_live_client_budget_guard: true,
     }

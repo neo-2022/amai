@@ -58,6 +58,7 @@ fn evaluate_startup_execution_gate_consistency(
     summary: &Value,
     startup_execution_gate: &Value,
     prompt_text_present: Option<bool>,
+    gate_contract: &Value,
 ) -> Option<bool> {
     let action_kind = summary["startup_next_action"]["action_kind"].as_str();
     let lease_owner_state = summary["execctl_active_lease"]["lease_owner_state"].as_str();
@@ -91,7 +92,6 @@ fn evaluate_startup_execution_gate_consistency(
     let required_task_set_count = summary["required_task_set"]
         .as_array()
         .map(|items| items.len() as u64);
-    let gate_contract = mcp::project_chat_startup_contract();
     let gate_enforcement = &gate_contract["startup_execution_gate_enforcement"];
     let resume_enforcement = &gate_contract["resume_enforcement"];
     let previous_session_owner_value = resume_enforcement["previous_session_owner_value"]
@@ -242,8 +242,17 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
             gate_semantics_consistent: None,
         });
     };
-    let expected_contract_sha =
-        hex_sha256(&serde_json::to_vec(&mcp::project_chat_startup_contract())?);
+    inspect_startup_runtime_state_artifact_payload(repo_root, output_path, &payload)
+}
+
+fn inspect_startup_runtime_state_artifact_payload(
+    repo_root: &Path,
+    output_path: PathBuf,
+    payload: &Value,
+) -> Result<StartupRuntimeStateAudit> {
+    let contract_resolution =
+        mcp::project_chat_startup_contract_resolution_for_repo_root(repo_root)?;
+    let expected_contract_sha = contract_resolution.startup_contract_sha256.clone();
     let summary = &payload["continuity_startup_summary"];
     let startup_contract_sha_matches_current_contract =
         Some(payload["startup_contract_sha256"].as_str() == Some(expected_contract_sha.as_str()));
@@ -400,6 +409,7 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         summary,
         &payload["startup_execution_gate"],
         prompt_text_present,
+        &contract_resolution.contract,
     );
     let artifact_gate_semantics_consistent = payload["gate_semantics_consistent"].as_bool();
     let artifact_gate_semantics_consistent_present =
@@ -495,6 +505,18 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         artifact_gate_semantics_consistent_matches_recomputed,
         gate_semantics_consistent,
     })
+}
+
+pub(crate) fn inspect_startup_runtime_state_payload(
+    repo_root: &Path,
+    payload: &Value,
+) -> Result<StartupRuntimeStateAudit> {
+    let artifact = build_startup_runtime_state_artifact(repo_root, payload, now_epoch_ms()?)?;
+    inspect_startup_runtime_state_artifact_payload(
+        repo_root,
+        startup_runtime_state_artifact_path(repo_root),
+        &artifact,
+    )
 }
 
 pub(crate) fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<()> {
@@ -793,9 +815,11 @@ pub(super) fn build_startup_runtime_state_artifact(
     payload: &Value,
     generated_at_epoch_ms: u64,
 ) -> Result<Value> {
-    let startup_contract_sha256 =
-        hex_sha256(&serde_json::to_vec(&mcp::project_chat_startup_contract())?);
-    let startup_execution_gate = build_startup_execution_gate(payload);
+    let contract_resolution =
+        mcp::project_chat_startup_contract_resolution_for_repo_root(repo_root)?;
+    let startup_contract_sha256 = contract_resolution.startup_contract_sha256.clone();
+    let startup_execution_gate =
+        build_startup_execution_gate(payload, &contract_resolution.contract);
     let mut continuity_startup_summary = mcp::continuity_startup_summary_json(payload);
     let authoritative_event_id =
         payload["working_state_restore"]["state_lineage"]["authoritative_event_id"]
@@ -861,6 +885,7 @@ pub(super) fn build_startup_runtime_state_artifact(
         &continuity_startup_summary,
         &startup_execution_gate,
         prompt_text_present,
+        &contract_resolution.contract,
     );
     let raw_client_budget_guard = &payload["working_state_restore"]["client_budget_guard"];
     let client_budget_guard = compact_startup_runtime_client_budget_guard(raw_client_budget_guard);
@@ -877,7 +902,7 @@ pub(super) fn build_startup_runtime_state_artifact(
         } else {
             Value::Null
         };
-    let agent_workflow_guard = mcp::agent_workflow_guard_contract();
+    let agent_workflow_guard = contract_resolution.contract["agent_workflow_guard"].clone();
     let workflow_promotion_state = build_workflow_promotion_state(
         &continuity_startup_summary,
         &payload["working_state_restore"]["state_lineage"],
@@ -1047,7 +1072,7 @@ fn build_workflow_promotion_state(
     })
 }
 
-pub(super) fn persist_startup_runtime_state_artifact(
+pub(crate) fn persist_startup_runtime_state_artifact(
     repo_root: &Path,
     payload: &Value,
 ) -> Result<()> {
@@ -1064,8 +1089,7 @@ pub(super) fn persist_startup_runtime_state_artifact(
     Ok(())
 }
 
-fn build_startup_execution_gate(payload: &Value) -> Value {
-    let contract = mcp::project_chat_startup_contract();
+fn build_startup_execution_gate(payload: &Value, contract: &Value) -> Value {
     let resume_enforcement = &contract["resume_enforcement"];
     let action_kind = payload["chat_start_restore"]["startup_next_action"]["action_kind"].as_str();
     let lease_owner_state =
