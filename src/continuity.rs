@@ -1169,13 +1169,13 @@ async fn import_thread_index_snapshots(
 }
 
 pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Result<()> {
-    let db = connect_bootstrapped_admin(cfg).await?;
-    let context = load_startup_context(&db, args).await?;
     if args.internal_preview_json {
-        let payload = startup_payload_with_context_preview(&db, &context, args).await?;
+        let payload = startup_payload_preview(cfg, args).await?;
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
     }
+    let db = connect_bootstrapped_admin(cfg).await?;
+    let context = load_startup_context(&db, args).await?;
     if args.runtime_state_json {
         let _ = startup_payload_with_context(&db, &context, args).await?;
         let repo_root = canonical_path(Path::new(&context.project.repo_root))?;
@@ -1406,25 +1406,6 @@ async fn startup_payload_with_context(
             refresh_same_thread_execctl_active_lease: true,
             record_restore_observed_event: true,
             persist_runtime_artifact: true,
-        },
-    )
-    .await
-}
-
-async fn startup_payload_with_context_preview(
-    db: &Client,
-    context: &ContinuityStartupContext,
-    args: &ContinuityStartupArgs,
-) -> Result<Value> {
-    startup_payload_with_context_and_resources(
-        db,
-        context,
-        args,
-        None,
-        StartupPayloadBuildOptions {
-            refresh_same_thread_execctl_active_lease: false,
-            record_restore_observed_event: false,
-            persist_runtime_artifact: false,
         },
     )
     .await
