@@ -91,6 +91,19 @@ try:
         if result.get("isError") is True:
             fail(f"tool returned isError=true: {result}")
         content = result.get("structuredContent", {})
+        stale_markers = {
+            "STALE PREVIEW HEADLINE MUST NOT LEAK",
+            "STALE PREVIEW NEXT STEP MUST NOT LEAK",
+        }
+        observed_values = [
+            content.get("continuity_startup_summary", {}).get("headline"),
+            content.get("continuity_startup_summary", {}).get("next_step"),
+            content.get("continuity_startup", {}).get("handoff_summary", {}).get("headline"),
+            content.get("continuity_startup", {}).get("handoff_summary", {}).get("next_step"),
+        ]
+        for observed in observed_values:
+            if observed in stale_markers:
+                fail(f"stale preview marker leaked into startup payload: {content}")
         reconcile = content.get("tool_runtime_reconcile", {})
         if expect_reconcile:
             if reconcile.get("applied") is not True:
@@ -107,6 +120,10 @@ try:
                 fail(f"tool still marked reconnect as required after stale-success reconcile: {content}")
             if reconcile.get("reconnect_helper_diagnostic_only") is not True:
                 fail(f"tool did not keep reconnect helper diagnostic-only after stale-success reconcile: {content}")
+            if content.get("continuity_startup_summary", {}).get("headline") != content.get("continuity_startup", {}).get("handoff_summary", {}).get("headline"):
+                fail(f"summary headline diverged from public handoff summary after reconcile: {content}")
+            if content.get("continuity_startup_summary", {}).get("next_step") != content.get("continuity_startup", {}).get("handoff_summary", {}).get("next_step"):
+                fail(f"summary next_step diverged from public handoff summary after reconcile: {content}")
         elif reconcile not in ({}, None):
             fail(f"unexpected second-pass reconcile after same-session self-heal: {content}")
 
