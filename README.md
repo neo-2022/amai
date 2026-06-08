@@ -135,7 +135,3 @@ cd "${HOME}/.local/share/amai/repo"
 
 `PolyForm Noncommercial 1.0.0`
 Текст лицензии: [LICENSE](LICENSE)
-
-## Контакты
-
-Обратная связь: `Art260679@gmail.com`
