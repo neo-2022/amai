@@ -42,11 +42,14 @@ pub async fn run_auto_extract(
             WHERE mre.project_id = (SELECT project_id FROM ami.projects WHERE code = $1)
               AND mre.namespace_id = (SELECT namespace_id FROM ami.namespaces WHERE code = $2
                                       AND project_id = (SELECT project_id FROM ami.projects WHERE code = $1))
+              AND mre.event_kind = 'memory_candidate_write'
+              AND mre.item_kind = 'raw_fact'
+              AND mre.derivation_kind IN ('raw_capture', 'auto_extract')
               AND NOT EXISTS (
-                  SELECT 1 FROM ami.memory_items mi
-                  WHERE mi.project_id = mre.project_id
-                    AND mi.namespace_id = mre.namespace_id
-                    AND mi.source_event_ids @> to_jsonb(mre.memory_raw_event_id::text)
+                  SELECT 1 FROM ami.memory_provenance mp
+                  WHERE mp.project_id = mre.project_id
+                    AND mp.namespace_id = mre.namespace_id
+                    AND mp.source_event_id = mre.memory_raw_event_id::text
               )
             ORDER BY mre.server_order_seq
             LIMIT $3

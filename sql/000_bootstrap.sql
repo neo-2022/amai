@@ -4449,8 +4449,9 @@ CREATE INDEX IF NOT EXISTS idx_ami_memory_items_project_kind
 CREATE INDEX IF NOT EXISTS idx_ami_memory_items_identity_key
     ON ami.memory_items(project_id, identity_key)
     WHERE identity_key IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_ami_memory_items_source_event_ids
-    ON ami.memory_items USING GIN (source_event_ids);
+CREATE INDEX IF NOT EXISTS idx_ami_memory_provenance_source_event
+    ON ami.memory_provenance(project_id, namespace_id, source_event_id)
+    WHERE source_event_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_ami_memory_edges_source
     ON ami.memory_edges(source_memory_item_id, edge_kind, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ami_memory_edges_target

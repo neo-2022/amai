@@ -163,6 +163,7 @@ pub(super) async fn bootstrap_schema_is_current(client: &Client) -> Result<bool>
                 AND to_regclass('ami.memory_edges') IS NOT NULL
                 AND to_regclass('ami.memory_conflicts') IS NOT NULL
                 AND to_regclass('ami.memory_provenance') IS NOT NULL
+                AND to_regclass('ami.idx_ami_memory_provenance_source_event') IS NOT NULL
                 AND to_regclass('ami.retrieval_traces') IS NOT NULL
                 AND to_regclass('ami.restore_packs') IS NOT NULL
                 AND to_regclass('ami.policy_rules') IS NOT NULL
