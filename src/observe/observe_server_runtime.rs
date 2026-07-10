@@ -1,6 +1,21 @@
 use super::*;
+use crate::auto_memory_synthesizer;
 
 const IMPORT_PACKET_QUARANTINE_RESOLUTION_INTERVAL: Duration = Duration::from_secs(60);
+const MEMORY_AUTO_EXTRACT_INTERVAL: Duration = Duration::from_secs(300);
+
+pub(super) async fn persist_periodic_auto_memory_extract(cfg: &AppConfig) -> Result<()> {
+    let db = postgres::connect_admin(cfg).await?;
+    postgres::bootstrap_schema(&db, cfg).await?;
+    let summary = auto_memory_synthesizer::run_auto_extract(&db, "amai", "continuity", 25).await?;
+    if summary.created > 0 || summary.errors > 0 {
+        eprintln!(
+            "Amai auto memory extract: scanned={} created={} skipped={} errors={}",
+            summary.scanned, summary.created, summary.skipped_already_extracted, summary.errors
+        );
+    }
+    Ok(())
+}
 
 pub(super) async fn persist_periodic_client_limit_trend_analysis(cfg: &AppConfig) -> Result<()> {
     let db = postgres::connect_admin(cfg).await?;
@@ -86,6 +101,18 @@ pub(crate) async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
                     .await
             {
                 eprintln!("import packet quarantine resolution failed: {error:#}");
+            }
+        }
+    });
+    let auto_extract_cfg = cfg.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(MEMORY_AUTO_EXTRACT_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(error) = persist_periodic_auto_memory_extract(&auto_extract_cfg).await {
+                eprintln!("auto memory extract failed: {error:#}");
             }
         }
     });

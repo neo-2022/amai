@@ -274,6 +274,7 @@ pub enum MemoryCommand {
     CreateArtifactRef(ArtifactRefCreateArgs),
     GetArtifactRef(ArtifactRefGetArgs),
     GetLatestRawEvent(MemoryRawEventGetArgs),
+    AutoExtract(MemoryAutoExtractArgs),
     ListWriteOutbox(MemoryWriteOutboxListArgs),
     CreateTaskNode(TaskNodeCreateArgs),
     GetTaskNode(TaskNodeGetArgs),
@@ -490,6 +491,16 @@ pub struct ArtifactRefCreateArgs {
 pub struct ArtifactRefGetArgs {
     #[arg(long = "artifact-ref-id")]
     pub artifact_ref_id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct MemoryAutoExtractArgs {
+    #[arg(long)]
+    pub project: String,
+    #[arg(long, default_value = "continuity")]
+    pub namespace: String,
+    #[arg(long, default_value = "100")]
+    pub limit: i64,
 }
 
 #[derive(Debug, Args)]
