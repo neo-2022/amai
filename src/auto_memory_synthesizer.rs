@@ -16,11 +16,65 @@ pub struct AutoExtractBatchResult {
 }
 
 const BATCH_SIZE: i64 = 100;
+const ADVISORY_LOCK_MAGIC_INT: i64 = 0x5caff00111;
 
+fn advisory_lock_key(project_code: &str, namespace_code: &str) -> i64 {
+    // ponytail: stable FNV-1a 64-bit hash; DefaultHasher is seeded per-process.
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    let mut mix = |bytes: &[u8]| {
+        for &b in bytes {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    };
+    mix(b"amai:auto_extract:");
+    mix(project_code.as_bytes());
+    mix(b":");
+    mix(namespace_code.as_bytes());
+    hash as i64
+}
 /// Scan raw memory events and promote unprocessed ones to memory_items.
 ///
 /// ponytail: reuse existing create_memory_item pipeline; no new tables, no LLM, no manual tags.
+/// Concurrent extractors for the same scope are serialized via a Postgres advisory lock
+/// to avoid duplicate memory_items under high load.
 pub async fn run_auto_extract(
+    client: &Client,
+    project_code: &str,
+    namespace_code: &str,
+    limit: i64,
+) -> Result<AutoExtractBatchResult> {
+    let lock_key = advisory_lock_key(project_code, namespace_code);
+    let got_lock: bool = client
+        .query_one("SELECT pg_try_advisory_lock($1)", &[&lock_key])
+        .await
+        .context("failed to acquire auto-extract advisory lock")?
+        .get(0);
+    if !got_lock {
+        info!(
+            project_code,
+            namespace_code, "auto-extract skipped: another extractor is running"
+        );
+        return Ok(AutoExtractBatchResult {
+            scanned: 0,
+            created: 0,
+            skipped_already_extracted: 0,
+            errors: 0,
+        });
+    }
+
+    let result = run_auto_extract_locked(client, project_code, namespace_code, limit).await;
+
+    let _ = client
+        .query_one("SELECT pg_advisory_unlock($1)", &[&lock_key])
+        .await;
+
+    result
+}
+
+async fn run_auto_extract_locked(
     client: &Client,
     project_code: &str,
     namespace_code: &str,
@@ -78,16 +132,10 @@ pub async fn run_auto_extract(
         let event_id_str = raw_event_id.to_string();
         let source_event_ids = vec![event_id_str.clone()];
 
-        let mut composed_body = body.unwrap_or_default();
-        if !composed_body.is_empty() && summary.is_some() {
-            composed_body.push_str("\n\n");
-        }
-        if let Some(s) = &summary {
-            composed_body.push_str(s);
-        }
-        if composed_body.is_empty() {
-            composed_body = format!("auto-extracted from raw event {}", raw_event_id);
-        }
+        // ponytail: preserve raw event text; no trigger heuristics because upstream already
+        // filtered to memory_candidate_write/raw_fact.
+        let composed_body = body.unwrap_or_else(|| summary.clone().unwrap_or_default());
+        let summary_text = summary.as_deref().unwrap_or(&title);
 
         let record = MemoryItemInsert {
             source_project_code: None,
@@ -96,7 +144,7 @@ pub async fn run_auto_extract(
             item_kind: "fact",
             identity_key: None,
             title: &title,
-            summary: Some(&composed_body[..composed_body.len().min(512)]),
+            summary: Some(summary_text),
             body: Some(&composed_body),
             sensitivity_class: Some("internal"),
             truth_state: Some("raw"),
