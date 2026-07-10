@@ -1,0 +1,26 @@
+policy_version = "benchmark-contamination-policy-v1"
+heavy_cpu_threshold_percent = 50.0
+cpu_sample_window_ms = 1000
+
+parallel_verify_lanes = [
+  "load",
+  "benchmark",
+  "accuracy",
+  "memory-matrix",
+  "mcp-matrix",
+]
+
+allowed_heavy_processes = []
+
+[[client_process_reconciliation]]
+code = "vscode"
+status_probe_code = "vscode_code_status"
+status_timeout_ms = 5000
+process_comm_names = ["code"]
+exe_path_contains = ["/usr/share/code/code"]
+cmdline_contains = [
+  "/usr/share/code/code",
+  ".config/Code",
+  "vscode-webview",
+  ".vscode/extensions/",
+]
