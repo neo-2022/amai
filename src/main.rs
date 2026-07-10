@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 
 mod artifact_cleanup;
+mod auto_memory_synthesizer;
 mod benchmark_matrix;
 mod benchmark_measured_approval;
 mod benchmark_promotion;
@@ -1819,6 +1820,16 @@ async fn main() -> Result<()> {
                     let raw_event =
                         postgres::get_latest_memory_raw_event_for_item(&db, memory_item_id).await?;
                     println!("{}", serde_json::to_string(&raw_event)?);
+                }
+                MemoryCommand::AutoExtract(args) => {
+                    let result = auto_memory_synthesizer::run_auto_extract(
+                        &db,
+                        &args.project,
+                        &args.namespace,
+                        args.limit,
+                    )
+                    .await?;
+                    println!("{}", serde_json::to_string(&result)?);
                 }
                 MemoryCommand::ListWriteOutbox(args) => {
                     let memory_item_id =
