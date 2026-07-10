@@ -1,0 +1,16 @@
+policy_version = "observability-compare-policy-v1"
+public_compare_scan_limit = 25
+
+[memory_task_matrix_public]
+snapshot_kind = "memory_task_matrix"
+payload_root = "memory_task_matrix"
+project_code = "amai"
+matrix = "letta_memory_local"
+source_kind = "memory_task_matrix_run"
+
+[mcp_task_matrix_public]
+snapshot_kind = "mcp_task_matrix"
+payload_root = "mcp_task_matrix"
+project_code = "amai"
+matrix = "live_mcpbench_local"
+source_kind = "mcp_task_matrix_run"
