@@ -38,6 +38,7 @@ scripts/disconnect_local.sh
 scripts/run_mcp_stdio.sh
 scripts/continuity_handoff.sh
 scripts/run_stack_service.sh
+scripts/proof_*.sh
 scripts/install_stack_autostart.sh
 scripts/remove_stack_autostart.sh
 
