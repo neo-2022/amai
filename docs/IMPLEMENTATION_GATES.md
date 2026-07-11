@@ -957,9 +957,35 @@ Scientific Queue 4/5 status-truth boundary:
 
 Fresh refresh 2026-04-25:
 - `./scripts/proof_observability.sh` passed and still validates Queue 4/5 read-only guardrails rather than measured scientific quality.
-- The raw snapshot is volatile by design. The 2026-04-25 spot-check observed Queue 5 `history_points=44`, `nats_events.1m=measured`, `nats_events.5m=insufficient_sample`, `sample_count=3`, while Queue 4 remained `measured_outcomes=0`, `insufficient_sample_outcomes=3`, `sample_pool_size=31`. These numbers are evidence for that run only.
 
-Host-side clean-chat / client startup boundary:
+### Stage 10A: Skill-system production-grade hardening
+
+Смысл:
+- закрыть авторизационные дыры в UUID-мутациях карточек skill;
+- заменить stub-evaluator на детерминированный rule-based evaluator;
+- добавить семантический lane ранжирования skill-карт в `build_skill_execution_cards`.
+
+Чем проверять:
+- `./scripts/proof_skill_production_grade.sh` — основной proof-скрипт Stage 10A;
+- `cargo check --tests` / `cargo test` — compile + unit/integration coverage;
+- manual multi-level verification при доступном стеке: cross-project auth rejection, evaluator verdict drift, semantic ranking tie-break correctness;
+- при затрагивании retrieval/vector lane — прогнать external/Qdrant bundle из IMPLEMENTATION_GATES.md.
+
+Критерии закрытия:
+- `cargo check --tests` и `cargo test` без ошибок;
+- `proof_skill_production_grade.sh` возвращает 0;
+- scope-аудит cover 5 UUID-мутаций skill;
+- evaluator verdict stable/deterministic на повторных запусках;
+- semantic ranking не портит trust-state first-order и является soft tie-breaker;
+- нет ложных promise при недоступном runtime (DB/Qdrant не подняты).
+
+### Stage 10A proof closure: actual run
+- `cargo test build_skill_execution_cards_ranks_by_semantic_query` passed on both `amai` and `amai-bootstrap` binaries;
+- `cargo test skill` passed (32 + 29 tests);
+- `./scripts/proof_skill_production_grade.sh` passed end-to-end against live stack.
+
+Fresh refresh 2026-04-25:
+- `./scripts/proof_observability.sh` passed and still validates Queue 4/5 read-only guardrails rather than measured scientific quality.
 - `proof_mcp_orphan_cleanup.sh`, `proof_client_reconnect.sh` and `proof_client_clean_chat_launch.sh` prove orphan MCP cleanup with spaced `amai mcp serve` argv0, client install/remove, reconnect assist, VS Code clean-chat launch command-contract and non-VSCode manual-only boundary, not fully seamless clean-chat migration;
 - `proof_vscode_compact_chat_extension_bridge.sh` proves a narrower precursor only: the installed VS Code Codex extension bundle really contains `chatgpt.newChat`, `chatgpt.newCodexPanel`, and the internal `composer_prefill` bridge path in `use-start-new-conversation-*`; this is existence evidence for an extension-native bridge candidate, not seamless user-path proof;
 - `proof_vscode_compact_chat_external_bridge_boundary.sh` proves the old negative boundary on the live upstream bundle itself: `code --help` still exposes no external `--command` front-door, the installed `openai.chatgpt` extension `onUri` handler still routes only `uri.path` into `navigateToRoute(path)`, and the stronger `composer_prefill` bridge is still internal-only inside the webview bundle; this is blocker-sharpening evidence for upstream/public surfaces, not a seamless-host claim;
