@@ -37,6 +37,8 @@ scripts/onboard_local.sh
 scripts/disconnect_local.sh
 scripts/run_mcp_stdio.sh
 scripts/continuity_handoff.sh
+scripts/continuity_compact_chat.sh
+scripts/verify_vscode_compact_chat_public_bridge_live.sh
 scripts/run_stack_service.sh
 scripts/proof_*.sh
 scripts/install_stack_autostart.sh
@@ -49,6 +51,7 @@ vendor/**
 
 tools/vscode-amai-bridge/**
 docs/MCP_INTEGRATION.md
+docs/OPERATIONS.md
 docs/AGENT_START_HERE.md
 docs/IMPLEMENTATION_STATUS.md
 docs/IMPLEMENTATION_GATES.md
