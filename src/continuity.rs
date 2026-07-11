@@ -2172,7 +2172,7 @@ fn authoritative_execctl_resume_state_value(node: &Value) -> Option<Value> {
         .map(Value::String)
 }
 
-fn compact_compact_chat_chat_start_restore(node: &Value) -> Value {
+fn compact_chat_chat_start_restore(node: &Value) -> Value {
     if !node.is_object() {
         return Value::Null;
     }
@@ -2219,7 +2219,7 @@ fn compact_compact_chat_chat_start_restore(node: &Value) -> Value {
     Value::Object(compact)
 }
 
-fn compact_compact_chat_host_current_thread_control(surface: &Value) -> Value {
+fn compact_chat_host_current_thread_control(surface: &Value) -> Value {
     if !surface.is_object() {
         return Value::Null;
     }
@@ -2243,7 +2243,7 @@ fn compact_compact_chat_host_current_thread_control(surface: &Value) -> Value {
     Value::Object(compact)
 }
 
-fn compact_compact_chat_handoff(handoff: &Value) -> Value {
+fn compact_chat_handoff(handoff: &Value) -> Value {
     if !handoff.is_object() {
         return Value::Null;
     }
@@ -3544,10 +3544,10 @@ pub async fn compact_chat_payload(
     let compact_client_budget_guard =
         compact_startup_runtime_client_budget_guard(&client_budget_guard);
     let compact_chat_start_restore =
-        compact_compact_chat_chat_start_restore(&startup_payload["chat_start_restore"]);
+        compact_chat_chat_start_restore(&startup_payload["chat_start_restore"]);
     let compact_host_current_thread_control =
-        compact_compact_chat_host_current_thread_control(&host_current_thread_control);
-    let compact_handoff = compact_compact_chat_handoff(&handoff_summary);
+        compact_chat_host_current_thread_control(&host_current_thread_control);
+    let compact_handoff = compact_chat_handoff(&handoff_summary);
     let compact_client_surface = compact_client_surface_for_compact_chat(&client_surface);
     let startup_command = shell_join_command(&[
         "amai",
@@ -3712,7 +3712,7 @@ fn compact_chat_payload_from_runtime_artifact(
             thread_id_hint.or(current_thread_id.as_deref()),
         );
     let compact_host_current_thread_control =
-        compact_compact_chat_host_current_thread_control(&host_current_thread_control);
+        compact_chat_host_current_thread_control(&host_current_thread_control);
     let compact_client_surface = compact_client_surface_for_compact_chat(&client_surface);
     let repo_root_string = repo_root.display().to_string();
     let startup_command = project_code.as_deref().and_then(|project_code| {
@@ -3757,9 +3757,9 @@ fn compact_chat_payload_from_runtime_artifact(
         &mut compact_chat,
         &json!({
             "client_budget_guard": artifact["client_budget_guard"].clone(),
-            "handoff": compact_compact_chat_handoff(&handoff_summary),
-            "chat_start_restore": compact_compact_chat_chat_start_restore(&artifact["chat_start_restore"]),
-            "delivery_surface_restore": compact_compact_chat_chat_start_restore(&artifact["chat_start_restore"]),
+            "handoff": compact_chat_handoff(&handoff_summary),
+            "chat_start_restore": compact_chat_chat_start_restore(&artifact["chat_start_restore"]),
+            "delivery_surface_restore": compact_chat_chat_start_restore(&artifact["chat_start_restore"]),
             "startup_execution_gate": artifact["startup_execution_gate"].clone(),
             "startup_next_action": artifact["startup_next_action"].clone(),
             "required_return_task": artifact["required_return_task"].clone(),
@@ -11585,7 +11585,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_compact_chat_chat_start_restore_keeps_multi_line_obligations() {
+    fn compact_chat_chat_start_restore_keeps_multi_line_obligations() {
         let node = json!({
             "headline": "Current active line",
             "next_step": "Finish the continuity rebase",
@@ -11638,7 +11638,7 @@ mod tests {
             }
         });
 
-        let compact = super::compact_compact_chat_chat_start_restore(&node);
+        let compact = super::compact_chat_chat_start_restore(&node);
 
         assert_eq!(compact["execctl_resume_state"], json!("return_required"));
         assert_eq!(
@@ -11844,7 +11844,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_compact_chat_chat_start_restore_bounds_pending_return_queue_preview() {
+    fn compact_chat_chat_start_restore_bounds_pending_return_queue_preview() {
         let node = json!({
             "headline": "Current active line",
             "next_step": "Finish the continuity rebase",
@@ -11912,7 +11912,7 @@ mod tests {
             ]
         });
 
-        let compact = super::compact_compact_chat_chat_start_restore(&node);
+        let compact = super::compact_chat_chat_start_restore(&node);
         let queue = compact["pending_return_queue"]
             .as_array()
             .expect("pending return queue preview");
