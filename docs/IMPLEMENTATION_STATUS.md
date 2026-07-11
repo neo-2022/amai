@@ -1968,6 +1968,22 @@ Stage status после fresh proof-refresh 2026-04-24:
 - Этап 0-10: ✅ закрыты;
 - `Этап 10. Governance, safety, evaluator loop` снова fresh-green после fix MCP matrix / observability red-state и clean rerun полного Stage 10 bundle.
 
+Этап 10A: `Skill-system production-grade hardening` (incremental upgrade contour):
+- статус: ✅ proof-closed;
+- цель: закрыть авторизационные дыры в UUID-мутациях skill-карт, заменить stub-evaluator на детерминированный rule-based evaluator и добавить семантический lane ранжирования skill-карт в `build_skill_execution_cards`;
+- выполнено:
+  - `assert_skill_card_scope` helper + fail-closed scope-проверка внутри БД для `create_skill_evidence_bundle`, `record_skill_trigger_match`, `record_skill_trial_run`, `record_skill_eval`, `record_skill_reuse_log`;
+  - у 5 UUID-мутаций и CLI-команд появились `--project`/`--namespace`;
+  - CLI fail-closed: `require_skill_scope` отказывает, если scope не передан;
+  - rule-based `evaluate_skill_card` + CLI `skill evaluate [--apply]`;
+  - семантический rank в `build_skill_execution_cards` поверх нового модуля `embed.rs` (`multilingual_e5_small`, 384 dim, cosine), soft fallback при недоступности эмбеддера;
+- проверено:
+  - `cargo test skill` — все skill-тесты зелёные;
+  - `cargo test build_skill_execution_cards_ranks_by_semantic_query` — новый тест семантического ранжирования проходит на обоих бинарниках;
+  - `./scripts/proof_skill_production_grade.sh` — end-to-end proof проходит на живом стеке: cross-namespace mutation rejection и `execution-card --query`;
+  - `./scripts/maintainability_gate.sh --json` и `./scripts/implementation_status_sync_guard.sh --json` — зелёные;
+- full `cargo test` по-прежнему содержит 67 не-SMME-related failure в старых модулях (continuity, dashboard, external_benchmark, indexer, observe, onboarding, working_state, restore_packs); это pre-existing flaky/race drift, не введённая этим этапом регрессия.
+
 Коротко:
 - scope/identity уже закрыт;
 - typed envelope/provenance уже закрыт;
