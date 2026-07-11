@@ -288,11 +288,6 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 continuity::client_budget_target(&cfg, &args).await?;
             }
-            ContinuityCommand::CompactChat(args) => {
-                let cfg = config::AppConfig::from_env()?;
-                compatibility::assert_supported(&cfg).await?;
-                continuity::compact_chat(&cfg, &args).await?;
-            }
             ContinuityCommand::RotateChat(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;

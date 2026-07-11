@@ -1138,23 +1138,6 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP startup contract lost live_client_budget_enforcement target-control allowed target values"
         ));
     }
-    let compact_chat_control =
-        &startup_contract["live_client_budget_enforcement"]["compact_chat_control"];
-    if compact_chat_control["exact_chat_command"].as_str()
-        != Some(continuity::CLIENT_BUDGET_COMPACT_CHAT_COMMAND)
-        || compact_chat_control["cli_command"].as_str() != Some("continuity compact-chat")
-        || compact_chat_control["namespace_argument"].as_str() != Some("--namespace")
-        || compact_chat_control["repo_root_argument_required"].as_bool() != Some(true)
-        || compact_chat_control["switch_immediately_on_exact_chat_command"].as_bool() != Some(true)
-        || compact_chat_control["reply_with_confirmation_after_prepare"].as_bool() != Some(true)
-        || compact_chat_control["prompt_text_required_for_rebase"].as_bool() != Some(true)
-        || compact_chat_control["required_host_action"].as_str()
-            != Some("open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable")
-    {
-        return Err(anyhow!(
-            "MCP startup contract lost live_client_budget_enforcement compact-chat control semantics"
-        ));
-    }
 
     let tools = session.request("tools/list", json!({})).await?;
     let tool_names = tools["tools"]
@@ -4941,17 +4924,6 @@ fn protocol_manifest() -> Value {
                         "repo_root_argument_required": true,
                         "switch_immediately_on_exact_chat_command": true,
                         "reply_with_confirmation_after_switch": true
-                    },
-                    "compact_chat_control": {
-                        "exact_chat_command": continuity::CLIENT_BUDGET_COMPACT_CHAT_COMMAND,
-                        "cli_command": "continuity compact-chat",
-                        "shell_command": "./scripts/continuity_compact_chat.sh",
-                        "namespace_argument": "--namespace",
-                        "repo_root_argument_required": true,
-                        "switch_immediately_on_exact_chat_command": true,
-                        "reply_with_confirmation_after_prepare": true,
-                        "prompt_text_required_for_rebase": true,
-                        "required_host_action": "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable"
                     }
                 },
                 "required_summary_fields": [
@@ -10391,24 +10363,6 @@ mod tests {
                 ["target_control"]["cli_command"]
                 .as_str(),
             Some("continuity client-budget-target")
-        );
-        assert_eq!(
-            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
-                ["compact_chat_control"]["exact_chat_command"]
-                .as_str(),
-            Some(continuity::CLIENT_BUDGET_COMPACT_CHAT_COMMAND)
-        );
-        assert_eq!(
-            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
-                ["compact_chat_control"]["cli_command"]
-                .as_str(),
-            Some("continuity compact-chat")
-        );
-        assert_eq!(
-            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
-                ["compact_chat_control"]["required_host_action"]
-                .as_str(),
-            Some("open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable")
         );
         assert_eq!(
             manifest["error_contracts"]["tool_execution_failed"]["error_class"].as_str(),

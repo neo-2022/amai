@@ -925,9 +925,6 @@ pub(super) fn client_budget_target_chat_command(target_percent: u64) -> String {
     format!("экономия_{target_percent}%")
 }
 
-pub(super) fn client_budget_compact_chat_command() -> &'static str {
-    continuity::CLIENT_BUDGET_COMPACT_CHAT_COMMAND
-}
 
 pub(super) fn global_client_limit_source(client_live_meter: &Value) -> Option<Value> {
     if preferred_client_limit_meter_is_exact(client_live_meter)
@@ -1714,109 +1711,11 @@ pub(super) fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<
     ))
 }
 
-fn compact_chat_selector_repo_root(restore_context: &Value) -> Option<PathBuf> {
-    restore_context["project"]["repo_root"]
-        .as_str()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| config::discover_repo_root(None).ok())
-}
 
-pub(super) fn compact_chat_selector_client_surface(restore_context: &Value) -> Value {
-    let repo_root = compact_chat_selector_repo_root(restore_context);
-    if let Some(repo_root) = repo_root {
-        onboarding::describe_client_surface(repo_root.as_path(), None).unwrap_or_else(|_| {
-            json!({
-                "client_key": "unknown",
-                "display_name": "Unknown client",
-                "startup_instruction_path": Value::Null,
-                "startup_instruction_mode": Value::Null,
-                "reconnect_shell_command": Value::Null,
-                "reconnect_bootstrap_command": Value::Null,
-                "fresh_chat_assist_summary": Value::Null,
-                "delivery_surface_assist_summary": Value::Null,
-            })
-        })
-    } else {
-        json!({
-            "client_key": "unknown",
-            "display_name": "Unknown client",
-            "startup_instruction_path": Value::Null,
-            "startup_instruction_mode": Value::Null,
-            "reconnect_shell_command": Value::Null,
-            "reconnect_bootstrap_command": Value::Null,
-            "fresh_chat_assist_summary": Value::Null,
-            "delivery_surface_assist_summary": Value::Null,
-        })
-    }
-}
 
-fn compact_chat_selector_prompt_path(restore_context: &Value) -> Option<PathBuf> {
-    let repo_root = compact_chat_selector_repo_root(restore_context)?;
-    let prompt_path = repo_root.join(".amai/continuity/compact-chat-prompt.txt");
-    if prompt_path.is_file() {
-        Some(prompt_path)
-    } else {
-        None
-    }
-}
 
-fn compact_chat_selector_prompt_file(restore_context: &Value) -> Option<String> {
-    compact_chat_selector_prompt_path(restore_context).map(|path| path.display().to_string())
-}
 
-fn compact_chat_selector_clean_launch_surface(
-    restore_context: &Value,
-    client_surface: &Value,
-) -> Value {
-    let Some(repo_root) = compact_chat_selector_repo_root(restore_context) else {
-        return json!({
-            "status": "bridge_unavailable",
-            "supported_auto_launch": false,
-            "command_kind": Value::Null,
-            "unavailable_reason": "repo_root_unavailable",
-            "ux_verdict": "not_seamless_until_live_client_proof",
-        });
-    };
-    crate::continuity::compact_chat_clean_launch_surface(
-        client_surface,
-        repo_root.as_path(),
-        compact_chat_selector_prompt_path(restore_context).as_deref(),
-    )
-}
 
-fn compact_chat_selector_manual_note(client_surface: &Value) -> Option<String> {
-    let mut note = "Если automatic clean-surface launch недоступен, открой новую чистую рабочую поверхность и вставь prompt_text вручную.".to_string();
-    if let Some(display_name) = client_surface["display_name"]
-        .as_str()
-        .filter(|value| !value.is_empty())
-    {
-        note.push_str(&format!(" Клиент: {display_name}."));
-    }
-    if let Some(summary) = client_surface["delivery_surface_assist_summary"]
-        .as_str()
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            client_surface["fresh_chat_assist_summary"]
-                .as_str()
-                .filter(|value| !value.is_empty())
-        })
-    {
-        note.push(' ');
-        note.push_str(summary);
-    }
-    if let Some(path) = client_surface["startup_instruction_path"]
-        .as_str()
-        .filter(|value| !value.is_empty())
-    {
-        let mode = client_surface["startup_instruction_mode"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .unwrap_or("unknown");
-        note.push_str(&format!(" Startup surface: {path} ({mode})."));
-    }
-    Some(note)
-}
 
 pub(super) fn client_limit_hourly_burn_metric_row(
     hourly_burn: &Value,
@@ -1915,12 +1814,6 @@ pub(super) fn client_limit_hourly_burn_metric_row(
                 host_current_thread_control["feedback_ack_intro"]
                     .as_str()
                     .unwrap_or("После попытки запуска отметь исход same-thread host control.");
-            let compact_chat_client_surface = compact_chat_selector_client_surface(restore_context);
-            let compact_chat_prompt_file = compact_chat_selector_prompt_file(restore_context);
-            let compact_chat_prompt_file_value = compact_chat_prompt_file
-                .as_deref()
-                .map(Value::from)
-                .unwrap_or(Value::Null);
             let actual_remaining_percent = hourly_burn["actual_remaining_percent"].as_f64();
             let ideal_remaining_percent = hourly_burn["ideal_remaining_percent"].as_f64();
             let projected_reset_delta_minutes =
@@ -1974,10 +1867,6 @@ pub(super) fn client_limit_hourly_burn_metric_row(
             );
             if let Some(root) = row.as_object_mut() {
                 if let Some((value_prefix, value_suffix)) = selector_value_parts {
-                    let compact_chat_clean_launch = compact_chat_selector_clean_launch_surface(
-                        restore_context,
-                        &compact_chat_client_surface,
-                    );
                     root.insert(
                         "target_selector".to_string(),
                         json!({
@@ -1993,47 +1882,6 @@ pub(super) fn client_limit_hourly_burn_metric_row(
                                 "Целевой режим клиентской экономии сейчас = {}%. Можно переключить его прямо отсюда.",
                                 client_budget_target_percent
                             ),
-                            "compact_chat_command": client_budget_compact_chat_command(),
-                            "compact_chat_button_label": "Compact chat",
-                            "compact_chat_intro": "Подготовить startup restore пакет для переноса рабочей линии на новую clean work surface.",
-                            "compact_chat_required_host_action":
-                                "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable",
-                            "compact_chat_prompt_file": compact_chat_prompt_file_value,
-                            "compact_chat_note":
-                                compact_chat_selector_manual_note(&compact_chat_client_surface),
-                            "compact_chat_client_surface": compact_chat_client_surface.clone(),
-                            "compact_chat_client_display_name":
-                                compact_chat_client_surface["display_name"].clone(),
-                            "compact_chat_assist_summary":
-                                compact_chat_client_surface["fresh_chat_assist_summary"].clone(),
-                            "compact_chat_delivery_surface_assist_summary":
-                                compact_chat_client_surface["delivery_surface_assist_summary"].clone(),
-                            "compact_chat_manual_fallback_steps":
-                                crate::continuity::compact_chat_manual_fallback_steps(
-                                    &compact_chat_client_surface,
-                                ),
-                            "compact_chat_launch_status":
-                                compact_chat_clean_launch["status"].clone(),
-                            "compact_chat_launch_supported_auto":
-                                compact_chat_clean_launch["supported_auto_launch"].clone(),
-                            "compact_chat_launch_command_kind":
-                                compact_chat_clean_launch["command_kind"].clone(),
-                            "compact_chat_launch_command":
-                                compact_chat_clean_launch["launch_clean_chat_command"].clone(),
-                            "compact_chat_launch_fallback_command":
-                                compact_chat_clean_launch["launch_clean_chat_fallback_command"].clone(),
-                            "compact_chat_launch_unavailable_reason":
-                                compact_chat_clean_launch["unavailable_reason"].clone(),
-                            "compact_chat_launch_ux_verdict":
-                                compact_chat_clean_launch["ux_verdict"].clone(),
-                            "compact_chat_startup_instruction_path":
-                                compact_chat_client_surface["startup_instruction_path"].clone(),
-                            "compact_chat_startup_instruction_mode":
-                                compact_chat_client_surface["startup_instruction_mode"].clone(),
-                            "compact_chat_reconnect_shell_command":
-                                compact_chat_client_surface["reconnect_shell_command"].clone(),
-                            "compact_chat_reconnect_bootstrap_command":
-                                compact_chat_client_surface["reconnect_bootstrap_command"].clone(),
                             "host_current_thread_control": host_current_thread_control.clone(),
                             "host_current_thread_control_button_label":
                                 host_current_thread_control_button_label,
@@ -3683,111 +3531,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn client_limit_hourly_burn_row_embeds_compact_chat_client_surface_assist() {
-        let row = super::client_limit_hourly_burn_metric_row(
-            &json!({
-                "status": "observed",
-                "classification": "saving",
-                "reply_prefix": "Burn guard: экономия 50.00%",
-                "projected_primary_used_per_hour_percent": 10.0,
-                "kpi_percent": 50.0,
-                "remaining_window_minutes": 30.0,
-                "actual_remaining_percent": 75.0,
-                "ideal_remaining_percent": 50.0,
-                "latest_observed_at_epoch_ms": 2000,
-                "projected_reset_delta_minutes": 30.0
-            }),
-            50,
-            &json!({
-                "project": {
-                    "repo_root": env!("CARGO_MANIFEST_DIR")
-                }
-            }),
-            &json!({
-                "thread_id": "thread-current",
-                "ended_at_epoch_ms": 6000,
-                "client_turn_total_tokens": 15000,
-                "context_used_percent": 5.8,
-                "primary_limit_used_percent": 24
-            }),
-            &json!({
-                "stage": "preserve",
-                "growth_since_compaction_tokens": 4800
-            }),
-            &working_state::build_host_current_thread_control_surface_for_thread_and_stage(
-                Some("thread-current"),
-                working_state::HostContextCompactionStage::Preserve,
-            ),
-        )
-        .expect("hourly burn row");
-        assert_eq!(
-            row["target_selector"]["compact_chat_required_host_action"],
-            json!("open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable")
-        );
-        assert!(
-            row["target_selector"]["compact_chat_note"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("clean")
-        );
-        assert!(
-            row["target_selector"]["compact_chat_assist_summary"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("./scripts/reconnect_local.sh --client")
-        );
-        assert_eq!(
-            row["target_selector"]["compact_chat_delivery_surface_assist_summary"],
-            row["target_selector"]["compact_chat_assist_summary"]
-        );
-        assert!(
-            row["target_selector"]["compact_chat_manual_fallback_steps"]
-                .as_array()
-                .and_then(|steps| steps.first())
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .contains("новую чистую рабочую поверхность")
-        );
-        assert!(
-            row["target_selector"]["compact_chat_launch_status"]
-                .as_str()
-                .is_some_and(|value| {
-                    [
-                        "manual_only",
-                        "bridge_unavailable",
-                        "launch_command_available",
-                    ]
-                    .contains(&value)
-                })
-        );
-        assert_eq!(
-            row["target_selector"]["compact_chat_launch_ux_verdict"],
-            json!("not_seamless_until_live_client_proof")
-        );
-        assert!(
-            row["target_selector"]["compact_chat_reconnect_bootstrap_command"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("./scripts/amai_exec.sh bootstrap reconnect --client")
-        );
-    }
 
-    #[test]
-    fn compact_chat_selector_client_surface_falls_back_to_discovered_repo_root() {
-        let surface = super::compact_chat_selector_client_surface(&json!({}));
-        assert!(
-            surface["display_name"]
-                .as_str()
-                .is_some_and(|value| !value.trim().is_empty())
-        );
-        assert!(
-            surface["reconnect_shell_command"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("./scripts/reconnect_local.sh --client")
-        );
-    }
 
     #[test]
     fn host_current_thread_control_effect_recommends_rotate_fallback_after_failed_compact_window() {

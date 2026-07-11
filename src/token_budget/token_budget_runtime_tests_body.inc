@@ -677,10 +677,6 @@ fn traffic_class_comes_from_source_kind_prefix() {
     assert_eq!(derive_traffic_class("live_context_pack"), "live");
     assert_eq!(derive_traffic_class("operator_continuity_startup"), "live");
     assert_eq!(
-        derive_traffic_class("operator_continuity_compact_chat"),
-        "live"
-    );
-    assert_eq!(
         derive_traffic_class("operator_client_budget_target"),
         "live"
     );

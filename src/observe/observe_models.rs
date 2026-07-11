@@ -22,18 +22,6 @@ pub(super) struct ClientBudgetTargetUpdateRequest {
     pub(super) namespace: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub(super) struct ClientBudgetCompactChatRequest {
-    #[serde(default)]
-    pub(super) project: Option<String>,
-    #[serde(default = "default_continuity_namespace")]
-    pub(super) namespace: String,
-    #[serde(default)]
-    pub(super) launch_host: bool,
-    #[serde(default)]
-    pub(super) refresh_handoff: bool,
-}
-
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(super) struct RemediationBundlesQuery {
     #[serde(default)]

@@ -152,7 +152,6 @@ pub enum ContinuityCommand {
     Answer(ContinuityAnswerArgs),
     Handoff(ContinuityHandoffArgs),
     ClientBudgetTarget(ContinuityClientBudgetTargetArgs),
-    CompactChat(ContinuityCompactChatArgs),
     RotateChat(ContinuityRotateChatArgs),
 }
 
@@ -1252,30 +1251,6 @@ pub struct ContinuityClientBudgetTargetArgs {
     pub namespace: String,
     #[arg(long)]
     pub percent: u64,
-    #[arg(long, default_value_t = false)]
-    pub json: bool,
-}
-
-#[derive(Debug, Clone, Args)]
-pub struct ContinuityCompactChatArgs {
-    #[arg(long)]
-    pub project: Option<String>,
-    #[arg(long)]
-    pub repo_root: Option<PathBuf>,
-    #[arg(long, default_value = "continuity")]
-    pub namespace: String,
-    #[arg(long)]
-    pub headline: Option<String>,
-    #[arg(long = "next-step")]
-    pub next_step: Option<String>,
-    #[arg(long)]
-    pub details_file: Option<PathBuf>,
-    #[arg(long, default_value_t = false)]
-    pub launch_host: bool,
-    #[arg(long, default_value_t = false)]
-    pub runtime_fallback: bool,
-    #[arg(long, default_value_t = false)]
-    pub skip_handoff: bool,
     #[arg(long, default_value_t = false)]
     pub json: bool,
 }

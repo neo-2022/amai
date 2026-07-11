@@ -4433,45 +4433,6 @@ fn render_startup_instruction_body(
             .as_bool()
             .unwrap_or(true);
     let client_budget_target_example_command = continuity::client_budget_target_chat_command(50);
-    let client_budget_compact_chat_control = &client_budget_enforcement["compact_chat_control"];
-    let client_budget_compact_chat_exact_command =
-        client_budget_compact_chat_control["exact_chat_command"]
-            .as_str()
-            .unwrap_or(continuity::CLIENT_BUDGET_COMPACT_CHAT_COMMAND);
-    let client_budget_compact_chat_cli_command = client_budget_compact_chat_control["cli_command"]
-        .as_str()
-        .unwrap_or("continuity compact-chat");
-    let client_budget_compact_chat_shell_command =
-        client_budget_compact_chat_control["shell_command"]
-            .as_str()
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("cargo run -- {client_budget_compact_chat_cli_command}"));
-    let client_budget_compact_chat_namespace_argument =
-        client_budget_compact_chat_control["namespace_argument"]
-            .as_str()
-            .unwrap_or("--namespace");
-    let client_budget_compact_chat_repo_root_argument_required = client_budget_compact_chat_control
-        ["repo_root_argument_required"]
-        .as_bool()
-        .unwrap_or(true);
-    let client_budget_compact_chat_switch_immediately =
-        client_budget_compact_chat_control["switch_immediately_on_exact_chat_command"]
-            .as_bool()
-            .unwrap_or(true);
-    let client_budget_compact_chat_reply_with_confirmation =
-        client_budget_compact_chat_control["reply_with_confirmation_after_prepare"]
-            .as_bool()
-            .unwrap_or(true);
-    let client_budget_compact_chat_prompt_text_required =
-        client_budget_compact_chat_control["prompt_text_required_for_rebase"]
-            .as_bool()
-            .unwrap_or(true);
-    let client_budget_compact_chat_required_host_action =
-        client_budget_compact_chat_control["required_host_action"]
-            .as_str()
-            .unwrap_or(
-                "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable",
-            );
     let client_budget_max_guard_age_seconds_text = client_budget_max_guard_age_seconds.to_string();
     let client_budget_stale_guard_requires_refresh_text =
         if client_budget_stale_guard_requires_refresh {
@@ -4726,11 +4687,11 @@ fn render_startup_instruction_body(
         && client_budget_output_prefix_enforcement_mode == "disabled_by_project_policy"
     {
         format!(
-            "7. Gate version pinned: `{client_budget_reply_execution_gate_version}`. Поле `{client_budget_reply_execution_gate_field}.{client_budget_reply_prefix_field}` может по-прежнему materialize-иться для диагностики, но начинать user-visible reply с KPI-prefix больше не требуется и fail-closed preflight по нему отключён. Если `{client_budget_reply_budget_mode_field} == \"{client_budget_compact_reply_mode_value}\"`, отвечай по `{client_budget_reply_budget_contract_field}` с `contract_version = \"{client_budget_compact_reply_contract_version}\"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing. Target switch: matching `{client_budget_target_command_pattern}` -> `{client_budget_target_shell_command} --repo-root \"{repo_root_display}\" {client_budget_target_namespace_argument} \"{namespace}\" {client_budget_target_percent_argument} N` (`repo_root_argument_required = {client_budget_target_repo_root_argument_required_text}`, `switch_immediately_on_exact_chat_command = {client_budget_target_switch_immediately_text}`, `reply_with_confirmation_after_switch = {client_budget_target_reply_with_confirmation_text}`). Пример exact chat-команды: `{client_budget_target_example_command}`. Huge-chat rebase: точную команду `{client_budget_compact_chat_exact_command}` обработай через `{client_budget_compact_chat_shell_command} --repo-root \"{repo_root_display}\" {client_budget_compact_chat_namespace_argument} \"{namespace}\" --json` (`repo_root_argument_required = {client_budget_compact_chat_repo_root_argument_required}`, `switch_immediately_on_exact_chat_command = {client_budget_compact_chat_switch_immediately}`, `reply_with_confirmation_after_prepare = {client_budget_compact_chat_reply_with_confirmation}`, `prompt_text_required_for_rebase = {client_budget_compact_chat_prompt_text_required}`), верни `prompt_text` и `operator_notice`, требуй host action `{client_budget_compact_chat_required_host_action}`."
+            "7. Gate version pinned: `{client_budget_reply_execution_gate_version}`. Поле `{client_budget_reply_execution_gate_field}.{client_budget_reply_prefix_field}` может по-прежнему materialize-иться для диагностики, но начинать user-visible reply с KPI-prefix больше не требуется и fail-closed preflight по нему отключён. Если `{client_budget_reply_budget_mode_field} == \"{client_budget_compact_reply_mode_value}\"`, отвечай по `{client_budget_reply_budget_contract_field}` с `contract_version = \"{client_budget_compact_reply_contract_version}\"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing. Target switch: matching `{client_budget_target_command_pattern}` -> `{client_budget_target_shell_command} --repo-root \"{repo_root_display}\" {client_budget_target_namespace_argument} \"{namespace}\" {client_budget_target_percent_argument} N` (`repo_root_argument_required = {client_budget_target_repo_root_argument_required_text}`, `switch_immediately_on_exact_chat_command = {client_budget_target_switch_immediately_text}`, `reply_with_confirmation_after_switch = {client_budget_target_reply_with_confirmation_text}`). Пример exact chat-команды: `{client_budget_target_example_command}`."
         )
     } else {
         format!(
-            "7. Gate version pinned: `{client_budget_reply_execution_gate_version}`. Начинать user-visible reply можно только если `{client_budget_reply_execution_gate_field}.{client_budget_reply_prefix_field}` не пустой и источник равен `{client_budget_required_reply_prefix_source}`; иначе сначала нужен `{client_budget_reply_prefix_enforcement_flag}`. Если `{client_budget_reply_budget_mode_field} == \"{client_budget_compact_reply_mode_value}\"`, отвечай по `{client_budget_reply_budget_contract_field}` с `contract_version = \"{client_budget_compact_reply_contract_version}\"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing. Target switch: matching `{client_budget_target_command_pattern}` -> `{client_budget_target_shell_command} --repo-root \"{repo_root_display}\" {client_budget_target_namespace_argument} \"{namespace}\" {client_budget_target_percent_argument} N` (`repo_root_argument_required = {client_budget_target_repo_root_argument_required_text}`, `switch_immediately_on_exact_chat_command = {client_budget_target_switch_immediately_text}`, `reply_with_confirmation_after_switch = {client_budget_target_reply_with_confirmation_text}`). Пример exact chat-команды: `{client_budget_target_example_command}`. Huge-chat rebase: точную команду `{client_budget_compact_chat_exact_command}` обработай через `{client_budget_compact_chat_shell_command} --repo-root \"{repo_root_display}\" {client_budget_compact_chat_namespace_argument} \"{namespace}\" --json` (`repo_root_argument_required = {client_budget_compact_chat_repo_root_argument_required}`, `switch_immediately_on_exact_chat_command = {client_budget_compact_chat_switch_immediately}`, `reply_with_confirmation_after_prepare = {client_budget_compact_chat_reply_with_confirmation}`, `prompt_text_required_for_rebase = {client_budget_compact_chat_prompt_text_required}`), верни `prompt_text` и `operator_notice`, требуй host action `{client_budget_compact_chat_required_host_action}`."
+            "7. Gate version pinned: `{client_budget_reply_execution_gate_version}`. Начинать user-visible reply можно только если `{client_budget_reply_execution_gate_field}.{client_budget_reply_prefix_field}` не пустой и источник равен `{client_budget_required_reply_prefix_source}`; иначе сначала нужен `{client_budget_reply_prefix_enforcement_flag}`. Если `{client_budget_reply_budget_mode_field} == \"{client_budget_compact_reply_mode_value}\"`, отвечай по `{client_budget_reply_budget_contract_field}` с `contract_version = \"{client_budget_compact_reply_contract_version}\"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing. Target switch: matching `{client_budget_target_command_pattern}` -> `{client_budget_target_shell_command} --repo-root \"{repo_root_display}\" {client_budget_target_namespace_argument} \"{namespace}\" {client_budget_target_percent_argument} N` (`repo_root_argument_required = {client_budget_target_repo_root_argument_required_text}`, `switch_immediately_on_exact_chat_command = {client_budget_target_switch_immediately_text}`, `reply_with_confirmation_after_switch = {client_budget_target_reply_with_confirmation_text}`). Пример exact chat-команды: `{client_budget_target_example_command}`."
         )
     };
 
@@ -4877,10 +4838,6 @@ fn render_startup_agent_contract_artifact(
             "client_budget_target_allowed_percents": contract["live_client_budget_enforcement"]["target_control"]["allowed_target_percents"].clone(),
             "client_budget_target_cli_command": contract["live_client_budget_enforcement"]["target_control"]["cli_command"].clone(),
             "client_budget_target_shell_command": contract["live_client_budget_enforcement"]["target_control"]["shell_command"].clone(),
-            "client_budget_compact_chat_exact_chat_command": contract["live_client_budget_enforcement"]["compact_chat_control"]["exact_chat_command"].clone(),
-            "client_budget_compact_chat_cli_command": contract["live_client_budget_enforcement"]["compact_chat_control"]["cli_command"].clone(),
-            "client_budget_compact_chat_shell_command": contract["live_client_budget_enforcement"]["compact_chat_control"]["shell_command"].clone(),
-            "client_budget_compact_chat_required_host_action": contract["live_client_budget_enforcement"]["compact_chat_control"]["required_host_action"].clone()
         },
         "fail_closed_conditions": contract["fail_closed_conditions"].clone()
     });
@@ -5492,8 +5449,6 @@ fn startup_contract_for_workspace(
             json!(helper_script("client_budget_root_cause.sh"));
         contract["live_client_budget_enforcement"]["target_control"]["shell_command"] =
             json!(helper_script("continuity_client_budget_target.sh"));
-        contract["live_client_budget_enforcement"]["compact_chat_control"]["shell_command"] =
-            json!(helper_script("continuity_compact_chat.sh"));
     }
     let sha256 = startup_contract_sha256(&contract)?;
     Ok((contract, sha256))
@@ -5618,7 +5573,6 @@ mod tests {
         startup_contract_artifact_path, startup_contract_sha256, strip_managed_startup_block,
         working_state_reason_summary,
     };
-    use crate::continuity;
     use crate::mcp;
     use crate::working_state;
     use serde_json::{Value, json};
@@ -6206,12 +6160,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("matching `^экономия_(0|10|20|30|40|50|60|70|80|90)%$`"));
         assert!(text.contains("./scripts/continuity_client_budget_target.sh --repo-root"));
         assert!(text.contains("Пример exact chat-команды: `экономия_50%`"));
-        assert!(text.contains("точную команду `компакт_чат`"));
-        assert!(text.contains("./scripts/continuity_compact_chat.sh --repo-root"));
         assert!(text.contains("`prompt_text` и `operator_notice`"));
-        assert!(text.contains(
-            "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable"
-        ));
         assert!(text.contains("reply_budget_mode == \"compact_high_signal\""));
         assert!(text.contains("reply_budget_contract"));
         assert!(text.contains("contract_version = \"client-reply-budget-v1\""));
@@ -6628,22 +6577,6 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             payload["startup_contract"]["live_client_budget_enforcement"]["target_control"]["shell_command"],
             json!("./scripts/continuity_client_budget_target.sh")
         );
-        assert_eq!(
-            payload["startup_contract"]["live_client_budget_enforcement"]["compact_chat_control"]["exact_chat_command"],
-            json!(continuity::CLIENT_BUDGET_COMPACT_CHAT_COMMAND)
-        );
-        assert_eq!(
-            payload["startup_contract"]["live_client_budget_enforcement"]["compact_chat_control"]["cli_command"],
-            json!("continuity compact-chat")
-        );
-        assert_eq!(
-            payload["startup_contract"]["live_client_budget_enforcement"]["compact_chat_control"]["shell_command"],
-            json!("./scripts/continuity_compact_chat.sh")
-        );
-        assert_eq!(
-            payload["startup_contract"]["live_client_budget_enforcement"]["compact_chat_control"]["required_host_action"],
-            json!("open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable")
-        );
     }
 
     #[test]
@@ -6746,26 +6679,6 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert_eq!(
             payload["compact_runtime_pointers"]["client_budget_target_cli_command"],
             json!("continuity client-budget-target")
-        );
-        assert_eq!(
-            payload["compact_runtime_pointers"]["client_budget_target_shell_command"],
-            json!("./scripts/continuity_client_budget_target.sh")
-        );
-        assert_eq!(
-            payload["compact_runtime_pointers"]["client_budget_compact_chat_exact_chat_command"],
-            json!(continuity::CLIENT_BUDGET_COMPACT_CHAT_COMMAND)
-        );
-        assert_eq!(
-            payload["compact_runtime_pointers"]["client_budget_compact_chat_cli_command"],
-            json!("continuity compact-chat")
-        );
-        assert_eq!(
-            payload["compact_runtime_pointers"]["client_budget_compact_chat_shell_command"],
-            json!("./scripts/continuity_compact_chat.sh")
-        );
-        assert_eq!(
-            payload["compact_runtime_pointers"]["client_budget_compact_chat_required_host_action"],
-            json!("open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable")
         );
         assert!(
             text.len() < full_text.len(),
@@ -6902,11 +6815,6 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert_eq!(
             contract["startup_contract"]["live_client_budget_enforcement"]["target_control"]["shell_command"],
             json!("/tmp/amai-helper/scripts/continuity_client_budget_target.sh")
-        );
-        assert_eq!(
-            contract["startup_contract"]["live_client_budget_enforcement"]["compact_chat_control"]
-                ["shell_command"],
-            json!("/tmp/amai-helper/scripts/continuity_compact_chat.sh")
         );
 
         let agent_text = render_startup_agent_contract_artifact(workspace, helper_repo)

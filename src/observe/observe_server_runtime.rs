@@ -160,10 +160,6 @@ pub(crate) async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
             post(client_budget_target_update_api_handler),
         )
         .route(
-            "/api/client-budget-compact-chat",
-            post(client_budget_compact_chat_api_handler),
-        )
-        .route(
             "/api/remediation-bundles",
             get(remediation_bundles_api_handler),
         )

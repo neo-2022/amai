@@ -1321,9 +1321,6 @@ cargo run -- mcp config --client vscode --cwd /path/to/art-memory-agent-index
 - для user-scope клиентов умеет создавать backup перед изменением файла.
 - после успешного onboarding именно клиент обязан уметь автоматически поднимать continuity
   для уже зарегистрированного проекта в новом чате, без ручного restore-step со стороны пользователя.
-- для `vscode` onboarding теперь ставит repo-local bridge `amai.amai-vscode-bridge`; если нужен отдельный bounded live-check этого bridge, используйте:
-  - `./scripts/proof_vscode_compact_chat_public_bridge_live.sh`
-- live-check и runtime launcher для этого bridge теперь идут по direct `code --open-url` path; `xdg-open` оставлен только как fallback, а не как канонический VS Code launcher.
 - launcher platform тоже может быть указан явно:
   - `auto`
   - `linux`
@@ -1416,7 +1413,6 @@ Proof для этого пути:
 
 ```bash
 ./scripts/proof_client_reconnect.sh
-./scripts/proof_client_clean_chat_launch.sh
 ```
 
 `./scripts/proof_client_reconnect.sh` теперь проверяет reconnect-матрицу для
@@ -1426,12 +1422,7 @@ Proof для этого пути:
 config/startup artifacts и симметричный возврат workspace в исходное состояние
 после `disconnect_local.sh`.
 
-`./scripts/proof_client_clean_chat_launch.sh` проверяет отдельную clean-chat
-launch boundary: VS Code получает `vscode_code_chat_cli` command-contract, а
-clients без автоматического launch bridge честно остаются `manual_only`;
-runtime/API host-launch states сохраняют `available_not_requested`,
-`bridge_unavailable`, `disabled_by_policy`, `requested` и `launch_failed`
-отдельно. Этот proof не является live client-open/session UX доказательством.
+[Removed: `./scripts/proof_client_clean_chat_launch.sh` — clean-chat auto-launch feature eliminated. Manual clean surfaces remain via `./scripts/reconnect_local.sh` and bootstrap reconnect.]
 
 ## Platform launchers
 

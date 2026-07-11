@@ -141,27 +141,8 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_html_keeps_compact_chat_assist_path_source_first() {
+    fn dashboard_html_keeps_launch_fallback_command_text() {
         let html = render_html(1000, None);
-        assert!(html.contains(
-            "const assistText = buildCompactChatAssistText(\n        notice?.client_surface || payload?.continuity_compact_chat?.client_surface,\n        notice?.note || payload?.continuity_compact_chat?.operator_notice?.note,\n        notice?.required_host_action || payload?.continuity_compact_chat?.operator_notice?.required_host_action,\n        notice?.prompt_file || payload?.continuity_compact_chat?.operator_notice?.prompt_file,\n        notice?.launch_clean_chat_command || payload?.continuity_compact_chat?.operator_notice?.launch_clean_chat_command,\n        notice?.launch_clean_chat_fallback_command || payload?.continuity_compact_chat?.operator_notice?.launch_clean_chat_fallback_command"
-        ));
-        assert!(html.contains(
-            "const sourceNoticeMessage = sourceNoticeMessageOrWarningFallback(\n          notice.message_text,\n          notice.working_state_write_status\n        );"
-        ));
-        assert!(html.contains(
-            "const enrichedMessage = assistText ? `${baseMessage}\\n${assistText}` : baseMessage;"
-        ));
-        assert!(html.contains(
-            "emitClientBudgetChatNotice(\n          { ...notice, message_text: enrichedMessage },\n          \"dashboard_compact_chat\"\n        );"
-        ));
-        assert!(html.contains(
-            "if (selectorState.compact_chat_launch_command) {\n          shell.appendChild(\n            textNode(\n              \"div\",\n              \"tooltip-target-picker-command\",\n              selectorState.compact_chat_launch_command"
-        ));
-        assert!(html.contains(
-            "if (selectorState.compact_chat_launch_fallback_command) {\n          shell.appendChild(\n            textNode(\n              \"div\",\n              \"tooltip-target-picker-command\",\n              selectorState.compact_chat_launch_fallback_command"
-        ));
-        assert!(html.contains("Launch command: ${launchCommand}"));
         assert!(html.contains("Launch fallback: ${launchFallbackCommand}"));
     }
 
@@ -174,8 +155,6 @@ mod tests {
         assert!(
             html.contains("emitClientBudgetChatNotice(notice, \"dashboard_agent_display_name\");")
         );
-        assert!(html.contains("\"dashboard_client_budget_target\""));
-        assert!(html.contains("\"dashboard_compact_chat\""));
         assert!(html.contains("\"dashboard_host_current_thread_control_feedback\""));
         assert!(html.contains("\"dashboard_host_current_thread_control_launch\""));
         assert!(html.contains("\"dashboard_host_current_thread_control_request\""));
