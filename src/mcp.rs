@@ -8336,7 +8336,7 @@ mod tests {
                         "state": "candidate_ready_for_measured_approval"
                     },
                     "measured_approval": {
-                        "state": "pending_human_review"
+                        "state": "approved"
                     }
                 }
             },
@@ -8395,7 +8395,7 @@ mod tests {
         assert_eq!(
             summary.latest_memory_task_matrix_summary.as_deref(),
             Some(
-                "compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review"
+                "compare=measured promotion=candidate_ready_for_measured_approval approval=approved"
             )
         );
         assert_eq!(
@@ -8757,7 +8757,7 @@ mod tests {
                     "state": "candidate_ready_for_measured_approval"
                 },
                 "measured_approval": {
-                    "state": "pending_human_review"
+                    "state": "approved"
                 },
                 "gate_failures": [],
                 "canonical_eval": {
@@ -8788,7 +8788,7 @@ mod tests {
             summary.promotion_law_state,
             "candidate_ready_for_measured_approval"
         );
-        assert_eq!(summary.measured_approval_state, "pending_human_review");
+        assert_eq!(summary.measured_approval_state, "approved");
     }
 
     #[test]
@@ -11122,7 +11122,7 @@ mod tests {
                     "state": "candidate_ready_for_measured_approval"
                 },
                 "measured_approval": {
-                    "state": "pending_human_review"
+                    "state": "approved"
                 },
                 "gate_failures": [],
                 "canonical_eval": {
@@ -11174,7 +11174,7 @@ mod tests {
         assert_eq!(
             result["content"][0]["text"],
             json!(
-                "memory matrix :: matrix=letta_memory_local tasks=8/8 failed=0 success_rate=1.000 mean_score=1.000 p95_ms=418.778 gate_failures=0 verdicts=hit_correct_target=4, recovered_useful=4 compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review"
+                "memory matrix :: matrix=letta_memory_local tasks=8/8 failed=0 success_rate=1.000 mean_score=1.000 p95_ms=418.778 gate_failures=0 verdicts=hit_correct_target=4, recovered_useful=4 compare=measured promotion=candidate_ready_for_measured_approval approval=approved"
             )
         );
         assert_eq!(
@@ -11242,7 +11242,7 @@ mod tests {
                         "drift_summary": { "status": "measured" }
                     },
                     "promotion_law": { "state": "candidate_ready_for_measured_approval" },
-                    "measured_approval": { "state": "pending_human_review" }
+                    "measured_approval": { "state": "approved"   }
                 }
             },
             "latest_mcp_task_matrix": {
@@ -11285,7 +11285,7 @@ mod tests {
         assert_eq!(
             result["content"][0]["text"],
             json!(
-                "observe snapshot :: pass=7 alert=1 critical=0 unknown=2 compatibility=vscode:ok continuity=4/4:pass included=exact_documents (1) — Exact layer matched. excluded=semantic_chunks — Semantic layer abstained. task_graph=validated graph-first projection • excluded_legacy(2: 1 deprecated, 1 quarantined) memory_matrix=compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review mcp_matrix=compare=measured promotion=blocked_benchmark_gates approval=not_applicable lifecycle_risk=scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00% review_packet=review_packet_ready approval=pending_human_review measured=not_measured_requires_holdout_or_post_action_outcomes"
+                "observe snapshot :: pass=7 alert=1 critical=0 unknown=2 compatibility=vscode:ok continuity=4/4:pass included=exact_documents (1) — Exact layer matched. excluded=semantic_chunks — Semantic layer abstained. task_graph=validated graph-first projection • excluded_legacy(2: 1 deprecated, 1 quarantined) memory_matrix=compare=measured promotion=candidate_ready_for_measured_approval approval=approved mcp_matrix=compare=measured promotion=blocked_benchmark_gates approval=not_applicable lifecycle_risk=scope=amai/continuity next=pending_review pending_review_7d=42.00% archive_30d=19.00% prune_30d=3.00% review_packet=review_packet_ready approval=pending_human_review measured=not_measured_requires_holdout_or_post_action_outcomes"
             )
         );
         assert_eq!(
@@ -11295,7 +11295,7 @@ mod tests {
         assert_eq!(
             result["structuredContent"]["observe_snapshot_summary"]["latest_memory_task_matrix_summary"],
             json!(
-                "compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review"
+                "compare=measured promotion=candidate_ready_for_measured_approval approval=approved"
             )
         );
         assert_eq!(

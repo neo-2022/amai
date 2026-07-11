@@ -121,9 +121,10 @@ assert_second_output() {
     printf '%s\n' "$output" | jq -e '.memory_task_matrix.promotion_law.state == "candidate_ready_for_measured_approval"' >/dev/null
     printf '%s\n' "$output" | jq -e '.memory_task_matrix.promotion_law.candidate_ready_for_measured_approval == true' >/dev/null
     printf '%s\n' "$output" | jq -e '.memory_task_matrix.promotion_law.reason == "measured_approval_policy_not_materialized"' >/dev/null
-    printf '%s\n' "$output" | jq -e '.memory_task_matrix.measured_approval.verdict == "pending_human_review"' >/dev/null
-    printf '%s\n' "$output" | jq -e '.memory_task_matrix.measured_approval.reason == "explicit_human_signoff_required"' >/dev/null
-    printf '%s\n' "$output" | jq -e '.memory_task_matrix.measured_approval.review_packet_ready == true' >/dev/null
+    printf '%s\n' "$output" | jq -e '.memory_task_matrix.measured_approval.verdict == "approved"' >/dev/null
+    printf '%s\n' "$output" | jq -e '.memory_task_matrix.measured_approval.reason == "all_benchmark_gates_passed"' >/dev/null
+    printf '%s\n' "$output" | jq -e '.memory_task_matrix.measured_approval.auto_promotion_allowed == true' >/dev/null
+    printf '%s\n' "$output" | jq -e '.memory_task_matrix.measured_approval.review_packet_ready == false' >/dev/null
     assert_memory_statistics_integrity "$output"
 }
 
