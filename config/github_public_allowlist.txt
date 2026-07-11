@@ -52,5 +52,8 @@ docs/MCP_INTEGRATION.md
 docs/AGENT_START_HERE.md
 docs/IMPLEMENTATION_STATUS.md
 docs/IMPLEMENTATION_GATES.md
+AGENTS.md
+config/benchmark_contamination_policy.toml
+config/observability_compare_policy.toml
 
 .github/workflows/**
