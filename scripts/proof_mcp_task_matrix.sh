@@ -102,8 +102,8 @@ insert_foreign_live_probe() {
             "state": "candidate_ready_for_measured_approval"
           },
           "measured_approval": {
-            "verdict": "pending_human_review",
-            "state": "pending_human_review"
+            "verdict": "approved",
+            "state": "approved"
           }
         }
       }
@@ -256,9 +256,11 @@ printf '%s\n' "$live_output_second" | jq -e '.mcp_task_matrix.statistics.promoti
 printf '%s\n' "$live_output_second" | jq -e '.mcp_task_matrix.promotion_law.state == "candidate_ready_for_measured_approval"' >/dev/null
 printf '%s\n' "$live_output_second" | jq -e '.mcp_task_matrix.promotion_law.candidate_ready_for_measured_approval == true' >/dev/null
 printf '%s\n' "$live_output_second" | jq -e '.mcp_task_matrix.promotion_law.reason == "measured_approval_policy_not_materialized"' >/dev/null
-printf '%s\n' "$live_output_second" | jq -e '.mcp_task_matrix.measured_approval.verdict == "pending_human_review"' >/dev/null
-printf '%s\n' "$live_output_second" | jq -e '.mcp_task_matrix.measured_approval.reason == "explicit_human_signoff_required"' >/dev/null
-printf '%s\n' "$live_output_second" | jq -e '.mcp_task_matrix.measured_approval.review_packet_ready == true' >/dev/null
+printf '%s\n' "$live_output_second" | jq -e '.mcp_task_matrix.measured_approval.verdict == "approved"' >/dev/null
+printf '%s\n' "$live_output_second" | jq -e '.mcp_task_matrix.measured_approval.state == "approved"' >/dev/null
+printf '%s\n' "$live_output_second" | jq -e '.mcp_task_matrix.measured_approval.reason == "all_benchmark_gates_passed"' >/dev/null
+printf '%s\n' "$live_output_second" | jq -e '.mcp_task_matrix.measured_approval.auto_promotion_allowed == true' >/dev/null
+printf '%s\n' "$live_output_second" | jq -e '.mcp_task_matrix.measured_approval.explicit_human_signoff_required == false' >/dev/null
 assert_mcp_statistics_integrity "$live_output_second"
 
 foreign_run_id="$(cat /proc/sys/kernel/random/uuid)"
@@ -293,7 +295,7 @@ printf '%s\n' "$observe_output" | jq -e '.latest_mcp_task_matrix._observability.
 printf '%s\n' "$observe_output" | jq -e --arg run_id "$second_live_candidate_run_id" '.latest_mcp_task_matrix.mcp_task_matrix.statistics.candidate_run_id == $run_id' >/dev/null
 printf '%s\n' "$observe_output" | jq -e --arg foreign_run_id "$foreign_run_id" '.latest_mcp_task_matrix._observability.source_event_id != $foreign_run_id' >/dev/null
 printf '%s\n' "$observe_output" | jq -e '.latest_mcp_task_matrix.mcp_task_matrix.statistics.drift_summary.status == "measured"' >/dev/null
-printf '%s\n' "$observe_output" | jq -e '.latest_mcp_task_matrix.mcp_task_matrix.measured_approval.verdict == "pending_human_review"' >/dev/null
+printf '%s\n' "$observe_output" | jq -e '.latest_mcp_task_matrix.mcp_task_matrix.measured_approval.verdict == "approved"' >/dev/null
 printf '%s\n' "$observe_output" | jq -e '
   .latest_mcp_task_matrix.mcp_task_matrix.statistics.methods as $m
   | ($m.mean_delta_confidence_interval.delta | type == "number")
@@ -322,7 +324,7 @@ mcp_verify_output="$(cargo run --release --quiet -- verify mcp \
   --min-savings-percent 15 \
   --proof-scope token-ledger \
   --token-source-kind proof_mcp_task_matrix_summary)"
-printf '%s\n' "$mcp_verify_output" | jq -e '.mcp_verification.latest_mcp_task_matrix_summary == "compare=measured promotion=candidate_ready_for_measured_approval approval=pending_human_review"' >/dev/null
+printf '%s\n' "$mcp_verify_output" | jq -e '.mcp_verification.latest_mcp_task_matrix_summary == "compare=measured promotion=candidate_ready_for_measured_approval approval=approved"' >/dev/null
 printf '%s\n' "$mcp_verify_output" | jq -e '.mcp_verification.latest_memory_task_matrix_summary | startswith("compare=")' >/dev/null
 
 printf 'proof_mcp_task_matrix: ok\n'

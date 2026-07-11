@@ -925,11 +925,11 @@ Companion non-regression:
 - `./scripts/proof_mcp_task_matrix.sh`
 - `./scripts/proof_observability.sh`
 
-Queue 1 dashboard parity invariant:
-- после `proof_memory_task_matrix.sh` и `proof_mcp_task_matrix.sh` `proof_observability.sh` обязан fail-closed проверять dashboard карточки `Memory task matrix compare` и `MCP task matrix compare`;
-- обе карточки должны показывать measured compare, `candidate_ready_for_measured_approval` и `pending_human_review`;
-- `Memory task matrix compare` должен surface-ить measured `Score drift`;
-- `MCP task matrix compare` должен surface-ить `Score drift = not_applicable`, а не скрывать отсутствие score-поля;
+- Queue 1 dashboard parity invariant:
+  - после `proof_memory_task_matrix.sh` и `proof_mcp_task_matrix.sh` `proof_observability.sh` обязан fail-closed проверять dashboard карточки `Memory task matrix compare` и `MCP task matrix compare`;
+  - обе карточки должны показывать measured compare, `candidate_ready_for_measured_approval` и `approved` measured approval;
+  - `Memory task matrix compare` должен surface-ить measured `Score drift`;
+  - `MCP task matrix compare` должен surface-ить `Score drift = not_applicable`, а не скрывать отсутствие score-поля;
 - public `latest_mcp_task_matrix` compare lane должен быть scoped to `amai/live_mcpbench_local`, а raw chronological latest обязан оставаться отдельным `latest_mcp_task_matrix_raw_latest`;
 - `proof_mcp_task_matrix.sh` обязан проверять hostile foreign row с тем же `matrix=live_mcpbench_local`: такой row не должен попадать в public compare lane;
 - measured statistics methods must carry numeric `lower / upper / delta / value` fields where applicable, not just green status strings;

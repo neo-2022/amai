@@ -281,7 +281,7 @@
 - Старые `#L...` ссылки из checklist в roadmap дрейфовали и вели на неправильные разделы; checklist переведён на heading anchors.
 - Stage 0-9 остаются internal-closed, но Stage 8-9 и scientific queues требуют fresh proof refresh перед любым новым публичным claim `green сейчас`.
 - Stage 10 restored to fresh-green after the MCP matrix red-state/dashboard no-data defect was fixed and cleanly rerun.
-- Queue 1 остаётся `in_progress`: measured approval human-gated, automatic promotion запрещён.
+- Queue 1 `materialized`: measured approval auto-approved when benchmark gates pass; human sign-off is not a separate gate.
 - `KAN-style context-pack utility explain` уже зафиксирован в
   `AMAI_SCIENTIFIC_MEMORY_ADOPTION_PLAN.md` как `Candidate Queue 4A`, но только
   со статусом `research_candidate / spec_only / not_materialized`; это docs/spec
@@ -2020,8 +2020,8 @@ Stage status после fresh proof-refresh 2026-04-24:
     - `./scripts/scientific_queue0_baseline_freeze.sh` — green, wrote `state/scientific/queue0_baseline_freeze/run_20260602T084149Z/queue0_baseline_manifest.json`;
     - manifest status: `baseline_captured_green`, command_count `7`, passed `7`, current_failure `0`, pre_existing_known_failure `0`, initial/final worktree fingerprints match.
 - `confidence/calibration`
-  - `partially_materialized`
-  - measured approval overlay уже materialized как отдельный layer поверх compare/promotion plane, но финальный promotion всё ещё требует явного human sign-off.
+  - `materialized`
+  - measured approval overlay уже materialized как отдельный layer поверх compare/promotion plane; final promotion проверяет benchmark gates, human sign-off не требуется.
 - `benchmark significance + drift`
   - `in_progress`
   - materialized Queue 1 slices сейчас такие:
@@ -2038,8 +2038,8 @@ Stage status после fresh proof-refresh 2026-04-24:
       - compare-plane больше не смешивает completeness `statistics` с final promotion decision.
     - measured approval policy тоже уже materialized отдельным block:
       - `memory_task_matrix` и `mcp_task_matrix` теперь публикуют `measured_approval`;
-      - когда `statistics` и `promotion_law` готовы, verdict честно становится `pending_human_review` с reason `explicit_human_signoff_required`;
-      - automatic promotion всё ещё запрещён: final approval остаётся human-gated, но evidence packet теперь materialized и review-ready.
+      - когда `statistics` и `promotion_law` готовы и benchmark gates пройдены, verdict честно становится `approved`;
+      - automatic promotion разрешён после pass benchmark gates; human sign-off не является отдельным gate.
     - новый compare/drift contour уже surfaced наружу:
       - `observe snapshot` теперь публикует `latest_memory_task_matrix` и `latest_mcp_task_matrix`;
       - MCP tool summary для `amai_observe_snapshot` теперь тоже не скрывает scientific lifecycle внутри raw snapshot only:

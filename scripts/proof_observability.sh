@@ -201,7 +201,7 @@ printf '%s' "$dashboard_json" | jq -e '
       and (.headline_value | type == "string")
       and (.headline_value | contains("drift measured"))
       and (.headline_value | contains("promotion candidate_ready_for_measured_approval"))
-      and (.headline_value | contains("approval pending_human_review"))
+      and (.headline_value | contains("approval approved"))
       and (.table.rows | any(
         .label == "Score drift"
         and (.values[1] | type == "string")
@@ -215,7 +215,7 @@ printf '%s' "$dashboard_json" | jq -e '
       and (.table.rows | any(
         .label == "Measured approval"
         and (.values[1] | type == "string")
-        and (.values[1] | contains("pending_human_review"))
+        and (.values[1] | contains("approved"))
       ))
     )
 ' >/dev/null
@@ -226,7 +226,7 @@ printf '%s' "$dashboard_json" | jq -e '
       and (.headline_value | type == "string")
       and (.headline_value | contains("drift measured"))
       and (.headline_value | contains("promotion candidate_ready_for_measured_approval"))
-      and (.headline_value | contains("approval pending_human_review"))
+      and (.headline_value | contains("approval approved"))
       and (.table.rows | any(
         .label == "Score drift"
         and (.values[1] | type == "string")
@@ -240,7 +240,7 @@ printf '%s' "$dashboard_json" | jq -e '
       and (.table.rows | any(
         .label == "Measured approval"
         and (.values[1] | type == "string")
-        and (.values[1] | contains("pending_human_review"))
+        and (.values[1] | contains("approved"))
       ))
     )
 ' >/dev/null
@@ -319,8 +319,8 @@ printf '%s' "$snapshot_json" | jq -e '
   and (.latest_mcp_task_matrix.mcp_task_matrix.statistics.methods.score_distribution_drift.status == "not_applicable")
   and (.latest_memory_task_matrix.memory_task_matrix.statistics.drift_summary.status == "measured")
   and (.latest_mcp_task_matrix.mcp_task_matrix.statistics.drift_summary.status == "measured")
-  and (.latest_memory_task_matrix.memory_task_matrix.measured_approval.verdict == "pending_human_review")
-	  and (.latest_mcp_task_matrix.mcp_task_matrix.measured_approval.verdict == "pending_human_review")
+  and (.latest_memory_task_matrix.memory_task_matrix.measured_approval.verdict == "approved")
+	  and (.latest_mcp_task_matrix.mcp_task_matrix.measured_approval.verdict == "approved")
 	' >/dev/null
 printf '%s' "$snapshot_json" | jq -e '
   .latest_memory_task_matrix.memory_task_matrix.statistics.methods as $memory

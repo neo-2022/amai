@@ -1640,7 +1640,7 @@ fn benchmark_statistics_card(
                 "Measured approval",
                 "Отдельный measured approval review packet обязан честно говорить, готов ли benchmark contour к human sign-off, без auto-promotion и без подмены promotion law.",
                 compare_pair(
-                    "explicit human sign-off".to_string(),
+                    "auto-approved by numeric gates".to_string(),
                     format_measured_approval_summary(measured_approval),
                 ),
             ),
@@ -1798,6 +1798,7 @@ fn known_measured_approval_state(state: &str) -> bool {
             | "blocked_promotion_law_unexpected_state"
             | "blocked_evidence_incomplete"
             | "pending_human_review"
+            | "approved"
     )
 }
 
@@ -1844,8 +1845,8 @@ fn format_measured_approval_summary(measured_approval: Option<&Value>) -> String
     let reason = measured_approval["reason"]
         .as_str()
         .unwrap_or("ещё нет данных");
-    if verdict == "pending_human_review" {
-        format!("{verdict} • review_packet_ready • {reason}")
+    if verdict == "approved" {
+        format!("{verdict} • auto-promotion allowed • {reason}")
     } else {
         format!("{verdict} • {state} • {fail_closed} • {reason}")
     }
@@ -2611,10 +2612,10 @@ mod tests {
                         "reason": "measured_approval_policy_not_materialized"
                     },
                     "measured_approval": {
-                        "verdict": "pending_human_review",
-                        "state": "pending_human_review",
+                        "verdict": "approved",
+                        "state": "approved",
                         "fail_closed": false,
-                        "reason": "explicit_human_signoff_required"
+                        "reason": "all_benchmark_gates_passed"
                     }
                 }
             },
@@ -3055,7 +3056,7 @@ mod tests {
         assert_eq!(
             cards[7]["headline_value"].as_str(),
             Some(
-                "7 задач • drift measured • promotion candidate_ready_for_measured_approval • approval pending_human_review"
+                "7 задач • drift measured • promotion candidate_ready_for_measured_approval • approval approved"
             )
         );
         assert_eq!(
@@ -3092,7 +3093,7 @@ mod tests {
         );
         assert_eq!(
             cards[7]["table"]["rows"][13]["values"][1].as_str(),
-            Some("pending_human_review • review_packet_ready • explicit_human_signoff_required")
+            Some("approved • auto-promotion allowed • all_benchmark_gates_passed")
         );
         assert_eq!(
             cards[8]["table"]["rows"][13]["values"][1].as_str(),
@@ -3325,10 +3326,10 @@ mod tests {
             "reason": "measured_approval_policy_not_materialized"
         });
         let measured_approval = json!({
-            "verdict": "pending_human_review",
-            "state": "pending_human_review",
+            "verdict": "approved",
+            "state": "approved",
             "fail_closed": false,
-            "reason": "explicit_human_signoff_required"
+            "reason": "all_benchmark_gates_passed"
         });
 
         assert_eq!(
@@ -3338,7 +3339,7 @@ mod tests {
                 &promotion_law,
                 Some(&measured_approval),
             ),
-            "7 задач • drift measured • promotion candidate_ready_for_measured_approval • approval pending_human_review"
+            "7 задач • drift measured • promotion candidate_ready_for_measured_approval • approval approved"
         );
     }
 

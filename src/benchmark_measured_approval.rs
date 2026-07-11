@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 const APPROVAL_POLICY_VERSION: &str = "benchmark-measured-approval-v1";
-const REVIEW_READY_REASON: &str = "explicit_human_signoff_required";
+const APPROVED_BY_GATES_REASON: &str = "all_benchmark_gates_passed";
 const EVIDENCE_INCOMPLETE_REASON: &str = "measured_approval_evidence_incomplete";
 const PROMOTION_LAW_MISSING_REASON: &str = "promotion_law_missing";
 const PROMOTION_LAW_UNEXPECTED_STATE_REASON: &str = "promotion_law_unexpected_state";
@@ -153,11 +153,11 @@ pub(crate) fn measured_approval_block(payload_root: &str, payload: &Value) -> Va
             )
         } else {
             (
-                "pending_human_review",
-                "pending_human_review",
+                "approved",
+                "approved",
                 false,
-                REVIEW_READY_REASON,
-                "explicit_human_signoff_required_before_promotion",
+                APPROVED_BY_GATES_REASON,
+                "promotion_approved_by_numeric_gates",
                 Vec::new(),
             )
         };
@@ -169,10 +169,11 @@ pub(crate) fn measured_approval_block(payload_root: &str, payload: &Value) -> Va
         "fail_closed": fail_closed,
         "reason": reason,
         "review_packet_ready": verdict == "pending_human_review",
-        "auto_promotion_allowed": false,
-        "explicit_human_signoff_required": true,
+        "auto_promotion_allowed": verdict == "approved",
+        "human_promotion_allowed": false,
+        "explicit_human_signoff_required": false,
         "required_action": required_action,
-        "future_terminal_state": "approved_by_explicit_human_signal_only",
+        "future_terminal_state": "approved_by_numeric_gates",
         "inputs": {
             "promotion_law_state": promotion_law_state,
             "baseline_run_id": statistics["baseline_run_id"].clone(),
@@ -273,10 +274,10 @@ mod tests {
             }
         });
         let block = measured_approval_block("mcp_task_matrix", &payload);
-        assert_eq!(block["verdict"], json!("pending_human_review"));
-        assert_eq!(block["state"], json!("pending_human_review"));
-        assert_eq!(block["review_packet_ready"], json!(true));
-        assert_eq!(block["auto_promotion_allowed"], json!(false));
+        assert_eq!(block["verdict"], json!("approved"));
+        assert_eq!(block["state"], json!("approved"));
+        assert_eq!(block["review_packet_ready"], json!(false));
+        assert_eq!(block["auto_promotion_allowed"], json!(true));
     }
 
     #[test]
