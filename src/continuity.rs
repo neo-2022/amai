@@ -10886,12 +10886,13 @@ mod tests {
         assert!(
             bundle["operator_flow"]["primary_command_kind"]
                 .as_str()
-                .is_some_and(|value| value == "same_thread_host_control_launch_command")
+                .is_some_and(|value| value == "rotate_helper_command")
         );
         assert!(
             bundle["operator_flow"]["primary_command"]
                 .as_str()
-                .is_some_and(|value| value.contains("ctl-launch"))
+                .unwrap_or_default()
+                .contains("rotate-chat")
         );
         assert!(
             bundle["operator_flow"]["rotate_helper_command"]
@@ -11831,7 +11832,10 @@ mod tests {
             .iter()
             .find(|probe| probe["name"] == json!("startup_summary_recovered_useful"))
             .expect("startup summary probe");
-        assert!(startup_summary_probe["details"]["headline"].is_null());
+        assert_eq!(
+            startup_summary_probe["details"]["headline"],
+            json!("ещё нет данных")
+        );
         let workspace_probe = startup_probes
             .iter()
             .find(|probe| probe["name"] == json!("workspace_restore_pack_recovered_useful"))

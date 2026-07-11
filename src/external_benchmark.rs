@@ -4243,17 +4243,20 @@ fn resolve_exact_document_source_path(item: &Value) -> Option<PathBuf> {
 }
 
 fn retrieval_payload_item_safe_relative_path(item: &Value) -> Option<String> {
-    let provenance = item.get("provenance")?.as_object()?;
-    let repo_root = Path::new(provenance.get("repo_root")?.as_str()?.trim());
-    let canonical_repo_root = repo_root.canonicalize().ok()?;
-    let candidate_path = resolve_exact_document_source_path(item)?;
-    let relative_path = candidate_path.strip_prefix(&canonical_repo_root).ok()?;
-    let relative_path = relative_path.to_string_lossy().into_owned();
-    if relative_path.is_empty() {
-        None
-    } else {
-        Some(relative_path)
+    if let Some(provenance) = item.get("provenance").and_then(Value::as_object) {
+        let repo_root = Path::new(provenance.get("repo_root")?.as_str()?.trim());
+        let canonical_repo_root = repo_root.canonicalize().ok()?;
+        let candidate_path = resolve_exact_document_source_path(item)?;
+        let relative_path = candidate_path.strip_prefix(&canonical_repo_root).ok()?;
+        let relative_path = relative_path.to_string_lossy().into_owned();
+        if !relative_path.is_empty() {
+            return Some(relative_path);
+        }
     }
+    item.get("relative_path")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn resolve_safe_repo_file_path(repo_root: &Path, candidate_path: &str) -> Option<PathBuf> {

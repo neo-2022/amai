@@ -141,9 +141,9 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_html_keeps_launch_fallback_command_text() {
+    fn dashboard_html_keeps_host_current_thread_control_text() {
         let html = render_html(1000, None);
-        assert!(html.contains("Launch fallback: ${launchFallbackCommand}"));
+        assert!(html.contains("Same-thread control"));
     }
 
     #[test]

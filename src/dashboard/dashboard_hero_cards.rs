@@ -218,6 +218,7 @@ pub(crate) fn build_active_agent_budget_session_card_from_surface(
             "limit_label": limit_label,
             "limit_value": limit_value,
             "limit_tooltip": limit_tooltip,
+            "kpi_label": "Экономия:",
             "kpi_value": kpi_prefix,
             "kpi_tooltip": kpi_tooltip,
         }));

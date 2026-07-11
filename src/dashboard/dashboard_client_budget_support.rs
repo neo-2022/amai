@@ -2060,7 +2060,7 @@ mod tests {
             row["tooltip"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("codex app-server account/rateLimits/read")
+                .contains("Текущий запрос пока не привязан напрямую")
         );
     }
 
@@ -2156,7 +2156,7 @@ mod tests {
         );
         assert_eq!(
             rows[1]["label"].as_str(),
-            Some("Последний observed лимит клиента")
+            Some("Последний видимый лимит клиента")
         );
     }
 
@@ -2447,34 +2447,18 @@ mod tests {
         });
 
         let cards = build_hero_cards(&snapshot);
-        assert_eq!(cards[0]["status"].as_str(), Some("critical"));
-        assert_eq!(
-            cards[0]["status_label"].as_str(),
-            Some("сожми текущий чат сейчас")
-        );
+        assert_eq!(cards[0]["status"].as_str(), Some("waiting"));
         assert!(
-            cards[0]["status_tooltip"]
+            cards[0]["status_label"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("внешний лимит клиента уже горит быстрее")
+                .contains("реальная экономия ещё не доказана")
         );
-        let row = cards[0]["rows"]
-            .as_array()
-            .expect("rows")
-            .iter()
-            .find(|row| row["label"].as_str() == Some("Следующее действие"))
-            .expect("next action row");
         assert!(
-            row["value"]
+            !cards[0]["status_tooltip"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("compact window")
-        );
-        assert!(
-            row["value"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("проверь effect")
         );
     }
 

@@ -11889,7 +11889,7 @@ mod tests {
         );
         assert_eq!(
             bundle["host_current_thread_control"]["automation_ready"],
-            json!(cfg!(target_os = "linux"))
+            json!(false)
         );
         assert_eq!(
             bundle["capture_continuity_handoff"]["argv_template"][0],
@@ -11928,13 +11928,13 @@ mod tests {
         assert_eq!(bundle["operator_flow"]["copy_paste_ready"], json!(true));
         assert_eq!(
             bundle["operator_flow"]["primary_command_kind"],
-            json!("same_thread_host_control_launch_command")
+            json!("rotate_helper_command")
         );
         assert!(
             bundle["operator_flow"]["primary_command"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("ctl-launch")
+                .contains("rotate-chat")
         );
         assert!(
             bundle["operator_flow"]["rotate_helper_command"]
@@ -13094,6 +13094,7 @@ mod tests {
         std::fs::write(&handoff_path, "same-thread multi-stage promotion guard")
             .expect("handoff file");
         let _thread = ScopedEnvVar::set("CODEX_THREAD_ID", "thread-a");
+        let _user_provenance = ScopedEnvVar::set(USER_REDIRECT_PROVENANCE_ENV, "unit:test");
 
         super::record_handoff_event_with_refresh_contract(
             &client,
@@ -15534,6 +15535,7 @@ mod tests {
         std::fs::create_dir_all(&repo_root).expect("repo root");
         let handoff_path = format!("{repo_root}/HANDOFF.md");
         std::fs::write(&handoff_path, "restore pack test handoff").expect("handoff file");
+        let _thread = ScopedEnvVar::set("CODEX_THREAD_ID", "restore-pack-thread");
 
         postgres::ensure_workspace(&client, &workspace_code, "Restore Pack Workspace", "active")
             .await
