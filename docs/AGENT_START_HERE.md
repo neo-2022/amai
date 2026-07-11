@@ -222,6 +222,7 @@
 - `Этап 2` `typed memory envelope + provenance` закрыт и materialized в truth/read pipeline;
 - `Этап 3` `commitment / task graph` и `Этап 3A` `procedural seed contour` уже закрыты;
 - `Этап 4` `workspace restore pack`, `Этап 5` `semantic + temporal strengthening`, `Этап 6` `multi-agent shared/private memory`, `Этап 7` `compare + benchmark plane`, `Этап 8` `procedural memory`, `Этап 9` `forgetting / consolidation / pruning` и `Этап 10` `governance / safety / evaluator loop` закрыты по текущему internal status checklist и fresh proof bundle.
+- `Этап 10A. Skill-system production-grade hardening` закрыт и подтверждён proof bundle: авторизация UUID-мутаций skill-карт, rule-based evaluator, semantic trigger/rank и batch-эмбеддинг.
 
 Важная оговорка:
 - `closed` здесь означает `закрыто по внутреннему status/proof контурy проекта`;
@@ -401,6 +402,9 @@ Fresh bounded real runtime 2026-04-26:
 10. `Full Procedural Memory`
 11. `Forgetting / Consolidation / Pruning`
 12. `Governance / Safety / Evaluator loop`
+13. `Skill-system production-grade hardening (Stage 10A)`
+    - инкрементальный upgrade поверх Stage 10; авторизация skill-карт, rule-based evaluator, semantic rank/batch-embed.
+14. `Scientific reinforcement overlay` — текущий ближайший фокус вне core Stage-лестницы.
 
 Подробности этапов живут в [AMAI_GLOBAL_MEMORY_ROADMAP.md](AMAI_GLOBAL_MEMORY_ROADMAP.md).
 
@@ -442,7 +446,7 @@ Upgrade-law для любого нового слоя простой:
 Если совсем коротко:
 - `Amai` уже имеет сильный current-state baseline;
 - глобальная memory fabric уже спроектирована;
-- Stage 0-10 закрыты по internal status checklist и fresh proof bundle, а fresh proof всегда берётся из matching bundle, а не из старой фразы в документации;
+- Stage 0-10 и Stage 10A закрыты по текущему internal status checklist и fresh proof bundle, а fresh proof всегда берётся из matching bundle, а не из старой фразы в документации;
 - главный ближайший фокус:
   - scientific reinforcement overlay;
   - status-truth / proof-refresh аудит;
