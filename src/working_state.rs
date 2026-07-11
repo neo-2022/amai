@@ -2424,6 +2424,8 @@ async fn overlay_restore_execution_card(
         true,
         false,
         false,
+        None,
+        None,
     )
     .await?;
     continuity_profile_log(
@@ -16182,6 +16184,8 @@ mod tests {
         postgres::create_skill_evidence_bundle(
             &client,
             skill.skill_card_id,
+            None,
+            None,
             "trace",
             Some("restore card evidence"),
             &[format!("event:restore-card:evidence:{suffix}")],
@@ -16197,6 +16201,8 @@ mod tests {
         postgres::record_skill_trigger_match(
             &client,
             skill.skill_card_id,
+            None,
+            None,
             "project_task",
             "restore continuity",
             true,
@@ -16216,6 +16222,8 @@ mod tests {
         postgres::record_skill_trial_run(
             &client,
             skill.skill_card_id,
+            None,
+            None,
             "shadow",
             Some("restore card shadow"),
             Some("codex"),
@@ -16238,6 +16246,8 @@ mod tests {
         postgres::record_skill_eval(
             &client,
             skill.skill_card_id,
+            None,
+            None,
             "promote_shadow",
             "manual_eval",
             true,
@@ -16260,6 +16270,8 @@ mod tests {
         postgres::record_skill_trial_run(
             &client,
             skill.skill_card_id,
+            None,
+            None,
             "trial",
             Some("restore card trial"),
             Some("codex"),
@@ -16282,6 +16294,8 @@ mod tests {
         postgres::record_skill_eval(
             &client,
             skill.skill_card_id,
+            None,
+            None,
             "promote_trial",
             "manual_eval",
             true,

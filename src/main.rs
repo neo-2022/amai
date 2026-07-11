@@ -21,6 +21,7 @@ mod dashboard_format;
 mod degradation_proof;
 mod deployment;
 mod edge_cache;
+mod embed;
 mod eval_verdict;
 mod external_benchmark;
 mod external_benchmark_conversion;
@@ -73,6 +74,15 @@ fn ensure_object_context<'a>(
     value
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("{} must be a JSON object", label))
+}
+
+fn require_skill_scope(project: &Option<String>, namespace: &Option<String>) -> Result<()> {
+    if project.is_none() || namespace.is_none() {
+        return Err(anyhow::anyhow!(
+            "--project and --namespace are required for this skill command"
+        ));
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -888,6 +898,7 @@ async fn main() -> Result<()> {
                     let skill_card_id = Uuid::parse_str(&args.skill_card_id).map_err(|error| {
                         anyhow::anyhow!("invalid skill_card_id {}: {}", args.skill_card_id, error)
                     })?;
+                    require_skill_scope(&args.project, &args.namespace)?;
                     let message_refs_json = serde_json::json!(args.message_refs);
                     let evidence_span = args
                         .evidence_span_json
@@ -899,6 +910,8 @@ async fn main() -> Result<()> {
                     let bundle = postgres::create_skill_evidence_bundle(
                         &db,
                         skill_card_id,
+                        args.project.as_deref(),
+                        args.namespace.as_deref(),
                         &args.evidence_kind,
                         args.summary.as_deref(),
                         &args.source_event_ids,
@@ -935,6 +948,7 @@ async fn main() -> Result<()> {
                     let skill_card_id = Uuid::parse_str(&args.skill_card_id).map_err(|error| {
                         anyhow::anyhow!("invalid skill_card_id {}: {}", args.skill_card_id, error)
                     })?;
+                    require_skill_scope(&args.project, &args.namespace)?;
                     let source_event_ids_json = serde_json::json!(args.source_event_ids);
                     let artifact_refs_json = serde_json::json!(args.artifact_refs);
                     let message_refs_json = serde_json::json!(args.message_refs);
@@ -948,6 +962,8 @@ async fn main() -> Result<()> {
                     let record = postgres::record_skill_trigger_match(
                         &db,
                         skill_card_id,
+                        args.project.as_deref(),
+                        args.namespace.as_deref(),
                         &args.match_scope,
                         &args.trigger_input,
                         args.matched,
@@ -987,6 +1003,7 @@ async fn main() -> Result<()> {
                     let skill_card_id = Uuid::parse_str(&args.skill_card_id).map_err(|error| {
                         anyhow::anyhow!("invalid skill_card_id {}: {}", args.skill_card_id, error)
                     })?;
+                    require_skill_scope(&args.project, &args.namespace)?;
                     let source_event_ids_json = serde_json::json!(args.source_event_ids);
                     let artifact_refs_json = serde_json::json!(args.artifact_refs);
                     let message_refs_json = serde_json::json!(args.message_refs);
@@ -1007,6 +1024,8 @@ async fn main() -> Result<()> {
                     let record = postgres::record_skill_trial_run(
                         &db,
                         skill_card_id,
+                        args.project.as_deref(),
+                        args.namespace.as_deref(),
                         &args.application_mode,
                         args.task_label.as_deref(),
                         args.runtime.as_deref(),
@@ -1051,6 +1070,7 @@ async fn main() -> Result<()> {
                     let skill_card_id = Uuid::parse_str(&args.skill_card_id).map_err(|error| {
                         anyhow::anyhow!("invalid skill_card_id {}: {}", args.skill_card_id, error)
                     })?;
+                    require_skill_scope(&args.project, &args.namespace)?;
                     let source_event_ids_json = serde_json::json!(args.source_event_ids);
                     let artifact_refs_json = serde_json::json!(args.artifact_refs);
                     let message_refs_json = serde_json::json!(args.message_refs);
@@ -1064,6 +1084,8 @@ async fn main() -> Result<()> {
                     let eval = postgres::record_skill_eval(
                         &db,
                         skill_card_id,
+                        args.project.as_deref(),
+                        args.namespace.as_deref(),
                         &args.verdict,
                         &args.evaluator_source,
                         args.safe_to_apply,
@@ -1091,6 +1113,54 @@ async fn main() -> Result<()> {
                         eval.utility_delta
                     );
                 }
+                SkillCommand::Evaluate(args) => {
+                    let skill_card_id = Uuid::parse_str(&args.skill_card_id).map_err(|error| {
+                        anyhow::anyhow!("invalid skill_card_id {}: {}", args.skill_card_id, error)
+                    })?;
+                    require_skill_scope(&args.project, &args.namespace)?;
+                    let recommendation = postgres::evaluate_skill_card(&db, skill_card_id).await?;
+                    println!(
+                        "skill auto-eval: skill={} :: verdict={} :: safe={} :: quality={} :: truth={} :: utility_delta={:.3} :: summary={}",
+                        recommendation.skill_card_id,
+                        recommendation.verdict,
+                        recommendation.safe_to_apply,
+                        recommendation.quality_ok,
+                        recommendation.truth_ok,
+                        recommendation.utility_delta,
+                        recommendation.summary
+                    );
+                    if args.apply {
+                        let source_event_ids_json = serde_json::json!([]);
+                        let artifact_refs_json = serde_json::json!([]);
+                        let message_refs_json = serde_json::json!([]);
+                        let evidence_span = serde_json::json!({"auto_eval": true});
+                        let eval = postgres::record_skill_eval(
+                            &db,
+                            skill_card_id,
+                            args.project.as_deref(),
+                            args.namespace.as_deref(),
+                            &recommendation.verdict,
+                            "auto",
+                            recommendation.safe_to_apply,
+                            recommendation.quality_ok,
+                            recommendation.truth_ok,
+                            recommendation.utility_delta,
+                            Some(&recommendation.summary),
+                            Some("auto_eval"),
+                            Some(&source_event_ids_json),
+                            Some(&artifact_refs_json),
+                            Some(&message_refs_json),
+                            Some(&evidence_span),
+                            Some("extract"),
+                            Some("skill-eval-envelope-v1"),
+                        )
+                        .await?;
+                        println!(
+                            "skill eval applied: {} :: skill={} :: verdict={}",
+                            eval.skill_eval_id, eval.skill_card_id, eval.verdict
+                        );
+                    }
+                }
                 SkillCommand::GetEval(args) => {
                     let skill_eval_id = Uuid::parse_str(&args.skill_eval_id).map_err(|error| {
                         anyhow::anyhow!("invalid skill_eval_id {}: {}", args.skill_eval_id, error)
@@ -1102,6 +1172,7 @@ async fn main() -> Result<()> {
                     let skill_card_id = Uuid::parse_str(&args.skill_card_id).map_err(|error| {
                         anyhow::anyhow!("invalid skill_card_id {}: {}", args.skill_card_id, error)
                     })?;
+                    require_skill_scope(&args.project, &args.namespace)?;
                     let message_refs_json = serde_json::json!(args.message_refs);
                     let mut evidence_span = args
                         .evidence_span_json
@@ -1124,6 +1195,8 @@ async fn main() -> Result<()> {
                     let log = postgres::record_skill_reuse_log(
                         &db,
                         skill_card_id,
+                        args.project.as_deref(),
+                        args.namespace.as_deref(),
                         &args.reuse_mode,
                         args.task_label.as_deref(),
                         &args.outcome,
@@ -1208,6 +1281,8 @@ async fn main() -> Result<()> {
                         args.allow_trial,
                         args.include_shadow,
                         args.without_amai_but_measuring,
+                        args.query.as_deref(),
+                        Some(&cfg),
                     )
                     .await?;
                     println!("{}", serde_json::to_string_pretty(&payload)?);

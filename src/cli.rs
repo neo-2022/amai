@@ -229,6 +229,7 @@ pub enum SkillCommand {
     RecordTrialRun(SkillRecordTrialRunArgs),
     GetTrialRun(SkillGetTrialRunArgs),
     RecordEval(SkillRecordEvalArgs),
+    Evaluate(SkillEvaluateArgs),
     GetEval(SkillGetEvalArgs),
     RecordReuse(SkillRecordReuseArgs),
     GetReuse(SkillGetReuseArgs),
@@ -1622,6 +1623,10 @@ pub struct AccessPolicyGetArgs {
 pub struct SkillAddEvidenceArgs {
     #[arg(long = "skill-card-id")]
     pub skill_card_id: String,
+    #[arg(long)]
+    pub project: Option<String>,
+    #[arg(long)]
+    pub namespace: Option<String>,
     #[arg(long = "evidence-kind", default_value = "episode_success")]
     pub evidence_kind: String,
     #[arg(long)]
@@ -1655,6 +1660,10 @@ pub struct SkillGetEvidenceArgs {
 pub struct SkillRecordTriggerMatchArgs {
     #[arg(long = "skill-card-id")]
     pub skill_card_id: String,
+    #[arg(long)]
+    pub project: Option<String>,
+    #[arg(long)]
+    pub namespace: Option<String>,
     #[arg(long = "match-scope", default_value = "project_task")]
     pub match_scope: String,
     #[arg(long = "trigger-input")]
@@ -1692,6 +1701,10 @@ pub struct SkillGetTriggerMatchArgs {
 pub struct SkillRecordTrialRunArgs {
     #[arg(long = "skill-card-id")]
     pub skill_card_id: String,
+    #[arg(long)]
+    pub project: Option<String>,
+    #[arg(long)]
+    pub namespace: Option<String>,
     #[arg(long = "application-mode", default_value = "shadow")]
     pub application_mode: String,
     #[arg(long = "task-label")]
@@ -1739,6 +1752,10 @@ pub struct SkillRecordEvalArgs {
     #[arg(long = "skill-card-id")]
     pub skill_card_id: String,
     #[arg(long)]
+    pub project: Option<String>,
+    #[arg(long)]
+    pub namespace: Option<String>,
+    #[arg(long)]
     pub verdict: String,
     #[arg(long = "evaluator-source", default_value = "manual_review")]
     pub evaluator_source: String,
@@ -1775,9 +1792,25 @@ pub struct SkillGetEvalArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct SkillEvaluateArgs {
+    #[arg(long = "skill-card-id")]
+    pub skill_card_id: String,
+    #[arg(long)]
+    pub project: Option<String>,
+    #[arg(long)]
+    pub namespace: Option<String>,
+    #[arg(long, default_value_t = false)]
+    pub apply: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct SkillRecordReuseArgs {
     #[arg(long = "skill-card-id")]
     pub skill_card_id: String,
+    #[arg(long)]
+    pub project: Option<String>,
+    #[arg(long)]
+    pub namespace: Option<String>,
     #[arg(long = "reuse-mode", default_value = "shadow")]
     pub reuse_mode: String,
     #[arg(long = "task-label")]
@@ -1846,6 +1879,8 @@ pub struct SkillExecutionCardArgs {
     pub model: Option<String>,
     #[arg(long)]
     pub tool: Option<String>,
+    #[arg(long)]
+    pub query: Option<String>,
     #[arg(long, default_value_t = false)]
     pub allow_trial: bool,
     #[arg(long, default_value_t = false)]
