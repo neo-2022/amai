@@ -47,5 +47,6 @@ third_party/**
 vendor/**
 
 tools/vscode-amai-bridge/**
-
 docs/MCP_INTEGRATION.md
+.github/workflows/**
+
