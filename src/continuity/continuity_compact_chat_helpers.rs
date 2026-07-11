@@ -302,13 +302,12 @@ fn build_vscode_public_bridge_launch_command(
     let request_path = compact_chat_bridge_request_path(repo_root);
     let request_json =
         build_vscode_public_bridge_request_json(repo_root, prompt_path, result_path, target);
-    let bridge_uri = build_vscode_public_bridge_uri(repo_root, prompt_path, result_path, target);
     if let Some(vscode_binary) = vscode_binary
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
         return format!(
-            "cd {} && mkdir -p {} && tmp_request=$(mktemp {}) && printf %s {} > \"$tmp_request\" && mv \"$tmp_request\" {} && {} --open-url {}",
+            "cd {} && mkdir -p {} && tmp_request=$(mktemp {}) && printf %s {} > \"$tmp_request\" && mv \"$tmp_request\" {} && {} --new-window {}",
             shell_quote(&repo_root.display().to_string()),
             shell_quote(
                 request_path
@@ -322,7 +321,7 @@ fn build_vscode_public_bridge_launch_command(
             shell_quote(&request_json),
             shell_quote(&request_path.display().to_string()),
             shell_quote(vscode_binary),
-            shell_quote(&bridge_uri),
+            shell_quote(&repo_root.display().to_string()),
         );
     }
     let uri_open_command = uri_open_command
@@ -344,7 +343,7 @@ fn build_vscode_public_bridge_launch_command(
         shell_quote(&request_json),
         shell_quote(&request_path.display().to_string()),
         shell_quote(uri_open_command),
-        shell_quote(&bridge_uri),
+        shell_quote(&repo_root.display().to_string()),
     )
 }
 
