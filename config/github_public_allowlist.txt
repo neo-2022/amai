@@ -49,5 +49,7 @@ vendor/**
 tools/vscode-amai-bridge/**
 docs/MCP_INTEGRATION.md
 docs/AGENT_START_HERE.md
-.github/workflows/**
+docs/IMPLEMENTATION_STATUS.md
+docs/IMPLEMENTATION_GATES.md
 
+.github/workflows/**
