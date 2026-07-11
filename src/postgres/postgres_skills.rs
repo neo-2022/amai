@@ -3720,9 +3720,7 @@ pub async fn build_skill_execution_cards(
         .enumerate()
         .map(|(idx, card)| {
             let sim = match (&query_vector, all_goal_vectors.get(idx)) {
-                (Some(query), Some(goal)) => {
-                    crate::embed::cosine_similarity(query, goal)
-                }
+                (Some(query), Some(goal)) => crate::embed::cosine_similarity(query, goal),
                 _ => 0.0,
             };
             (card, sim)
@@ -3732,11 +3730,7 @@ pub async fn build_skill_execution_cards(
     selected.sort_by(|(left, left_sim), (right, right_sim)| {
         skill_trust_rank(&right.skill_trust_state)
             .cmp(&skill_trust_rank(&left.skill_trust_state))
-            .then_with(|| {
-                right_sim
-                    .partial_cmp(left_sim)
-                    .unwrap_or(Ordering::Equal)
-            })
+            .then_with(|| right_sim.partial_cmp(left_sim).unwrap_or(Ordering::Equal))
             .then_with(|| {
                 right
                     .skill_utility_score

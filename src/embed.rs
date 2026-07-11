@@ -35,10 +35,7 @@ pub(crate) fn embed_text(cfg: &AppConfig, text: &str) -> Result<(Vec<f32>, u128)
     Ok((vector, duration))
 }
 
-pub(crate) fn embed_text_batch(
-    cfg: &AppConfig,
-    texts: &[String],
-) -> Result<(Vec<Vec<f32>>, u128)> {
+pub(crate) fn embed_text_batch(cfg: &AppConfig, texts: &[String]) -> Result<(Vec<Vec<f32>>, u128)> {
     let started = Instant::now();
     let cache = EMBEDDER_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache
@@ -73,7 +70,8 @@ pub(crate) fn embed_text_batch(
 
     if !batch_inputs.is_empty() {
         let embeddings = cached.embedder.embed(&batch_inputs, None)?;
-        for (offset, (text, vector)) in batch_inputs.iter().zip(embeddings.into_iter()).enumerate() {
+        for (offset, (text, vector)) in batch_inputs.iter().zip(embeddings.into_iter()).enumerate()
+        {
             let index = batch_index[offset];
             result[index] = Some(vector.clone());
             if cached.query_cache.len() >= 384 {
