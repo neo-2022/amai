@@ -4350,6 +4350,8 @@ async fn build_skill_review_payload_keeps_history_after_promote_eval_and_reuse()
     create_skill_evidence_bundle(
         &client,
         patch.skill_card_id,
+        None,
+        None,
         "trace",
         Some("manual evidence"),
         &[format!("event:stage3:history-life-evidence:{suffix}")],
@@ -4367,6 +4369,8 @@ async fn build_skill_review_payload_keeps_history_after_promote_eval_and_reuse()
     record_skill_trigger_match(
         &client,
         patch.skill_card_id,
+        None,
+        None,
         "project_task",
         "restore continuity",
         true,
@@ -4388,6 +4392,8 @@ async fn build_skill_review_payload_keeps_history_after_promote_eval_and_reuse()
     record_skill_trial_run(
         &client,
         patch.skill_card_id,
+        None,
+        None,
         "shadow",
         Some("manual shadow"),
         Some("codex"),
@@ -4414,6 +4420,8 @@ async fn build_skill_review_payload_keeps_history_after_promote_eval_and_reuse()
     record_skill_eval(
         &client,
         patch.skill_card_id,
+        None,
+        None,
         "promote_shadow",
         "manual_eval",
         true,
@@ -4438,6 +4446,8 @@ async fn build_skill_review_payload_keeps_history_after_promote_eval_and_reuse()
     record_skill_trial_run(
         &client,
         patch.skill_card_id,
+        None,
+        None,
         "trial",
         Some("manual trial"),
         Some("codex"),
@@ -4464,6 +4474,8 @@ async fn build_skill_review_payload_keeps_history_after_promote_eval_and_reuse()
     record_skill_eval(
         &client,
         patch.skill_card_id,
+        None,
+        None,
         "promote_trial",
         "manual_eval",
         true,
@@ -4488,6 +4500,8 @@ async fn build_skill_review_payload_keeps_history_after_promote_eval_and_reuse()
     record_skill_reuse_log(
         &client,
         patch.skill_card_id,
+        None,
+        None,
         "trial",
         Some("manual reuse"),
         "success",
@@ -4612,6 +4626,8 @@ async fn build_skill_execution_cards_filters_by_context_and_ranks_by_utility() {
         create_skill_evidence_bundle(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "trace",
             Some("manual evidence"),
             &[format!("event:stage3a:evidence:{label}:{suffix}")],
@@ -4627,6 +4643,8 @@ async fn build_skill_execution_cards_filters_by_context_and_ranks_by_utility() {
         record_skill_trigger_match(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "project_task",
             &trigger_conditions[0],
             true,
@@ -4646,6 +4664,8 @@ async fn build_skill_execution_cards_filters_by_context_and_ranks_by_utility() {
         record_skill_trial_run(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "shadow",
             Some("manual shadow"),
             Some("codex"),
@@ -4670,6 +4690,8 @@ async fn build_skill_execution_cards_filters_by_context_and_ranks_by_utility() {
         record_skill_eval(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "promote_shadow",
             "manual_eval",
             true,
@@ -4694,6 +4716,8 @@ async fn build_skill_execution_cards_filters_by_context_and_ranks_by_utility() {
         record_skill_trial_run(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "trial",
             Some("manual trial"),
             Some("codex"),
@@ -4718,6 +4742,8 @@ async fn build_skill_execution_cards_filters_by_context_and_ranks_by_utility() {
         record_skill_eval(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "promote_trial",
             "manual_eval",
             true,
@@ -4782,6 +4808,8 @@ async fn build_skill_execution_cards_filters_by_context_and_ranks_by_utility() {
         true,
         false,
         false,
+        None,
+        None,
     )
     .await
     .expect("filtered execution cards");
@@ -4809,6 +4837,8 @@ async fn build_skill_execution_cards_filters_by_context_and_ranks_by_utility() {
         true,
         false,
         false,
+        None,
+        None,
     )
     .await
     .expect("missing runtime execution cards");
@@ -4826,12 +4856,270 @@ async fn build_skill_execution_cards_filters_by_context_and_ranks_by_utility() {
         true,
         false,
         false,
+        None,
+        None,
     )
     .await
     .expect("ranked execution cards");
     let ranked = ranked.as_array().expect("array");
     assert!(ranked.len() >= 2);
     assert_eq!(ranked[0]["skill_card_id"], json!(deploy_card.skill_card_id));
+    assert_eq!(
+        ranked[1]["skill_card_id"],
+        json!(restore_card.skill_card_id)
+    );
+}
+
+async fn make_verified_skill_card_for_semantic(
+    client: &Client,
+    project_code: &str,
+    namespace_code: &str,
+    skill_id: &str,
+    goal: &str,
+    trigger: &str,
+) -> SkillCardRecord {
+    let skill = super::create_skill_card_candidate_with_refinement(
+        client,
+        project_code,
+        namespace_code,
+        skill_id,
+        1,
+        &format!("semantic {skill_id}"),
+        goal,
+        &[trigger.to_string()],
+        &["fresh".to_string()],
+        &["step".to_string()],
+        &["done".to_string()],
+        &[].as_slice(),
+        Some("ok"),
+        "project_private",
+        "project",
+        &["codex".to_string()],
+        &["gpt-5".to_string()],
+        &["exec_command".to_string()],
+        &["continuity".to_string()],
+        &[format!("event:semantic:{skill_id}")],
+        &[format!("artifact://semantic/{skill_id}")],
+        &json!({"path":"docs/IMPLEMENTATION_STATUS.md","line_start":1,"line_end":1}),
+        None,
+        Some("new"),
+        None,
+        None,
+        Some("extract"),
+    )
+    .await
+    .expect("candidate");
+    let message_refs = json!([format!("thread:semantic:{skill_id}")]);
+    let evidence_span = json!({"kind":"semantic","skill_id":skill_id,"context":"continuity"});
+    create_skill_evidence_bundle(
+        client,
+        skill.skill_card_id,
+        None,
+        None,
+        "trace",
+        Some("evidence"),
+        &[format!("event:semantic:evidence:{skill_id}")],
+        &[format!("artifact://semantic/evidence/{skill_id}")],
+        Some("manual_proof"),
+        Some(&message_refs),
+        Some(&evidence_span),
+        Some("extract"),
+        Some("skill-evidence-bundle-envelope-v1"),
+    )
+    .await
+    .expect("evidence");
+    record_skill_trigger_match(
+        client,
+        skill.skill_card_id,
+        None,
+        None,
+        "project_task",
+        trigger,
+        true,
+        Some("trigger"),
+        Some("manual_trigger"),
+        Some(&json!([format!("event:semantic:trigger:{skill_id}")])),
+        Some(&json!([format!("artifact://semantic/trigger/{skill_id}")])),
+        Some(&message_refs),
+        Some(&evidence_span),
+        Some("extract"),
+        Some("skill-trigger-match-envelope-v1"),
+    )
+    .await
+    .expect("trigger");
+    record_skill_trial_run(
+        client,
+        skill.skill_card_id,
+        None,
+        None,
+        "shadow",
+        Some("shadow"),
+        Some("codex"),
+        Some("gpt-5"),
+        Some("exec_command"),
+        true,
+        false,
+        "success",
+        Some("shadow success"),
+        Some("manual_shadow"),
+        Some(&json!([format!("event:semantic:shadow:{skill_id}")])),
+        Some(&json!([format!("artifact://semantic/shadow/{skill_id}")])),
+        Some(&message_refs),
+        Some(&evidence_span),
+        Some("extract"),
+        Some("skill-trial-run-envelope-v1"),
+    )
+    .await
+    .expect("shadow");
+    record_skill_eval(
+        client,
+        skill.skill_card_id,
+        None,
+        None,
+        "promote_shadow",
+        "manual_eval",
+        true,
+        true,
+        true,
+        0.0,
+        Some("promote shadow"),
+        Some("manual_eval"),
+        Some(&json!([format!("event:semantic:eval-shadow:{skill_id}")])),
+        Some(&json!([format!(
+            "artifact://semantic/eval-shadow/{skill_id}"
+        )])),
+        Some(&message_refs),
+        Some(&evidence_span),
+        Some("extract"),
+        Some("skill-eval-envelope-v1"),
+    )
+    .await
+    .expect("promote shadow");
+    record_skill_trial_run(
+        client,
+        skill.skill_card_id,
+        None,
+        None,
+        "trial",
+        Some("trial"),
+        Some("codex"),
+        Some("gpt-5"),
+        Some("exec_command"),
+        true,
+        true,
+        "success",
+        Some("trial success"),
+        Some("manual_trial"),
+        Some(&json!([format!("event:semantic:trial:{skill_id}")])),
+        Some(&json!([format!("artifact://semantic/trial/{skill_id}")])),
+        Some(&message_refs),
+        Some(&evidence_span),
+        Some("extract"),
+        Some("skill-trial-run-envelope-v1"),
+    )
+    .await
+    .expect("trial");
+    record_skill_eval(
+        client,
+        skill.skill_card_id,
+        None,
+        None,
+        "promote_verified",
+        "manual_eval",
+        true,
+        true,
+        true,
+        0.0,
+        Some("promote verified"),
+        Some("manual_eval"),
+        Some(&json!([format!("event:semantic:eval-verified:{skill_id}")])),
+        Some(&json!([format!(
+            "artifact://semantic/eval-verified/{skill_id}"
+        )])),
+        Some(&message_refs),
+        Some(&evidence_span),
+        Some("extract"),
+        Some("skill-eval-envelope-v1"),
+    )
+    .await
+    .expect("promote verified");
+    skill
+}
+
+#[tokio::test]
+async fn build_skill_execution_cards_ranks_by_semantic_query() {
+    if let Ok(env_text) =
+        std::fs::read_to_string(".env").or_else(|_| std::fs::read_to_string(".env.example"))
+    {
+        for line in env_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = trimmed.split_once('=') else {
+                continue;
+            };
+            if std::env::var_os(key).is_none() {
+                unsafe {
+                    std::env::set_var(key, value);
+                }
+            }
+        }
+    }
+    unsafe {
+        std::env::set_var("AMI_STACK_NAME", "default");
+    }
+    let cfg = AppConfig::from_env().expect("env config");
+    let client = connect_admin(&cfg).await.expect("postgres");
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("unix epoch")
+        .as_nanos();
+    let namespace_code = format!("semantic-rank-{suffix}");
+    ensure_project_alpha_test_namespace(&client, &namespace_code).await;
+
+    let deploy_card = make_verified_skill_card_for_semantic(
+        &client,
+        "project_alpha",
+        &namespace_code,
+        &format!("deploy_skill_{suffix}"),
+        "deploy a kubernetes cluster and verify pods",
+        "deploy required",
+    )
+    .await;
+    let restore_card = make_verified_skill_card_for_semantic(
+        &client,
+        "project_alpha",
+        &namespace_code,
+        &format!("restore_skill_{suffix}"),
+        "restore a postgresql database from cold backup",
+        "restore required",
+    )
+    .await;
+
+    let ranked = build_skill_execution_cards(
+        &client,
+        "project_alpha",
+        &namespace_code,
+        None,
+        Some("codex"),
+        Some("gpt-5"),
+        Some("exec_command"),
+        false,
+        false,
+        false,
+        Some("deploy kubernetes cluster"),
+        Some(&cfg),
+    )
+    .await
+    .expect("semantic ranked execution cards");
+    let ranked = ranked.as_array().expect("array");
+    assert_eq!(ranked.len(), 2, "expected both verified cards");
+    assert_eq!(
+        ranked[0]["skill_card_id"],
+        json!(deploy_card.skill_card_id),
+        "deploy card should rank first by semantic query"
+    );
     assert_eq!(
         ranked[1]["skill_card_id"],
         json!(restore_card.skill_card_id)
@@ -4910,6 +5198,8 @@ async fn build_skill_execution_cards_keeps_negative_procedural_classes_alongside
         create_skill_evidence_bundle(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "trace",
             Some("manual evidence"),
             &[format!("event:stage3a-negative:evidence:{label}:{suffix}")],
@@ -4927,6 +5217,8 @@ async fn build_skill_execution_cards_keeps_negative_procedural_classes_alongside
         record_skill_trigger_match(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "project_task",
             &format!("trigger {label}"),
             true,
@@ -4948,6 +5240,8 @@ async fn build_skill_execution_cards_keeps_negative_procedural_classes_alongside
         record_skill_trial_run(
                 client,
                 skill.skill_card_id,
+                None,
+                None,
                 "shadow",
                 Some("manual shadow"),
                 Some("codex"),
@@ -4972,6 +5266,8 @@ async fn build_skill_execution_cards_keeps_negative_procedural_classes_alongside
         record_skill_eval(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "promote_shadow",
             "manual_eval",
             true,
@@ -4996,6 +5292,8 @@ async fn build_skill_execution_cards_keeps_negative_procedural_classes_alongside
         record_skill_trial_run(
                 client,
                 skill.skill_card_id,
+                None,
+                None,
                 "trial",
                 Some("manual trial"),
                 Some("codex"),
@@ -5020,6 +5318,8 @@ async fn build_skill_execution_cards_keeps_negative_procedural_classes_alongside
         record_skill_eval(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "promote_trial",
             "manual_eval",
             true,
@@ -5044,6 +5344,8 @@ async fn build_skill_execution_cards_keeps_negative_procedural_classes_alongside
         record_skill_eval(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "promote_verified",
             "manual_eval",
             true,
@@ -5099,6 +5401,8 @@ async fn build_skill_execution_cards_keeps_negative_procedural_classes_alongside
         false,
         false,
         false,
+        None,
+        None,
     )
     .await
     .expect("execution cards");
@@ -5222,6 +5526,8 @@ async fn project_shared_verified_skill_requires_explicit_shared_approval_for_exe
         create_skill_evidence_bundle(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "trace",
             Some("manual evidence"),
             &[format!("event:stage3a-shared:evidence:{label}:{suffix}")],
@@ -5239,6 +5545,8 @@ async fn project_shared_verified_skill_requires_explicit_shared_approval_for_exe
         record_skill_trigger_match(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "project_task",
             &format!("trigger {label}"),
             true,
@@ -5260,6 +5568,8 @@ async fn project_shared_verified_skill_requires_explicit_shared_approval_for_exe
         record_skill_trial_run(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "shadow",
             Some("manual shadow"),
             Some("codex"),
@@ -5286,6 +5596,8 @@ async fn project_shared_verified_skill_requires_explicit_shared_approval_for_exe
         record_skill_eval(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "promote_shadow",
             "manual_eval",
             true,
@@ -5310,6 +5622,8 @@ async fn project_shared_verified_skill_requires_explicit_shared_approval_for_exe
         record_skill_trial_run(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "trial",
             Some("manual trial"),
             Some("codex"),
@@ -5336,6 +5650,8 @@ async fn project_shared_verified_skill_requires_explicit_shared_approval_for_exe
         record_skill_eval(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "promote_trial",
             "manual_eval",
             true,
@@ -5360,6 +5676,8 @@ async fn project_shared_verified_skill_requires_explicit_shared_approval_for_exe
         record_skill_eval(
             client,
             skill.skill_card_id,
+            None,
+            None,
             "promote_verified",
             "manual_eval",
             true,
@@ -5417,6 +5735,8 @@ async fn project_shared_verified_skill_requires_explicit_shared_approval_for_exe
         false,
         false,
         false,
+        None,
+        None,
     )
     .await
     .expect("execution cards without approval");
@@ -5439,6 +5759,8 @@ async fn project_shared_verified_skill_requires_explicit_shared_approval_for_exe
     record_skill_eval(
         &client,
         shared.skill_card_id,
+        None,
+        None,
         "approve_shared_promotion",
         "shared_approval_contour",
         true,
@@ -5470,6 +5792,8 @@ async fn project_shared_verified_skill_requires_explicit_shared_approval_for_exe
         false,
         false,
         false,
+        None,
+        None,
     )
     .await
     .expect("execution cards with approval");
@@ -5534,6 +5858,8 @@ async fn project_shared_verified_skill_requires_explicit_shared_approval_for_exe
         false,
         false,
         false,
+        None,
+        None,
     )
     .await
     .expect("execution cards private");
@@ -5610,6 +5936,8 @@ async fn build_skill_execution_cards_returns_empty_array_for_without_amai_measur
     create_skill_evidence_bundle(
         &client,
         skill.skill_card_id,
+        None,
+        None,
         "trace",
         Some("manual evidence"),
         &[format!("event:stage3a:without-amai:evidence:{suffix}")],
@@ -5625,6 +5953,8 @@ async fn build_skill_execution_cards_returns_empty_array_for_without_amai_measur
     record_skill_trigger_match(
         &client,
         skill.skill_card_id,
+        None,
+        None,
         "project_task",
         "continuity restore required",
         true,
@@ -5646,6 +5976,8 @@ async fn build_skill_execution_cards_returns_empty_array_for_without_amai_measur
     record_skill_trial_run(
         &client,
         skill.skill_card_id,
+        None,
+        None,
         "shadow",
         Some("manual shadow"),
         Some("codex"),
@@ -5672,6 +6004,8 @@ async fn build_skill_execution_cards_returns_empty_array_for_without_amai_measur
     record_skill_eval(
         &client,
         skill.skill_card_id,
+        None,
+        None,
         "promote_shadow",
         "manual_eval",
         true,
@@ -5696,6 +6030,8 @@ async fn build_skill_execution_cards_returns_empty_array_for_without_amai_measur
     record_skill_trial_run(
         &client,
         skill.skill_card_id,
+        None,
+        None,
         "trial",
         Some("manual trial"),
         Some("codex"),
@@ -5722,6 +6058,8 @@ async fn build_skill_execution_cards_returns_empty_array_for_without_amai_measur
     record_skill_eval(
         &client,
         skill.skill_card_id,
+        None,
+        None,
         "promote_trial",
         "manual_eval",
         true,
@@ -5746,6 +6084,8 @@ async fn build_skill_execution_cards_returns_empty_array_for_without_amai_measur
     record_skill_eval(
         &client,
         skill.skill_card_id,
+        None,
+        None,
         "promote_verified",
         "manual_eval",
         true,
@@ -5779,6 +6119,8 @@ async fn build_skill_execution_cards_returns_empty_array_for_without_amai_measur
         true,
         false,
         false,
+        None,
+        None,
     )
     .await
     .expect("with amai execution cards");
@@ -5795,6 +6137,8 @@ async fn build_skill_execution_cards_returns_empty_array_for_without_amai_measur
         true,
         true,
         true,
+        None,
+        None,
     )
     .await
     .expect("without amai execution cards");
@@ -8279,6 +8623,8 @@ async fn create_skill_evidence_bundle_surfaces_stage2_provenance_fields() {
     let bundle = create_skill_evidence_bundle(
         &client,
         skill_card.skill_card_id,
+        None,
+        None,
         "trace",
         Some("bundle summary"),
         &[source_event_id.clone()],
@@ -8591,6 +8937,8 @@ async fn record_skill_trigger_match_surfaces_stage2_provenance_fields() {
     let record = record_skill_trigger_match(
         &client,
         skill_card.skill_card_id,
+        None,
+        None,
         "thread",
         "trigger input",
         true,
@@ -8651,6 +8999,8 @@ async fn record_skill_trial_run_surfaces_stage2_provenance_fields() {
     let record = record_skill_trial_run(
         &client,
         skill_card.skill_card_id,
+        None,
+        None,
         "shadow",
         Some("proof task"),
         Some("codex"),
@@ -8716,6 +9066,8 @@ async fn record_skill_eval_surfaces_stage2_provenance_fields() {
     create_skill_evidence_bundle(
         &client,
         skill_card.skill_card_id,
+        None,
+        None,
         "trace",
         Some("bundle"),
         &[source_event_id.clone()],
@@ -8731,6 +9083,8 @@ async fn record_skill_eval_surfaces_stage2_provenance_fields() {
     record_skill_trigger_match(
         &client,
         skill_card.skill_card_id,
+        None,
+        None,
         "manual_review",
         "eval trigger",
         true,
@@ -8748,6 +9102,8 @@ async fn record_skill_eval_surfaces_stage2_provenance_fields() {
     let record = record_skill_eval(
         &client,
         skill_card.skill_card_id,
+        None,
+        None,
         "promote_shadow",
         "eval_contour",
         true,
@@ -8814,6 +9170,8 @@ async fn record_skill_reuse_log_surfaces_stage2_provenance_fields() {
     let record = record_skill_reuse_log(
         &client,
         skill_card.skill_card_id,
+        None,
+        None,
         "shadow",
         Some("proof task"),
         "success",
@@ -8879,6 +9237,8 @@ async fn record_skill_reuse_log_requires_runtime_constraint_match() {
     let error = record_skill_reuse_log(
         &client,
         skill_card.skill_card_id,
+        None,
+        None,
         "shadow",
         Some("proof task"),
         "success",
@@ -8904,6 +9264,8 @@ async fn record_skill_reuse_log_requires_runtime_constraint_match() {
     let record = record_skill_reuse_log(
         &client,
         skill_card.skill_card_id,
+        None,
+        None,
         "shadow",
         Some("proof task"),
         "success",
@@ -8958,6 +9320,8 @@ async fn record_skill_reuse_log_rejects_unknown_mode() {
     let error = record_skill_reuse_log(
         &client,
         skill_card.skill_card_id,
+        None,
+        None,
         "unexpected_mode",
         Some("proof task"),
         "neutral",
@@ -9012,6 +9376,8 @@ async fn record_skill_reuse_log_verified_requires_match_and_apply() {
     let error = record_skill_reuse_log(
         &client,
         skill_card.skill_card_id,
+        None,
+        None,
         "verified",
         Some("proof task"),
         "neutral",
@@ -9036,6 +9402,8 @@ async fn record_skill_reuse_log_verified_requires_match_and_apply() {
     let record = record_skill_reuse_log(
         &client,
         skill_card.skill_card_id,
+        None,
+        None,
         "verified",
         Some("proof task"),
         "neutral",
@@ -9093,6 +9461,8 @@ async fn record_skill_trial_run_requires_runtime_constraint_match() {
     let error = record_skill_trial_run(
         &client,
         skill_card.skill_card_id,
+        None,
+        None,
         "shadow",
         Some("proof task"),
         None,
@@ -9121,6 +9491,8 @@ async fn record_skill_trial_run_requires_runtime_constraint_match() {
     let record = record_skill_trial_run(
         &client,
         skill_card.skill_card_id,
+        None,
+        None,
         "shadow",
         Some("proof task"),
         None,

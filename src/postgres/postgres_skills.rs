@@ -26,6 +26,50 @@ fn value_string_array_matches_required(value: &Value, candidate: Option<&str>) -
     items.iter().any(|item| item.as_str() == Some(candidate))
 }
 
+/// Verify that the caller is authorized to mutate/access the skill card by UUID.
+///
+/// A skill card is scoped to a workspace/project/namespace triple. All mutation
+/// functions that accept a bare `skill_card_id` must call this helper fail-closed
+/// when a caller-supplied project/namespace hint is provided. Internal trusted
+/// callers that already resolved the scope may pass `None` to skip the check.
+async fn assert_skill_card_scope(
+    client: &Client,
+    skill_card_id: Uuid,
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
+) -> Result<(Uuid, Uuid, Uuid)> {
+    let row = client
+        .query_one(
+            r#"
+            SELECT p.code, n.code, sc.workspace_id, sc.project_id, sc.namespace_id
+            FROM ami.skill_cards sc
+            INNER JOIN ami.projects p ON p.project_id = sc.project_id
+            INNER JOIN ami.namespaces n ON n.namespace_id = sc.namespace_id
+            WHERE sc.skill_card_id = $1
+            "#,
+            &[&skill_card_id],
+        )
+        .await
+        .with_context(|| format!("failed to load skill card scope for {skill_card_id}"))?;
+    let card_project_code: String = row.get(0);
+    let card_namespace_code: String = row.get(1);
+    if let Some(expected) = project_code {
+        if card_project_code != expected {
+            return Err(anyhow!(
+                "skill card {skill_card_id} belongs to project {card_project_code}, not {expected}"
+            ));
+        }
+    }
+    if let Some(expected) = namespace_code {
+        if card_namespace_code != expected {
+            return Err(anyhow!(
+                "skill card {skill_card_id} belongs to namespace {card_namespace_code}, not {expected}"
+            ));
+        }
+    }
+    Ok((row.get(2), row.get(3), row.get(4)))
+}
+
 fn evidence_span_string_values(evidence_span: &Value, keys: &[&str]) -> Vec<String> {
     let Some(map) = evidence_span.as_object() else {
         return Vec::new();
@@ -2153,6 +2197,8 @@ pub async fn create_skill_card_candidate_with_refinement(
 pub async fn create_skill_evidence_bundle(
     client: &Client,
     skill_card_id: Uuid,
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
     evidence_kind: &str,
     summary: Option<&str>,
     source_event_ids: &[String],
@@ -2163,6 +2209,7 @@ pub async fn create_skill_evidence_bundle(
     derivation_kind: Option<&str>,
     schema_version: Option<&str>,
 ) -> Result<SkillEvidenceBundleRecord> {
+    assert_skill_card_scope(client, skill_card_id, project_code, namespace_code).await?;
     let source_event_ids = string_array_json(source_event_ids);
     let artifact_refs = string_array_json(artifact_refs);
     let message_refs = message_refs.cloned().unwrap_or_else(|| json!([]));
@@ -2299,6 +2346,8 @@ pub async fn get_skill_evidence_bundle(
 pub async fn record_skill_trigger_match(
     client: &Client,
     skill_card_id: Uuid,
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
     match_scope: &str,
     trigger_input: &str,
     matched: bool,
@@ -2311,6 +2360,7 @@ pub async fn record_skill_trigger_match(
     derivation_kind: Option<&str>,
     schema_version: Option<&str>,
 ) -> Result<SkillTriggerMatchRecord> {
+    assert_skill_card_scope(client, skill_card_id, project_code, namespace_code).await?;
     let source_event_ids = source_event_ids.cloned().unwrap_or_else(|| json!([]));
     let artifact_refs = artifact_refs.cloned().unwrap_or_else(|| json!([]));
     let message_refs = message_refs.cloned().unwrap_or_else(|| json!([]));
@@ -2441,6 +2491,8 @@ pub async fn get_skill_trigger_match(
 pub async fn record_skill_trial_run(
     client: &Client,
     skill_card_id: Uuid,
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
     application_mode: &str,
     task_label: Option<&str>,
     runtime: Option<&str>,
@@ -2458,6 +2510,7 @@ pub async fn record_skill_trial_run(
     derivation_kind: Option<&str>,
     schema_version: Option<&str>,
 ) -> Result<SkillTrialRunRecord> {
+    assert_skill_card_scope(client, skill_card_id, project_code, namespace_code).await?;
     let source_event_ids = source_event_ids.cloned().unwrap_or_else(|| json!([]));
     let artifact_refs = artifact_refs.cloned().unwrap_or_else(|| json!([]));
     let message_refs = message_refs.cloned().unwrap_or_else(|| json!([]));
@@ -2651,6 +2704,8 @@ pub async fn get_skill_trial_run(
 pub async fn record_skill_eval(
     client: &Client,
     skill_card_id: Uuid,
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
     verdict: &str,
     evaluator_source: &str,
     safe_to_apply: bool,
@@ -2666,6 +2721,7 @@ pub async fn record_skill_eval(
     derivation_kind: Option<&str>,
     schema_version: Option<&str>,
 ) -> Result<SkillEvalRecord> {
+    assert_skill_card_scope(client, skill_card_id, project_code, namespace_code).await?;
     let source_event_ids = source_event_ids.cloned().unwrap_or_else(|| json!([]));
     let artifact_refs = artifact_refs.cloned().unwrap_or_else(|| json!([]));
     let message_refs = message_refs.cloned().unwrap_or_else(|| json!([]));
@@ -3038,6 +3094,178 @@ pub async fn record_skill_eval(
     })
 }
 
+pub async fn evaluate_skill_card(
+    client: &Client,
+    skill_card_id: Uuid,
+) -> Result<SkillEvalRecommendation> {
+    let card = get_skill_card(client, skill_card_id).await?;
+    let evidence_count: i64 = client
+        .query_one(
+            "SELECT count(*) FROM ami.skill_evidence_bundles WHERE skill_card_id = $1",
+            &[&skill_card_id],
+        )
+        .await
+        .context("failed to count skill evidence bundles")?
+        .get(0);
+    let matched_trigger_count: i64 = client
+        .query_one(
+            "SELECT count(*) FROM ami.skill_trigger_matches WHERE skill_card_id = $1 AND matched = true",
+            &[&skill_card_id],
+        )
+        .await
+        .context("failed to count matched skill trigger matches")?
+        .get(0);
+    let shadow_success_count: i64 = client
+        .query_one(
+            "SELECT count(*) FROM ami.skill_trial_runs WHERE skill_card_id = $1 AND application_mode = 'shadow' AND outcome = 'success'",
+            &[&skill_card_id],
+        )
+        .await
+        .context("failed to count shadow successes")?
+        .get(0);
+    let shadow_fail_count: i64 = client
+        .query_one(
+            "SELECT count(*) FROM ami.skill_trial_runs WHERE skill_card_id = $1 AND application_mode = 'shadow' AND outcome = 'failure'",
+            &[&skill_card_id],
+        )
+        .await
+        .context("failed to count shadow failures")?
+        .get(0);
+    let trial_success_count: i64 = client
+        .query_one(
+            "SELECT count(*) FROM ami.skill_trial_runs WHERE skill_card_id = $1 AND application_mode = 'trial' AND outcome = 'success'",
+            &[&skill_card_id],
+        )
+        .await
+        .context("failed to count trial successes")?
+        .get(0);
+    let trial_fail_count: i64 = client
+        .query_one(
+            "SELECT count(*) FROM ami.skill_trial_runs WHERE skill_card_id = $1 AND application_mode = 'trial' AND outcome = 'failure'",
+            &[&skill_card_id],
+        )
+        .await
+        .context("failed to count trial failures")?
+        .get(0);
+    let verified_success_count: i64 = client
+        .query_one(
+            "SELECT count(*) FROM ami.skill_reuse_logs WHERE skill_card_id = $1 AND reuse_mode = 'verified' AND outcome = 'success'",
+            &[&skill_card_id],
+        )
+        .await
+        .context("failed to count verified successes")?
+        .get(0);
+    let verified_fail_count: i64 = client
+        .query_one(
+            "SELECT count(*) FROM ami.skill_reuse_logs WHERE skill_card_id = $1 AND reuse_mode = 'verified' AND outcome = 'failure'",
+            &[&skill_card_id],
+        )
+        .await
+        .context("failed to count verified failures")?
+        .get(0);
+
+    let quality_ok = !card.skill_goal.trim().is_empty()
+        && card.skill_trigger_conditions.is_array()
+        && card
+            .skill_trigger_conditions
+            .as_array()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        && card.skill_execution_steps.is_array()
+        && card
+            .skill_execution_steps
+            .as_array()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        && card.skill_stop_conditions.is_array()
+        && card
+            .skill_stop_conditions
+            .as_array()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+
+    let truth_ok = evidence_count >= 1
+        && matched_trigger_count >= 1
+        && (card.skill_source_event_ids.is_array()
+            && card
+                .skill_source_event_ids
+                .as_array()
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+            || card.skill_artifact_refs.is_array()
+                && card
+                    .skill_artifact_refs
+                    .as_array()
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false));
+
+    let shadow_total = shadow_success_count + shadow_fail_count;
+    let failure_rate = if shadow_total > 0 {
+        shadow_fail_count as f64 / shadow_total as f64
+    } else {
+        0.0
+    };
+    let safe_to_apply = shadow_success_count >= 1 && failure_rate <= 0.25;
+
+    let total = (shadow_success_count
+        + shadow_fail_count
+        + trial_success_count
+        + trial_fail_count
+        + verified_success_count
+        + verified_fail_count)
+        .max(5);
+    let utility_delta = (((shadow_success_count + trial_success_count + verified_success_count)
+        as f64
+        + (shadow_success_count as f64 * 0.25)
+        - ((shadow_fail_count + trial_fail_count + verified_fail_count) as f64 * 0.75))
+        / total as f64)
+        .clamp(-1.0, 1.0);
+
+    let verdict = match card.skill_trust_state.as_str() {
+        "candidate" if safe_to_apply && quality_ok && truth_ok && shadow_success_count >= 1 => {
+            "promote_shadow"
+        }
+        "shadow" if safe_to_apply && quality_ok && truth_ok && trial_success_count >= 1 => {
+            "promote_trial"
+        }
+        "trial" if safe_to_apply && quality_ok && truth_ok && verified_success_count >= 1 => {
+            "promote_verified"
+        }
+        "candidate" | "shadow" | "trial" if !safe_to_apply && failure_rate > 0.25 => "quarantine",
+        other => {
+            let _ = other;
+            "candidate_only"
+        }
+    };
+
+    let summary = format!(
+        "auto-eval: evidence={} triggers={} shadow={}/{} trial={}/{} verified={}/{} quality={} truth={} safe={} verdict={}",
+        evidence_count,
+        matched_trigger_count,
+        shadow_success_count,
+        shadow_fail_count,
+        trial_success_count,
+        trial_fail_count,
+        verified_success_count,
+        verified_fail_count,
+        quality_ok,
+        truth_ok,
+        safe_to_apply,
+        verdict
+    );
+
+    Ok(SkillEvalRecommendation {
+        skill_card_id,
+        safe_to_apply,
+        quality_ok,
+        truth_ok,
+        utility_delta,
+        verdict: verdict.to_string(),
+        evaluator_source: "auto".to_string(),
+        summary,
+    })
+}
+
 pub async fn get_skill_eval(client: &Client, skill_eval_id: Uuid) -> Result<SkillEvalRecord> {
     let row = client
         .query_one(
@@ -3085,6 +3313,8 @@ pub async fn get_skill_eval(client: &Client, skill_eval_id: Uuid) -> Result<Skil
 pub async fn record_skill_reuse_log(
     client: &Client,
     skill_card_id: Uuid,
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
     reuse_mode: &str,
     task_label: Option<&str>,
     outcome: &str,
@@ -3097,6 +3327,7 @@ pub async fn record_skill_reuse_log(
     derivation_kind: Option<&str>,
     schema_version: Option<&str>,
 ) -> Result<SkillReuseLogRecord> {
+    assert_skill_card_scope(client, skill_card_id, project_code, namespace_code).await?;
     let reuse_mode = match reuse_mode {
         "shadow" | "trial" | "verified" | "manual_debug" => reuse_mode,
         other => {
@@ -3275,6 +3506,68 @@ pub async fn get_skill_reuse_log(
     })
 }
 
+async fn get_skill_card(client: &Client, skill_card_id: Uuid) -> Result<SkillCardRecord> {
+    let row = client
+        .query_one(
+            r#"
+            SELECT
+                sc.skill_card_id,
+                w.code,
+                p.code,
+                n.code,
+                sc.skill_id,
+                sc.skill_version,
+                sc.skill_title,
+                sc.skill_goal,
+                sc.skill_trigger_conditions,
+                sc.skill_preconditions,
+                sc.skill_execution_steps,
+                sc.skill_stop_conditions,
+                sc.skill_forbidden_when,
+                sc.skill_expected_outcome,
+                sc.skill_scope_type,
+                sc.skill_owner_scope,
+                sc.skill_trust_state,
+                sc.skill_verification_state,
+                sc.skill_runtime_constraints,
+                sc.skill_model_constraints,
+                sc.skill_tool_constraints,
+                sc.skill_context_constraints,
+                sc.skill_source_event_ids,
+                sc.skill_artifact_refs,
+                sc.skill_evidence_span,
+                sc.skill_candidate_class,
+                sc.skill_derivation_kind,
+                sc.skill_source_kind,
+                sc.skill_hot_path_write_eligible,
+                sc.skill_background_consolidation_recommended,
+                sc.skill_success_count,
+                sc.skill_failure_count,
+                sc.skill_reuse_count,
+                sc.skill_shadow_pass_count,
+                sc.skill_shadow_fail_count,
+                to_char(sc.skill_last_used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                to_char(sc.skill_last_verified_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                sc.skill_patch_parent_id,
+                sc.skill_merge_group_id,
+                sc.skill_shared_promotion_state,
+                sc.skill_shared_approved_by,
+                sc.skill_shared_approval_reason,
+                to_char(sc.skill_shared_approved_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                sc.skill_utility_score
+            FROM ami.skill_cards sc
+            INNER JOIN ami.workspaces w ON w.workspace_id = sc.workspace_id
+            INNER JOIN ami.projects p ON p.project_id = sc.project_id
+            INNER JOIN ami.namespaces n ON n.namespace_id = sc.namespace_id
+            WHERE sc.skill_card_id = $1
+            "#,
+            &[&skill_card_id],
+        )
+        .await
+        .with_context(|| format!("failed to load skill card {skill_card_id}"))?;
+    Ok(skill_card_record_from_row(&row))
+}
+
 pub async fn list_skill_cards(
     client: &Client,
     project_code: Option<&str>,
@@ -3356,6 +3649,8 @@ pub async fn build_skill_execution_cards(
     allow_trial: bool,
     include_shadow: bool,
     without_amai_but_measuring: bool,
+    query: Option<&str>,
+    cfg: Option<&AppConfig>,
 ) -> Result<Value> {
     if without_amai_but_measuring {
         return Ok(Value::Array(Vec::new()));
@@ -3368,7 +3663,21 @@ pub async fn build_skill_execution_cards(
         allowed_states.push("shadow");
     }
     let cards = list_skill_cards(client, Some(project_code), Some(namespace_code), None).await?;
-    let mut selected: Vec<&SkillCardRecord> = cards
+
+    let query_vector: Option<Vec<f32>> = if let (Some(query), Some(cfg)) = (query, cfg) {
+        match crate::embed::embed_text(cfg, query) {
+            Ok((vector, _)) => Some(vector),
+            Err(error) => {
+                // ponytail: semantic lane is a soft tie-breaker; log-and-fall-back keeps the hot path alive
+                eprintln!("skill semantic ranking disabled: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let goal_texts: Vec<String> = cards
         .iter()
         .filter(|card| allowed_states.contains(&card.skill_trust_state.as_str()))
         .filter(|card| {
@@ -3381,10 +3690,53 @@ pub async fn build_skill_execution_cards(
         })
         .filter(|card| value_string_array_matches_required(&card.skill_model_constraints, model))
         .filter(|card| value_string_array_matches_required(&card.skill_tool_constraints, tool))
+        .map(|card| card.skill_goal.clone())
         .collect();
-    selected.sort_by(|left, right| {
+    let all_goal_vectors: Vec<Vec<f32>> = if let Some(cfg) = cfg {
+        match crate::embed::embed_text_batch(cfg, &goal_texts) {
+            Ok((vectors, _)) => vectors,
+            Err(error) => {
+                eprintln!("skill batch semantic embedding failed: {error}");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let mut selected: Vec<(&SkillCardRecord, f32)> = cards
+        .iter()
+        .filter(|card| allowed_states.contains(&card.skill_trust_state.as_str()))
+        .filter(|card| {
+            card.skill_scope_type != "project_shared"
+                || card.skill_shared_promotion_state == "approved"
+        })
+        .filter(|card| value_string_array_matches(&card.skill_context_constraints, context))
+        .filter(|card| {
+            value_string_array_matches_required(&card.skill_runtime_constraints, runtime)
+        })
+        .filter(|card| value_string_array_matches_required(&card.skill_model_constraints, model))
+        .filter(|card| value_string_array_matches_required(&card.skill_tool_constraints, tool))
+        .enumerate()
+        .map(|(idx, card)| {
+            let sim = match (&query_vector, all_goal_vectors.get(idx)) {
+                (Some(query), Some(goal)) => {
+                    crate::embed::cosine_similarity(query, goal)
+                }
+                _ => 0.0,
+            };
+            (card, sim)
+        })
+        .collect();
+
+    selected.sort_by(|(left, left_sim), (right, right_sim)| {
         skill_trust_rank(&right.skill_trust_state)
             .cmp(&skill_trust_rank(&left.skill_trust_state))
+            .then_with(|| {
+                right_sim
+                    .partial_cmp(left_sim)
+                    .unwrap_or(Ordering::Equal)
+            })
             .then_with(|| {
                 right
                     .skill_utility_score
@@ -3400,7 +3752,7 @@ pub async fn build_skill_execution_cards(
     let payload = Value::Array(
         selected
             .into_iter()
-            .map(|card| {
+            .map(|(card, _)| {
                 json!({
                     "skill_card_id": card.skill_card_id,
                     "project": card.project_code,

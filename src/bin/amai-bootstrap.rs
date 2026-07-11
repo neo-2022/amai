@@ -11,6 +11,8 @@ mod compatibility;
 mod config;
 #[path = "../edge_cache.rs"]
 mod edge_cache;
+#[path = "../embed.rs"]
+mod embed;
 #[path = "../nats.rs"]
 mod nats;
 #[path = "../observability_policy.rs"]

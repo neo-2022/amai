@@ -68,6 +68,18 @@ pub struct SkillEvidenceBundleRecord {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SkillEvalRecommendation {
+    pub skill_card_id: Uuid,
+    pub safe_to_apply: bool,
+    pub quality_ok: bool,
+    pub truth_ok: bool,
+    pub utility_delta: f64,
+    pub verdict: String,
+    pub evaluator_source: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SkillTriggerMatchRecord {
     pub skill_trigger_match_id: Uuid,
     pub skill_card_id: Uuid,
