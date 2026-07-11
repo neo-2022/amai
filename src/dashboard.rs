@@ -1,9 +1,7 @@
 use crate::codex_threads;
 use crate::config::{self, AppConfig};
-use crate::continuity;
 use crate::dashboard_format::*;
 use crate::hardware_telemetry::{AcceleratorSummary, MachineSummary, collect_machine_summary};
-use crate::onboarding;
 use crate::working_state;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};

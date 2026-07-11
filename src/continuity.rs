@@ -8,7 +8,6 @@ use crate::codex_threads;
 use crate::config::AppConfig;
 use crate::dashboard::client_turn_pressure_display_status_label;
 use crate::eval_verdict::{self, EvalPattern, EvalSignals};
-use crate::onboarding;
 use crate::postgres::{self, ChunkRecord, DocumentRecord, NamespaceRecord, ProjectRecord};
 use crate::retrieval_science;
 use crate::s3;
@@ -22,7 +21,7 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio_postgres::Client;
 use uuid::Uuid;
 
