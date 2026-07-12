@@ -25,9 +25,6 @@ scripts/install_from_github.sh
 scripts/install_amai.sh
 scripts/install_amai_oneclick.sh
 scripts/amai_tray_menu.sh
-scripts/openvsx_bridge_sync.sh
-scripts/package_vscode_amai_bridge.sh
-scripts/publish_vscode_amai_bridge.sh
 scripts/install_vscode_connect_offer_autostart.sh
 scripts/offer_vscode_connect.sh
 scripts/purge_amai_vscode_host.sh

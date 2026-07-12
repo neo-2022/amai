@@ -937,11 +937,11 @@ No checkbox is removed by this snapshot: current audit found downgraded broad cl
     normal success path”.
   - concurrent write race для canonical handoff теперь тоже прикрыт отдельным
     hostile proof `./scripts/proof_continuity_frontdoor_concurrent_handoff_race_condition.sh`:
-    несколько одновременных `continuity_handoff.sh` через local fallback должны
-    все вернуть валидный JSON, а итоговый `state/continuity-imports/amai/live-handoff.md`
-    обязан остаться цельным и соответствовать ровно одному из завершившихся
-    writers, без дублированных `headline/next_step` линий и без межпроцессной
-    порчи canonical handoff файла.
+    два одновременных thread-bound Rust handoff writer работают в уникальном
+    временном proof-проекте и должны вернуть валидный JSON, а итоговый
+    `state/continuity-imports/<proof-project>/live-handoff.md` обязан остаться
+    цельным, без дублированных `headline/next_step` линий и без изменения
+    рабочей continuity-линии проекта `amai`.
   - bounded soak для repeated transport-fallback handoff тоже теперь materialized:
     `./scripts/proof_continuity_handoff_transport_fallback_bounded_soak.sh`
     прогоняет `12` подряд shell `continuity_handoff.sh` запусков при сломанном
@@ -1906,12 +1906,12 @@ Host-side clean-chat / client startup consensus records:
 - 2026-07-12 correction: `proof_continuity_frontdoor_concurrent_handoff_race_condition.sh` was restored as an independent handoff atomicity proof. The other removed `proof_continuity_frontdoor_*` scripts remain deleted because they called the removed compact-chat contour; current handoff transport guarantees are covered by `proof_continuity_handoff_transport_*`.
 - Fresh proof current work: `./scripts/proof_onboarding.sh`, `./scripts/proof_mcp_orphan_cleanup.sh`, `./scripts/proof_client_reconnect.sh` verify orphan MCP cleanup, reconnect assist, managed startup instruction materialization for VS Code/Hermes, and repo file restore after proof mutation.
 - `AMAI-AUDIT-CLIENT-001`
-  - `claim_owner`: docs previously implied compact-chat already emits `bridge_unavailable` and `available_not_requested`;
-  - `implementation_verifier`: `src/continuity/continuity_compact_chat_helpers.rs::maybe_launch_compact_chat_host` and `build_compact_chat_clean_launch_surface_with_vscode_binary`;
-  - `proof_owner`: targeted `cargo test --quiet maybe_launch_compact_chat_host`, `cargo test --quiet compact_chat_clean_launch_surface`, `cargo test --quiet compact_chat_notice_kind_preserves_fail_closed_host_states`, and `./scripts/proof_client_clean_chat_launch.sh` now prove no-request -> `available_not_requested`, missing command -> `bridge_unavailable`, default policy gate -> `disabled_by_policy`, opt-in shell command success -> `requested`, opt-in shell command failure -> `launch_failed`, API notice-kind preservation for those fail-closed states, the public wrapper honoring `AMAI_COMPACT_CHAT_AUTO_LAUNCH=1`, VS Code `code chat` command-contract, missing VS Code CLI, missing prompt artifact, and non-VSCode `manual_only` gap;
-  - `consensus_verdict`: `host_state_machine_command_contract`;
-  - `required_doc_action`: keep emitted-state wording tied to proof-backed host command-contract branches and keep live client UX claims out of this verdict;
-  - `required_implementation_action`: add live client-open/session evidence before calling the transition seamless.
+  - `claim_owner`: auto-open clean-surface and VS Code/OpenVSX bridge contours are removed;
+  - `implementation_verifier`: managed startup artifacts in `src/onboarding.rs`, startup contract in `src/mcp.rs`, restore path in `src/continuity.rs`;
+  - `proof_owner`: `proof_onboarding.sh`, `proof_client_reconnect.sh` and `proof_client_auto_startup_{vscode,hermes}.sh` prove installation and direct Rust startup only;
+  - `consensus_verdict`: `bridge_removed__managed_startup_contract_verified__live_client_auto_start_unproven`;
+  - `required_doc_action`: do not restore bridge/host-launch claims and do not call VS Code or Hermes Tier-1 without live client/session evidence;
+  - `required_implementation_action`: add live client/session proof before any future automatic or seamless UX claim.
 - `AMAI-AUDIT-CLIENT-002`
   - `claim_owner`: Hermes startup/onboarding claim is stronger than generic MCP config writing because it also creates sticky project profile;
   - `implementation_verifier`: `config/client_targets.toml`, `src/onboarding.rs::ensure_hermes_project_profile`, `src/onboarding.rs::remove_hermes_project_profile`;
@@ -2590,7 +2590,8 @@ Stage status после fresh proof-refresh 2026-04-24:
 - remaining user-facing gap for the broader laptop story is now narrower and explicit:
   - GitHub one-command install/remove is proof-backed;
   - but `find Amai in VS Code Extensions search and install it as a published marketplace extension` is still not materialized, because marketplace/OpenVSX publishing contour has not been closed yet.
-- packaging/publish contour is now materially closer to that target:
+- **Архив удалённого VS Code/OpenVSX bridge contour:** записи ниже до следующего `Fresh update` описывают прежнее состояние на 2026-05-09. Они не являются current implementation status; bridge/package/publish scripts и extension source удалены 2026-07-12.
+- packaging/publish contour был materially closer to that target:
   - `tools/vscode-amai-bridge/package.json` now uses a publish-safe PNG marketplace icon, public repository/homepage/bugs metadata and an explicit `files` allowlist;
   - new wrappers `./scripts/package_vscode_amai_bridge.sh` and `./scripts/publish_vscode_amai_bridge.sh` materialize a VSIX build path plus fail-closed target-specific publish path for `marketplace` and `openvsx`;
   - new proofs `./scripts/proof_vscode_amai_bridge_package.sh` and `./scripts/proof_vscode_amai_bridge_publish_fail_closed.sh` prove successful VSIX packaging and explicit token-required failure instead of silent publish drift.
