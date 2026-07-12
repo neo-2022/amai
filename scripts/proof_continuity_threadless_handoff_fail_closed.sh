@@ -24,6 +24,7 @@ run_release() {
 }
 
 cd "${repo_root}"
+unset AMAI_PLATFORM_THREAD_ID CODEX_THREAD_ID HERMES_SESSION_ID
 
 cargo run --release --quiet -- bootstrap schema >/dev/null
 cargo build --release --quiet >/dev/null

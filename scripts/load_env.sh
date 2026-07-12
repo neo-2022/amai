@@ -47,19 +47,25 @@ amai_trim_shell_value() {
 }
 
 resolve_amai_thread_id_from_env() {
-  local platform_value legacy_value
+  local platform_value legacy_value hermes_value explicit_value
   platform_value="$(amai_trim_shell_value "${AMAI_PLATFORM_THREAD_ID-}")"
   legacy_value="$(amai_trim_shell_value "${CODEX_THREAD_ID-}")"
+  hermes_value="$(amai_trim_shell_value "${HERMES_SESSION_ID-}")"
   if [[ -n "${platform_value}" && -n "${legacy_value}" && "${platform_value}" != "${legacy_value}" ]]; then
     printf '%s\n' "conflicting thread identity aliases: AMAI_PLATFORM_THREAD_ID and CODEX_THREAD_ID differ" >&2
     return 2
   fi
   if [[ -n "${platform_value}" ]]; then
-    printf '%s\n' "${platform_value}"
+    explicit_value="${platform_value}"
+  elif [[ -n "${legacy_value}" ]]; then
+    explicit_value="${legacy_value}"
+  fi
+  if [[ -n "${explicit_value-}" ]]; then
+    printf '%s\n' "${explicit_value}"
     return 0
   fi
-  if [[ -n "${legacy_value}" ]]; then
-    printf '%s\n' "${legacy_value}"
+  if [[ -n "${hermes_value}" ]]; then
+    printf '%s\n' "${hermes_value}"
     return 0
   fi
   return 1

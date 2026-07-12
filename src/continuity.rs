@@ -7089,6 +7089,12 @@ mod tests {
         EnvVarRestore { key, previous }
     }
 
+    fn unset_env_var_for_test(key: &'static str) -> EnvVarRestore {
+        let previous = std::env::var_os(key);
+        unsafe { std::env::remove_var(key) };
+        EnvVarRestore { key, previous }
+    }
+
     fn load_env_for_postgres_test() {
         if let Ok(env_text) =
             fs::read_to_string(".env").or_else(|_| fs::read_to_string(".env.example"))
@@ -10786,6 +10792,8 @@ mod tests {
 
     #[test]
     fn startup_runtime_state_artifact_compacts_startup_next_action_bundle() {
+        let _no_hermes_thread =
+            unset_env_var_for_test(crate::thread_binding::HERMES_SESSION_ID_ENV);
         let payload = json!({
             "continuity_startup": {
                 "project": {

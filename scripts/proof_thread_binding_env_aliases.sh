@@ -10,7 +10,7 @@ source "${SCRIPT_DIR}/load_env.sh"
 resolve_in_subshell() {
   local setup="${1:-}"
   (
-    unset AMAI_PLATFORM_THREAD_ID CODEX_THREAD_ID
+    unset AMAI_PLATFORM_THREAD_ID CODEX_THREAD_ID HERMES_SESSION_ID
     if [[ -n "${setup}" ]]; then
       eval "${setup}"
     fi
@@ -30,8 +30,14 @@ assert_eq() {
 
 assert_eq "" "$(resolve_in_subshell)" "missing aliases"
 assert_eq "legacy-thread" \
-  "$(resolve_in_subshell 'CODEX_THREAD_ID=legacy-thread')" \
-  "legacy alias fallback"
+  "$(resolve_in_subshell 'CODEX_THREAD_ID=legacy-thread; HERMES_SESSION_ID=foreign-hermes-session')" \
+  "legacy alias overrides Hermes fallback"
+assert_eq "platform-thread" \
+  "$(resolve_in_subshell 'AMAI_PLATFORM_THREAD_ID=platform-thread; HERMES_SESSION_ID=foreign-hermes-session')" \
+  "platform alias overrides Hermes fallback"
+assert_eq "hermes-session" \
+  "$(resolve_in_subshell 'HERMES_SESSION_ID=hermes-session')" \
+  "Hermes session fallback"
 assert_eq "platform-thread" \
   "$(resolve_in_subshell 'AMAI_PLATFORM_THREAD_ID=platform-thread; CODEX_THREAD_ID=platform-thread')" \
   "matching aliases"
@@ -41,7 +47,7 @@ assert_eq "trimmed-thread" \
 
 conflict_stderr="$(mktemp)"
 if (
-  unset AMAI_PLATFORM_THREAD_ID CODEX_THREAD_ID
+  unset AMAI_PLATFORM_THREAD_ID CODEX_THREAD_ID HERMES_SESSION_ID
   AMAI_PLATFORM_THREAD_ID=platform-thread
   CODEX_THREAD_ID=legacy-thread
   resolve_amai_thread_id_from_env
@@ -53,7 +59,7 @@ fi
 grep -Fq "conflicting thread identity aliases" "${conflict_stderr}"
 
 if (
-  unset AMAI_PLATFORM_THREAD_ID CODEX_THREAD_ID
+  unset AMAI_PLATFORM_THREAD_ID CODEX_THREAD_ID HERMES_SESSION_ID
   AMAI_PLATFORM_THREAD_ID=platform-thread
   CODEX_THREAD_ID=legacy-thread
   resolve_amai_thread_id_or_empty_from_env
@@ -65,13 +71,14 @@ fi
 grep -Fq "conflicting thread identity aliases" "${conflict_stderr}"
 rm -f "${conflict_stderr}"
 
+
 for consumer in \
   "${SCRIPT_DIR}/client_budget_gate.sh" \
   "${SCRIPT_DIR}/client_budget_root_cause.sh"
 do
   conflict_stderr="$(mktemp)"
   if (
-    unset AMAI_PLATFORM_THREAD_ID CODEX_THREAD_ID
+    unset AMAI_PLATFORM_THREAD_ID CODEX_THREAD_ID HERMES_SESSION_ID
     AMAI_PLATFORM_THREAD_ID=platform-thread \
       CODEX_THREAD_ID=legacy-thread \
       AMI_OBSERVE_BIND=127.0.0.1:1 \

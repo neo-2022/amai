@@ -3,6 +3,7 @@ use std::fmt;
 
 pub const PLATFORM_THREAD_ID_ENV: &str = "AMAI_PLATFORM_THREAD_ID";
 pub const LEGACY_CODEX_THREAD_ID_ENV: &str = "CODEX_THREAD_ID";
+pub const HERMES_SESSION_ID_ENV: &str = "HERMES_SESSION_ID";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadBindingConflict {
@@ -63,7 +64,12 @@ pub fn resolve_thread_id_candidates_result(
 pub fn current_thread_id_result() -> Result<Option<String>, ThreadBindingConflict> {
     let platform_thread_id = env::var(PLATFORM_THREAD_ID_ENV).ok();
     let legacy_thread_id = env::var(LEGACY_CODEX_THREAD_ID_ENV).ok();
-    resolve_thread_id_candidates_result(platform_thread_id.as_deref(), legacy_thread_id.as_deref())
+    let hermes_session_id = normalized_thread_id(env::var(HERMES_SESSION_ID_ENV).ok().as_deref());
+    let explicit_thread_id = resolve_thread_id_candidates_result(
+        platform_thread_id.as_deref(),
+        legacy_thread_id.as_deref(),
+    )?;
+    Ok(explicit_thread_id.or(hermes_session_id))
 }
 
 pub fn current_thread_id() -> Option<String> {
@@ -75,8 +81,8 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        LEGACY_CODEX_THREAD_ID_ENV, PLATFORM_THREAD_ID_ENV, current_thread_id,
-        current_thread_id_result, resolve_thread_id_candidates,
+        HERMES_SESSION_ID_ENV, LEGACY_CODEX_THREAD_ID_ENV, PLATFORM_THREAD_ID_ENV,
+        current_thread_id, current_thread_id_result, resolve_thread_id_candidates,
         resolve_thread_id_candidates_result,
     };
 
@@ -168,6 +174,7 @@ mod tests {
         let _guard = env_lock();
         let _platform = ScopedEnvVar::set(PLATFORM_THREAD_ID_ENV, "same-thread");
         let _legacy = ScopedEnvVar::set(LEGACY_CODEX_THREAD_ID_ENV, "same-thread");
+        let _no_hermes = ScopedEnvVar::unset(HERMES_SESSION_ID_ENV);
         assert_eq!(current_thread_id().as_deref(), Some("same-thread"));
     }
 
@@ -176,6 +183,7 @@ mod tests {
         let _guard = env_lock();
         let _platform = ScopedEnvVar::set(PLATFORM_THREAD_ID_ENV, "platform-thread");
         let _legacy = ScopedEnvVar::set(LEGACY_CODEX_THREAD_ID_ENV, "legacy-thread");
+        let _no_hermes = ScopedEnvVar::unset(HERMES_SESSION_ID_ENV);
         assert_eq!(current_thread_id(), None);
         assert!(current_thread_id_result().is_err());
     }
@@ -185,7 +193,26 @@ mod tests {
         let _guard = env_lock();
         let _no_platform = ScopedEnvVar::unset(PLATFORM_THREAD_ID_ENV);
         let _legacy = ScopedEnvVar::set(LEGACY_CODEX_THREAD_ID_ENV, "legacy-thread");
+        let _hermes = ScopedEnvVar::set(HERMES_SESSION_ID_ENV, "foreign-hermes-session");
         assert_eq!(current_thread_id().as_deref(), Some("legacy-thread"));
+    }
+
+    #[test]
+    fn current_thread_id_prefers_platform_alias_over_hermes_session() {
+        let _guard = env_lock();
+        let _platform = ScopedEnvVar::set(PLATFORM_THREAD_ID_ENV, "platform-thread");
+        let _no_legacy = ScopedEnvVar::unset(LEGACY_CODEX_THREAD_ID_ENV);
+        let _hermes = ScopedEnvVar::set(HERMES_SESSION_ID_ENV, "foreign-hermes-session");
+        assert_eq!(current_thread_id().as_deref(), Some("platform-thread"));
+    }
+
+    #[test]
+    fn current_thread_id_falls_back_to_hermes_session() {
+        let _guard = env_lock();
+        let _no_platform = ScopedEnvVar::unset(PLATFORM_THREAD_ID_ENV);
+        let _no_legacy = ScopedEnvVar::unset(LEGACY_CODEX_THREAD_ID_ENV);
+        let _hermes = ScopedEnvVar::set(HERMES_SESSION_ID_ENV, "hermes-session");
+        assert_eq!(current_thread_id().as_deref(), Some("hermes-session"));
     }
 
     #[test]
@@ -193,6 +220,7 @@ mod tests {
         let _guard = env_lock();
         let _no_platform = ScopedEnvVar::unset(PLATFORM_THREAD_ID_ENV);
         let _blank_legacy = ScopedEnvVar::set(LEGACY_CODEX_THREAD_ID_ENV, "   ");
+        let _no_hermes = ScopedEnvVar::unset(HERMES_SESSION_ID_ENV);
         assert_eq!(current_thread_id(), None);
     }
 }

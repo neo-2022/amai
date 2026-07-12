@@ -54,6 +54,7 @@ assert_no_side_effects() {
 }
 
 cd "${repo_root}"
+unset HERMES_SESSION_ID
 
 cargo run --release --quiet -- bootstrap schema >/dev/null
 cargo build --release --quiet >/dev/null

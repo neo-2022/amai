@@ -11865,6 +11865,7 @@ mod tests {
 
     #[test]
     fn rotate_chat_action_bundle_exposes_canonical_handoff_and_startup_commands() {
+        let _no_hermes_thread = ScopedEnvVar::unset(crate::thread_binding::HERMES_SESSION_ID_ENV);
         let bundle = super::build_rotate_chat_action_bundle(
             Some("amai"),
             Some("continuity"),
@@ -13555,6 +13556,7 @@ mod tests {
         drop(thread_a);
 
         let _no_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _no_hermes_thread = ScopedEnvVar::unset(crate::thread_binding::HERMES_SESSION_ID_ENV);
         let error = super::record_handoff_event_with_refresh(
             &client,
             &project,
@@ -13615,6 +13617,7 @@ mod tests {
         std::fs::write(&handoff_path, "threadless active lease guard").expect("handoff file");
 
         let _no_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _no_hermes_thread = ScopedEnvVar::unset(crate::thread_binding::HERMES_SESSION_ID_ENV);
         super::record_handoff_event_with_refresh(
             &client,
             &project,
@@ -13960,6 +13963,7 @@ mod tests {
         drop(thread_a);
 
         let _no_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _no_hermes_thread = ScopedEnvVar::unset(crate::thread_binding::HERMES_SESSION_ID_ENV);
         let refreshed = super::refresh_same_thread_execctl_active_lease_for_startup(
             &client,
             &project,
@@ -14115,6 +14119,7 @@ mod tests {
         std::fs::write(&handoff_path, "startup threadless foreign guard").expect("handoff file");
 
         let _no_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _no_hermes_thread = ScopedEnvVar::unset(crate::thread_binding::HERMES_SESSION_ID_ENV);
         super::record_handoff_event_with_refresh(
             &client,
             &project,
@@ -14220,6 +14225,7 @@ mod tests {
         drop(thread_a);
 
         let _no_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _no_hermes_thread = ScopedEnvVar::unset(crate::thread_binding::HERMES_SESSION_ID_ENV);
         super::maintain_same_thread_execctl_active_lease_for_guard(&client, restore.as_ref(), None)
             .await
             .expect("guard maintenance");
@@ -14252,6 +14258,7 @@ mod tests {
         std::fs::write(&handoff_path, "guard threadless foreign guard").expect("handoff file");
 
         let _no_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _no_hermes_thread = ScopedEnvVar::unset(crate::thread_binding::HERMES_SESSION_ID_ENV);
         super::record_handoff_event_with_refresh(
             &client,
             &project,
