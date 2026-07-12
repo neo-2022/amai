@@ -4,8 +4,8 @@ use crate::regression_explain;
 use crate::{
     artifact_cleanup,
     cli::{
-        ObserveCapacityForecastArgs,
-        ObserveClientBudgetHostControlLaunchArgs, ObserveRegressionExplainArgs,
+        ObserveCapacityForecastArgs, ObserveClientBudgetHostControlLaunchArgs,
+        ObserveRegressionExplainArgs,
     },
     codex_threads, compatibility, continuity, dashboard, external_benchmark, nats, postgres, s3,
     token_budget, working_state,
@@ -84,10 +84,9 @@ pub(crate) use self::observe_client_budget_runtime::{
     print_client_budget_gate, print_client_budget_guard, print_client_budget_root_cause,
 };
 use self::observe_control_api::{
-    client_budget_host_control_feedback_api_handler,
-    client_budget_host_control_launch_api_handler, continuity_handoff_api_handler,
-    observe_user_visible_client_thread, remediation_bundle_detail_api_handler,
-    remediation_bundles_api_handler,
+    client_budget_host_control_feedback_api_handler, client_budget_host_control_launch_api_handler,
+    continuity_handoff_api_handler, observe_user_visible_client_thread,
+    remediation_bundle_detail_api_handler, remediation_bundles_api_handler,
 };
 #[cfg(test)]
 use self::observe_control_api::{

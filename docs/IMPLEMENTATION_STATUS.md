@@ -468,9 +468,9 @@ Claim inventory snapshot 2026-04-25 for the current status-truth audit cluster:
 
 | Claim id | Current allowed claim | Code surface | Proof surface | Dashboard/raw lane | Freshness | Verdict / downgrade boundary |
 |---|---|---|---|---|---|---|
-| `AMAI-AUDIT-CLIENT-001` | compact-chat host launch now distinguishes no-request, no-bridge-command, policy-disabled, opt-in command success/failure and per-client launch support states; non-auto-launch clients also surface truthful client-specific manual fallback guidance instead of a codex-only generic note; dashboard target selector now also surfaces auto-launch bridge status/reason/UX boundary instead of hiding that state behind runtime payload only; real client UX remains not proven. | `src/continuity/continuity_compact_chat_helpers.rs`, `src/continuity.rs`, `src/dashboard/dashboard_client_budget_support.rs`, `src/observe/observe_control_api.rs` | `cargo test --quiet compact_chat`, `cargo test --quiet maybe_launch_compact_chat_host`, `cargo test --quiet compact_chat_notice_kind_preserves_fail_closed_host_states`, `./scripts/proof_client_clean_chat_launch.sh`, helper/API assertions inside compact-chat paths | compact-chat payload / client-budget guard raw payload / dashboard target selector note | 2026-04-30 | `host_state_machine_command_contract`: `available_not_requested`, `bridge_unavailable`, `disabled_by_policy`, `requested`, `launch_failed`, public env-gated wrapper, API notice-kind mapping, VS Code `code chat` command-contract and non-VSCode `manual_only` gap are proof-backed; manual fallback for Codex/Hermes/OpenClaw/generic-style clients is now client-specific and surfaces startup/reconnect assist instead of a codex-only note; dashboard selector now also exposes auto-launch status / unavailable reason / UX boundary from the same continuity truth surface; seamless clean-chat migration and live-client UX are still not proven. |
+| `AMAI-AUDIT-CLIENT-001` | auto-open clean-surface launch feature has been eliminated; seamless transition is now provided solely by managed startup instructions that force every new/resumed chat to call `amai_continuity_startup` and restore context from PostgreSQL; manual fallback guidance for clean surface remains client-specific via reconnect helpers. | `src/onboarding.rs` (managed instruction install), `src/mcp.rs` (startup contract), `src/continuity.rs` (`continuity_startup` restore), `config/client_targets.toml` (client targets) | `./scripts/proof_onboarding.sh`, `./scripts/proof_client_reconnect.sh`, `cargo test --quiet onboarding` | `.github/instructions/amai-continuity-startup.instructions.md` / `.hermes.md` / `~/.hermes/profiles/*/SOUL.md` / startup contract / continuity runtime artifact | 2026-07-11 | `auto_open_removed__continuity_startup_is_seamless_transition`: VS Code public bridge install/package/publish scripts, OpenVSX workflow and all related `proof_vscode_*_bridge*` / `proof_vscode_code_chat_*` / `proof_continuity_frontdoor_*compact_chat*` proofs deleted; managed startup instruction path ensures continuity restore is the first action on a new surface; Hermes compact instruction size fixed to pass the 4000-byte proof limit; live client UX proof remains per-client. |
 | `AMAI-AUDIT-CLIENT-002` | Hermes onboarding creates compact startup/profile artifacts and sticky project profile. | `config/client_targets.toml`, `src/onboarding.rs::ensure_hermes_project_profile`, `src/onboarding.rs::remove_hermes_project_profile` | `./scripts/proof_client_reconnect.sh`, `./scripts/proof_remote_onboarding.sh`, targeted Rust onboarding tests | generated `.hermes.md` / managed profile / client config artifacts | 2026-04-25 | Verified for profile/install contract only; full live Hermes agent behavior remains `proof-refresh-required`. |
-| `AMAI-AUDIT-CLIENT-003` | reconnect assist is materialized for supported client configs. | `scripts/reconnect_local.sh`, `scripts/cleanup_mcp_orphans.sh`, `scripts/amai_exec.sh`, startup contract reconnect helper fields | `./scripts/proof_client_reconnect.sh`, `./scripts/proof_mcp_orphan_cleanup.sh` | reconnect helper output, orphan MCP cleanup proof and restored startup artifact files | 2026-04-26 | Verified for reconnect assist and orphan cleanup only; seamless host-side clean-chat migration remains open. |
+| `AMAI-AUDIT-CLIENT-003` | reconnect assist is materialized for supported client configs. | `scripts/reconnect_local.sh`, `scripts/cleanup_mcp_orphans.sh`, `scripts/amai_exec.sh`, startup contract reconnect helper fields | `./scripts/proof_client_reconnect.sh`, `./scripts/proof_mcp_orphan_cleanup.sh` | reconnect helper output, orphan MCP cleanup proof and restored startup artifact files | 2026-04-26 | Verified for reconnect assist and orphan cleanup only; host-triggered clean-chat migration is no longer a project objective after explicit removal of the auto-open surface. |
 | `AMAI-AUDIT-CLIENT-004` | remote onboarding proof is offline-deterministic through fake SSH and payload-boundary checks. | `scripts/onboard_remote_client.sh`, `scripts/sync_remote_repo.sh`, `scripts/proof_remote_onboarding.sh`, `scripts/proof_remote_repo_sync_payload.sh` | `./scripts/proof_remote_onboarding.sh`, `./scripts/proof_remote_repo_sync_payload.sh` | fake-ssh run artifacts and sync payload manifest | 2026-04-25 | Verified for offline remote onboarding proof; live remote-host availability/e2e remains a separate proof lane. |
 | `AMAI-AUDIT-AUTOSTART-001` | local install materializes and enables `systemd --user` `amai-stack.service` for user-manager startup. | `src/onboarding.rs`, `scripts/install_stack_autostart.sh`, `scripts/run_stack_service.sh`, `scripts/bootstrap_stack.sh` | `./scripts/proof_stack_autostart.sh`, `./scripts/proof_bootstrap_volume_dirs.sh`, `./scripts/proof_onboarding.sh` | rendered user unit and `tmp/onboarding/proof-vscode.out` install output | 2026-04-25 | `partial`: does not prove headless reboot, linger, or system-service semantics. |
 | `AMAI-AUDIT-BRIDGE-001` | compatibility `memory search` prints hits plus `Почему вошло` and `Почему часть не вошла`. | `src/bin/memory.rs::print_search_state`, `src/onboarding.rs::install_memory_bridge` | `./scripts/proof_memory_bridge_search.sh`, `cargo test --quiet --bin memory` | release bridge stdout from `target/release/memory search` | 2026-04-25 | Verified output/explainability contract only; retrieval relevance quality remains governed by context-pack/retrieval proofs. |
@@ -1901,7 +1901,9 @@ Status-truth rule:
       - какими reconnect/open-new-chat командами поднимать clean chat fallback вручную.
 
 Host-side clean-chat / client startup consensus records:
-- Fresh proof 2026-04-26: `./scripts/proof_mcp_orphan_cleanup.sh`, `./scripts/proof_client_reconnect.sh` and `./scripts/proof_client_clean_chat_launch.sh` passed for robust orphan MCP cleanup, reconnect assist, compact Hermes startup/profile surface, repo file restore after proof mutation, VS Code clean-chat launch command-contract, non-VSCode manual-only launch boundary, and API notice-kind preservation for fail-closed host states; this refresh does not upgrade the unresolved seamless clean-chat claim.
+- Auto-open clean-surface launch has been removed from the codebase: VS Code public bridge extension install/package/publish scripts, the OpenVSX bridge sync workflow and the related proof contour are deleted. New or resumed chat surfaces rely on managed startup instructions that call `amai_continuity_startup` before any substantive reply.
+- 2026-07-11 cleanup: hard-removed remaining `scripts/proof_continuity_frontdoor_*.sh` proofs, compacted Hermes managed startup instructions so `.hermes.md` passes the 4000-byte compact-startup proof limit, and refreshed `AMAI-AUDIT-CLIENT-001` evidence to the current removal state.
+- Fresh proof current work: `./scripts/proof_onboarding.sh`, `./scripts/proof_mcp_orphan_cleanup.sh`, `./scripts/proof_client_reconnect.sh` verify orphan MCP cleanup, reconnect assist, managed startup instruction materialization for VS Code/Hermes, and repo file restore after proof mutation.
 - `AMAI-AUDIT-CLIENT-001`
   - `claim_owner`: docs previously implied compact-chat already emits `bridge_unavailable` and `available_not_requested`;
   - `implementation_verifier`: `src/continuity/continuity_compact_chat_helpers.rs::maybe_launch_compact_chat_host` and `build_compact_chat_clean_launch_surface_with_vscode_binary`;
@@ -1961,6 +1963,63 @@ Local stack autostart consensus records:
     - truth-authoritative Bayesian promotion;
     - destructive probabilistic auto-decision;
     - replacement of `verified truth` with projection.
+- Phase A плана «Amai как нескончаемый чат»:
+  - статус: ✅ Phase A пройдена;
+  - цель: упростить и упрочить универсальный MCP startup contract, разрешить `amai_continuity_startup` без явного project/repo_root, дать Generic-клиентам готовую system-prompt-затравку и ввести Tier-1/Tier-2 модель клиентов;
+  - выполнено:
+    - `server_instructions()` и `amai-continuity-startup` prompt/tool теперь поддерживают вызов без project/repo_root: Amai автоопределяет проект по cwd и остаётся fail-closed при неоднозначном binding;
+    - для `--client generic` onboarding теперь materialize-ит `tmp/onboarding/generic-amai-system-prompt.txt` — одна строка для вставки в system prompt;
+    - в `config/client_targets.toml` добавлено поле `tier`, а `describe_client_surface()` публикует `tier` и `auto_start_ready`;
+    - `docs/MCP_INTEGRATION.md` обновлена разделом «Модель Tier-1 / Tier-2»;
+    - `proof_onboarding.sh` и `proof_client_reconnect.sh` проверяют generic onboarding/disconnect symmetry;
+  - проверено:
+    - `cargo test --quiet onboarding` — 35 passed;
+    - `cargo test --quiet mcp` — 111 passed;
+    - `./scripts/proof_onboarding.sh` — ok;
+    - `./scripts/proof_client_reconnect.sh` — ok;
+    - `./scripts/proof_remove_amai_full.sh` — PASS;
+    - `./scripts/proof_mcp_orphan_cleanup.sh` — PASS;
+    - `./scripts/maintainability_gate.sh --json`, `./scripts/implementation_status_sync_guard.sh --json`, `./scripts/agent_preflight.sh --json` — ok.
+- Phase B плана «Amai как нескончаемый чат»:
+  - статус: ✅ Phase B пройдена для первых двух кандидатов;
+  - цель: сертифицировать Tier-1 клиентов через автоматические proof-скрипты, которые проверяют managed startup artifact и факт создания runtime-артефакта `amai_continuity_startup`;
+  - выполнено:
+    - добавлены `scripts/proof_client_auto_startup_vscode.sh` и `scripts/proof_client_auto_startup_hermes.sh`;
+    - скрипты проверяют managed startup artifact и клиентскую MCP-конфигурацию, затем вызывают штатный Rust CLI `continuity startup` и требуют `gate_semantics_consistent = true` в runtime state; MCP initialize/prompts/tool-call контракт отдельно покрыт Rust-тестами `src/mcp.rs`;
+    - `vscode` и `hermes` переведены в `tier = 1` в `config/client_targets.toml`;
+    - таблица в `docs/MCP_INTEGRATION.md` обновлена: VS Code и Hermes — Tier-1;
+  - проверено:
+    - `./scripts/proof_client_auto_startup_vscode.sh` — ok;
+    - `./scripts/proof_client_auto_startup_hermes.sh` — ok.
+- Phase C плана «Amai как нескончаемый чат»:
+  - статус: ✅ Phase C materialized;
+  - цель: сделать pre-reply stale/fresh reconcile client-agnostic и добавить hostile fallback для Tier-2 клиентов;
+  - выполнено:
+    - generic system-prompt seed (`render_generic_system_prompt_body`) расширен правилом stale/fresh reconcile: после успешного MCP startup проверять runtime artifact и при дрейфе делать локальный reconcile;
+    - все managed startup instructions (vscode, cursor, codex, claude-code, hermes, openclaw, claude-desktop, generic) содержат правило stale-success reconcile — покрыто unit-тестом `all_client_startup_instruction_bodies_contain_stale_success_rule`;
+    - `docs/MCP_INTEGRATION.md` дополнена разделом «Phase C: client-agnostic stale/fresh reconcile»;
+    - добавлен `scripts/proof_client_auto_startup_generic.sh` — доказывает, что Tier-2 generic client с system-prompt seed может произвести runtime state через `amai_continuity_startup`;
+  - проверено:
+    - `cargo test --quiet onboarding` — проходит, включая новые тесты stale-success coverage и generic system prompt;
+    - `cargo test --quiet mcp` — проходит;
+    - `./scripts/proof_client_auto_startup_generic.sh` — ok;
+    - `./scripts/proof_mcp_continuity_startup_stale_success_reconcile.sh` — ok;
+    - `./scripts/maintainability_gate.sh --json`, `./scripts/implementation_status_sync_guard.sh --json`, `./scripts/agent_preflight.sh --json` — ok.
+
+- Phase D плана «Amai как нескончаемый чат»:
+  - статус: ✅ Phase D materialized;
+  - цель: обогатить рабочий restore pack контекстом недавнего разговора и активного редактора, чтобы следующий чат продолжался с пониманием того, что обсуждалось и над чем велась работа;
+  - выполнено:
+    - в `WORKSPACE_RESTORE_PACK_VERSION` выполнен bump на `workspace-restore-pack-v2`;
+    - `build_workspace_restore_pack()` теперь включает `recent_thread_highlights` (до `MAX_THREAD_HIGHLIGHTS = 3` записей) и `active_editor_state`;
+    - summary пака теперь отражает bucket `editor(...)` наряду с commitments/waiting/paused-buckets;
+    - `compact_workspace_restore_pack_for_startup()` публикует счётчики/флаги обоих новых полей для runtime startup state;
+    - unit-тесты `workspace_restore_pack` и `continuity` обновлены до v2 и проверяют оба новых bucket;
+  - проверено:
+    - `cargo test --quiet workspace_restore_pack` — проходит;
+    - `cargo test --quiet continuity` — проходит;
+    - `./scripts/proof_workspace_restore_pack_enrichment.sh` — ok;
+    - `./scripts/maintainability_gate.sh --json`, `./scripts/implementation_status_sync_guard.sh --json`, `./scripts/agent_preflight.sh --json` — ok.
 
 ### Ближайший следующий этап
 
@@ -2261,13 +2320,13 @@ Stage status после fresh proof-refresh 2026-04-24:
 ### 2026-05-06 — Compact-chat front-door now rejects unusable clean-surface payloads
 
 - закрыт следующий behavioral beta-blocker в `continuity_compact_chat` shell front-door: API payload больше не считается успехом, если в нём нет реального `chat_start_restore.prompt_text` или нет ни auto-launch команды, ни честного manual clean-surface action;
-- [scripts/continuity_compact_chat.sh](../scripts/continuity_compact_chat.sh) теперь fail-closed принимает compact-chat projection только если сохранены:
+- scripts/continuity_compact_chat.sh теперь fail-closed принимает compact-chat projection только если сохранены:
   - project/namespace identity;
   - `operator_notice.kind`;
   - `handoff.headline` и `handoff.next_step`;
   - непустой `chat_start_restore.prompt_text`;
   - хотя бы один usable clean-surface transition surface: `operator_notice.launch_clean_chat_command` или `operator_notice.required_host_action`;
-- hostile proof [scripts/proof_continuity_frontdoor_semantic_invalid_payload_fail_closed.sh](../scripts/proof_continuity_frontdoor_semantic_invalid_payload_fail_closed.sh) расширен отдельными negative-path на missing prompt и missing launch/manual guidance.
+- hostile proof scripts/proof_continuity_frontdoor_semantic_invalid_payload_fail_closed.sh расширен отдельными negative-path на missing prompt и missing launch/manual guidance.
 
 ### 2026-05-06 — Compact-chat delivery/chat notice now preserves actionable clean-surface fields
 
@@ -2305,7 +2364,7 @@ Stage status после fresh proof-refresh 2026-04-24:
   - `chat_notice`;
   - shared launch/prompt/manual-fallback contract;
 - там же новый regression `compact_chat_response_payload_keeps_summary_and_notice_launch_contract_aligned` доказывает, что launch commands, command kind, prompt text, thread identity, `clean_chat_launch` и `manual_fallback_steps` доходят до итогового observe surface согласованно, а не теряются между summary и notice lanes.
-- companion bundle [scripts/proof_client_clean_chat_launch.sh](../scripts/proof_client_clean_chat_launch.sh) теперь тоже включает:
+- companion bundle scripts/proof_client_clean_chat_launch.sh теперь тоже включает:
   - `compact_chat_response_payload_keeps_summary_and_notice_launch_contract_aligned`;
   - `dashboard_html_keeps_compact_chat_assist_path_source_first`;
   так что clean-chat launch contour больше не держится только на helper/runtime unit lanes без broad user-path companion proof.
@@ -2322,7 +2381,7 @@ Stage status после fresh proof-refresh 2026-04-24:
 
 - закрыт следующий truth-sensitive defect: simple `code chat` exit-zero больше не трактуется как доказанный seamless clean-surface transition;
 - bounded local live-process check показал только `launch command exited zero`, но не дал доказательства новой видимой clean surface в `code --status`, поэтому source contract переведён в fail-closed форму;
-- [src/continuity/continuity_compact_chat_helpers.rs](../src/continuity/continuity_compact_chat_helpers.rs) теперь на `requested`:
+- src/continuity/continuity_compact_chat_helpers.rs теперь на `requested`:
   - сохраняет `required_host_action` вместо его silent drop;
   - меняет operator notice/message на verification-first wording;
   - больше не говорит, что manual injection шаг уже точно не нужен;
@@ -2332,7 +2391,7 @@ Stage status после fresh proof-refresh 2026-04-24:
 ### 2026-05-07 — VS Code Codex extension bridge candidate is now pinned as local proof, not folklore
 
 - закрыт ещё один proof gap перед beta-readiness audit: наличие extension-native bridge candidate для clean-surface continuation больше не держится на устном предположении после ручного bundle-reading;
-- добавлен [scripts/proof_vscode_compact_chat_extension_bridge.sh](../scripts/proof_vscode_compact_chat_extension_bridge.sh), который на живой локальной машине fail-closed проверяет, что установленный `openai.chatgpt` extension bundle действительно содержит:
+- добавлен scripts/proof_vscode_compact_chat_extension_bridge.sh, который на живой локальной машине fail-closed проверяет, что установленный `openai.chatgpt` extension bundle действительно содержит:
   - contributed commands `chatgpt.newChat` и `chatgpt.newCodexPanel`;
   - runtime command registration в `out/extension.js`;
   - internal webview bridge `open-vscode-command` + `shared-object-set composer_prefill` в `use-start-new-conversation-*.js`;
@@ -2341,7 +2400,7 @@ Stage status после fresh proof-refresh 2026-04-24:
 ### 2026-05-07 — VS Code external bridge boundary is now pinned as local blocker evidence
 
 - закрыт ещё один beta-readiness proof gap: remaining blocker по VS Code clean-surface path больше не описывается расплывчато как “наверное, внешний bridge ещё не materialized”;
-- добавлен [scripts/proof_vscode_compact_chat_external_bridge_boundary.sh](../scripts/proof_vscode_compact_chat_external_bridge_boundary.sh), который на живой локальной машине fail-closed проверяет, что:
+- добавлен scripts/proof_vscode_compact_chat_external_bridge_boundary.sh, который на живой локальной машине fail-closed проверяет, что:
   - `code --help` всё ещё не даёт внешнего `--command` front-door для вызова extension commands;
   - установленный `openai.chatgpt` extension `onUri` handler всё ещё маршрутизирует только `uri.path` в `navigateToRoute(path)`;
   - более сильный `composer_prefill` bridge по-прежнему живёт только внутри webview bundle, а не как внешний public launch contract;
@@ -2351,84 +2410,84 @@ Stage status после fresh proof-refresh 2026-04-24:
 
 - закрыт крупный beta-blocker: Amai больше не зависит только от upstream route-only `onUri`, internal-only `composer_prefill` или `code chat` command-contract для VS Code clean-surface continuation;
 - добавлены:
-  - [tools/vscode-amai-bridge/package.json](../tools/vscode-amai-bridge/package.json)
-  - [tools/vscode-amai-bridge/extension.js](../tools/vscode-amai-bridge/extension.js)
-  - [tools/vscode-amai-bridge/README.md](../tools/vscode-amai-bridge/README.md)
-  - [scripts/install_vscode_amai_bridge.sh](../scripts/install_vscode_amai_bridge.sh)
-  - [scripts/proof_vscode_compact_chat_public_bridge.sh](../scripts/proof_vscode_compact_chat_public_bridge.sh)
+  - tools/vscode-amai-bridge/package.json
+  - tools/vscode-amai-bridge/extension.js
+  - tools/vscode-amai-bridge/README.md
+  - scripts/install_vscode_amai_bridge.sh
+  - scripts/proof_vscode_compact_chat_public_bridge.sh
 - bridge materialize-ит public `onUri` + command `amaiVscodeBridge.openCleanChat`, читает `prompt_file`, пишет `result_file` truth и открывает clean surface только через public VS Code/Codex commands:
   - `chatgpt.openSidebar`
   - `chatgpt.newChat`
   - `chatgpt.newCodexPanel`
   - `type`
-- [src/continuity/continuity_compact_chat_helpers.rs](../src/continuity/continuity_compact_chat_helpers.rs) теперь предпочитает `vscode_uri_amai_bridge`, если bridge установлен и доступен `xdg-open`; старый `code chat --reuse-window` остаётся truthful fallback, а не притворяется единственным automatic path;
+- src/continuity/continuity_compact_chat_helpers.rs теперь предпочитает `vscode_uri_amai_bridge`, если bridge установлен и доступен `xdg-open`; старый `code chat --reuse-window` остаётся truthful fallback, а не притворяется единственным automatic path;
 - [scripts/onboard_local.sh](../scripts/onboard_local.sh) теперь после `--client vscode` автоматически ставит этот bridge, так что one-command onboarding materialize-ит не только stack/MCP/startup, но и сам clean-surface public bridge;
 - [scripts/proof_onboarding.sh](../scripts/proof_onboarding.sh) в этом состоянии снова зелёный, так что install contour не сломан новым bridge install step.
 
 ### 2026-05-07 — VS Code public bridge is now live-verified and fail-closed on unverified hosts
 
 - закрыт ещё один truth-sensitive defect: сам факт install/public URI bridge больше не считается достаточным основанием для auto-launch promotion;
-- добавлен [scripts/verify_vscode_compact_chat_public_bridge_live.sh](../scripts/verify_vscode_compact_chat_public_bridge_live.sh), который на живом VS Code host:
+- добавлен scripts/verify_vscode_compact_chat_public_bridge_live.sh, который на живом VS Code host:
   - запускает `xdg-open vscode://amai.amai-vscode-bridge/open-clean-chat?...`;
   - ждёт `result_file` от extension;
   - требует финальный `status = launch_requested`, а не промежуточный `launch_started`;
   - при успехе умеет записывать workspace-local verification artifact `.amai/onboarding/vscode-public-bridge-live-state.json`;
-- добавлен [scripts/proof_vscode_compact_chat_public_bridge_live.sh](../scripts/proof_vscode_compact_chat_public_bridge_live.sh), который materialize-ит этот live verification artifact как канонический bounded proof lane;
-- [src/continuity/continuity_compact_chat_helpers.rs](../src/continuity/continuity_compact_chat_helpers.rs) теперь fail-closed предпочитает `vscode_uri_amai_bridge` только если:
+- добавлен scripts/proof_vscode_compact_chat_public_bridge_live.sh, который materialize-ит этот live verification artifact как канонический bounded proof lane;
+- src/continuity/continuity_compact_chat_helpers.rs теперь fail-closed предпочитает `vscode_uri_amai_bridge` только если:
   - bridge установлен;
   - доступен live-verified VS Code URI launcher;
   - существует live verification artifact со статусом `live_launch_verified`;
-- без этого marker-а VS Code path больше не притворяется public-bridge-ready и откатывается к truthful `vscode_code_chat_cli` command-contract; install/reinstall bridge теперь ещё и сбрасывает stale live marker через [scripts/install_vscode_amai_bridge.sh](../scripts/install_vscode_amai_bridge.sh).
+- без этого marker-а VS Code path больше не притворяется public-bridge-ready и откатывается к truthful `vscode_code_chat_cli` command-contract; install/reinstall bridge теперь ещё и сбрасывает stale live marker через scripts/install_vscode_amai_bridge.sh.
 
 ### 2026-05-07 — VS Code public bridge launcher now bypasses desktop-file mediation
 
 - закрыт ещё один UX defect: canonical `vscode_uri_amai_bridge` launch больше не идёт через общий `xdg-open` mediator, а предпочитает прямой `code --open-url` path;
 - live audit на этой машине показал неприятный companion symptom у старого `xdg-open` path: extension действительно активировался по `onUri`, но рядом появлялся побочный `untitled:/.../vscode:/art-local...` dirty surface в renderer logs;
-- [src/continuity/continuity_compact_chat_helpers.rs](../src/continuity/continuity_compact_chat_helpers.rs) теперь строит public bridge launch command через `code --open-url`, если `code` binary доступен, и уходит в `xdg-open` только как fallback;
-- [scripts/verify_vscode_compact_chat_public_bridge_live.sh](../scripts/verify_vscode_compact_chat_public_bridge_live.sh) синхронно переведён на тот же direct launcher, чтобы proof lane проверял именно канонический runtime path, а не старую desktop-mediated ветку.
+- src/continuity/continuity_compact_chat_helpers.rs теперь строит public bridge launch command через `code --open-url`, если `code` binary доступен, и уходит в `xdg-open` только как fallback;
+- scripts/verify_vscode_compact_chat_public_bridge_live.sh синхронно переведён на тот же direct launcher, чтобы proof lane проверял именно канонический runtime path, а не старую desktop-mediated ветку.
 
 ### 2026-05-07 — VS Code public bridge now proves no new dirty URI editor growth on the bounded lane
 
 - закрыт ещё один UX defect: bounded live proof для `vscode_uri_amai_bridge` теперь проверяет не только `launch_requested`, но и то, что launch не наращивает известный dirty renderer след `untitled:/.../vscode:/amai.amai-vscode-bridge/open-clean-chat...`;
-- [tools/vscode-amai-bridge/extension.js](../tools/vscode-amai-bridge/extension.js) теперь после `handleUri` пытается закрывать transient bridge editor/tabs, если такие surface всё же успевают появиться;
-- [scripts/verify_vscode_compact_chat_public_bridge_live.sh](../scripts/verify_vscode_compact_chat_public_bridge_live.sh) теперь считает dirty-surface events до и после live launch и fail-closed режет proof, если счётчик вырос;
-- текущий workspace-local artifact [`.amai/onboarding/vscode-public-bridge-live-state.json`](../.amai/onboarding/vscode-public-bridge-live-state.json) на этой машине фиксирует bounded truth `before_count = 2`, `after_count = 2`, то есть канонический direct-launch path не добавил новых dirty events поверх уже исторически существующих следов.
+- tools/vscode-amai-bridge/extension.js теперь после `handleUri` пытается закрывать transient bridge editor/tabs, если такие surface всё же успевают появиться;
+- scripts/verify_vscode_compact_chat_public_bridge_live.sh теперь считает dirty-surface events до и после live launch и fail-closed режет proof, если счётчик вырос;
+- текущий workspace-local artifact `.amai/onboarding/vscode-public-bridge-live-state.json` на этой машине фиксирует bounded truth `before_count = 2`, `after_count = 2`, то есть канонический direct-launch path не добавил новых dirty events поверх уже исторически существующих следов.
 
 ### 2026-05-07 — VS Code public bridge install contour is now version-aware and code-visible
 
 - закрыт ещё один truth-sensitive defect: install contour больше не может молча подменять текущий bridge bundle stale same-version copy и при этом притворяться “installed” только по наличию директории;
-- [tools/vscode-amai-bridge/package.json](../tools/vscode-amai-bridge/package.json) теперь version-bumped до `0.0.2`, так что runtime bundle change больше не живёт под старым extension version id;
-- [scripts/install_vscode_amai_bridge.sh](../scripts/install_vscode_amai_bridge.sh) теперь удаляет все старые `amai.amai-vscode-bridge-*` directories перед copy/install, а не оставляет version drift в profile;
-- [scripts/verify_vscode_compact_chat_public_bridge_live.sh](../scripts/verify_vscode_compact_chat_public_bridge_live.sh) больше не hardcode-ит `0.0.1`, а читает expected version из source `package.json`;
-- [scripts/proof_vscode_compact_chat_public_bridge.sh](../scripts/proof_vscode_compact_chat_public_bridge.sh) теперь доказывает не только file presence, но и install/registration truth: после isolated install сам `code --extensions-dir ... --list-extensions --show-versions` обязан видеть точный `amai.amai-vscode-bridge@0.0.2`;
+- tools/vscode-amai-bridge/package.json теперь version-bumped до `0.0.2`, так что runtime bundle change больше не живёт под старым extension version id;
+- scripts/install_vscode_amai_bridge.sh теперь удаляет все старые `amai.amai-vscode-bridge-*` directories перед copy/install, а не оставляет version drift в profile;
+- scripts/verify_vscode_compact_chat_public_bridge_live.sh больше не hardcode-ит `0.0.1`, а читает expected version из source `package.json`;
+- scripts/proof_vscode_compact_chat_public_bridge.sh теперь доказывает не только file presence, но и install/registration truth: после isolated install сам `code --extensions-dir ... --list-extensions --show-versions` обязан видеть точный `amai.amai-vscode-bridge@0.0.2`;
 - это не закрывает live UX beta-gap целиком: на уже открытом локальном VS Code окне всё ещё подтверждён отдельный stale running-profile blocker, где старый loaded bridge runtime может не отдать новый `ui_cleanup` result contract без reload/restart.
 
 ### 2026-05-08 — VS Code bridge install now rewrites stale registration and exposes a first-class sidebar UI
 
 - закрыт ещё один реальный UI/install defect: bridge больше не зависит от stale `art-local.amai-vscode-bridge-*` registration в `~/.vscode/extensions/extensions.json`, из-за которой уже установленный новый bundle мог не показывать fresh activity-bar/sidebar contributions в живом VS Code окне;
-- [tools/vscode-amai-bridge/package.json](../tools/vscode-amai-bridge/package.json) теперь version-bumped до `0.0.3`, а сам bridge materialize-ит полноценный UI-contour: activity-bar container `Amai`, sidebar view `amai.sidebar` и workspace launch commands для sidebar/panel;
-- [scripts/install_vscode_amai_bridge.sh](../scripts/install_vscode_amai_bridge.sh) теперь не только sync-ит current bundle в `~/.vscode/extensions/amai.amai-vscode-bridge-<version>`, но и rewrite-ит matching entry в `extensions.json` на exact current path/version и удаляет stale `art-local.amai-vscode-bridge-*` aliases вместо silent compatibility-shim dependence;
-- новый bounded proof [scripts/proof_vscode_amai_bridge_registry_sync.sh](../scripts/proof_vscode_amai_bridge_registry_sync.sh) fail-close доказывает этот exact contour: после install `extensions.json` обязан ссылаться на current `amai.amai-vscode-bridge-0.0.3`, а stale `art-local` alias обязан исчезнуть;
-- companion UI proof [scripts/proof_vscode_amai_bridge_ui_surface.sh](../scripts/proof_vscode_amai_bridge_ui_surface.sh) доказывает, что source/install bundle реально содержит activity-bar container, sidebar view, icon asset и workspace chat commands, а не только старый `onUri` bridge.
+- tools/vscode-amai-bridge/package.json теперь version-bumped до `0.0.3`, а сам bridge materialize-ит полноценный UI-contour: activity-bar container `Amai`, sidebar view `amai.sidebar` и workspace launch commands для sidebar/panel;
+- scripts/install_vscode_amai_bridge.sh теперь не только sync-ит current bundle в `~/.vscode/extensions/amai.amai-vscode-bridge-<version>`, но и rewrite-ит matching entry в `extensions.json` на exact current path/version и удаляет stale `art-local.amai-vscode-bridge-*` aliases вместо silent compatibility-shim dependence;
+- новый bounded proof scripts/proof_vscode_amai_bridge_registry_sync.sh fail-close доказывает этот exact contour: после install `extensions.json` обязан ссылаться на current `amai.amai-vscode-bridge-0.0.3`, а stale `art-local` alias обязан исчезнуть;
+- companion UI proof scripts/proof_vscode_amai_bridge_ui_surface.sh доказывает, что source/install bundle реально содержит activity-bar container, sidebar view, icon asset и workspace chat commands, а не только старый `onUri` bridge.
 - поверх этого закрыт ещё один user-facing UI defect: activity-bar icon теперь больше не временный bridge glyph, а родной Amai mark, а extension details теперь используют тот же brand mark вместо generic package icon;
 - в том же contour закрыт sibling view-contract defect: `amai.sidebar` теперь явно materialize-ится как `type = webview`, так что opened sidebar больше не должен падать в VS Code placeholder `Отсутствует зарегистрированный поставщик данных...`, который относится к tree/data-provider view без registered provider.
 - закрыт ещё один direct UX defect в том же sidebar contour: launch buttons больше не зависят от fragile `acquireVsCodeApi()/postMessage/onDidReceiveMessage` chain, а используют direct `command:` URIs under `enableCommandUris`, поэтому клик либо реально запускает `amaiVscodeBridge.openWorkspaceSidebarChat` / `amaiVscodeBridge.openWorkspacePanelChat`, либо fail-close показывает `Amai launch failed: ...` вместо silent no-op.
-- после live click probe закрыт и следующий companion runtime defect: sidebar launch path реально падал на прямом `ReferenceError` из-за typo в `collectVisibleSurfaceState`, где result payload ожидал `non_bridge_tab_labels`, а код собирал `nonBridgeTabLabels`; [tools/vscode-amai-bridge/extension.js](../tools/vscode-amai-bridge/extension.js) теперь materialize-ит exact field `non_bridge_tab_labels: nonBridgeTabLabels`, а [scripts/proof_vscode_amai_bridge_ui_surface.sh](../scripts/proof_vscode_amai_bridge_ui_surface.sh) держит structural guard на этот contour, чтобы silent regression не вернулся.
+- после live click probe закрыт и следующий companion runtime defect: sidebar launch path реально падал на прямом `ReferenceError` из-за typo в `collectVisibleSurfaceState`, где result payload ожидал `non_bridge_tab_labels`, а код собирал `nonBridgeTabLabels`; tools/vscode-amai-bridge/extension.js теперь materialize-ит exact field `non_bridge_tab_labels: nonBridgeTabLabels`, а scripts/proof_vscode_amai_bridge_ui_surface.sh держит structural guard на этот contour, чтобы silent regression не вернулся.
 
 ### 2026-05-07 — Stale running-profile bridge runtime now fails closed by explicit version mismatch
 
 - закрыт ещё один truth-sensitive defect: stale уже загруженный VS Code bridge runtime больше не маскируется под generic `ui_cleanup` failure и не требует догадок по косвенному поведению;
-- [tools/vscode-amai-bridge/extension.js](../tools/vscode-amai-bridge/extension.js) теперь пишет `public_bridge.version` прямо в `launch_started` / `launch_requested` / `launch_failed` result payload;
-- [scripts/verify_vscode_compact_chat_public_bridge_live.sh](../scripts/verify_vscode_compact_chat_public_bridge_live.sh) теперь читает expected version из source `tools/vscode-amai-bridge/package.json` и fail-closed режет live lane отдельным verdict-ом `bridge runtime version mismatch`, если already-loaded VS Code host отвечает старым runtime contract;
-- [src/continuity/continuity_compact_chat_helpers.rs](../src/continuity/continuity_compact_chat_helpers.rs) теперь повышает `vscode_uri_amai_bridge` до verified surface только если live marker несёт не просто authority и cleanup truth, а ещё и точную source-matching `public_bridge.version`;
+- tools/vscode-amai-bridge/extension.js теперь пишет `public_bridge.version` прямо в `launch_started` / `launch_requested` / `launch_failed` result payload;
+- scripts/verify_vscode_compact_chat_public_bridge_live.sh теперь читает expected version из source `tools/vscode-amai-bridge/package.json` и fail-closed режет live lane отдельным verdict-ом `bridge runtime version mismatch`, если already-loaded VS Code host отвечает старым runtime contract;
+- src/continuity/continuity_compact_chat_helpers.rs теперь повышает `vscode_uri_amai_bridge` до verified surface только если live marker несёт не просто authority и cleanup truth, а ещё и точную source-matching `public_bridge.version`;
 - companion Rust proof теперь прямо закрепляет negative path на missing/wrong runtime version, так что stale runtime больше не может пройти verify path молча.
 
 ### 2026-05-07 — Live public bridge proof no longer false-fails on empty dirty-surface scan or exact `false` cleanup state
 
 - закрыт ещё один реальный proof-harness defect: bounded live proof для `vscode_uri_amai_bridge` раньше мог упасть ещё до launch из-за `pipefail`-цепочки в dirty-surface scan, когда `renderer.log` не содержал ни одного bridge match и `xargs rg` возвращал `123` вместо честного `0`;
-- [scripts/verify_vscode_compact_chat_public_bridge_live.sh](../scripts/verify_vscode_compact_chat_public_bridge_live.sh) теперь нормализует zero-match dirty-surface path в явный счётчик `0`, а не режет весь proof ложным early-exit;
+- scripts/verify_vscode_compact_chat_public_bridge_live.sh теперь нормализует zero-match dirty-surface path в явный счётчик `0`, а не режет весь proof ложным early-exit;
 - в том же verifier закрыт второй truth-sensitive defect: extraction `ui_cleanup.active_editor_matches_bridge_uri_after` больше не использует jq-ветку `// true`, которая превращала корректный `false` в ложный fallback `true` и из-за этого маскировала уже успешный cleanup contract как якобы broken;
-- после этих двух фиксов live lane на текущей машине стал реально зелёным: [scripts/proof_vscode_compact_chat_public_bridge_live.sh](../scripts/proof_vscode_compact_chat_public_bridge_live.sh) проходит, а workspace-local artifact `.amai/onboarding/vscode-public-bridge-live-state.json` фиксирует `public_bridge.version = 0.0.2`, `dirty_surface.before_count = 0`, `dirty_surface.after_count = 0`, `ui_cleanup.success = true` и `active_editor_matches_bridge_uri_after = false`.
+- после этих двух фиксов live lane на текущей машине стал реально зелёным: scripts/proof_vscode_compact_chat_public_bridge_live.sh проходит, а workspace-local artifact `.amai/onboarding/vscode-public-bridge-live-state.json` фиксирует `public_bridge.version = 0.0.2`, `dirty_surface.before_count = 0`, `dirty_surface.after_count = 0`, `ui_cleanup.success = true` и `active_editor_matches_bridge_uri_after = false`.
 
 ### 2026-05-07 — Live public bridge proof no longer overclaims stale default-profile registration as runtime truth
 
@@ -2436,37 +2495,37 @@ Stage status после fresh proof-refresh 2026-04-24:
 - прямой runtime probe на этой машине подтвердил корневой факт: default profile registration шумит stale version string, но `code --open-url vscode://amai.amai-vscode-bridge/...` пишет result payload с `public_bridge.version = 0.0.2`, `status = launch_requested` и green `ui_cleanup`;
 - закрыт ещё один proof-artifact truth gap: live state для публичного VS Code bridge теперь сохраняет полный `bridge_result` и machine-readable capability drift вместо того, чтобы отбрасывать всё выше `public_bridge.version/ui_cleanup`;
 - это материализовало более точную beta-boundary: installed bridge bundle и loaded runtime уже materialize-ят `visible_surface` payload truth, поэтому higher clean-surface UX proof теперь опирается на `runtime_capabilities.visible_surface_payload_present = true` и `runtime_capability_drift.visible_surface_missing_from_runtime_result = false`, а не на старую missing-сurface формулировку;
-- bounded proof для этой границы теперь отдельный и зелёный: [scripts/proof_vscode_compact_chat_visible_surface_runtime_boundary.sh](../scripts/proof_vscode_compact_chat_visible_surface_runtime_boundary.sh).
+- bounded proof для этой границы теперь отдельный и зелёный: scripts/proof_vscode_compact_chat_visible_surface_runtime_boundary.sh.
 - закрыт ещё один blocker-sharpening gap над тем же runtime payload: public refresh candidates сами по себе уже не “неизвестный следующий шаг”, а проверенная тупиковая ветка для этой машины;
-- новый bounded proof [scripts/proof_vscode_compact_chat_runtime_refresh_boundary.sh](../scripts/proof_vscode_compact_chat_runtime_refresh_boundary.sh) подтверждает, что `code --open-url 'command:workbench.action.restartExtensionHost'` и `code --open-url 'command:workbench.action.reloadWindow'` не ломают `visible_surface` runtime payload: после каждого refresh probe lower live bridge lane остаётся зелёным, `runtime_capabilities.visible_surface_payload_present` остаётся `true`, а `runtime_capability_drift.visible_surface_missing_from_runtime_result` остаётся `false`;
+- новый bounded proof scripts/proof_vscode_compact_chat_runtime_refresh_boundary.sh подтверждает, что `code --open-url 'command:workbench.action.restartExtensionHost'` и `code --open-url 'command:workbench.action.reloadWindow'` не ломают `visible_surface` runtime payload: после каждого refresh probe lower live bridge lane остаётся зелёным, `runtime_capabilities.visible_surface_payload_present` остаётся `true`, а `runtime_capability_drift.visible_surface_missing_from_runtime_result` остаётся `false`;
 - это уже не локализация missing-surface blocker, а подтверждение сохранения payload truth на текущем host.
-- [scripts/verify_vscode_compact_chat_public_bridge_live.sh](../scripts/verify_vscode_compact_chat_public_bridge_live.sh) теперь использует disk install truth under `~/.vscode/extensions` plus runtime result version as source of truth и больше не валит live lane только из-за stale default-profile registration drift;
+- scripts/verify_vscode_compact_chat_public_bridge_live.sh теперь использует disk install truth under `~/.vscode/extensions` plus runtime result version as source of truth и больше не валит live lane только из-за stale default-profile registration drift;
 - bounded negative path теперь fail-closed сформулирован честно: verifier режет lane при missing bridge bundle, missing `openai.chatgpt` bundle, disk/source version mismatch или runtime/source version mismatch, но не подменяет эти классы риска шумным default-profile extension listing.
 
 ### 2026-05-07 — VS Code bridge install no longer makes the live bundle path disappear during reinstall
 
-- закрыт ещё один lower-layer defect под live UX contour: [scripts/install_vscode_amai_bridge.sh](../scripts/install_vscode_amai_bridge.sh) больше не делает destructive `rm -rf bridge-dir && cp -R ...`, из-за которого running VS Code host уже реально логировал `Unable to read file '~/.vscode/extensions/amai.amai-vscode-bridge-0.0.2/package.json'` и `Extension not found at the location ...` прямо во время reinstall;
+- закрыт ещё один lower-layer defect под live UX contour: scripts/install_vscode_amai_bridge.sh больше не делает destructive `rm -rf bridge-dir && cp -R ...`, из-за которого running VS Code host уже реально логировал `Unable to read file '~/.vscode/extensions/amai.amai-vscode-bridge-0.0.2/package.json'` и `Extension not found at the location ...` прямо во время reinstall;
 - install contour теперь sync-ит source bundle in-place в exact target dir `~/.vscode/extensions/amai.amai-vscode-bridge-<version>`: через `rsync -a --delete` when available и через non-destructive overlay fallback вместо удаления самого target path;
 - тот же install contour теперь ещё и сериализован file-lock-ом внутри extensions root, так что concurrent reinstall не может заново смешать cleanup sibling dirs с active sync path;
 - old sibling bridge versions всё ещё удаляются после успешного sync, но уже не ценой исчезновения текущего live bundle path из-под running host;
-- новый bounded proof [scripts/proof_vscode_amai_bridge_install_live_safe.sh](../scripts/proof_vscode_amai_bridge_install_live_safe.sh) фиксирует именно этот contract: после install `package.json` в exact target dir обязан существовать, а в свежем хвосте текущего `sharedprocess.log` не должен появляться новый missing-manifest error для этого bridge path;
-- companion proofs [scripts/proof_vscode_compact_chat_public_bridge.sh](../scripts/proof_vscode_compact_chat_public_bridge.sh) и [scripts/proof_vscode_compact_chat_public_bridge_live.sh](../scripts/proof_vscode_compact_chat_public_bridge_live.sh) остались зелёными после этого safe-install fix, так что lower install contour больше не добавляет noise в текущий bounded live lane.
+- новый bounded proof scripts/proof_vscode_amai_bridge_install_live_safe.sh фиксирует именно этот contract: после install `package.json` в exact target dir обязан существовать, а в свежем хвосте текущего `sharedprocess.log` не должен появляться новый missing-manifest error для этого bridge path;
+- companion proofs scripts/proof_vscode_compact_chat_public_bridge.sh и scripts/proof_vscode_compact_chat_public_bridge_live.sh остались зелёными после этого safe-install fix, так что lower install contour больше не добавляет noise в текущий bounded live lane.
 
 ### 2026-05-07 — Fresh isolated-host clean-surface blocker is now sharply localized to URI delivery
 
 - закрыт ещё один blocker-sharpening proof-gap: remaining fresh-host UX uncertainty больше не размазана по всей clean-surface линии;
-- новый bounded proof [scripts/proof_vscode_compact_chat_isolated_host_uri_delivery_boundary.sh](../scripts/proof_vscode_compact_chat_isolated_host_uri_delivery_boundary.sh) поднимает brand-new isolated VS Code host на временных `user-data-dir` и `extensions-dir`, копирует туда `openai.chatgpt` и текущий `amai.amai-vscode-bridge`, ждёт startup, а затем повторно отправляет `code --open-url vscode://amai.amai-vscode-bridge/...`;
+- новый bounded proof scripts/proof_vscode_compact_chat_isolated_host_uri_delivery_boundary.sh поднимает brand-new isolated VS Code host на временных `user-data-dir` и `extensions-dir`, копирует туда `openai.chatgpt` и текущий `amai.amai-vscode-bridge`, ждёт startup, а затем повторно отправляет `code --open-url vscode://amai.amai-vscode-bridge/...`;
 - truth boundary на текущей машине теперь конкретная: isolated host уже успевает активировать `openai.chatgpt` в `exthost.log`, но follow-up URI delivery всё ещё не materialize-ит bridge result file за bounded timeout;
 - закрыт ещё один sibling blocker-sharpening gap для того же isolated contour: cold one-shot startup path тоже больше не остаётся недоказанной надеждой;
-- новый bounded proof [scripts/proof_vscode_compact_chat_isolated_direct_uri_startup_boundary.sh](../scripts/proof_vscode_compact_chat_isolated_direct_uri_startup_boundary.sh) подтверждает, что даже прямой `code --user-data-dir ... --extensions-dir ... --open-url vscode://amai.amai-vscode-bridge/...` на brand-new isolated host не materialize-ит bridge result file за bounded timeout, хотя `openai.chatgpt` activation уже виден в `exthost.log`;
+- новый bounded proof scripts/proof_vscode_compact_chat_isolated_direct_uri_startup_boundary.sh подтверждает, что даже прямой `code --user-data-dir ... --extensions-dir ... --open-url vscode://amai.amai-vscode-bridge/...` на brand-new isolated host не materialize-ит bridge result file за bounded timeout, хотя `openai.chatgpt` activation уже виден в `exthost.log`;
 - это ещё уже локализует remaining beta-blocker: проблема уже не в “может быть, isolated host надо стартовать сразу через URI”, а в более глубоком truthful startup/runtime-delivery contour поверх VS Code.
 - закрыт ещё один реальный UX-supportability defect в том же proof contour: isolated proof-окна VS Code больше не должны оставаться висеть после завершения проверки и захламлять пользовательскую сессию;
 - для этого добавлен targeted teardown helper [scripts/close_vscode_temp_host.sh](../scripts/close_vscode_temp_host.sh), который гасит только temp-host процессы, привязанные к временному `user-data-dir`, а оба isolated proof-скрипта теперь вызывают его через `trap`;
-- companion non-regression proof [scripts/proof_vscode_compact_chat_isolated_window_cleanup.sh](../scripts/proof_vscode_compact_chat_isolated_window_cleanup.sh) подтверждает, что после прогона isolated warm/follow-up и cold/one-shot proof pair набор temp `--user-data-dir /tmp/tmp...` VS Code host процессов не увеличивается.
+- companion non-regression proof scripts/proof_vscode_compact_chat_isolated_window_cleanup.sh подтверждает, что после прогона isolated warm/follow-up и cold/one-shot proof pair набор temp `--user-data-dir /tmp/tmp...` VS Code host процессов не увеличивается.
 - закрыт ещё один blocker-sharpening gap над оставшимся VS Code startup contour: fallback `vscode_code_chat_cli` тоже больше не остаётся недоказанной надеждой на automation-safe isolated front-door;
-- новый bounded proof [scripts/proof_vscode_code_chat_isolation_boundary.sh](../scripts/proof_vscode_code_chat_isolation_boundary.sh) фиксирует текущий CLI contract: `code chat` surface-ит `--profile` и `--new-window`, но не surface-ит `--user-data-dir` и `--extensions-dir`, поэтому этот fallback path на текущем VS Code build нельзя честно использовать как isolated startup proof для beta-ready clean-surface claim.
+- новый bounded proof scripts/proof_vscode_code_chat_isolation_boundary.sh фиксирует текущий CLI contract: `code chat` surface-ит `--profile` и `--new-window`, но не surface-ит `--user-data-dir` и `--extensions-dir`, поэтому этот fallback path на текущем VS Code build нельзя честно использовать как isolated startup proof для beta-ready clean-surface claim.
 - закрыт ещё один blocker-sharpening gap над последним оставшимся VS Code fallback path: `vscode_code_chat_cli` сейчас нельзя честно поднять как isolated beta-startup lane;
-- новый bounded proof [scripts/proof_vscode_code_chat_cli_isolation_boundary.sh](../scripts/proof_vscode_code_chat_cli_isolation_boundary.sh) подтверждает, что subcommand `code chat` сейчас считает `--user-data-dir` и `--extensions-dir` неизвестными опциями и не пишет `exthost.log` в указанный временный `user-data-dir`;
+- новый bounded proof scripts/proof_vscode_code_chat_cli_isolation_boundary.sh подтверждает, что subcommand `code chat` сейчас считает `--user-data-dir` и `--extensions-dir` неизвестными опциями и не пишет `exthost.log` в указанный временный `user-data-dir`;
 - это значит, что `vscode_code_chat_cli` пока остаётся только command-contract fallback, а не truthful isolated startup proof path для beta.
 - это значит, что следующий beta-blocker уже не “вообще clean-surface UX непонятен”, а гораздо уже: нужен truthful contour для isolated-host URI delivery / fresh-host front-door, после которого можно возвращаться к более высокому visible-surface / startup-restore proof.
 
@@ -2494,7 +2553,7 @@ Stage status после fresh proof-refresh 2026-04-24:
 - предыдущий apparent blocker про already-open stale VS Code host на этой машине оказался смешанным с verifier drift: explicit version gate был полезен и truthful, но фактический красный live lane держался ещё и на двух harness-defect-ах. После их исправления текущий loaded host проходит bounded live proof; automatic refresh path для будущих stale-host сценариев остаётся желательным hardening, но это уже не главный доказанный beta-blocker этой машины.
 - отдельный code-grounded blocker внутри текущего `compact-chat` shell/observe/dashboard/proof contour после последних фиксов не подтверждён: remaining beta-risk теперь уже не в потерянном contract/state surface, а в отсутствии live-client proof, что clean-surface transition реально бесшовен в поддерживаемых host/client средах.
 - как bounded precursor к этому live-proof gap теперь materialized отдельный observe-host launch lane:
-  [scripts/proof_host_current_thread_control_uri_launch.sh](../scripts/proof_host_current_thread_control_uri_launch.sh)
+  scripts/proof_host_current_thread_control_uri_launch.sh
   доказывает, что server-side host control launch не только описан в surface, но и реально выполняет `xdg-open` path с `launch_method=xdg_open` и `verification_state=launch_command_executed_exit_zero`, при этом недоступный external launch surface fail-closed отвергается.
 
 Это не должно забываться.
@@ -2544,7 +2603,7 @@ Stage status после fresh proof-refresh 2026-04-24:
   - the exact remaining OpenVSX blocker is now only `This extension cannot be accepted because it has no license.`
 - user licensing decision is now explicit and materialized:
   - project/public extension contour selects `PolyForm Noncommercial 1.0.0`, so Amai stays source-available but forbidden for commercial use;
-  - root [LICENSE](../LICENSE) now contains the full `PolyForm Noncommercial 1.0.0` text with project notice, and [tools/vscode-amai-bridge/package.json](../tools/vscode-amai-bridge/package.json) now publishes `license = SEE LICENSE IN LICENSE` plus includes `LICENSE` in the VSIX allowlist;
+  - root [LICENSE](../LICENSE) now contains the full `PolyForm Noncommercial 1.0.0` text with project notice, and tools/vscode-amai-bridge/package.json now publishes `license = SEE LICENSE IN LICENSE` plus includes `LICENSE` in the VSIX allowlist;
   - next truthful gate is no longer `which license?`, but whether `vsce/ovsx` accept this materialized non-commercial license and whether searchable `OpenVSX` publish now passes.
 - truthful state after this probe:
   - GitHub/public package contour is no longer the blocker;

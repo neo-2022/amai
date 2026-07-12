@@ -150,41 +150,16 @@ assert_hermes_compact_startup() {
 }
 
 spawn_fake_orphan() {
-  TEMP_HOME="${temp_home}" python3 - <<'PY'
-import os
-
-repo_root = os.getcwd()
-temp_home = os.environ["TEMP_HOME"]
-
-read_fd, write_fd = os.pipe()
-pid = os.fork()
-if pid == 0:
-    os.close(read_fd)
-    os.setsid()
-    grandchild = os.fork()
-    if grandchild == 0:
-        os.chdir(repo_root)
-        os.environ["HOME"] = temp_home
-        devnull = os.open("/dev/null", os.O_RDWR)
-        os.dup2(devnull, 0)
-        os.dup2(devnull, 1)
-        os.dup2(devnull, 2)
-        if devnull > 2:
-            os.close(devnull)
-        os.close(write_fd)
-        os.execl("/bin/sleep", "./target/release/amai mcp serve", "600")
-    os.write(write_fd, str(grandchild).encode("utf-8"))
-    os.close(write_fd)
-    os._exit(0)
-
-os.close(write_fd)
-grandchild_pid = os.read(read_fd, 64).decode("utf-8").strip()
-os.close(read_fd)
-os.waitpid(pid, 0)
-if not grandchild_pid.isdigit():
-    raise RuntimeError("proof_client_reconnect: failed to create fake orphan MCP process")
-print(grandchild_pid)
-PY
+  HOME="${temp_home}" setsid /bin/bash -c \
+    'exec -a "./target/release/amai mcp serve" /bin/sleep 600' \
+    </dev/null >/dev/null 2>&1 &
+  local pid=$!
+  sleep 0.1
+  [[ -e "/proc/${pid}" ]] || {
+    echo "proof_client_reconnect: failed to create fake orphan MCP process" >&2
+    return 1
+  }
+  printf '%s\n' "${pid}"
 }
 
 cleanup_pid() {
@@ -208,6 +183,7 @@ run_client_command() {
   HOME="${temp_home}" \
     RUSTUP_HOME="${RUSTUP_HOME}" \
     CARGO_HOME="${CARGO_HOME}" \
+    PATH="${CARGO_HOME}/bin:/usr/bin:/bin" \
     "$@"
 }
 
@@ -385,6 +361,30 @@ if openclaw_cli="$(resolve_temp_home_openclaw_cli)"; then
 fi
 if [[ -f .openclaw/AGENTS.md ]]; then
   echo "proof_client_reconnect: openclaw startup workspace still present after disconnect"
+  exit 1
+fi
+
+run_client_command ./scripts/onboard_local.sh --client generic --yes --skip-stack --skip-release-build >/dev/null
+system_prompt="tmp/onboarding/generic-amai-system-prompt.txt"
+startup_md="tmp/onboarding/generic-amai-startup.md"
+client_config="tmp/onboarding/generic-mcp.json"
+test -f "${system_prompt}"
+test -f "${startup_md}"
+test -f "${client_config}"
+grep -q 'before each substantive reply, call the MCP tool amai_continuity_startup' "${system_prompt}"
+grep -q 'AMAI MANAGED STARTUP INSTRUCTIONS v2' "${startup_md}"
+grep -q 'run_mcp_stdio.sh' "${client_config}"
+run_client_command ./scripts/disconnect_local.sh --client generic >/dev/null
+if [[ -f "${client_config}" ]]; then
+  echo "proof_client_reconnect: generic mcp config still present after disconnect"
+  exit 1
+fi
+if [[ -f "${system_prompt}" ]]; then
+  echo "proof_client_reconnect: generic system prompt still present after disconnect"
+  exit 1
+fi
+if [[ -f "${startup_md}" ]]; then
+  echo "proof_client_reconnect: generic startup snippet still present after disconnect"
   exit 1
 fi
 

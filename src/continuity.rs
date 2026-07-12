@@ -542,6 +542,13 @@ fn compact_workspace_restore_pack_for_startup(pack: &Value) -> Value {
         "important_artifacts_count": count("important_artifacts"),
         "unresolved_conflicts_count": count("unresolved_conflicts"),
         "relevant_procedures_count": count("relevant_procedures"),
+        "recent_thread_highlights": pack["recent_thread_highlights"].clone(),
+        "recent_thread_highlights_count": if pack["recent_thread_highlights"].is_object() {
+            pack["recent_thread_highlights"]["messages_count"].as_u64().unwrap_or(0)
+        } else {
+            0
+        },
+        "active_editor_state": pack["active_editor_state"].clone(),
         "summary": pack["summary"].clone(),
         "procedural_restore_policy": pack["procedural_restore_policy"].clone(),
         "summary_only": true,
@@ -9061,7 +9068,7 @@ mod tests {
                 ],
                 "workspace_restore_pack_summary": "active(1); paused(1); facts(1); constraints(2); artifacts(3); procedures(1)",
                 "workspace_restore_pack": {
-                    "pack_version": "workspace-restore-pack-v1",
+                    "pack_version": "workspace-restore-pack-v2",
                     "active_commitments": [{"headline": "Amai upstream thread-index enrich materialized"}],
                     "blocked_waiting_items": [],
                     "paused_branches": [{"headline": "Same-meter spend control"}],

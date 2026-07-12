@@ -438,6 +438,14 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
         );
         println!("Почему runtime materialized: {}", summary.reason);
     }
+    if client_resolution.client_key == "generic" {
+        if let Some(summary) = &client_runtime_summary {
+            println!(
+                "Для Generic-клиента: вставь содержимое {} в system prompt (одна строка-затравка).",
+                summary.output_path.display()
+            );
+        }
+    }
     if let Some(summary) = &startup_contract_summary {
         println!("Machine-readable startup contract: {}", summary.status);
         println!(
@@ -2459,11 +2467,25 @@ struct ClientTarget {
     default_output: String,
     install_scope: String,
     priority: i64,
+    #[serde(default)]
+    tier: Option<u8>,
     detect_env_vars: Vec<String>,
     detect_workspace_markers: Vec<String>,
     detect_home_markers: Vec<String>,
     #[serde(default)]
     startup_instructions: Option<ClientStartupInstructions>,
+}
+
+impl ClientTarget {
+    fn tier_or_default(&self) -> u8 {
+        self.tier.unwrap_or(2)
+    }
+
+    fn auto_start_ready(&self) -> bool {
+        self.startup_instructions
+            .as_ref()
+            .is_some_and(|startup| startup.mode != "manual_snippet_only")
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2687,13 +2709,25 @@ pub(crate) fn describe_client_surface(
         "./scripts/amai_exec.sh bootstrap reconnect --client {} --yes",
         resolution.client_key
     );
-    let delivery_surface_assist_summary = format!(
-        "Для front-door новой чистой рабочей поверхности используй {} или {}.",
-        reconnect_shell_command, reconnect_bootstrap_command
-    );
+    let delivery_surface_assist_summary = if resolution.client_key == "generic" {
+        let system_prompt_path = generic_system_prompt_path(repo_root).display().to_string();
+        format!(
+            "Для front-door новой чистой рабочей поверхности вставь содержимое {} в system prompt клиента.",
+            system_prompt_path
+        )
+    } else {
+        format!(
+            "Для front-door новой чистой рабочей поверхности используй {} или {}.",
+            reconnect_shell_command, reconnect_bootstrap_command
+        )
+    };
+    let system_prompt_path: Option<String> = (resolution.client_key == "generic")
+        .then(|| generic_system_prompt_path(repo_root).display().to_string());
     Ok(json!({
         "client_key": resolution.client_key,
         "display_name": resolution.target.display_name,
+        "tier": resolution.target.tier_or_default(),
+        "auto_start_ready": resolution.target.auto_start_ready(),
         "auto_selected": resolution.auto_selected,
         "selection_reason": resolution.reason,
         "other_detected_clients": resolution.other_detected_clients,
@@ -2705,6 +2739,7 @@ pub(crate) fn describe_client_surface(
         "startup_instruction_install_scope": startup.map(|item| item.install_scope.clone()),
         "startup_instruction_install_scope_label": startup.map(|item| install_scope_status(&item.install_scope)),
         "startup_instruction_path": startup_instruction_path.map(|path| path.display().to_string()),
+        "system_prompt_path": system_prompt_path,
         "client_runtime_agent_id": openclaw_agent_id,
         "client_runtime_workspace_path": openclaw_agent_workspace,
         "reconnect_shell_command": reconnect_shell_command,
@@ -2775,6 +2810,14 @@ fn agent_preflight_agent_contract_artifact_path(repo_root: &Path) -> PathBuf {
 
 fn agent_preflight_state_artifact_path(repo_root: &Path) -> PathBuf {
     repo_root.join(".amai/onboarding/project-agent-preflight-state.json")
+}
+
+fn generic_system_prompt_path(repo_root: &Path) -> PathBuf {
+    repo_root.join("tmp/onboarding/generic-amai-system-prompt.txt")
+}
+
+fn render_generic_system_prompt_body() -> String {
+    "Amai continuity rule: before each substantive reply, call the MCP tool amai_continuity_startup for the current project and namespace continuity. Omit project/repo_root to let Amai auto-detect the project from cwd; if the project is unbound, ambiguous, or the call fails closed, stop and ask instead of guessing. After any successful MCP startup, read the runtime artifact `.amai/continuity/project-chat-startup-state.json`. If you detect stale or inconsistent data, reconcile once via the local CLI: `./scripts/continuity_startup.sh --repo-root <project-repo-root> --namespace continuity --json`, then continue only from the fresh local payload. The reconnect helper `./scripts/reconnect_local.sh --client generic` remains only a diagnostic fallback for repeated transport/runtime failure.".to_string()
 }
 
 fn contains_managed_startup_marker(content: &str) -> Result<bool> {
@@ -2986,6 +3029,23 @@ fn install_client_runtime_artifacts(
                 "Hermes profile `{}` is now the sticky default and boots with repo-bound Amai startup even outside the repo cwd",
                 summary.profile_name
             ),
+        }));
+    }
+
+    if client_resolution.client_key == "generic" {
+        let path = generic_system_prompt_path(repo_root);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let body = render_generic_system_prompt_body();
+        fs::write(&path, body.as_bytes())
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        return Ok(Some(ClientRuntimeInstallSummary {
+            status: "generic_system_prompt_generated".to_string(),
+            output_path: path,
+            install_scope: "manual_generated".to_string(),
+            reason: "copy the contents of this file into the client's system prompt as the front-door seed".to_string(),
         }));
     }
 
@@ -3644,6 +3704,20 @@ fn remove_client_runtime_artifacts(
     if client_key == "hermes" {
         return remove_hermes_project_profile(repo_root);
     }
+    if client_key == "generic" {
+        let path = generic_system_prompt_path(repo_root);
+        if path.is_file() {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+            return Ok(Some(ClientRuntimeInstallSummary {
+                status: "generic_system_prompt_removed".to_string(),
+                output_path: path,
+                install_scope: "manual_generated".to_string(),
+                reason: "generic system prompt seed removed".to_string(),
+            }));
+        }
+        return Ok(None);
+    }
     if client_key == "openclaw" && openclaw_cli_binary().is_none() {
         return Ok(None);
     }
@@ -3735,132 +3809,13 @@ fn render_hermes_compact_startup_body(
     let reconcile_error_detail_contains = tool_runtime_reconcile["error_detail_contains"]
         .as_str()
         .unwrap_or("no continuity import found for");
-    let reconcile_local_cli_shell_command = tool_runtime_reconcile["local_cli"]["shell_command"]
-        .as_str()
-        .unwrap_or("./scripts/continuity_startup.sh");
     let reconcile_transport_error_detail_contains =
         tool_runtime_reconcile["transport_error_detail_contains"]
             .as_str()
             .unwrap_or("Transport closed");
-    let reconcile_local_cli_success_classification =
-        tool_runtime_reconcile["local_cli_success_classification"]
-            .as_str()
-            .unwrap_or("stale_embedded_mcp_session");
-    let reconcile_must_request_mcp_reconnect =
-        tool_runtime_reconcile["must_request_mcp_reconnect_after_local_success"]
-            .as_bool()
-            .unwrap_or(false);
-    let reconcile_same_session_continuation_allowed =
-        tool_runtime_reconcile["same_session_continuation_allowed_after_local_success"]
-            .as_bool()
-            .unwrap_or(false);
-    let reconcile_operator_action_required =
-        tool_runtime_reconcile["operator_action_required_after_local_success"]
-            .as_bool()
-            .unwrap_or(false);
-    let reconnect_helper_diagnostic_only =
-        tool_runtime_reconcile["reconnect_helper_diagnostic_only_after_local_success"]
-            .as_bool()
-            .unwrap_or(false);
-    let reconcile_must_continue_from_local_payload =
-        tool_runtime_reconcile["must_continue_from_local_startup_payload"]
-            .as_bool()
-            .unwrap_or(false);
-    let stale_success = &tool_runtime_reconcile["success_payload_stale_runtime_artifact"];
-    let stale_success_detect_after_any_success = stale_success["detect_after_any_success"]
-        .as_bool()
-        .unwrap_or(false);
-    let stale_success_local_cli_reconcile_required = stale_success["local_cli_reconcile_required"]
-        .as_bool()
-        .unwrap_or(false);
-    let stale_success_local_cli_unavailable_blocks_report =
-        stale_success["local_cli_unavailable_blocks_report"]
-            .as_bool()
-            .unwrap_or(false);
-    let stale_success_replaces_mcp_success =
-        stale_success["local_cli_success_replaces_stale_mcp_success"]
-            .as_bool()
-            .unwrap_or(false);
-    let stale_success_conditions = stale_success["stale_conditions"]
-        .as_array()
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            "startup_contract_sha_mismatch, missing_agent_workflow_guard, missing_workflow_promotion_state, missing_working_state_lineage_event_id, missing_active_lease_source_event_id, workflow_promotion_source_event_mismatch, gate_semantics_inconsistent".to_string()
-        });
-    let reconnect_helper = &tool_runtime_reconcile["reconnect_helper"];
-    let reconnect_helper_shell_relative_path = reconnect_helper["shell_helper_relative_path"]
+    let reconcile_local_cli_shell_command = tool_runtime_reconcile["local_cli"]["shell_command"]
         .as_str()
-        .unwrap_or("./scripts/reconnect_local.sh");
-    let reconnect_helper_bootstrap_command = reconnect_helper["bootstrap_command"]
-        .as_str()
-        .unwrap_or("bootstrap reconnect");
-    let reconnect_helper_requires_client_argument = reconnect_helper["requires_client_argument"]
-        .as_bool()
-        .unwrap_or(false);
-    let reconnect_helper_requires_yes_argument = reconnect_helper["requires_yes_argument"]
-        .as_bool()
-        .unwrap_or(false);
-    let reconnect_shell_command = if helper_repo_root != workspace_root {
-        let helper = helper_repo_root.display();
-        if reconnect_helper_requires_client_argument {
-            format!(
-                "{reconnect_helper_shell_relative_path} --client {client_key} --cwd {} --workspace-root {} --yes",
-                helper,
-                workspace_root.display()
-            )
-        } else {
-            format!(
-                "{reconnect_helper_shell_relative_path} --cwd {} --workspace-root {} --yes",
-                helper,
-                workspace_root.display()
-            )
-        }
-    } else if reconnect_helper_requires_client_argument {
-        format!("{reconnect_helper_shell_relative_path} --client {client_key}")
-    } else {
-        reconnect_helper_shell_relative_path.to_string()
-    };
-    let reconnect_bootstrap_command = if helper_repo_root != workspace_root {
-        let helper_exec = helper_repo_root.join("scripts/amai_exec.sh");
-        if reconnect_helper_requires_client_argument {
-            format!(
-                "{} {} --client {client_key} --cwd {} --workspace-root {} --yes",
-                helper_exec.display(),
-                reconnect_helper_bootstrap_command,
-                helper_repo_root.display(),
-                workspace_root.display()
-            )
-        } else {
-            format!(
-                "{} {} --cwd {} --workspace-root {} --yes",
-                helper_exec.display(),
-                reconnect_helper_bootstrap_command,
-                helper_repo_root.display(),
-                workspace_root.display()
-            )
-        }
-    } else if reconnect_helper_requires_client_argument {
-        if reconnect_helper_requires_yes_argument {
-            format!(
-                "./scripts/amai_exec.sh {reconnect_helper_bootstrap_command} --client {client_key} --yes"
-            )
-        } else {
-            format!(
-                "./scripts/amai_exec.sh {reconnect_helper_bootstrap_command} --client {client_key}"
-            )
-        }
-    } else if reconnect_helper_requires_yes_argument {
-        format!("./scripts/amai_exec.sh {reconnect_helper_bootstrap_command} --yes")
-    } else {
-        format!("./scripts/amai_exec.sh {reconnect_helper_bootstrap_command}")
-    };
+        .unwrap_or("./scripts/continuity_startup.sh");
 
     let runtime_state_artifact = &contract["runtime_state_artifact"];
     let runtime_state_relative_path =
@@ -3870,57 +3825,6 @@ fn render_hermes_compact_startup_body(
     let startup_execution_gate_field = runtime_state_artifact["startup_execution_gate_field"]
         .as_str()
         .unwrap_or("startup_execution_gate");
-    let gate_semantics_consistent_field = runtime_state_artifact["gate_semantics_consistent_field"]
-        .as_str()
-        .unwrap_or("gate_semantics_consistent");
-    let startup_state_fallback_shell_command =
-        runtime_state_artifact["inspection_fallback_cli"]["shell_command"]
-            .as_str()
-            .unwrap_or("./scripts/continuity_startup_state.sh");
-
-    let resume_enforcement = &contract["resume_enforcement"];
-    let resume_state_field = resume_enforcement["resume_state_field"]
-        .as_str()
-        .unwrap_or("execctl_resume_state");
-    let resume_contract_field = resume_enforcement["contract_field"]
-        .as_str()
-        .unwrap_or("execctl_resume_contract_summary");
-    let resume_obligation_field = resume_enforcement["obligation_field"]
-        .as_str()
-        .unwrap_or("execctl_resume_obligation");
-    let startup_next_action_field = resume_enforcement["startup_next_action_field"]
-        .as_str()
-        .unwrap_or("startup_next_action");
-    let active_lease_field = resume_enforcement["active_lease_field"]
-        .as_str()
-        .unwrap_or("execctl_active_lease");
-    let required_action_kind = resume_enforcement["required_action_kind_when_resume_required"]
-        .as_str()
-        .unwrap_or("resume_required_return_task");
-
-    let live_budget = &contract["live_client_budget_enforcement"];
-    let client_budget_guard_shell_command = live_budget["guard_shell_command"]
-        .as_str()
-        .unwrap_or("./scripts/client_budget_gate.sh");
-    let client_budget_reply_execution_gate_field = live_budget["reply_execution_gate_field"]
-        .as_str()
-        .unwrap_or("reply_execution_gate");
-    let client_budget_reply_prefix_field = live_budget["reply_prefix_field"]
-        .as_str()
-        .unwrap_or("reply_prefix");
-    let client_budget_required_reply_prefix_source = live_budget["required_reply_prefix_source"]
-        .as_str()
-        .unwrap_or("disabled_by_project_policy");
-    let fail_closed_conditions = contract["fail_closed_conditions"]
-        .as_array()
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(|value| value.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default();
 
     let repo_root_display = workspace_root.display().to_string();
     let agent_contract_path_display = startup_agent_contract_artifact_path(workspace_root)
@@ -3931,15 +3835,15 @@ fn render_hermes_compact_startup_body(
         .to_string();
 
     Ok(format!(
-        "Перед первым содержательным ответом в новом или resumed чате и дальше перед каждым следующим содержательным ответом:\n\
-1. Workspace = `{repo_root_display}`. Прочитай compact agent contract `{agent_contract_path_display}` и machine-readable startup contract `{contract_path_display}`. Startup contract остаётся pinned source-of-truth; до MCP tool call проверь `{startup_contract_sha256_field} = \"{startup_contract_sha256}\"`, `workspace_contract_required_before_tool_call = {startup_contract_required_before_tool_call}`, `missing_or_unreadable_fail_closed = {startup_contract_missing_or_unreadable_fail_closed}`, `sha256_mismatch_fail_closed = {startup_contract_sha256_mismatch_fail_closed}`.\n\
-2. Затем вызови MCP tool `{tool}` с `repo_root = \"{repo_root_display}\"` и `namespace = \"{namespace}\"` до любого другого Amai шага.\n\
-3. Если tool вернул `{reconcile_error_class}` с detail `{reconcile_error_detail_contains}` или transport error с detail `{reconcile_transport_error_detail_contains}`, немедленно делай local reconcile: `{reconcile_local_cli_shell_command} --repo-root \"{repo_root_display}\" --namespace \"{namespace}\" --json`. Если он успешен, классифицируй случай как `{reconcile_local_cli_success_classification}` (`same_session_continuation_allowed_after_local_success = {reconcile_same_session_continuation_allowed}`, `operator_action_required_after_local_success = {reconcile_operator_action_required}`, `must_request_mcp_reconnect_after_local_success = {reconcile_must_request_mcp_reconnect}`, `reconnect_helper_diagnostic_only_after_local_success = {reconnect_helper_diagnostic_only}`, `must_continue_from_local_startup_payload = {reconcile_must_continue_from_local_payload}`) и продолжай от локального startup payload без прерывания пользователя. Reconnect helper держи только как диагностический fallback: `{reconnect_shell_command}` или `{reconnect_bootstrap_command}`.\n\
-4. После любого успешного MCP startup прочитай runtime artifact `{runtime_state_relative_path}`. Если stale-success проверка включена (`detect_after_any_success = {stale_success_detect_after_any_success}`) и найдено `{stale_success_conditions}`, делай local reconcile (`local_cli_reconcile_required = {stale_success_local_cli_reconcile_required}`, `local_cli_unavailable_blocks_report = {stale_success_local_cli_unavailable_blocks_report}`, `local_cli_success_replaces_stale_mcp_success = {stale_success_replaces_mcp_success}`), продолжай только от локального payload в том же сеансе и не требуй reconnect как нормальный шаг. Reconnect helper допустим только если transport продолжает падать или следующий MCP startup снова не доходит до self-healed состояния.\n\
-5. Obey fail-closed только по полям `{startup_execution_gate_field}`, `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}`, `{active_lease_field}`. `{gate_semantics_consistent_field}` должен быть `true`; если resume требует `{required_action_kind}`, follow startup_next_action first. No silent drop.\n\
-6. Перед каждым содержательным ответом обновляй `{client_budget_guard_shell_command} --enforce-reply-gate` и работай только по `client_budget_reply_gate.{client_budget_reply_execution_gate_field}`. Начинать user-visible reply можно только с exact non-empty `client_budget_reply_gate.{client_budget_reply_prefix_field}` из `{client_budget_required_reply_prefix_source}`.\n\
-7. Fallback для runtime-state inspection: `{startup_state_fallback_shell_command} --repo-root \"{repo_root_display}\" --json`.\n\
-8. Любой fail-closed scenario ({fail_closed_conditions}) сообщай как блокер и не угадывай continuity."
+        "Before every substantive reply:\n\
+        1. Workspace = `{repo_root_display}`. Read compact agent contract `{agent_contract_path_display}` and startup contract `{contract_path_display}`; verify `{startup_contract_sha256_field} = \"{startup_contract_sha256}\"`, `workspace_contract_required_before_tool_call = {startup_contract_required_before_tool_call}`, `missing_or_unreadable_fail_closed = {startup_contract_missing_or_unreadable_fail_closed}`, `sha256_mismatch_fail_closed = {startup_contract_sha256_mismatch_fail_closed}`.\n\
+        2. Затем вызови MCP tool `{tool}` с `repo_root = \"{repo_root_display}\"` и `namespace = \"{namespace}\"` до любого другого Amai шага.\n\
+        3. Если tool вернул `{reconcile_error_class}` с detail `{reconcile_error_detail_contains}` или transport error с detail `{reconcile_transport_error_detail_contains}`, немедленно делай local reconcile: `{reconcile_local_cli_shell_command} --repo-root \"{repo_root_display}\" --namespace \"{namespace}\" --json`. Если он успешен, классифицируй случай как stale embedded MCP session и продолжай от локального startup payload без прерывания пользователя. Reconnect helper держи только как диагностический fallback: `./scripts/reconnect_local.sh --client {client_key}` или `./scripts/amai_exec.sh bootstrap reconnect --client {client_key} --yes`.\n\
+        4. После любого успешного MCP startup прочитай runtime artifact `{runtime_state_relative_path}`. Если stale-success проверка находит дрейф, делай local reconcile и продолжай только от локального payload в том же сеансе; reconnect helper допустим только при повторном transport failure.\n\
+        5. Obey fail-closed только по полям `{startup_execution_gate_field}`, `execctl_resume_state`, `execctl_resume_contract_summary`, `execctl_resume_obligation`, `startup_next_action`, `execctl_active_lease`. `gate_semantics_consistent` должен быть `true`; если resume требует `resume_required_return_task`, follow `startup_next_action` first. No silent drop.\n\
+        6. Перед каждым содержательным ответом обновляй client-budget gate (`./scripts/client_budget_gate.sh --enforce-reply-gate`) и работай только по `reply_execution_gate`. Начинать user-visible reply можно только с exact non-empty `reply_prefix` из авторитетного источника.\n\
+        7. Fallback для runtime-state inspection: `./scripts/continuity_startup_state.sh --repo-root \"{repo_root_display}\" --json`.\n\
+        8. Любой fail-closed scenario сообщай как блокер и не угадывай continuity.\n"
     ))
 }
 
@@ -5567,11 +5471,11 @@ mod tests {
         hermes_profile_id, inspect_startup_artifacts, install_memory_bridge, install_scope_status,
         install_startup_instructions, merge_managed_startup_block, remove_hermes_project_profile,
         remove_startup_instructions, render_agent_preflight_contract_artifact,
-        render_agent_preflight_state_artifact, render_startup_agent_contract_artifact,
-        render_startup_contract_artifact, render_startup_instructions, resolve_client_target,
-        resolve_output_path, save_install_state, startup_agent_contract_artifact_path,
-        startup_contract_artifact_path, startup_contract_sha256, strip_managed_startup_block,
-        working_state_reason_summary,
+        render_agent_preflight_state_artifact, render_generic_system_prompt_body,
+        render_startup_agent_contract_artifact, render_startup_contract_artifact,
+        render_startup_instructions, resolve_client_target, resolve_output_path,
+        save_install_state, startup_agent_contract_artifact_path, startup_contract_artifact_path,
+        startup_contract_sha256, strip_managed_startup_block, working_state_reason_summary,
     };
     use crate::mcp;
     use crate::working_state;
@@ -5778,6 +5682,8 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
 
         let generic = describe_client_surface(repo, Some("generic")).expect("generic surface");
         assert_eq!(generic["client_key"], json!("generic"));
+        assert_eq!(generic["tier"], json!(2));
+        assert_eq!(generic["auto_start_ready"], json!(false));
         assert_eq!(
             generic["startup_instruction_mode"],
             json!("manual_snippet_only")
@@ -5788,9 +5694,14 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
                 .is_some_and(|value| value.ends_with("tmp/onboarding/generic-amai-startup.md"))
         );
         assert!(
-            generic["fresh_chat_assist_summary"].as_str().is_some_and(
-                |value| value.contains("./scripts/reconnect_local.sh --client generic")
+            generic["system_prompt_path"].as_str().is_some_and(
+                |value| value.ends_with("tmp/onboarding/generic-amai-system-prompt.txt")
             )
+        );
+        assert!(
+            generic["fresh_chat_assist_summary"]
+                .as_str()
+                .is_some_and(|value| value.contains("generic-amai-system-prompt.txt"))
         );
         assert_eq!(
             generic["delivery_surface_assist_summary"],
@@ -6004,8 +5915,11 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(repo.join(".vscode")).unwrap();
         std::fs::create_dir_all(repo.join("config")).unwrap();
-        std::fs::copy(base.join("config/client_targets.toml"), repo.join("config/client_targets.toml"))
-            .unwrap();
+        std::fs::copy(
+            base.join("config/client_targets.toml"),
+            repo.join("config/client_targets.toml"),
+        )
+        .unwrap();
         let resolution = resolve_client_target(&repo, "auto", false).unwrap();
         assert_eq!(resolution.client_key, "vscode");
         assert!(resolution.auto_selected);
@@ -6020,6 +5934,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             default_output: "${repo_root}/tmp/example.json".to_string(),
             install_scope: "workspace_local".to_string(),
             priority: 50,
+            tier: None,
             detect_env_vars: Vec::new(),
             detect_workspace_markers: vec!["missing-marker".to_string()],
             detect_home_markers: Vec::new(),
@@ -7519,6 +7434,56 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
 
         fs::remove_dir_all(&workspace).expect("cleanup workspace");
+    }
+
+    #[test]
+    fn generic_system_prompt_body_contains_stale_reconcile_rule() {
+        let body = render_generic_system_prompt_body();
+        let required = [
+            "amai_continuity_startup",
+            "runtime artifact",
+            ".amai/continuity/project-chat-startup-state.json",
+            "./scripts/continuity_startup.sh",
+            "stale",
+            "namespace continuity",
+        ];
+        for phrase in required {
+            assert!(
+                body.contains(phrase),
+                "generic system prompt seed must mention '{phrase}', got: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_client_startup_instruction_bodies_contain_stale_success_rule() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = unique_test_dir("stale-success-rule-coverage");
+        let clients = [
+            ("vscode", "vscode_instructions_md"),
+            ("cursor", "cursor_rules_mdc"),
+            ("claude-code", "generic_markdown"),
+            ("codex", "codex_agents_snippet"),
+            ("hermes", "hermes_compact_markdown"),
+            ("openclaw", "generic_markdown"),
+            ("claude-desktop", "generic_markdown"),
+            ("generic", "generic_markdown"),
+        ];
+        let required = ["runtime artifact", "stale", "continuity_startup.sh"];
+        for (client_key, format) in clients {
+            let body =
+                render_startup_instructions(&workspace, repo, client_key, client_key, format)
+                    .unwrap_or_else(|err| {
+                        panic!("failed to render startup instructions for {client_key}: {err}")
+                    });
+            for phrase in required {
+                assert!(
+                    body.contains(phrase),
+                    "client '{client_key}' startup instructions must mention '{phrase}', got: {body}"
+                );
+            }
+        }
+        fs::remove_dir_all(&workspace).ok();
     }
 
     #[test]

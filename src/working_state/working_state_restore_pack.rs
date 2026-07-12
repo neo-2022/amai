@@ -5,6 +5,8 @@ use super::{
     MAX_ACTIVE_FILES, MAX_OPEN_QUESTIONS, MAX_RECENT_ACTIONS, WORKSPACE_RESTORE_PACK_VERSION,
 };
 
+const MAX_THREAD_HIGHLIGHT_MESSAGES: usize = 3;
+
 fn workspace_restore_pack_active_commitments(restore: &Value) -> Value {
     let mut items = Vec::new();
     if let Some(nodes) = restore["project_task_tree"]["nodes"].as_array() {
@@ -347,6 +349,80 @@ fn workspace_restore_pack_relevant_procedures(restore: &Value) -> Value {
     })])
 }
 
+fn compact_text_for_restore_pack(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    format!("{}...", trimmed.chars().take(max_chars).collect::<String>())
+}
+
+fn workspace_restore_pack_recent_thread_highlights(restore: &Value) -> Value {
+    let _thread_id = restore["thread_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let Some(repo_root) = restore["project"]["repo_root"]
+        .as_str()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    else {
+        return Value::Null;
+    };
+    let Ok(Some(tail)) =
+        crate::codex_threads::current_chat_tail(repo_root, MAX_THREAD_HIGHLIGHT_MESSAGES)
+    else {
+        return Value::Null;
+    };
+    let highlights = tail
+        .messages
+        .iter()
+        .map(|message| {
+            json!({
+                "role": message.role,
+                "text": compact_text_for_restore_pack(&message.text, 160),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "thread_id": tail.thread_id,
+        "title": tail.title,
+        "summary_headline": tail.summary_headline,
+        "summary_next_step": tail.summary_next_step,
+        "messages_count": tail.messages.len(),
+        "highlights": highlights,
+    })
+}
+
+fn workspace_restore_pack_active_editor_state(restore: &Value) -> Value {
+    let open_files = restore["active_files"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let focused_file = open_files
+        .iter()
+        .find_map(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            restore["recent_actions"]
+                .as_array()
+                .and_then(|items| items.first())
+                .and_then(|item| item["local_path"].as_str())
+                .map(str::to_owned)
+        });
+    let last_action_local_path = restore["recent_actions"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| item["local_path"].as_str())
+        .map(str::to_owned);
+    json!({
+        "open_files": open_files,
+        "focused_file": focused_file.unwrap_or_default(),
+        "last_action_local_path": last_action_local_path,
+        "source": "working_state_restore",
+    })
+}
+
 fn summarize_workspace_restore_bucket(label: &str, value: &Value) -> Option<String> {
     let count = value.as_array().map(|items| items.len()).unwrap_or(0);
     (count > 0).then(|| format!("{label}({count})"))
@@ -364,7 +440,9 @@ pub(crate) fn build_workspace_restore_pack(restore: &Value) -> Value {
     let important_artifacts = workspace_restore_pack_important_artifacts(restore);
     let unresolved_conflicts = workspace_restore_pack_unresolved_conflicts(restore);
     let relevant_procedures = workspace_restore_pack_relevant_procedures(restore);
-    let summary = [
+    let recent_thread_highlights = workspace_restore_pack_recent_thread_highlights(restore);
+    let active_editor_state = workspace_restore_pack_active_editor_state(restore);
+    let mut summary = [
         summarize_workspace_restore_bucket("active", &active_commitments),
         summarize_workspace_restore_bucket("blocked", &blocked_waiting_items),
         summarize_workspace_restore_bucket("paused", &paused_branches),
@@ -375,8 +453,22 @@ pub(crate) fn build_workspace_restore_pack(restore: &Value) -> Value {
     ]
     .into_iter()
     .flatten()
-    .collect::<Vec<_>>()
-    .join("; ");
+    .collect::<Vec<_>>();
+    if let Some(count) = recent_thread_highlights["messages_count"].as_u64() {
+        if count > 0 {
+            summary.push(format!("thread({count})"));
+        }
+    }
+    if active_editor_state["open_files"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty())
+    {
+        summary.push(format!(
+            "editor({})",
+            active_editor_state["open_files"].as_array().unwrap().len()
+        ));
+    }
+    let summary = summary.join("; ");
     json!({
         "pack_version": WORKSPACE_RESTORE_PACK_VERSION,
         "pack_kind": "workspace_restore_pack",
@@ -395,6 +487,8 @@ pub(crate) fn build_workspace_restore_pack(restore: &Value) -> Value {
         "important_artifacts": important_artifacts,
         "unresolved_conflicts": unresolved_conflicts,
         "relevant_procedures": relevant_procedures,
+        "recent_thread_highlights": recent_thread_highlights,
+        "active_editor_state": active_editor_state,
         "procedural_restore_policy": {
             "raw_procedural_archive_forbidden": true,
             "materialized_surface": if restore["skill_execution_card"].is_object() {
@@ -425,4 +519,56 @@ pub(super) fn overlay_workspace_restore_pack(bundle: &mut Value) {
 
 pub(crate) fn ensure_runtime_workspace_restore_pack(bundle: &mut Value) {
     overlay_workspace_restore_pack(bundle);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_workspace_restore_pack;
+    use serde_json::json;
+
+    #[test]
+    fn workspace_restore_pack_includes_active_editor_state() {
+        let restore = json!({
+            "project": {"code": "art", "repo_root": "/tmp/nonexistent-repo"},
+            "active_files": ["src/a.rs", "src/b.rs"],
+            "recent_actions": [{"local_path": "src/c.rs"}],
+        });
+        let pack = build_workspace_restore_pack(&restore);
+        let editor = &pack["active_editor_state"];
+        assert!(editor.is_object());
+        assert_eq!(editor["open_files"], json!(["src/a.rs", "src/b.rs"]));
+        assert_eq!(editor["focused_file"], json!("src/a.rs"));
+        assert_eq!(editor["last_action_local_path"], json!("src/c.rs"));
+        assert_eq!(editor["source"], json!("working_state_restore"));
+    }
+
+    #[test]
+    fn workspace_restore_pack_includes_recent_thread_highlights_slot() {
+        let restore = json!({
+            "project": {"code": "art", "repo_root": "/tmp/nonexistent-repo"},
+            "active_files": [],
+        });
+        let pack = build_workspace_restore_pack(&restore);
+        assert!(
+            pack.as_object()
+                .unwrap()
+                .contains_key("recent_thread_highlights"),
+            "restore pack must expose recent_thread_highlights slot"
+        );
+    }
+
+    #[test]
+    fn workspace_restore_pack_summary_counts_editor_and_thread() {
+        let restore = json!({
+            "project": {"code": "art", "repo_root": "/tmp/nonexistent-repo"},
+            "active_files": ["src/a.rs"],
+            "recent_actions": [],
+        });
+        let pack = build_workspace_restore_pack(&restore);
+        let summary = pack["summary"].as_str().unwrap_or_default();
+        assert!(
+            summary.contains("editor(1)"),
+            "summary must report active editor file count: {summary}"
+        );
+    }
 }

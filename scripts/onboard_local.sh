@@ -47,7 +47,3 @@ if [[ -f "state/install_state.json" && -x "target/release/amai" ]]; then
 fi
 
 ./scripts/amai_exec.sh bootstrap onboarding "${extra_args[@]}" "$@"
-
-if [[ "${client}" == "vscode" ]]; then
-  ./scripts/install_vscode_amai_bridge.sh >/dev/null
-fi

@@ -200,7 +200,7 @@ fi && \
 - затем запускает канонический `scripts/install_amai.sh` уже внутри clone;
 - нужен именно для beta/public install contour, где продукт должен стартовать одной командой от GitHub, а не после ручного `git clone`.
 - если для install path не хватает `cargo`, `rustc`, `docker` или `docker compose`, shell front-door должен fail-closed до `cargo run` и напечатать явное remediation-сообщение.
-- если client = `vscode`, onboarding дополнительно ставит repo-local public bridge `amai.amai-vscode-bridge`, чтобы clean-surface launch опирался на явный Amai-owned `vscode://.../open-clean-chat` path, а не на скрытые внутренности upstream extension.
+- если client = `vscode`, onboarding materialize-ит managed startup instruction (`.github/instructions/amai-continuity-startup.instructions.md`) и workspace-local MCP config, так что любой новый/возобновлённый чат начинается с `amai_continuity_startup`. Auto-open clean surface больше не используется и не устанавливается.
 
 Если нужен другой git source, wrapper всё ещё допускает явное переопределение:
 
@@ -1421,8 +1421,6 @@ Proof для этого пути:
 что orphan cleanup действительно сработал, а затем проверяет client-native
 config/startup artifacts и симметричный возврат workspace в исходное состояние
 после `disconnect_local.sh`.
-
-[Removed: `./scripts/proof_client_clean_chat_launch.sh` — clean-chat auto-launch feature eliminated. Manual clean surfaces remain via `./scripts/reconnect_local.sh` and bootstrap reconnect.]
 
 ## Platform launchers
 

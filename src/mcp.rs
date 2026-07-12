@@ -4561,12 +4561,13 @@ fn stack_preflight_summary(payload: &Value) -> StackPreflightSummary {
 fn server_instructions() -> String {
     [
         "Amai is a project-scoped continuity and retrieval server for AI agents.",
+        "MANDATORY STARTUP RULE: before every substantive reply on a new, resumed, or ongoing work surface, call the amai_continuity_startup tool for the current project and namespace (default: continuity). You may omit project/repo_root; Amai auto-detects the project from the current working directory via its bound repo_root. If the project is not bound or the binding is ambiguous, the tool fails closed—do not guess.",
         "Default law: keep projects isolated and prefer local_strict unless a related-project policy is explicitly required.",
-        "Use amai_list_projects first when you do not know what is registered.",
+        "If amai_continuity_startup fails with tool_execution_failed containing 'no continuity import found for', or the embedded MCP transport closes before a payload arrives, reconcile once via local CLI continuity startup for the same repo_root and namespace before declaring continuity unavailable; if local CLI succeeds, treat the MCP failure as a stale embedded MCP session and continue from the local payload.",
+        "Use amai_list_projects when you do not know what is registered.",
         "Use amai_list_namespaces before querying an unfamiliar project.",
-        "Use amai_continuity_startup at the beginning of a new clean work surface or when resuming a project, before substantive work.",
-        "Use amai_stack_preflight when you need to know what this machine can honestly support.",
         "Use amai_context_pack for retrieval instead of asking for whole repositories.",
+        "Use amai_stack_preflight when you need to know what this machine can honestly support.",
         "Use amai_observe_whole_cycle when the client only learns assistant output tokens after the context-pack tool call and needs to attach real whole-cycle evidence back to the same event.",
         "Use amai_observe_whole_cycle_turn when the client learns assistant-generation tokens for one logical turn across multiple context packs and needs a turn-scoped attach without per-event duplication.",
         "Use amai_token_benchmark when you need a measured token-economy comparison.",
@@ -5351,12 +5352,17 @@ fn prompt_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "amai-continuity-startup",
-            "description": "Guide the model to request a project-scoped continuity startup pack before substantive work.",
+            "description": "Guide the model to request a project-scoped continuity startup pack before substantive work. Project may be omitted to auto-detect from cwd.",
             "arguments": [
                 {
                     "name": "project",
-                    "description": "Registered project code to resume.",
-                    "required": true
+                    "description": "Optional registered project code. Omit to auto-detect from cwd via bound repo_root.",
+                    "required": false
+                },
+                {
+                    "name": "repo_root",
+                    "description": "Optional canonical project repo root. Omit to auto-detect from cwd.",
+                    "required": false
                 },
                 {
                     "name": "namespace",
@@ -5411,7 +5417,14 @@ fn prompt_result(params: Value) -> McpToolResult<Value> {
             }]
         }),
         "amai-continuity-startup" => {
-            let project = required_prompt_arg(&arguments, "project")?;
+            let project = arguments
+                .get("project")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty());
+            let repo_root = arguments
+                .get("repo_root")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty());
             let namespace = arguments
                 .get("namespace")
                 .and_then(Value::as_str)
@@ -5422,9 +5435,7 @@ fn prompt_result(params: Value) -> McpToolResult<Value> {
                     "role": "assistant",
                     "content": {
                         "type": "text",
-                        "text": format!(
-                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, startup_execution_gate, startup_next_action, execctl_active_lease, and execctl_active_lease_summary. Treat startup_execution_gate as the immediate return-enforcement object. Require gate_semantics_consistent = true before trusting that gate or executing startup_next_action. If amai_continuity_startup fails with tool_execution_failed and detail containing 'no continuity import found for', or if the embedded MCP transport closes before the tool returns a payload, immediately reconcile once via local CLI continuity startup for the same repo_root and namespace before declaring continuity unavailable; if local CLI startup succeeds, treat the MCP failure as a stale embedded MCP session, continue from the local startup payload, and keep the user flow on the same session without demanding reconnect. Also inspect the runtime state after any successful MCP startup; if it has a stale startup contract sha, missing agent_workflow_guard, missing workflow_promotion_state, workflow source-event mismatch, or gate_semantics_consistent != true, treat that successful MCP payload as stale_embedded_mcp_session, reconcile via local CLI, continue only from the local payload, and keep reconnect helper as diagnostic fallback only when transport stays broken or the next MCP startup still fails to self-heal. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away. If execctl_active_lease.lease_owner_state is previous_session_owner, do not silently seize the workline; follow startup_next_action first."
-                        )
+                        "text": continuity_startup_guidance_text(project, repo_root, namespace)
                     }
                 }]
             })
@@ -5598,11 +5609,11 @@ fn continuity_startup_input_schema() -> Value {
         "properties": {
             "project": {
                 "type": ["string", "null"],
-                "description": "Registered project code to resume."
+                "description": "Optional registered project code. Omit to auto-detect the current project from cwd; fails closed if unbound or ambiguous."
             },
             "repo_root": {
                 "type": ["string", "null"],
-                "description": "Optional repo root path used to resolve the registered project binding."
+                "description": "Optional repo root path used to resolve the registered project binding. Omit to auto-detect from cwd."
             },
             "namespace": {
                 "type": "string",
@@ -7098,6 +7109,28 @@ fn yaml_document_is_effectively_empty(document: &str) -> bool {
         .lines()
         .map(str::trim)
         .all(|line| line.is_empty() || line.starts_with('#'))
+}
+
+fn continuity_startup_guidance_text(
+    project: Option<&str>,
+    repo_root: Option<&str>,
+    namespace: &str,
+) -> String {
+    let binding_clause = match (project, repo_root) {
+        (Some(project), Some(repo_root)) => {
+            format!("for project {project} (repo_root {repo_root}) in namespace {namespace}")
+        }
+        (Some(project), None) => format!("for project {project} in namespace {namespace}"),
+        (None, Some(repo_root)) => format!(
+            "for namespace {namespace} using repo_root {repo_root} (omit project to let Amai resolve it)"
+        ),
+        (None, None) => format!(
+            "for namespace {namespace}. Omit project/repo_root to let Amai auto-detect the current project from cwd via its bound repo_root; if the project is missing or ambiguous, the call fails closed, so do not guess."
+        ),
+    };
+    format!(
+        "Before substantive work in a new or resumed chat, call amai_continuity_startup {binding_clause}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, startup_execution_gate, startup_next_action, execctl_active_lease, and execctl_active_lease_summary. Treat startup_execution_gate as the immediate return-enforcement object. Require gate_semantics_consistent = true before trusting that gate or executing startup_next_action. If amai_continuity_startup fails with tool_execution_failed and detail containing 'no continuity import found for', or if the embedded MCP transport closes before the tool returns a payload, immediately reconcile once via local CLI continuity startup for the same repo_root and namespace before declaring continuity unavailable; if local CLI startup succeeds, treat the MCP failure as a stale embedded MCP session, continue from the local startup payload, and keep the user flow on the same session without demanding reconnect. Also inspect the runtime state after any successful MCP startup; if it has a stale startup contract sha, missing agent_workflow_guard, missing workflow_promotion_state, workflow source-event mismatch, or gate_semantics_consistent != true, treat that successful MCP payload as stale_embedded_mcp_session, reconcile via local CLI, continue only from the local payload, and keep reconnect helper as diagnostic fallback only when transport stays broken or the next MCP startup still fails to self-heal. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away. If execctl_active_lease.lease_owner_state is previous_session_owner, do not silently seize the workline; follow startup_next_action first."
+    )
 }
 
 fn required_prompt_arg(

@@ -40,10 +40,7 @@ jq -e '.startup_contract.live_client_budget_enforcement.reply_prefix_field == "r
 jq -e '.startup_contract.live_client_budget_enforcement.target_control.exact_chat_command_pattern == "^экономия_(0|10|20|30|40|50|60|70|80|90)%$"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.live_client_budget_enforcement.target_control.cli_command == "continuity client-budget-target"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.live_client_budget_enforcement.target_control.shell_command == "./scripts/continuity_client_budget_target.sh"' "${startup_contract}" >/dev/null
-jq -e '.startup_contract.live_client_budget_enforcement.compact_chat_control.exact_chat_command == "компакт_чат"' "${startup_contract}" >/dev/null
-jq -e '.startup_contract.live_client_budget_enforcement.compact_chat_control.cli_command == "continuity compact-chat"' "${startup_contract}" >/dev/null
-jq -e '.startup_contract.live_client_budget_enforcement.compact_chat_control.shell_command == "./scripts/continuity_compact_chat.sh"' "${startup_contract}" >/dev/null
-jq -e '.startup_contract.live_client_budget_enforcement.compact_chat_control.required_host_action == "open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable"' "${startup_contract}" >/dev/null
+jq -e '.startup_contract.live_client_budget_enforcement | has("compact_chat_control") | not' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.runtime_state_artifact.workspace_runtime_state_relative_path == ".amai/continuity/project-chat-startup-state.json"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.runtime_state_artifact.startup_execution_gate_field == "startup_execution_gate"' "${startup_contract}" >/dev/null
 jq -e '.startup_contract.runtime_state_artifact.gate_semantics_consistent_field == "gate_semantics_consistent"' "${startup_contract}" >/dev/null
@@ -138,10 +135,7 @@ grep -q 'required_reply_prefix_source = disabled_by_project_policy' "${startup_o
 grep -q 'required_reply_prefix_non_empty = false' "${startup_output}"
 grep -q 'reply_prefix_preflight_blocks_substantive_reply = false' "${startup_output}"
 grep -q 'output_prefix_enforcement_mode = disabled_by_project_policy' "${startup_output}"
-grep -q 'точную команду `компакт_чат`' "${startup_output}"
 grep -q './scripts/continuity_client_budget_target.sh --repo-root' "${startup_output}"
-grep -q './scripts/continuity_compact_chat.sh --repo-root' "${startup_output}"
-grep -q 'open_clean_chat_surface_and_inject_prompt_text_if_launch_bridge_unavailable' "${startup_output}"
 grep -q 'advisory/compact pressure signal' "${startup_output}"
 grep -q 'reply_blocking_removed = true' "${startup_output}"
 grep -q 'required_return_task' "${startup_output}"
@@ -171,6 +165,23 @@ for _ in $(seq 1 20); do
 done
 if [[ "${status_ok}" != "1" ]]; then
   echo "proof_onboarding: status did not become green after install"
+  exit 1
+fi
+
+./scripts/onboard_local.sh --client generic --yes --skip-stack --skip-release-build >/tmp/proof_onboarding_generic.out
+generic_system_prompt="tmp/onboarding/generic-amai-system-prompt.txt"
+generic_startup_md="tmp/onboarding/generic-amai-startup.md"
+generic_config="tmp/onboarding/generic-mcp.json"
+test -f "${generic_system_prompt}"
+test -f "${generic_startup_md}"
+test -f "${generic_config}"
+grep -q 'before each substantive reply, call the MCP tool amai_continuity_startup' "${generic_system_prompt}"
+grep -q 'AMAI MANAGED STARTUP INSTRUCTIONS v2' "${generic_startup_md}"
+grep -q 'run_mcp_stdio.sh' "${generic_config}"
+grep -q 'Generic-клиента: вставь содержимое' /tmp/proof_onboarding_generic.out
+./scripts/disconnect_local.sh --client generic >/dev/null
+if [[ -f "${generic_system_prompt}" ]] || [[ -f "${generic_startup_md}" ]] || [[ -f "${generic_config}" ]]; then
+  echo "proof_onboarding: generic onboarding artifacts were not removed on disconnect"
   exit 1
 fi
 

@@ -24,7 +24,6 @@ scripts/remove_amai.ps1
 scripts/install_from_github.sh
 scripts/install_amai.sh
 scripts/install_amai_oneclick.sh
-scripts/install_vscode_amai_bridge.sh
 scripts/install_vscode_connect_offer_autostart.sh
 scripts/offer_vscode_connect.sh
 scripts/purge_amai_vscode_host.sh
@@ -37,8 +36,6 @@ scripts/onboard_local.sh
 scripts/disconnect_local.sh
 scripts/run_mcp_stdio.sh
 scripts/continuity_handoff.sh
-scripts/continuity_compact_chat.sh
-scripts/verify_vscode_compact_chat_public_bridge_live.sh
 scripts/run_stack_service.sh
 scripts/proof_*.sh
 scripts/install_stack_autostart.sh
@@ -49,7 +46,6 @@ sql/**
 third_party/**
 vendor/**
 
-tools/vscode-amai-bridge/**
 docs/MCP_INTEGRATION.md
 docs/OPERATIONS.md
 docs/AGENT_START_HERE.md

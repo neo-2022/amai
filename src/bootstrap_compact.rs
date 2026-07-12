@@ -126,10 +126,6 @@ async fn install(
         .context("failed to load generated .env for compact bootstrap install")?;
 
     check_dependency("docker", &["--version"]).await?;
-    let vscode_cli = resolve_vscode_cli_binary();
-    if let Some(cli_path) = &vscode_cli {
-        check_dependency_path(cli_path, &["--version"]).await?;
-    }
 
     if !skip_stack {
         let mut bootstrap_stack = script_command(
@@ -146,13 +142,6 @@ async fn install(
         script_command(&repo_root, "scripts/install_stack_autostart.sh", []),
     )
     .await?;
-
-    let mut install_bridge =
-        script_command(&repo_root, "scripts/install_vscode_amai_bridge.sh", []);
-    if let Some(cli_path) = &vscode_cli {
-        install_bridge.env("AMAI_VSCODE_CLI_BIN", cli_path);
-    }
-    run_command("install vscode bridge", install_bridge).await?;
 
     let client_config_path = resolve_vscode_output_path(&repo_root, output);
     write_vscode_mcp_config(&repo_root, &client_config_path)?;
@@ -179,7 +168,9 @@ async fn install(
     println!("Выбранный профиль: {}", stack_profile);
     println!("Внешний memory bridge: пропущен в compact install contour");
     println!("Startup contract для клиента: пропущен в compact install contour");
-    println!("Client runtime artifact: VS Code bridge установлен");
+    println!(
+        "Client runtime artifact: VS Code public bridge removed; managed startup instructions installed"
+    );
     println!("Release binary готов: нет");
     println!("Что делать дальше:");
     println!("- откройте любой рабочий проект в VS Code или Codium");
@@ -233,7 +224,7 @@ async fn remove(
         "startup_instruction_removed: {}",
         startup_instruction_removed
     );
-    println!("client_runtime_removed: {}", bridge_removed);
+    println!("legacy_vscode_bridge_removed: {}", bridge_removed);
 
     if !full_remove_mode_enabled() {
         println!("next_step_1: reload the client window or restart the client");
@@ -801,59 +792,6 @@ async fn check_dependency_path(program: &Path, args: &[&str]) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn resolve_vscode_cli_binary() -> Option<PathBuf> {
-    if let Some(explicit) = env::var_os("AMAI_VSCODE_CLI_BIN") {
-        let path = PathBuf::from(explicit);
-        if is_executable_file(&path) {
-            return Some(path);
-        }
-    }
-
-    for candidate in ["code", "codium", "code-oss"] {
-        if let Some(path) = resolve_in_path(candidate) {
-            return Some(path);
-        }
-    }
-
-    let home = home_dir()?;
-    for candidate in ["code", "codium", "code-oss"] {
-        let path = home.join(".local/bin").join(candidate);
-        if is_executable_file(&path) {
-            return Some(path);
-        }
-    }
-    None
-}
-
-fn resolve_in_path(program: &str) -> Option<PathBuf> {
-    let paths = env::var_os("PATH")?;
-    for path in env::split_paths(&paths) {
-        let candidate = path.join(program);
-        if is_executable_file(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::metadata(path) {
-            return meta.permissions().mode() & 0o111 != 0;
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        return true;
-    }
-    false
 }
 
 async fn best_effort_cleanup_mcp_orphans(repo_root: &Path) {

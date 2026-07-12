@@ -74,7 +74,7 @@ const EXECCTL_LEASE_HEARTBEAT_MIN_INTERVAL_MS: u64 = 5 * 60 * 1000;
 const PROJECT_TASK_TREE_VERSION: &str = "project-task-tree-v1";
 const PROJECT_TASK_LEDGER_VERSION: &str = "project-task-ledger-v2";
 const TASK_GRAPH_STARTUP_PROJECTION_VERSION: &str = "task-graph-startup-projection-v1";
-const WORKSPACE_RESTORE_PACK_VERSION: &str = "workspace-restore-pack-v1";
+const WORKSPACE_RESTORE_PACK_VERSION: &str = "workspace-restore-pack-v2";
 const WORKSPACE_RESTORE_PACK_ENVELOPE_VERSION: &str = "restore-pack-envelope-v2";
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION: &str =
     "client-budget-blocked-reply-v1";
@@ -16627,7 +16627,7 @@ mod tests {
         assert_eq!(
             pack["summary"],
             json!(
-                "active(1); blocked(2); paused(1); facts(4); constraints(4); artifacts(3); procedures(1)"
+                "active(1); blocked(2); paused(1); facts(4); constraints(4); artifacts(3); procedures(1); editor(1)"
             )
         );
     }

@@ -9,9 +9,6 @@ mkdir -p "${autostart_dir}"
 
 icon_path="${repo_root}/brand/amai_mark.svg"
 if [[ ! -f "${icon_path}" ]]; then
-  icon_path="${repo_root}/tools/vscode-amai-bridge/media/amai-extension.png"
-fi
-if [[ ! -f "${icon_path}" ]]; then
   icon_path="applications-system"
 fi
 

@@ -232,9 +232,9 @@
 ### Что уже есть, но ещё не является полной целевой реализацией
 
 Есть сильный промежуточный baseline:
-- continuity между рабочими поверхностями уже работает на prompt/machine-readable стороне, но
-  host-side clean-chat handoff ещё не полностью бесшовный во всех клиентах и средах;
-- даже там, где automatic clean-chat bridge ещё не materialized, compact-chat уже не сводит manual fallback к codex-only подсказке: current client surface, startup path и reconnect/fresh-chat assist теперь surfaced по реальному клиенту, а dashboard KPI selector ещё и показывает текущий auto-launch status / unavailable reason / UX boundary для clean-chat path;
+- continuity между рабочими поверхностями уже работает на prompt/machine-readable стороне: любая новая или возобновлённая рабочая поверхность обязана сначала выполнить `amai_continuity_startup` и получить `chat_start_restore.prompt_text` вместе с `project_task_tree` / `project_task_ledger`;
+- host-side auto-open clean surface (VS Code public bridge) удалён; seamless transition обеспечивается continuity restore, а не автооткрытием окна;
+- reconnect/fresh-chat assist всё ещё surfaced по реальному клиенту, но теперь это manual fallback, а не замена auto-open;
 - pending return и resume obligations уже surfaced;
 - dashboard/eval/compare contours уже есть;
 - scientific reinforcement overlay уже начат как отдельная queue-driven надстройка поверх Stage 7 / 9 / 10;
@@ -249,21 +249,22 @@
 Пока ещё не доведены до полного target-state:
 - полноценный graph-wide restore continuity beyond уже materialized `workspace_restore_pack`;
 - по-настоящему бесшовное продолжение длинной работы через новые client/runtime surfaces с
-  несколькими старыми линиями работы.
+  несколькими старыми линиями работы; continuity restore уже переносит контекст, но live-доказательство автоматического запуска `amai_continuity_startup` на каждом клиенте остаётся за рамками этого baseline.
 - external long-term memory benchmark registry из `IMPLEMENTATION_GATES.md` уже surfaced как отдельный prep/proof contour, но не как полный scored maturity verdict: LongMemEval/MemoryAgentBench/LoCoMo и AMA-Bench имеют guarded normalized cases, `external-memory-run/score` покрыты synthetic smoke, LongMemEval, AMA-Bench и bounded `MemoryAgentBench / conflict_resolution` plus `long_range_understanding` and `test_time_learning` имеют initial, dataset-specific runtime+baseline-score proof, а benchmark-grade claim всё ещё требует full dataset runtime+score proof, semantic retrieval precision и upstream parity.
 - bounded `MemoryAgentBench / accurate_retrieval` теперь тоже materialized как отдельный blocked profile, но честная measured truth на primary local semantic lane отрицательная: current bounded runtime+score slice завершается с `3/3` baseline answers и уже без benchmark-specific shaping (`query_override_cases=0`, `window_override_cases=0`, `answer_extraction_cases=0`, `benchmark_specific_shaping_present=false`, `generic_runtime_maturity=true`), при этом runtime proxy/accounting остаются mixed (`retrieval_answer_cases=2`, `fallback_scan_cases=1`, `top_ranked_relevant_retrieval_cases=2`, `gold_answer_supported_retrieval_cases=0`, `top_ranked_structural_fact_supported_cases=0`), а repo-owned local semantic retrieval judge on the ranked preview set gives `question_relevant_cases=0/3` and `gold_answer_supported_cases=0/3`. Profiling-guided runtime hardening additionally dropped the current bounded cold first-case `index_project_ms` to about `0.87s` and bounded `total_case_ms.avg` to about `0.91s`, but this still remains bounded-only latency evidence rather than latency-grade maturity. Поэтому contour остаётся blocker-visible: baseline score perfect, но retrieval-distribution/semantic-support maturity не доказана и upstream scorer parity всё ещё отсутствует.
 - Queue 1 scientific benchmark honesty ещё не равна финальному automatic promotion: measured approval остаётся human-gated.
 - Queue 4 regression explain surface production-visible, но measured regression quality на live sample остаётся `insufficient_sample`, пока не накоплен двусторонний sample contour.
 - Queue 5 capacity forecast surface production-visible только как forecast-only/read-only contour; exact live window values из `observe snapshot` не являются долговечным implementation-status claim.
-- host-side clean-chat migration всё ещё не полностью seamless: current compact-chat runtime/API truthfully distinguishes `available_not_requested`, `bridge_unavailable`, `disabled_by_policy`, `requested` and `launch_failed`; VS Code `vscode_code_chat_cli` and non-VSCode `manual_only` boundaries are command-contract evidence only, while live client-open/session UX still requires separate proof before any seamless claim.
+- host-side clean-chat auto-migration удалена: compact-chat launch state machine (`available_not_requested`, `bridge_unavailable`, `disabled_by_policy`, `requested`, `launch_failed`) и VS Code public bridge больше не являются частью architecture. Seamless transition теперь означает, что агент в новом чате автоматически получает контекст через `amai_continuity_startup`; live client-open/session proof всё ещё требуется перед тем, как называть UX полностью seamless для конкретного клиента.
 
 ### Главная честная оговорка
 
-Полноценный бесшовный переход в новую рабочую поверхность пока ещё не решён до конца.
+Seamless переход через continuity restore уже materialized: новый или возобновлённый чат получает `chat_start_restore`, `working_state_restore`, `project_task_tree` и `project_task_ledger` из PostgreSQL, если клиент следует managed startup instruction и вызывает `amai_continuity_startup`.
 
 То есть:
-- continuity и restore уже есть;
-- но длинная смешанная история задач пока ещё может не подниматься так бесшовно, как должна в target-state.
+- continuity и restore уже есть и являются определением бесшовного перехода;
+- host-triggered auto-open чистой поверхности удалён и больше не считается необходимым условием;
+- оставшийся gap — live-доказательство того, что каждый поддерживаемый клиент действительно автоматически вызывает `amai_continuity_startup` на новой поверхности, не требуя от пользователя ручного копирования prompt.
 
 Это не скрытый баг документации.
 Это один из главных product outcomes всего утверждённого roadmap.
@@ -453,5 +454,5 @@ Upgrade-law для любого нового слоя простой:
   - устранение cross-doc drift;
 - главный общий закон:
   - скорость, точность, качество и правдивость нельзя разменивать друг на друга;
-- главный продуктовый недостающий outcome:
-  - по-настоящему бесшовное продолжение работы в новом чате.
+- главный продуктовый outcome:
+  - по-настоящему бесшовное продолжение работы в новом чате через automatic `amai_continuity_startup` restore.

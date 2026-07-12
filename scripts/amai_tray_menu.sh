@@ -31,9 +31,6 @@ try_enable_status_icons() {
 resolve_tray_icon() {
   local candidate
   for candidate in \
-    "${repo_root}/brand/amai_mark.svg" \
-    "${repo_root}/tools/vscode-amai-bridge/media/amai-extension.svg" \
-    "${repo_root}/tools/vscode-amai-bridge/media/amai-extension.png" \
     "${repo_root}/brand/amai_mark.svg"
   do
     [[ -f "${candidate}" ]] && { printf '%s\n' "${candidate}"; return 0; }
@@ -90,7 +87,6 @@ confirm_action() {
 
 action_connect() {
   "${repo_root}/scripts/install_amai.sh" --client vscode --stack-profile default --yes
-  "${repo_root}/scripts/install_vscode_amai_bridge.sh" >/dev/null 2>&1 || true
   show_info "Amai подключена к VS Code/Codium."
 }
 
@@ -105,7 +101,6 @@ action_check() {
 }
 
 action_repair() {
-  "${repo_root}/scripts/install_vscode_amai_bridge.sh" >/dev/null 2>&1 || true
   "${repo_root}/scripts/install_amai.sh" --client vscode --stack-profile default --yes
   show_info "Исправление завершено. Проверьте подключение в VS Code/Codium."
 }

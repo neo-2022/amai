@@ -10,9 +10,8 @@
 
 <p align="center">
   <a href="https://github.com/neo-2022/amai"><img alt="Repo" src="https://img.shields.io/badge/repo-GitHub-181717"></a>
-  <a href="https://open-vsx.org/extension/amai/amai-vscode-bridge"><img alt="OpenVSX" src="https://img.shields.io/open-vsx/v/amai/amai-vscode-bridge?label=OpenVSX"></a>
   <img alt="License" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-1f6feb">
-  <img alt="Verified contour" src="https://img.shields.io/badge/verified-Linux%20%2B%20VS%20Code-2ea043">
+  <img alt="Verified contour" src="https://img.shields.io/badge/verified-Linux%20%2B%20VS%20Code%2FCodium-2ea043">
 </p>
 
 # Amai
@@ -24,8 +23,11 @@
 ## Проверенный контур
 
 - ОС: `Ubuntu` / `Debian`
-- Клиент: `VS Code` / `Codium`
-- Bridge: `Amai VS Code Bridge` через `OpenVSX`
+- Клиент: `VS Code` / `Codium`, `Hermes`
+- Подключение: MCP stdio server; seamless transition обеспечивается continuity restore через `amai_continuity_startup`
+
+## Основной живой сценарий
+ запись, мгновенный смысловой и буквальный поиск, точное время, происхождение, графовая связь, замена старого факта, сырой журнал, защита долговечных данных от забывания и восстановление после удаления местного кэша.
 
 ## Быстрый старт
 
@@ -129,7 +131,6 @@ cd "${HOME}/.local/share/amai/repo"
 ## Где дальше читать
 
 - Полный MCP/install walkthrough: [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md)
-- Bridge package: [tools/vscode-amai-bridge/README.md](tools/vscode-amai-bridge/README.md)
 
 ## License
 

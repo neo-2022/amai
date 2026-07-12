@@ -41,6 +41,7 @@ output/
 
 # Local agent/dev artifacts (must not be committed).
 .codex
+.hermes/
 .playwright-cli/
 
 # Vendor must stay self-contained in git even if nested files match generic ignore

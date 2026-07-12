@@ -925,7 +925,6 @@ pub(super) fn client_budget_target_chat_command(target_percent: u64) -> String {
     format!("экономия_{target_percent}%")
 }
 
-
 pub(super) fn global_client_limit_source(client_live_meter: &Value) -> Option<Value> {
     if preferred_client_limit_meter_is_exact(client_live_meter)
         && !current_session_client_live_meter_available(client_live_meter)
@@ -1710,12 +1709,6 @@ pub(super) fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<
         Some(tooltip.as_str()),
     ))
 }
-
-
-
-
-
-
 
 pub(super) fn client_limit_hourly_burn_metric_row(
     hourly_burn: &Value,
@@ -3514,8 +3507,6 @@ mod tests {
                 .contains("compact window")
         );
     }
-
-
 
     #[test]
     fn host_current_thread_control_effect_recommends_rotate_fallback_after_failed_compact_window() {
