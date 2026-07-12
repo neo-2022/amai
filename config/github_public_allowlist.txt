@@ -24,6 +24,10 @@ scripts/remove_amai.ps1
 scripts/install_from_github.sh
 scripts/install_amai.sh
 scripts/install_amai_oneclick.sh
+scripts/amai_tray_menu.sh
+scripts/openvsx_bridge_sync.sh
+scripts/package_vscode_amai_bridge.sh
+scripts/publish_vscode_amai_bridge.sh
 scripts/install_vscode_connect_offer_autostart.sh
 scripts/offer_vscode_connect.sh
 scripts/purge_amai_vscode_host.sh
@@ -52,6 +56,7 @@ docs/AGENT_START_HERE.md
 docs/IMPLEMENTATION_STATUS.md
 docs/IMPLEMENTATION_GATES.md
 AGENTS.md
+.hermes.md
 config/benchmark_contamination_policy.toml
 config/observability_compare_policy.toml
 

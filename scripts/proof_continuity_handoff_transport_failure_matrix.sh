@@ -2,14 +2,14 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-export AMAI_OPERATOR_REDIRECT_PROVENANCE="proof_harness:$(basename "$0")"
+export AMAI_PLATFORM_THREAD_ID="proof-continuity-handoff-transport-matrix"
+export AMAI_AGENT_SCOPE="proof-continuity-handoff-transport-matrix"
 
-handoff_path="state/continuity-imports/amai/live-handoff.md"
 tmpdir="$(mktemp -d)"
+project_code="proof_handoff_transport_$(date +%s%N)"
+repo_root="${tmpdir}/repo"
+handoff_path="state/continuity-imports/${project_code}/live-handoff.md"
 fakebin="${tmpdir}/bin"
-snapshot_path="${tmpdir}/live-handoff.snapshot"
-state_path="${tmpdir}/live-handoff.state"
-promotion_details="${tmpdir}/promotion-details.txt"
 mkdir -p "${fakebin}"
 
 cleanup() {
@@ -20,32 +20,26 @@ cleanup() {
       mv "${tmpdir}/$path" "$path"
     fi
   done
-  if [[ -f "${state_path}" ]] && [[ "$(cat "${state_path}")" == "present" ]]; then
-    mkdir -p "$(dirname "${handoff_path}")"
-    cp "${snapshot_path}" "${handoff_path}"
-  else
-    rm -f "${handoff_path}"
-  fi
+  rm -rf "state/continuity-imports/${project_code}"
   rm -rf "${tmpdir}"
 }
 trap cleanup EXIT
-
-if [[ -f "${handoff_path}" ]]; then
-  printf 'present' > "${state_path}"
-  cp "${handoff_path}" "${snapshot_path}"
-else
-  printf 'absent' > "${state_path}"
-fi
 
 if [[ ! -x ./target/release/amai ]]; then
   echo "proof_continuity_handoff_transport_failure_matrix: missing ./target/release/amai" >&2
   exit 1
 fi
 
-cat >"${promotion_details}" <<'EOF'
-promotion_contract: operator_redirect
-Synthetic transport proof explicitly switches the active main workline.
-EOF
+mkdir -p "${repo_root}"
+./target/release/amai project register \
+  --code "${project_code}" \
+  --display-name "Handoff transport proof" \
+  --repo-root "${repo_root}" \
+  --workspace default >/dev/null
+./target/release/amai namespace ensure \
+  --project "${project_code}" \
+  --code continuity \
+  --display-name Continuity >/dev/null
 
 mkdir -p "${tmpdir}/scripts"
 if [[ -e scripts/ensure_observe_frontdoor.sh ]]; then
@@ -77,18 +71,16 @@ codes=(7 28 56)
 max_single_ms=5000
 
 for code in "${codes[@]}"; do
-  headline="proof transport matrix handoff ${code}"
-  next_step="verify fallback for curl exit ${code}"
+  headline="proof transport matrix handoff"
+  next_step="verify fallback across curl transport failures"
   started_ms="$(./scripts/epoch_ms.sh)"
   payload="$(
     PATH="${fakebin}:/usr/bin:/bin" AMI_OBSERVE_BIND=127.0.0.1:1 AMAI_FAKE_CURL_EXIT_CODE="${code}" \
       timeout 10s ./scripts/continuity_handoff.sh \
-        --project amai \
+        --project "${project_code}" \
         --namespace continuity \
         --headline "${headline}" \
-        --next-step "${next_step}" \
-        --details-file "${promotion_details}" \
-        --promote-active-workline
+        --next-step "${next_step}"
   )"
   ended_ms="$(./scripts/epoch_ms.sh)"
   elapsed_ms="$((ended_ms - started_ms))"

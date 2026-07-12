@@ -468,7 +468,7 @@ Claim inventory snapshot 2026-04-25 for the current status-truth audit cluster:
 
 | Claim id | Current allowed claim | Code surface | Proof surface | Dashboard/raw lane | Freshness | Verdict / downgrade boundary |
 |---|---|---|---|---|---|---|
-| `AMAI-AUDIT-CLIENT-001` | auto-open clean-surface launch feature has been eliminated; seamless transition is now provided solely by managed startup instructions that force every new/resumed chat to call `amai_continuity_startup` and restore context from PostgreSQL; manual fallback guidance for clean surface remains client-specific via reconnect helpers. | `src/onboarding.rs` (managed instruction install), `src/mcp.rs` (startup contract), `src/continuity.rs` (`continuity_startup` restore), `config/client_targets.toml` (client targets) | `./scripts/proof_onboarding.sh`, `./scripts/proof_client_reconnect.sh`, `cargo test --quiet onboarding` | `.github/instructions/amai-continuity-startup.instructions.md` / `.hermes.md` / `~/.hermes/profiles/*/SOUL.md` / startup contract / continuity runtime artifact | 2026-07-11 | `auto_open_removed__continuity_startup_is_seamless_transition`: VS Code public bridge install/package/publish scripts, OpenVSX workflow and all related `proof_vscode_*_bridge*` / `proof_vscode_code_chat_*` / `proof_continuity_frontdoor_*compact_chat*` proofs deleted; managed startup instruction path ensures continuity restore is the first action on a new surface; Hermes compact instruction size fixed to pass the 4000-byte proof limit; live client UX proof remains per-client. |
+| `AMAI-AUDIT-CLIENT-001` | auto-open clean-surface launch has been eliminated; managed startup artifacts and the direct Rust continuity startup path are materialized, while automatic behavior of a real client remains unproven. | `src/onboarding.rs`, `src/mcp.rs`, `src/continuity.rs`, `config/client_targets.toml` | `./scripts/proof_onboarding.sh`, `./scripts/proof_client_reconnect.sh`, `./scripts/proof_client_auto_startup_vscode.sh`, `./scripts/proof_client_auto_startup_hermes.sh`, `cargo test --quiet onboarding` | managed startup files / profile / startup contract / continuity runtime artifact | 2026-07-12 | Verified for artifact installation and direct Rust startup only. VS Code and Hermes remain Tier-2 until a live client/session proof shows an automatic startup call without direct test invocation. |
 | `AMAI-AUDIT-CLIENT-002` | Hermes onboarding creates compact startup/profile artifacts and sticky project profile. | `config/client_targets.toml`, `src/onboarding.rs::ensure_hermes_project_profile`, `src/onboarding.rs::remove_hermes_project_profile` | `./scripts/proof_client_reconnect.sh`, `./scripts/proof_remote_onboarding.sh`, targeted Rust onboarding tests | generated `.hermes.md` / managed profile / client config artifacts | 2026-04-25 | Verified for profile/install contract only; full live Hermes agent behavior remains `proof-refresh-required`. |
 | `AMAI-AUDIT-CLIENT-003` | reconnect assist is materialized for supported client configs. | `scripts/reconnect_local.sh`, `scripts/cleanup_mcp_orphans.sh`, `scripts/amai_exec.sh`, startup contract reconnect helper fields | `./scripts/proof_client_reconnect.sh`, `./scripts/proof_mcp_orphan_cleanup.sh` | reconnect helper output, orphan MCP cleanup proof and restored startup artifact files | 2026-04-26 | Verified for reconnect assist and orphan cleanup only; host-triggered clean-chat migration is no longer a project objective after explicit removal of the auto-open surface. |
 | `AMAI-AUDIT-CLIENT-004` | remote onboarding proof is offline-deterministic through fake SSH and payload-boundary checks. | `scripts/onboard_remote_client.sh`, `scripts/sync_remote_repo.sh`, `scripts/proof_remote_onboarding.sh`, `scripts/proof_remote_repo_sync_payload.sh` | `./scripts/proof_remote_onboarding.sh`, `./scripts/proof_remote_repo_sync_payload.sh` | fake-ssh run artifacts and sync payload manifest | 2026-04-25 | Verified for offline remote onboarding proof; live remote-host availability/e2e remains a separate proof lane. |
@@ -858,7 +858,8 @@ No checkbox is removed by this snapshot: current audit found downgraded broad cl
     fallback, а launcher-routing/integrity truth: все перечисленные wrappers
     обязаны пройти через `scripts/amai_exec.sh`, а proof дополнительно ловит
     missing-details negative path для handoff.
-  - соседний front-door payload contract выровнен и для delivery wrappers:
+  - **Архив удалённого compact-chat contour (не current proof surface):** следующие записи до handoff transport matrix описывают прежний `continuity_compact_chat.sh` и связанные proof-файлы; они сохранены только как история и не должны использоваться как действующий gate.
+  - соседний front-door payload contract был выровнен и для delivery wrappers:
     `continuity_compact_chat.sh` и `continuity_client_budget_target.sh` больше
     не принимают любой non-empty API body как будто это валидный projection.
     Если `/api/client-budget-compact-chat` или `/api/client-budget-target`
@@ -920,7 +921,7 @@ No checkbox is removed by this snapshot: current audit found downgraded broad cl
     handoff и не оставляет sequence в подвешенном состоянии. То есть transport
     failure на последнем шаге теперь доказан как recoverable continuity path, а
     не как тихая потеря handoff.
-  - transport failure matrix для handoff fallback тоже теперь прикрыт:
+  - **Текущий handoff proof surface начинается здесь:** transport failure matrix для handoff fallback прикрыт:
     `./scripts/proof_continuity_handoff_transport_failure_matrix.sh` прогоняет
     как минимум `curl` exit `7`, `28` и `56` на `/api/continuity-handoff` и
     доказывает, что shell `continuity_handoff.sh` не завязан на один timeout
@@ -1902,7 +1903,7 @@ Status-truth rule:
 
 Host-side clean-chat / client startup consensus records:
 - Auto-open clean-surface launch has been removed from the codebase: VS Code public bridge extension install/package/publish scripts, the OpenVSX bridge sync workflow and the related proof contour are deleted. New or resumed chat surfaces rely on managed startup instructions that call `amai_continuity_startup` before any substantive reply.
-- 2026-07-11 cleanup: hard-removed remaining `scripts/proof_continuity_frontdoor_*.sh` proofs, compacted Hermes managed startup instructions so `.hermes.md` passes the 4000-byte compact-startup proof limit, and refreshed `AMAI-AUDIT-CLIENT-001` evidence to the current removal state.
+- 2026-07-12 correction: `proof_continuity_frontdoor_concurrent_handoff_race_condition.sh` was restored as an independent handoff atomicity proof. The other removed `proof_continuity_frontdoor_*` scripts remain deleted because they called the removed compact-chat contour; current handoff transport guarantees are covered by `proof_continuity_handoff_transport_*`.
 - Fresh proof current work: `./scripts/proof_onboarding.sh`, `./scripts/proof_mcp_orphan_cleanup.sh`, `./scripts/proof_client_reconnect.sh` verify orphan MCP cleanup, reconnect assist, managed startup instruction materialization for VS Code/Hermes, and repo file restore after proof mutation.
 - `AMAI-AUDIT-CLIENT-001`
   - `claim_owner`: docs previously implied compact-chat already emits `bridge_unavailable` and `available_not_requested`;
@@ -1981,13 +1982,13 @@ Local stack autostart consensus records:
     - `./scripts/proof_mcp_orphan_cleanup.sh` — PASS;
     - `./scripts/maintainability_gate.sh --json`, `./scripts/implementation_status_sync_guard.sh --json`, `./scripts/agent_preflight.sh --json` — ok.
 - Phase B плана «Amai как нескончаемый чат»:
-  - статус: ✅ Phase B пройдена для первых двух кандидатов;
-  - цель: сертифицировать Tier-1 клиентов через автоматические proof-скрипты, которые проверяют managed startup artifact и факт создания runtime-артефакта `amai_continuity_startup`;
+  - статус: ✅ installation/direct-startup contract materialized; live Tier-1 certification remains open;
+  - цель: проверить managed startup artifact, client MCP config и прямой Rust continuity startup без приписывания автоматического поведения реальному клиенту;
   - выполнено:
     - добавлены `scripts/proof_client_auto_startup_vscode.sh` и `scripts/proof_client_auto_startup_hermes.sh`;
     - скрипты проверяют managed startup artifact и клиентскую MCP-конфигурацию, затем вызывают штатный Rust CLI `continuity startup` и требуют `gate_semantics_consistent = true` в runtime state; MCP initialize/prompts/tool-call контракт отдельно покрыт Rust-тестами `src/mcp.rs`;
-    - `vscode` и `hermes` переведены в `tier = 1` в `config/client_targets.toml`;
-    - таблица в `docs/MCP_INTEGRATION.md` обновлена: VS Code и Hermes — Tier-1;
+    - `vscode` и `hermes` остаются `tier = 2` до отдельного live client/session proof;
+    - таблица в `docs/MCP_INTEGRATION.md` явно отделяет установочный контракт от Tier-1 certification;
   - проверено:
     - `./scripts/proof_client_auto_startup_vscode.sh` — ok;
     - `./scripts/proof_client_auto_startup_hermes.sh` — ok.
@@ -2008,10 +2009,10 @@ Local stack autostart consensus records:
 
 - Phase D плана «Amai как нескончаемый чат»:
   - статус: ✅ Phase D materialized;
-  - цель: обогатить рабочий restore pack контекстом недавнего разговора и активного редактора, чтобы следующий чат продолжался с пониманием того, что обсуждалось и над чем велась работа;
+  - цель: обогатить рабочий restore pack доступным контекстом точно совпавшего потока и эвристикой активных файлов;
   - выполнено:
     - в `WORKSPACE_RESTORE_PACK_VERSION` выполнен bump на `workspace-restore-pack-v2`;
-    - `build_workspace_restore_pack()` теперь включает `recent_thread_highlights` (до `MAX_THREAD_HIGHLIGHTS = 3` записей) и `active_editor_state`;
+    - `build_workspace_restore_pack()` включает `recent_thread_highlights` только при точном совпадении `thread_id` (до `MAX_THREAD_HIGHLIGHT_MESSAGES = 3`) и `active_editor_state` из working-state file hints;
     - summary пака теперь отражает bucket `editor(...)` наряду с commitments/waiting/paused-buckets;
     - `compact_workspace_restore_pack_for_startup()` публикует счётчики/флаги обоих новых полей для runtime startup state;
     - unit-тесты `workspace_restore_pack` и `continuity` обновлены до v2 и проверяют оба новых bucket;

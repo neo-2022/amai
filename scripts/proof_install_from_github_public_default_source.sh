@@ -27,6 +27,5 @@ test -f "${state_file}"
 rg '^Amai готов$' "${install_out}" >/dev/null
 rg '^Клиент: VS Code / Codium$' "${install_out}" >/dev/null
 rg '^Startup contract для клиента: пропущен в compact install contour$' "${install_out}" >/dev/null
-rg '^Client runtime artifact: VS Code bridge установлен$' "${install_out}" >/dev/null
 
 echo "proof_install_from_github_public_default_source: ok"

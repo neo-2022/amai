@@ -190,7 +190,7 @@ main() {
     verify_install
     install_vscode_offer_hook
   } >>"$log_file" 2>&1 || {
-    show_error "Amai install failed" "Установка Amai завершилась с ошибкой.\n\nЧто сделать:\n1) Открой лог: $log_file\n2) Проверьте интернет-доступ к github.com и open-vsx.org\n3) Повторите запуск этой же команды.\n\nЕсли ошибка сохраняется — пришлите лог."
+    show_error "Amai install failed" "Установка Amai завершилась с ошибкой.\n\nЧто сделать:\n1) Открой лог: $log_file\n2) Проверьте интернет-доступ к github.com\n3) Повторите запуск этой же команды.\n\nЕсли ошибка сохраняется — пришлите лог."
     exit 1
   }
 

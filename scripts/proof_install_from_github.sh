@@ -29,7 +29,6 @@ test -f "${state_file}"
 rg '^Amai готов$' "${install_out}" >/dev/null
 rg '^Клиент: VS Code / Codium$' "${install_out}" >/dev/null
 rg '^Startup contract для клиента: пропущен в compact install contour$' "${install_out}" >/dev/null
-rg '^Client runtime artifact: VS Code bridge установлен$' "${install_out}" >/dev/null
 
 CARGO_TARGET_DIR="${repo_root}/target" AMAI_INSTALL_STATE_PATH="${state_file}" ./scripts/install_from_github.sh \
   --repo-url "${repo_root}" \

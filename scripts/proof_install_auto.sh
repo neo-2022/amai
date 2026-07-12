@@ -24,7 +24,6 @@ rg '^Amai готов$' "$install_out" >/dev/null
 rg '^Клиент: VS Code / Codium$' "$install_out" >/dev/null
 rg '^Выбранный профиль: default$' "$install_out" >/dev/null
 rg '^Startup contract для клиента: пропущен в compact install contour$' "$install_out" >/dev/null
-rg '^Client runtime artifact: VS Code bridge установлен$' "$install_out" >/dev/null
 printf '1\nДА\n' | CARGO_TARGET_DIR="$(pwd)/target" AMAI_FORCE_INTERACTIVE_PROMPT=1 AMAI_INSTALL_STATE_PATH="$state_file" ./scripts/install_amai.sh \
   --client vscode \
   --skip-stack \

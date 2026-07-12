@@ -358,10 +358,13 @@ fn compact_text_for_restore_pack(text: &str, max_chars: usize) -> String {
 }
 
 fn workspace_restore_pack_recent_thread_highlights(restore: &Value) -> Value {
-    let _thread_id = restore["thread_id"]
+    let Some(thread_id) = restore["thread_id"]
         .as_str()
         .map(str::trim)
-        .filter(|v| !v.is_empty());
+        .filter(|v| !v.is_empty())
+    else {
+        return Value::Null;
+    };
     let Some(repo_root) = restore["project"]["repo_root"]
         .as_str()
         .map(str::trim)
@@ -374,6 +377,9 @@ fn workspace_restore_pack_recent_thread_highlights(restore: &Value) -> Value {
     else {
         return Value::Null;
     };
+    if tail.thread_id.trim() != thread_id {
+        return Value::Null;
+    }
     let highlights = tail
         .messages
         .iter()

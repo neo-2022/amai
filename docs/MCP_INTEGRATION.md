@@ -83,25 +83,25 @@ cd "$clone_dir"
 
 Amai разделяет клиентов по тому, умеет ли клиент самостоятельно потреблять startup-инструкции без ручной вставки prompt-а:
 
-- **Tier-1** — клиент использует `initialize.instructions` или `prompts/list`, поэтому каждая новая рабочая поверхность сама вызывает `amai_continuity_startup` перед содержательной работой. Никакого copy/paste.
+- **Tier-1** — live client/session proof подтвердил, что новая рабочая поверхность сама вызывает `amai_continuity_startup` перед содержательной работой. Наличие managed artifact и успешный прямой вызов Amai сами по себе для Tier-1 недостаточны.
 - **Tier-2** — клиент не потребляет MCP-инструкции автоматически; требуется одноразовая затравка в system prompt. Для таких клиентов Amai генерирует файл `tmp/onboarding/generic-amai-system-prompt.txt` — это компактная seed-инструкция, которую нужно вставить в system prompt клиента. Seed уже содержит правило stale/fresh reconcile: после успешного MCP startup проверять runtime artifact `.amai/continuity/project-chat-startup-state.json`, при дрейфе делать локальный reconcile через `./scripts/continuity_startup.sh --repo-root <project> --namespace continuity --json` и продолжать только от свежего локального payload.
 
 | Клиент | Управляемый startup artifact | Текущий tier | Примечание |
 |--------|------------------------------|--------------|------------|
-| `vscode` | `.github/instructions/amai-continuity-startup.instructions.md` | 1 | сертифицирован через `proof_client_auto_startup_vscode.sh` |
+| `vscode` | `.github/instructions/amai-continuity-startup.instructions.md` | 2 | managed artifact и прямой Rust startup проверены; live client/session proof отсутствует |
 | `cursor` | `.cursor/rules/amai-continuity-startup.mdc` | 2 | кандидат в Tier-1 |
 | `codex` | managed block в `AGENTS.md` | 2 | кандидат в Tier-1 |
 | `claude-code` | managed block в `CLAUDE.md` | 2 | кандидат в Tier-1 |
-| `hermes` | `.hermes.md` + sticky profile | 1 | сертифицирован через `proof_client_auto_startup_hermes.sh` |
+| `hermes` | `.hermes.md` + sticky profile | 2 | managed artifact и прямой Rust startup проверены; live client/session proof отсутствует |
 | `openclaw` | `.openclaw/AGENTS.md` + project agent | 2 | кандидат в Tier-1 |
 | `claude-desktop` | `tmp/onboarding/claude-desktop-amai-startup.md` | 2 | manual snippet |
 | `generic` | `tmp/onboarding/generic-amai-startup.md` + `generic-amai-system-prompt.txt` | 2 | всегда Tier-2 по дизайну — затравка в system prompt |
 
-Tier присваивается не по наличию managed artifact, а по результатам автоматического proof-скрипта `scripts/proof_client_auto_startup_<client>.sh`: скрипт должен доказать, что при свежей рабочей поверхности runtime-артефакт `amai_continuity_startup` создался без ручного ввода. До прохождения такого proof клиент остаётся Tier-2.
+Tier присваивается не по наличию managed artifact и не по прямому вызову Rust CLI. Для Tier-1 нужен live client/session proof, который запускает реальный клиент и доказывает создание runtime-артефакта без ручного вызова Amai. До такого доказательства клиент остаётся Tier-2.
 
 ### Phase C: client-agnostic stale/fresh reconcile
 
-Начиная с Phase C все managed startup artifacts — и для Tier-1 (`vscode`, `hermes`), и для Tier-2 (`cursor`, `codex`, `claude-code`, `openclaw`, `claude-desktop`, `generic`) — содержат единое правило pre-reply reconcile:
+Начиная с Phase C все managed startup artifacts содержат единое правило pre-reply reconcile:
 1. Перед каждым содержательным ответом вызвать `amai_continuity_startup`.
 2. После любого успешного MCP startup проверить runtime artifact `.amai/continuity/project-chat-startup-state.json`.
 3. При обнаружении stale/дрейфа — один раз запустить локальный reconcile `./scripts/continuity_startup.sh --repo-root <project> --namespace continuity --json` и продолжить только от свежего локального payload.
