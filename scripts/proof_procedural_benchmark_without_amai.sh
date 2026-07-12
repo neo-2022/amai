@@ -56,12 +56,14 @@ fi
 
 cargo run --quiet -- skill add-evidence \
   --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --evidence-kind "episode_success" \
   --summary "without amai benchmark evidence" \
   --source-event-id "proof-without-amai-event-1-evidence" \
   --artifact-ref "artifact://proof/procedural-benchmark-without-amai/evidence" >/dev/null
 cargo run --quiet -- skill record-trigger-match \
   --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --match-scope "project_task" \
   --trigger-input "continuity restore required" \
   --matched \
@@ -72,6 +74,7 @@ cargo run --quiet -- skill record-trigger-match \
   --evidence-span-json '{"kind":"skill_trigger_match","phase":"without_amai_control"}' >/dev/null
 cargo run --quiet -- skill record-trial-run \
   --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --application-mode "shadow" \
   --task-label "proof-without-amai-shadow" \
   --context "continuity" \
@@ -87,6 +90,7 @@ cargo run --quiet -- skill record-trial-run \
   --evidence-span-json '{"kind":"skill_trial_run","phase":"shadow"}' >/dev/null
 cargo run --quiet -- skill record-eval \
   --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --verdict "promote_shadow" \
   --evaluator-source "proof_procedural_benchmark_without_amai" \
   --safe-to-apply \
@@ -99,6 +103,7 @@ cargo run --quiet -- skill record-eval \
   --evidence-span-json '{"kind":"skill_eval","phase":"shadow"}' >/dev/null
 cargo run --quiet -- skill record-trial-run \
   --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --application-mode "trial" \
   --task-label "proof-without-amai-trial" \
   --context "continuity" \
@@ -115,6 +120,7 @@ cargo run --quiet -- skill record-trial-run \
   --evidence-span-json '{"kind":"skill_trial_run","phase":"trial"}' >/dev/null
 cargo run --quiet -- skill record-eval \
   --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --verdict "promote_trial" \
   --evaluator-source "proof_procedural_benchmark_without_amai" \
   --safe-to-apply \
@@ -127,6 +133,7 @@ cargo run --quiet -- skill record-eval \
   --evidence-span-json '{"kind":"skill_eval","phase":"trial"}' >/dev/null
 cargo run --quiet -- skill record-eval \
   --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --verdict "promote_verified" \
   --evaluator-source "proof_procedural_benchmark_without_amai" \
   --safe-to-apply \

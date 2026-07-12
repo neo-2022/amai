@@ -72,12 +72,14 @@ fi
 step "attach evidence and record shadow-mode match/run"
 cargo run --quiet -- skill add-evidence \
   --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --evidence-kind "episode_success" \
   --summary "seed evidence" \
   --source-event-id "proof-seed-event-1" \
   --artifact-ref "artifact://proof/procedural-seed/evidence" >/dev/null
 cargo run --quiet -- skill record-trigger-match \
   --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --match-scope "project_task" \
   --trigger-input "resume required after continuity startup" \
   --matched \
@@ -88,6 +90,7 @@ cargo run --quiet -- skill record-trigger-match \
   --evidence-span-json '{"kind":"skill_trigger_match","phase":"shadow","basis":"proof"}' >/dev/null
 cargo run --quiet -- skill record-trial-run \
   --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --application-mode "shadow" \
   --task-label "proof-shadow" \
   --context "continuity" \
@@ -103,6 +106,7 @@ cargo run --quiet -- skill record-trial-run \
   --evidence-span-json '{"kind":"skill_trial_run","phase":"shadow","task":"proof-shadow"}' >/dev/null
 cargo run --quiet -- skill record-eval \
   --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --verdict "promote_shadow" \
   --evaluator-source "proof_procedural_seed" \
   --summary "evidence present; safe to try in shadow" \
@@ -133,6 +137,7 @@ cargo run --quiet -- skill execution-card \
 step "record trial success and allow trial execution card only when explicitly requested"
 cargo run --quiet -- skill record-trial-run \
   --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --application-mode "trial" \
   --task-label "proof-trial" \
   --context "continuity" \
@@ -149,6 +154,7 @@ cargo run --quiet -- skill record-trial-run \
   --evidence-span-json '{"kind":"skill_trial_run","phase":"trial","task":"proof-trial"}' >/dev/null
 cargo run --quiet -- skill record-eval \
   --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --verdict "promote_trial" \
   --evaluator-source "proof_procedural_seed" \
   --summary "shadow success observed; trial allowed" \
@@ -158,6 +164,7 @@ cargo run --quiet -- skill record-eval \
   --evidence-span-json '{"kind":"skill_eval","phase":"trial","verdict":"promote_trial"}' >/dev/null
 cargo run --quiet -- skill record-reuse \
   --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --reuse-mode "trial" \
   --task-label "proof-trial" \
   --context "continuity" \
@@ -208,6 +215,7 @@ if [[ -z "${fail_skill_card_id}" ]]; then
 fi
 if cargo run --quiet -- skill record-eval \
   --skill-card-id "${fail_skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --verdict "promote_verified" \
   --evaluator-source "proof_procedural_seed" \
   --safe-to-apply \

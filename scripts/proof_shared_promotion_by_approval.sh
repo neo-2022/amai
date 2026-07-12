@@ -57,6 +57,7 @@ create_and_promote_verified() {
 
   cargo run --quiet -- skill add-evidence \
     --skill-card-id "${skill_card_id}" \
+    --project "${project_code}" --namespace "${namespace_code}" \
     --evidence-kind "episode_success" \
     --summary "${title} evidence" \
     --source-event-id "${source_prefix}-evidence" \
@@ -64,6 +65,7 @@ create_and_promote_verified() {
 
   cargo run --quiet -- skill record-trigger-match \
     --skill-card-id "${skill_card_id}" \
+    --project "${project_code}" --namespace "${namespace_code}" \
     --match-scope "project_task" \
     --trigger-input "shared procedural approval required" \
     --matched \
@@ -75,6 +77,7 @@ create_and_promote_verified() {
 
   cargo run --quiet -- skill record-trial-run \
     --skill-card-id "${skill_card_id}" \
+    --project "${project_code}" --namespace "${namespace_code}" \
     --application-mode "shadow" \
     --task-label "${source_prefix}-shadow" \
     --context "continuity" \
@@ -91,6 +94,7 @@ create_and_promote_verified() {
 
   cargo run --quiet -- skill record-eval \
     --skill-card-id "${skill_card_id}" \
+    --project "${project_code}" --namespace "${namespace_code}" \
     --verdict "promote_shadow" \
     --evaluator-source "proof_shared_promotion_by_approval" \
     --safe-to-apply \
@@ -104,6 +108,7 @@ create_and_promote_verified() {
 
   cargo run --quiet -- skill record-trial-run \
     --skill-card-id "${skill_card_id}" \
+    --project "${project_code}" --namespace "${namespace_code}" \
     --application-mode "trial" \
     --task-label "${source_prefix}-trial" \
     --context "continuity" \
@@ -121,6 +126,7 @@ create_and_promote_verified() {
 
   cargo run --quiet -- skill record-eval \
     --skill-card-id "${skill_card_id}" \
+    --project "${project_code}" --namespace "${namespace_code}" \
     --verdict "promote_trial" \
     --evaluator-source "proof_shared_promotion_by_approval" \
     --safe-to-apply \
@@ -134,6 +140,7 @@ create_and_promote_verified() {
 
   cargo run --quiet -- skill record-eval \
     --skill-card-id "${skill_card_id}" \
+    --project "${project_code}" --namespace "${namespace_code}" \
     --verdict "promote_verified" \
     --evaluator-source "proof_shared_promotion_by_approval" \
     --safe-to-apply \
@@ -199,6 +206,7 @@ printf '%s\n' "${cards_before}" | jq -e --arg shared_id "${shared_skill_id}" --a
 step "approve shared promotion explicitly"
 cargo run --quiet -- skill record-eval \
   --skill-card-id "${shared_skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --verdict "approve_shared_promotion" \
   --evaluator-source "proof_shared_promotion_by_approval" \
   --safe-to-apply \

@@ -69,6 +69,7 @@ create_and_promote_verified() {
 
   cargo run --quiet -- skill add-evidence \
     --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
     --evidence-kind "episode_success" \
     --summary "${title} evidence" \
     --source-event-id "${skill_id}-event-1-evidence" \
@@ -76,6 +77,7 @@ create_and_promote_verified() {
 
   cargo run --quiet -- skill record-trigger-match \
     --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
     --match-scope "project_task" \
     --trigger-input "${trigger}" \
     --matched \
@@ -87,6 +89,7 @@ create_and_promote_verified() {
 
   cargo run --quiet -- skill record-trial-run \
     --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
     --application-mode "shadow" \
     --task-label "${skill_id}-shadow" \
     --context "continuity" \
@@ -103,6 +106,7 @@ create_and_promote_verified() {
 
   cargo run --quiet -- skill record-eval \
     --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
     --verdict "promote_shadow" \
     --evaluator-source "proof_negative_procedural_memory" \
     --summary "${title} promoted to shadow" \
@@ -113,6 +117,7 @@ create_and_promote_verified() {
 
   cargo run --quiet -- skill record-trial-run \
     --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
     --application-mode "trial" \
     --task-label "${skill_id}-trial" \
     --context "continuity" \
@@ -130,6 +135,7 @@ create_and_promote_verified() {
 
   cargo run --quiet -- skill record-eval \
     --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
     --verdict "promote_trial" \
     --evaluator-source "proof_negative_procedural_memory" \
     --summary "${title} promoted to trial" \
@@ -140,6 +146,7 @@ create_and_promote_verified() {
 
   cargo run --quiet -- skill record-eval \
     --skill-card-id "${skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
     --verdict "promote_verified" \
     --evaluator-source "proof_negative_procedural_memory" \
     --safe-to-apply \

@@ -132,6 +132,7 @@ printf '%s\n' "${merge_review_json}" | jq -e --arg parent_id "${base_skill_card_
 step "record lifecycle actions and verify history survives promote/eval/reuse"
 cargo run --quiet -- skill add-evidence \
   --skill-card-id "${patch_skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --evidence-kind "trace" \
   --summary "version history lifecycle evidence" \
   --source-kind "manual_proof" \
@@ -140,6 +141,7 @@ cargo run --quiet -- skill add-evidence \
   --evidence-span-json '{"kind":"bundle","context":"continuity"}' >/dev/null
 cargo run --quiet -- skill record-trigger-match \
   --skill-card-id "${patch_skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --match-scope "project_task" \
   --trigger-input "restore continuity" \
   --matched \
@@ -150,6 +152,7 @@ cargo run --quiet -- skill record-trigger-match \
   --evidence-span-json '{"matched":true,"context":"continuity"}' >/dev/null
 cargo run --quiet -- skill record-trial-run \
   --skill-card-id "${patch_skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --application-mode "shadow" \
   --task-label "proof-history-shadow" \
   --context "continuity" \
@@ -165,6 +168,7 @@ cargo run --quiet -- skill record-trial-run \
   --evidence-span-json '{"kind":"skill_trial_run","phase":"shadow","task":"proof-history-shadow"}' >/dev/null
 cargo run --quiet -- skill record-eval \
   --skill-card-id "${patch_skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --verdict "promote_shadow" \
   --evaluator-source "proof_skill_version_history" \
   --summary "history survived shadow promotion" \
@@ -174,6 +178,7 @@ cargo run --quiet -- skill record-eval \
   --evidence-span-json '{"kind":"skill_eval","phase":"shadow","verdict":"promote_shadow"}' >/dev/null
 cargo run --quiet -- skill record-trial-run \
   --skill-card-id "${patch_skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --application-mode "trial" \
   --task-label "proof-history-trial" \
   --context "continuity" \
@@ -190,6 +195,7 @@ cargo run --quiet -- skill record-trial-run \
   --evidence-span-json '{"kind":"skill_trial_run","phase":"trial","task":"proof-history-trial"}' >/dev/null
 cargo run --quiet -- skill record-eval \
   --skill-card-id "${patch_skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --verdict "promote_trial" \
   --evaluator-source "proof_skill_version_history" \
   --summary "history survived trial promotion" \
@@ -199,6 +205,7 @@ cargo run --quiet -- skill record-eval \
   --evidence-span-json '{"kind":"skill_eval","phase":"trial","verdict":"promote_trial"}' >/dev/null
 cargo run --quiet -- skill record-reuse \
   --skill-card-id "${patch_skill_card_id}" \
+  --project "${project_code}" --namespace "${namespace_code}" \
   --reuse-mode "trial" \
   --task-label "proof-history-trial" \
   --context "continuity" \
