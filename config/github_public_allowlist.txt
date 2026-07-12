@@ -33,6 +33,7 @@ scripts/ensure_verified_linux_prereqs.sh
 scripts/bootstrap_stack.sh
 scripts/preflight.sh
 scripts/status.sh
+scripts/load_env.sh
 scripts/onboard_local.sh
 scripts/disconnect_local.sh
 scripts/run_mcp_stdio.sh
