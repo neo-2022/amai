@@ -639,6 +639,8 @@ pub struct MemoryCardCreateArgs {
     pub tag: Vec<String>,
     #[arg(long = "provenance-json", default_value = "{}")]
     pub provenance_json: String,
+    #[arg(long = "derivation-kind")]
+    pub derivation_kind: Option<String>,
     #[arg(long = "fact-subject")]
     pub fact_subject: Option<String>,
     #[arg(long = "fact-predicate")]
@@ -3311,6 +3313,34 @@ pub struct BootstrapReconnectArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_create_card_cli_accepts_operator_write_derivation_kind() {
+        let cli = Cli::try_parse_from([
+            "amai",
+            "memory",
+            "create-card",
+            "--project",
+            "amai",
+            "--title",
+            "Durable fact",
+            "--summary",
+            "Durable summary",
+            "--body",
+            "Durable body",
+            "--derivation-kind",
+            "operator_write",
+        ])
+        .expect("memory create-card should accept an explicit derivation kind");
+
+        let Command::Memory { command } = cli.command else {
+            panic!("expected memory command");
+        };
+        let MemoryCommand::CreateCard(args) = command else {
+            panic!("expected memory create-card command");
+        };
+        assert_eq!(args.derivation_kind.as_deref(), Some("operator_write"));
+    }
 
     #[test]
     fn project_register_cli_defaults_to_default_workspace_and_project_scope() {

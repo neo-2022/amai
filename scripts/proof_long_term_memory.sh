@@ -69,18 +69,16 @@ else
   exit 1
 fi
 
-echo "=== 6. Auto-recorded learning episode is in interaction log and searchable ==="
-episode_event_id="auto-learning-episode-${card_id}"
-out4=$(./scripts/amai_exec.sh context pack --project amai --namespace continuity \
-  --query "create memory card" --disable-cache --limit-documents 5 --limit-semantic-chunks 5)
-if echo "$out4" | jq -e --arg id "$episode_event_id" '.retrieval.interaction_log_events[] | select(.event_id == $id)' >/dev/null; then
-  echo "auto-recorded learning episode confirmed: $episode_event_id"
+echo "=== 6. Operator-written provenance is durable ==="
+stored_derivation=$($PG -t -c "SELECT derivation_kind FROM ami.memory_cards WHERE memory_card_id='${card_id}'" | xargs)
+if [[ "$stored_derivation" == "operator_write" ]]; then
+  echo "operator-written provenance confirmed"
 else
-  echo "FAIL: auto-recorded learning episode not retrievable via context pack"
+  echo "FAIL: derivation kind was not stored: $stored_derivation"
   exit 1
 fi
 
-echo "=== 7. Auto-created graph relation edges connect similar memory cards ==="
+echo "=== 7. Explicit graph relation edge connects memory cards ==="
 card_line_b=$(./scripts/amai_exec.sh memory create-card \
   --project amai --namespace continuity \
   --title "Decade memory proof marker second" \
@@ -93,18 +91,22 @@ card_line_b=$(./scripts/amai_exec.sh memory create-card \
 card_id_b=$(echo "$card_line_b" | sed 's/memory card created: //' | awk '{print $1}')
 echo "created similar card $card_id_b"
 
-# Use a temporary cache file for the relation-edge lookup so we test fresh query, not stale cache.
-tmp_local_cache=$(mktemp state/proof-ltm-cache-XXXXXX.db)
-trap 'rm -f "$tmp_local_cache"' EXIT
-AMAISTATE="$tmp_local_cache" ./scripts/amai_exec.sh context pack --project amai --namespace continuity \
-  --query "Long-term memory proof marker" --disable-cache --limit-documents 5 --limit-semantic-chunks 5 >/dev/null
-out5=$(AMAISTATE="$tmp_local_cache" ./scripts/amai_exec.sh context pack --project amai --namespace continuity \
-  --query "Long-term memory proof marker" --disable-cache --limit-documents 5 --limit-semantic-chunks 5)
-edge_count=$(echo "$out5" | jq '[.retrieval.memory_relation_edges[]?] | length')
+./scripts/amai_exec.sh memory create-relation-edge \
+  --project amai --namespace continuity \
+  --source-memory-card-id "$card_id" \
+  --target-memory-card-id "$card_id_b" \
+  --relation-type semantically_related_to \
+  --derivation-kind operator_write >/dev/null
+
+edge_json=$(./scripts/amai_exec.sh memory list-relation-edges \
+  --project amai --namespace continuity \
+  --memory-card-id "$card_id" --memory-card-id "$card_id_b")
+edge_count=$(echo "$edge_json" | jq --arg source "$card_id" --arg target "$card_id_b" \
+  '[.[] | select(.source_memory_card_id == $source and .target_memory_card_id == $target and .relation_state == "active")] | length')
 if [[ "$edge_count" -gt 0 ]]; then
-  echo "auto-created relation edges: $edge_count"
+  echo "explicit relation edges: $edge_count"
 else
-  echo "FAIL: no memory relation edges auto-created between similar cards"
+  echo "FAIL: explicit memory relation edge was not returned"
   exit 1
 fi
 

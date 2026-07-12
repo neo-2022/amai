@@ -2063,9 +2063,18 @@ async fn main() -> Result<()> {
                     println!("{}", serde_json::to_string(&task_event)?);
                 }
                 MemoryCommand::CreateCard(args) => {
-                    let provenance =
+                    let mut provenance =
                         serde_json::from_str::<serde_json::Value>(&args.provenance_json)
                             .context("invalid --provenance-json for memory card")?;
+                    if let Some(derivation_kind) = args.derivation_kind.as_deref() {
+                        let object = provenance.as_object_mut().ok_or_else(|| {
+                            anyhow::anyhow!("--provenance-json for memory card must be an object")
+                        })?;
+                        object.insert(
+                            "derivation_kind".to_string(),
+                            serde_json::Value::String(derivation_kind.to_string()),
+                        );
+                    }
                     let card = postgres::create_memory_card(
                         &db,
                         &args.project,
