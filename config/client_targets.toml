@@ -81,6 +81,22 @@ default_output = "${repo_root}/.hermes.md"
 install_scope = "workspace_local"
 format = "hermes_compact_markdown"
 
+[clients.opencode]
+display_name = "OpenCode"
+default_output = "${repo_root}/opencode.json"
+install_scope = "workspace_local"
+priority = 85
+tier = 2
+detect_env_vars = ["OPENCODE"]
+detect_workspace_markers = ["opencode.json", "opencode.jsonc", ".opencode"]
+detect_home_markers = [".config/opencode"]
+
+[clients.opencode.startup_instructions]
+mode = "managed_append_block"
+default_output = "${repo_root}/AGENTS.md"
+install_scope = "workspace_local"
+format = "generic_markdown"
+
 [clients.openclaw]
 display_name = "OpenClaw"
 default_output = "${home}/.openclaw/openclaw.json"

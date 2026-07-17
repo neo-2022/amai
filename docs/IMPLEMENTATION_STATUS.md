@@ -2022,6 +2022,23 @@ Local stack autostart consensus records:
     - `./scripts/proof_workspace_restore_pack_enrichment.sh` — ok;
     - `./scripts/maintainability_gate.sh --json`, `./scripts/implementation_status_sync_guard.sh --json`, `./scripts/agent_preflight.sh --json` — ok.
 
+- Phase E плана «Amai как нескончаемый чат» (OpenCode target):
+  - статус: ✅ installation/direct-startup contract materialized; live Tier-1 certification remains open;
+  - цель: добавить OpenCode как полноценный client target — MCP config, managed startup block и session hook; затем Kimi Code;
+  - выполнено:
+    - в `config/client_targets.toml` добавлен `[clients.opencode]` (workspace-local `opencode.json`, startup block в `AGENTS.md`, tier = 2 до live client/session proof);
+    - `src/mcp.rs` поддерживает `ConfigShape::OpenCodeJson`: render/merge/exists/remove для top-level `mcp` блока OpenCode (`type = "local"`, `command` array, `enabled = true`, `environment.AMAI_PROJECT_ROOT`);
+    - `src/onboarding.rs` materialize-ит `.opencode/plugins/amai-continuity.js` — project plugin, который на событии `session.created` запускает canonical `./scripts/continuity_startup.sh` с точным `AMAI_PLATFORM_THREAD_ID = sessionID` OpenCode-сессии;
+    - добавлен `scripts/proof_client_auto_startup_opencode.sh`: чистый temp-проект, onboarding, проверка `opencode.json`, managed block в `AGENTS.md`, plugin session hook и `gate_semantics_consistent = true` в runtime state;
+  - проверено:
+    - `cargo test --bin amai onboarding` — 38 passed;
+    - `cargo test --bin amai mcp` — 112 passed;
+    - `cargo test --bin amai opencode` — 2 passed;
+    - `./scripts/proof_client_auto_startup_opencode.sh` — ok;
+    - `./scripts/proof_onboarding.sh` — ok;
+    - `./scripts/proof_client_reconnect.sh` — ok;
+  - честная граница claim: OpenCode остаётся Tier-2 — plugin session hook проверен как materialized artifact, но live OpenCode session, который сам вызывает startup, ещё не поднят; Kimi Code target ещё не добавлен.
+
 ### Ближайший следующий этап
 
 Stage status после fresh proof-refresh 2026-04-24:

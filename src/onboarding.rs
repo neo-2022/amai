@@ -3005,6 +3005,33 @@ fn install_client_runtime_artifacts(
     client_resolution: &ClientResolution,
     startup_summary: Option<&mut StartupInstructionsInstallSummary>,
 ) -> Result<Option<ClientRuntimeInstallSummary>> {
+    if client_resolution.client_key == "opencode" {
+        let workspace_root = client_config_path
+            .parent()
+            .ok_or_else(|| anyhow!("OpenCode config path has no parent workspace directory"))?;
+        let plugin_path = workspace_root.join(".opencode/plugins/amai-continuity.js");
+        if let Some(parent) = plugin_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(
+            &plugin_path,
+            render_opencode_continuity_plugin(workspace_root, repo_root).as_bytes(),
+        )
+        .with_context(|| format!("failed to write {}", plugin_path.display()))?;
+        if let Some(startup_summary) = startup_summary {
+            startup_summary.status = "managed_opencode_session_hook_installed".to_string();
+            startup_summary.auto_start_ready = true;
+            startup_summary.reason = "OpenCode loads the project plugin automatically; each session.created event runs canonical Amai startup with the exact OpenCode session ID".to_string();
+        }
+        return Ok(Some(ClientRuntimeInstallSummary {
+            status: "managed_opencode_session_hook_installed".to_string(),
+            output_path: plugin_path,
+            install_scope: "workspace_local".to_string(),
+            reason: "OpenCode project plugin binds session.created to continuity_startup.sh before the event handler returns".to_string(),
+        }));
+    }
+
     if client_resolution.client_key == "hermes" {
         let Some(startup_summary) = startup_summary else {
             return Ok(None);
@@ -3093,6 +3120,45 @@ fn install_client_runtime_artifacts(
             agent.agent_id
         ),
     }))
+}
+
+fn render_opencode_continuity_plugin(workspace_root: &Path, amai_root: &Path) -> String {
+    let workspace_root = serde_json::to_string(&workspace_root.display().to_string())
+        .expect("workspace root JSON string must serialize");
+    let amai_root = serde_json::to_string(&amai_root.display().to_string())
+        .expect("Amai root JSON string must serialize");
+    format!(
+        r#"import {{ spawn }} from "node:child_process";
+
+const workspaceRoot = {workspace_root};
+const amaiRoot = {amai_root};
+const startup = `${{amaiRoot}}/scripts/continuity_startup.sh`;
+
+function runStartup(sessionID) {{
+  return new Promise((resolve, reject) => {{
+    const child = spawn(startup, ["--repo-root", workspaceRoot, "--namespace", "continuity", "--json"], {{
+      cwd: workspaceRoot,
+      env: {{ ...process.env, AMAI_PLATFORM_THREAD_ID: sessionID }},
+      stdio: ["ignore", "ignore", "pipe"],
+    }});
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {{ stderr += chunk.toString(); }});
+    child.on("error", reject);
+    child.on("close", (code) => code === 0
+      ? resolve()
+      : reject(new Error(`Amai continuity startup failed (${{code}}): ${{stderr.trim()}}`)));
+  }});
+}}
+
+export const AmaiContinuity = async () => ({{
+  event: async ({{ event }}) => {{
+    if (event.type === "session.created") {{
+      await runStartup(event.properties.sessionID);
+    }}
+  }},
+}});
+"#
+    )
 }
 
 fn install_startup_contract_artifact(
@@ -5943,6 +6009,21 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         let repo = PathBuf::from("/tmp/amai-nonexistent");
         let home = PathBuf::from("/tmp/amai-home-nonexistent");
         assert!(detection_score(&repo, &home, &target).is_none());
+    }
+
+    #[test]
+    fn renders_opencode_session_created_hook_with_exact_thread_binding() {
+        let plugin = super::render_opencode_continuity_plugin(
+            Path::new("/tmp/project"),
+            Path::new("/tmp/amai"),
+        );
+        assert!(plugin.contains("event.type === \"session.created\""));
+        assert!(plugin.contains("AMAI_PLATFORM_THREAD_ID: sessionID"));
+        assert!(plugin.contains("await runStartup(event.properties.sessionID)"));
+        assert!(plugin.contains("const workspaceRoot = \"/tmp/project\""));
+        assert!(plugin.contains("const amaiRoot = \"/tmp/amai\""));
+        assert!(plugin.contains("`${amaiRoot}/scripts/continuity_startup.sh`"));
+        assert!(plugin.contains("reject(new Error"));
     }
 
     #[test]

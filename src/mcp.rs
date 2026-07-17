@@ -161,6 +161,7 @@ pub fn client_config_contains_server(args: &McpConfigArgs) -> Result<bool> {
             }
             Err(error) => Err(error),
         },
+        ConfigShape::OpenCodeJson => json_server_exists(&existing, "mcp", &server_name),
         ConfigShape::CodexToml => toml_server_exists(&existing, &server_name),
         ConfigShape::HermesYaml => yaml_server_exists(&existing, "mcp_servers", &server_name),
     }
@@ -201,6 +202,7 @@ pub fn remove_client_config(
             }
             Err(error) => return Err(error),
         },
+        ConfigShape::OpenCodeJson => remove_json_server(&existing, "mcp", &server_name)?,
         ConfigShape::CodexToml => remove_toml_server(&existing, &server_name)?,
         ConfigShape::HermesYaml => remove_yaml_server(&existing, "mcp_servers", &server_name)?,
     };
@@ -248,6 +250,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         "codex",
         "hermes",
         "openclaw",
+        "opencode",
     ] {
         let config = render_client_config(&McpConfigArgs {
             client: client.to_string(),
@@ -5981,6 +5984,21 @@ fn render_client_config(args: &McpConfigArgs) -> Result<String> {
             }
         }))
         .context("failed to render OpenClaw MCP config"),
+        ConfigShape::OpenCodeJson => serde_json::to_string_pretty(&json!({
+            "mcp": {
+                server_name: {
+                    "type": "local",
+                    "command": std::iter::once(launcher.command)
+                        .chain(launcher.args)
+                        .collect::<Vec<_>>(),
+                    "environment": {
+                        "AMAI_PROJECT_ROOT": cwd
+                    },
+                    "enabled": true
+                }
+            }
+        }))
+        .context("failed to render OpenCode MCP config"),
         ConfigShape::CodexToml => {
             let mut server_table = toml::map::Map::new();
             server_table.insert("command".to_string(), toml::Value::String(launcher.command));
@@ -6012,6 +6030,7 @@ enum ConfigShape {
     VscodeJson,
     McpServersJson,
     OpenClawJson,
+    OpenCodeJson,
     CodexToml,
     HermesYaml,
 }
@@ -6022,10 +6041,11 @@ fn config_shape_for_client(client: &str) -> Result<ConfigShape> {
         "vscode" => Ok(ConfigShape::VscodeJson),
         "cursor" | "claude-desktop" | "claude-code" => Ok(ConfigShape::McpServersJson),
         "openclaw" => Ok(ConfigShape::OpenClawJson),
+        "opencode" => Ok(ConfigShape::OpenCodeJson),
         "codex" => Ok(ConfigShape::CodexToml),
         "hermes" => Ok(ConfigShape::HermesYaml),
         other => Err(anyhow!(
-            "unsupported MCP client config target: {other}; use generic|vscode|cursor|claude-desktop|claude-code|codex|hermes|openclaw"
+            "unsupported MCP client config target: {other}; use generic|vscode|cursor|claude-desktop|claude-code|codex|hermes|openclaw|opencode"
         )),
     }
 }
@@ -6657,6 +6677,12 @@ fn merge_existing_config(
         ConfigShape::OpenClawJson => merge_openclaw_json_config(
             &existing,
             rendered,
+            &normalized_server_name(&args.server_name)?,
+        ),
+        ConfigShape::OpenCodeJson => merge_json_server(
+            &existing,
+            rendered,
+            "mcp",
             &normalized_server_name(&args.server_name)?,
         ),
         ConfigShape::CodexToml => merge_toml_server(
@@ -7727,6 +7753,41 @@ mod tests {
             "/tmp/run_mcp_stdio.sh"
         );
         assert_eq!(json["mcp"]["servers"]["amai"]["cwd"], "/tmp/amai");
+    }
+
+    #[test]
+    fn renders_and_merges_opencode_config() {
+        let temp_root = std::env::temp_dir().join(format!("amai-mcp-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let output = temp_root.join("opencode.json");
+        fs::write(
+            &output,
+            r#"{"$schema":"https://opencode.ai/config.json","plugin":["existing-plugin"]}"#,
+        )
+        .expect("write OpenCode config");
+        super::write_client_config(&McpConfigArgs {
+            client: "opencode".to_string(),
+            server_name: "amai".to_string(),
+            launcher_platform: "auto".to_string(),
+            ssh_destination: None,
+            remote_repo_root: None,
+            command: Some("/tmp/run_mcp_stdio.sh".to_string()),
+            cwd: Some(PathBuf::from("/tmp/amai")),
+            output: Some(output.clone()),
+        })
+        .expect("merge OpenCode config");
+        let value: Value = serde_json::from_str(
+            &fs::read_to_string(&output).expect("read updated OpenCode config"),
+        )
+        .expect("parse updated OpenCode config");
+        assert_eq!(value["plugin"], json!(["existing-plugin"]));
+        assert_eq!(value["mcp"]["amai"]["type"], json!("local"));
+        assert_eq!(
+            value["mcp"]["amai"]["command"],
+            json!(["/tmp/run_mcp_stdio.sh"])
+        );
+        assert_eq!(value["mcp"]["amai"]["enabled"], json!(true));
+        fs::remove_dir_all(&temp_root).expect("remove temp root");
     }
 
     #[test]
