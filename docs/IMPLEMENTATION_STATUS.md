@@ -2038,6 +2038,20 @@ Local stack autostart consensus records:
     - `./scripts/proof_onboarding.sh` — ok;
     - `./scripts/proof_client_reconnect.sh` — ok;
   - честная граница claim: OpenCode остаётся Tier-2 — plugin session hook проверен как materialized artifact, но live OpenCode session, который сам вызывает startup, ещё не поднят; Kimi Code target ещё не добавлен.
+- Phase F плана «Amai как нескончаемый чат» (Kimi Code target):
+  - статус: ✅ installation/direct-startup contract materialized; live Tier-1 certification remains open;
+  - цель: добавить Kimi Code как полноценный client target — MCP config, managed startup block и SessionStart hook;
+  - выполнено:
+    - в `config/client_targets.toml` добавлен `[clients.kimi-code]` (workspace-local `.kimi-code/mcp.json`, startup block в `AGENTS.md`, tier = 2 до live client/session proof);
+    - `src/mcp.rs`: kimi-code подключён к существующему `ConfigShape::McpServersJson` (top-level `mcpServers`, stdio `command`/`args`) — shape совпадает с официальной схемой Kimi Code; добавлен в smoke-proof список клиентов;
+    - `src/onboarding.rs` materialize-ит SessionStart hook: исполняемый `scripts/kimi_code_session_start_hook.sh` (читает hook event JSON из stdin, извлекает `session_id`, запускает canonical `scripts/continuity_startup.sh` с точным `AMAI_PLATFORM_THREAD_ID`; observation-only — всегда exit 0, hook не может заблокировать сессию пользователя) + managed блок `[[hooks]] event = "SessionStart"` в `~/.kimi-code/config.toml` (маркеры `AMAI MANAGED KIMI SESSION HOOK v1`, идемпотентное слияние с существующим конфигом, override через `KIMI_CODE_HOME`);
+    - добавлен `scripts/proof_client_auto_startup_kimi_code.sh`: чистый temp-проект, `KIMI_CODE_HOME` в temp-каталог, onboarding, проверка `.kimi-code/mcp.json`, managed block, hook-конфига, реальное исполнение hook-скрипта с Kimi session payload и runtime artifact gates;
+  - проверено:
+    - `cargo test --bin amai onboarding` — 40 passed (включая `renders_kimi_code_session_hook_script_with_exact_thread_binding` и `kimi_code_session_hook_merges_into_existing_config_toml`);
+    - `cargo test --bin amai mcp` — 112 passed;
+    - `cargo test --bin amai kimi` — 2 passed;
+    - `./scripts/proof_client_auto_startup_kimi_code.sh` — ok;
+  - честная граница claim: Kimi Code остаётся Tier-2 — SessionStart hook проверен как materialized artifact и реально исполняет startup в proof, но live Kimi Code session, которая сама вызывает hook, ещё не поднята.
 
 ### Ближайший следующий этап
 

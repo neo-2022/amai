@@ -3032,6 +3032,26 @@ fn install_client_runtime_artifacts(
         }));
     }
 
+    if client_resolution.client_key == "kimi-code" {
+        let workspace_root = client_config_path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| anyhow!("Kimi Code config path has no parent workspace directory"))?;
+        let script_path = write_kimi_code_session_hook_script(workspace_root, repo_root)?;
+        let config_path = ensure_kimi_code_session_hook(repo_root, &script_path)?;
+        if let Some(startup_summary) = startup_summary {
+            startup_summary.status = "managed_kimi_code_session_hook_installed".to_string();
+            startup_summary.auto_start_ready = true;
+            startup_summary.reason = "Kimi Code SessionStart hook in ~/.kimi-code/config.toml runs canonical Amai startup with the exact Kimi session ID whenever a session starts in this workspace".to_string();
+        }
+        return Ok(Some(ClientRuntimeInstallSummary {
+            status: "managed_kimi_code_session_hook_installed".to_string(),
+            output_path: config_path,
+            install_scope: "user_global".to_string(),
+            reason: "Kimi Code SessionStart hook binds each new session to continuity_startup.sh before the first model turn".to_string(),
+        }));
+    }
+
     if client_resolution.client_key == "hermes" {
         let Some(startup_summary) = startup_summary else {
             return Ok(None);
@@ -3159,6 +3179,113 @@ export const AmaiContinuity = async () => ({{
 }});
 "#
     )
+}
+
+fn write_kimi_code_session_hook_script(workspace_root: &Path, amai_root: &Path) -> Result<PathBuf> {
+    let script_dir = amai_root.join("scripts");
+    fs::create_dir_all(&script_dir)
+        .with_context(|| format!("failed to create {}", script_dir.display()))?;
+    let script_path = script_dir.join("kimi_code_session_start_hook.sh");
+    let workspace = workspace_root.display().to_string();
+    let startup = format!("{}/scripts/continuity_startup.sh", amai_root.display());
+    let content = format!(
+        r#"#!/usr/bin/env bash
+# Amai managed Kimi Code SessionStart hook.
+# Reads the Kimi Code hook event JSON from stdin and runs the canonical Amai
+# continuity startup bound to the exact Kimi session ID. Observation-only by
+# contract: this script always exits 0 so a broken startup can never block the
+# user's session (Kimi Code hooks are fail-open by design).
+set -u
+
+payload="$(cat)"
+session_id="$(printf '%s' "${{payload}}" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+if [ -z "${{session_id}}" ]; then
+  exit 0
+fi
+if [ -d "{workspace}" ]; then
+  AMAI_PLATFORM_THREAD_ID="${{session_id}}" "{startup}" \
+    --repo-root "{workspace}" \
+    --namespace continuity \
+    --json >/dev/null 2>&1 || true
+fi
+exit 0
+"#
+    );
+    fs::write(&script_path, content.as_bytes())
+        .with_context(|| format!("failed to write {}", script_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path)
+            .with_context(|| format!("failed to stat {}", script_path.display()))?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms)
+            .with_context(|| format!("failed to chmod {}", script_path.display()))?;
+    }
+    Ok(script_path)
+}
+
+fn ensure_kimi_code_session_hook(amai_root: &Path, script_path: &Path) -> Result<PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("failed to resolve user home directory"))?;
+    let kimi_home = std::env::var_os("KIMI_CODE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".kimi-code"));
+    ensure_kimi_code_session_hook_in(amai_root, script_path, &kimi_home)
+}
+
+fn ensure_kimi_code_session_hook_in(
+    amai_root: &Path,
+    script_path: &Path,
+    kimi_home: &Path,
+) -> Result<PathBuf> {
+    fs::create_dir_all(kimi_home)
+        .with_context(|| format!("failed to create {}", kimi_home.display()))?;
+    let config_path = kimi_home.join("config.toml");
+    let existing = if config_path.is_file() {
+        fs::read_to_string(&config_path)
+            .with_context(|| format!("failed to read {}", config_path.display()))?
+    } else {
+        String::new()
+    };
+    let repo_root = amai_root.display().to_string();
+    let script_display = script_path.display().to_string();
+    let marker_begin = "# AMAI MANAGED KIMI SESSION HOOK v1";
+    let marker_end = "# /AMAI MANAGED KIMI SESSION HOOK v1";
+    let block = format!(
+        "{marker_begin}\n# Repo-bound Amai continuity startup for {repo_root}.\n[[hooks]]\nevent = \"SessionStart\"\ncommand = \"{script_display}\"\ntimeout = 30\n{marker_end}"
+    );
+    let merged = if existing.contains(marker_begin) && existing.contains(marker_end) {
+        let mut out = String::with_capacity(existing.len() + block.len());
+        let mut rest = existing.as_str();
+        loop {
+            let Some(begin) = rest.find(marker_begin) else {
+                out.push_str(rest);
+                break;
+            };
+            let Some(end_rel) = rest[begin..].find(marker_end) else {
+                out.push_str(rest);
+                break;
+            };
+            let end = begin + end_rel + marker_end.len();
+            out.push_str(&rest[..begin]);
+            out.push_str(&block);
+            rest = &rest[end..];
+        }
+        out
+    } else {
+        let mut out = existing.clone();
+        if !out.ends_with('\n') && !out.is_empty() {
+            out.push('\n');
+        }
+        out.push('\n');
+        out.push_str(&block);
+        out.push('\n');
+        out
+    };
+    fs::write(&config_path, merged.as_bytes())
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    Ok(config_path)
 }
 
 fn install_startup_contract_artifact(
@@ -5550,6 +5677,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use uuid::Uuid;
 
     fn hermes_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -6024,6 +6152,57 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(plugin.contains("const amaiRoot = \"/tmp/amai\""));
         assert!(plugin.contains("`${amaiRoot}/scripts/continuity_startup.sh`"));
         assert!(plugin.contains("reject(new Error"));
+    }
+
+    #[test]
+    fn renders_kimi_code_session_hook_script_with_exact_thread_binding() {
+        let temp_root =
+            std::env::temp_dir().join(format!("amai-kimi-hook-test-{}", Uuid::new_v4()));
+        let workspace = temp_root.join("project");
+        let amai_root = temp_root.join("amai");
+        fs::create_dir_all(&workspace).expect("create temp workspace");
+        let script_path = super::write_kimi_code_session_hook_script(&workspace, &amai_root)
+            .expect("hook script must render");
+        let script = fs::read_to_string(&script_path).expect("read hook script");
+        assert!(script.contains("AMAI_PLATFORM_THREAD_ID=\"${session_id}\""));
+        assert!(script.contains("continuity_startup.sh"));
+        assert!(script.contains("--namespace continuity"));
+        assert!(script.contains("exit 0"));
+        assert!(script.contains("session_id"));
+        let workspace_display = workspace.display().to_string();
+        assert!(script.contains(&workspace_display));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn kimi_code_session_hook_merges_into_existing_config_toml() {
+        let temp_home = std::env::temp_dir().join(format!("amai-kimi-cfg-test-{}", Uuid::new_v4()));
+        let kimi_home = temp_home.join(".kimi-code");
+        fs::create_dir_all(&kimi_home).expect("create kimi home");
+        let config_path = kimi_home.join("config.toml");
+        fs::write(&config_path, "default_model = \"kimi-code/k3\"\n").expect("seed config");
+        let amai_root = Path::new("/tmp/amai");
+        let script_path = Path::new("/tmp/amai/scripts/kimi_code_session_start_hook.sh");
+        let written = super::ensure_kimi_code_session_hook_in(amai_root, script_path, &kimi_home)
+            .expect("hook config must merge");
+        let content = fs::read_to_string(&written).expect("read merged config");
+        assert!(content.contains("default_model = \"kimi-code/k3\""));
+        assert!(content.contains("AMAI MANAGED KIMI SESSION HOOK v1"));
+        assert!(content.contains("[[hooks]]"));
+        assert!(content.contains("event = \"SessionStart\""));
+        assert!(content.contains("kimi_code_session_start_hook.sh"));
+        // Re-run must replace the managed block, not duplicate it.
+        super::ensure_kimi_code_session_hook_in(amai_root, script_path, &kimi_home)
+            .expect("second merge must succeed");
+        let content2 = fs::read_to_string(&written).expect("read re-merged config");
+        assert_eq!(
+            content2
+                .matches("AMAI MANAGED KIMI SESSION HOOK v1")
+                .count(),
+            2
+        );
+        assert_eq!(content2.matches("[[hooks]]").count(), 1);
+        fs::remove_dir_all(&temp_home).ok();
     }
 
     #[test]

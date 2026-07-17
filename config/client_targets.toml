@@ -97,6 +97,22 @@ default_output = "${repo_root}/AGENTS.md"
 install_scope = "workspace_local"
 format = "generic_markdown"
 
+[clients.kimi-code]
+display_name = "Kimi Code"
+default_output = "${repo_root}/.kimi-code/mcp.json"
+install_scope = "workspace_local"
+priority = 84
+tier = 2
+detect_env_vars = ["KIMI_CODE_HOME"]
+detect_workspace_markers = [".kimi-code", ".kimi-code/mcp.json"]
+detect_home_markers = [".kimi-code", ".kimi-code/config.toml", ".kimi"]
+
+[clients.kimi-code.startup_instructions]
+mode = "managed_append_block"
+default_output = "${repo_root}/AGENTS.md"
+install_scope = "workspace_local"
+format = "generic_markdown"
+
 [clients.openclaw]
 display_name = "OpenClaw"
 default_output = "${home}/.openclaw/openclaw.json"

@@ -94,6 +94,7 @@ Amai разделяет клиентов по тому, умеет ли клие
 | `claude-code` | managed block в `CLAUDE.md` | 2 | кандидат в Tier-1 |
 | `hermes` | `.hermes.md` + sticky profile | 2 | managed artifact и прямой Rust startup проверены; live client/session proof отсутствует |
 | `opencode` | managed block в `AGENTS.md` + `.opencode/plugins/amai-continuity.js` session hook | 2 | managed artifact, plugin session hook и прямой Rust startup проверены (`proof_client_auto_startup_opencode.sh`); live client/session proof отсутствует |
+| `kimi-code` | managed block в `AGENTS.md` + `.kimi-code/mcp.json` + `~/.kimi-code/config.toml` `[[hooks]]` SessionStart hook | 2 | managed artifact, SessionStart hook и прямой Rust startup проверены (`proof_client_auto_startup_kimi_code.sh`; hook реально исполняет canonical startup с точным Kimi session id); live client/session proof отсутствует |
 | `openclaw` | `.openclaw/AGENTS.md` + project agent | 2 | кандидат в Tier-1 |
 | `claude-desktop` | `tmp/onboarding/claude-desktop-amai-startup.md` | 2 | manual snippet |
 | `generic` | `tmp/onboarding/generic-amai-startup.md` + `generic-amai-system-prompt.txt` | 2 | всегда Tier-2 по дизайну — затравка в system prompt |

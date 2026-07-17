@@ -251,6 +251,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         "hermes",
         "openclaw",
         "opencode",
+        "kimi-code",
     ] {
         let config = render_client_config(&McpConfigArgs {
             client: client.to_string(),
@@ -6039,13 +6040,15 @@ fn config_shape_for_client(client: &str) -> Result<ConfigShape> {
     match client.trim().to_ascii_lowercase().as_str() {
         "generic" => Ok(ConfigShape::GenericJson),
         "vscode" => Ok(ConfigShape::VscodeJson),
-        "cursor" | "claude-desktop" | "claude-code" => Ok(ConfigShape::McpServersJson),
+        "cursor" | "claude-desktop" | "claude-code" | "kimi-code" => {
+            Ok(ConfigShape::McpServersJson)
+        }
         "openclaw" => Ok(ConfigShape::OpenClawJson),
         "opencode" => Ok(ConfigShape::OpenCodeJson),
         "codex" => Ok(ConfigShape::CodexToml),
         "hermes" => Ok(ConfigShape::HermesYaml),
         other => Err(anyhow!(
-            "unsupported MCP client config target: {other}; use generic|vscode|cursor|claude-desktop|claude-code|codex|hermes|openclaw|opencode"
+            "unsupported MCP client config target: {other}; use generic|vscode|cursor|claude-desktop|claude-code|codex|hermes|openclaw|opencode|kimi-code"
         )),
     }
 }
