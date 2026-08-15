@@ -1,4 +1,4 @@
-> Рекомендация: для `Codex CLI`, `IDE Agent` и `OpenAI`-совместимых клиентов можно использовать API relay [CodexCN](https://codexcn.top/register?aff=yeJh). Через него можно управлять ключами, коэффициентами, балансом, логами и статусом сервиса. Есть дешёвые подписки.
+> Рекомендация: для `Codex CLI`, `IDE Agent` и `OpenAI`-совместимых клиентов можно использовать API relay [nordrouter](https://nordrouter.com/dashboard/register?ref=XNH4N5). Через него можно управлять ключами, коэффициентами, балансом, логами и статусом сервиса. Есть дешёвые подписки.
 
 <p align="center">
   <img src="brand/amai_lockup.svg" alt="Amai" width="360">
